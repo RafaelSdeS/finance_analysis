@@ -36,3 +36,5 @@ Thumbs.db
 # Python-Build artifacts
 *.egg
 *.whl
+
+*.csv

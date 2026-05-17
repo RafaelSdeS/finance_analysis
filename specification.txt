@@ -1,0 +1,174 @@
+===============================
+SYSTEM OVERVIEW
+===============================
+
+Goal:
+- Learn a dynamic portfolio allocation strategy over time
+- Maximize return for a given level of risk (defined by the user)
+- Allocate capital between equities, ETFs, crypto, and risk-free assets (e.g., Selic/CDI)
+- NOT predict prices — instead, decide how to allocate capital
+
+Overall: the model will betweene given a certain amount every month (R$1000) to invest however it wants. With each passing month, it can 
+also move some of the invested money to other assets. The model should not try to predict prices, but it should learn how to invest and 
+when to invest, avoiding risk and getting a good return. 
+
+--------------------------------
+
+INPUT DATA (FEATURES)
+
+1. Market Data (per asset):
+- Historical prices (OHLC)
+- Returns
+- Volume
+- Technical indicators:
+  - Momentum
+  - Moving averages
+  - Volatility
+  - Drawdowns
+
+2. Fundamental Data (for equities only):
+- P/E (Price/Earnings)
+- P/B (Price/Book)
+- ROE
+- Dividend Yield
+- Growth metrics
+- Other data may also be included
+
+3. Macro / Context Features:
+- Risk-free rate (e.g., Selic/CDI)
+- Trend of interest rates
+- Market regime (bull / bear)
+- Market volatility indicators
+
+4. Optional:
+- Sentiment (news, trends)
+
+5. Portfolio State:
+- Current asset allocation
+- Available cash
+- User risk profile (low / medium / high)
+
+--------------------------------
+
+MODEL OUTPUT
+
+At each time step (e.g., monthly):
+
+- Portfolio allocation vector:
+  
+  weights = [w1, w2, ..., wn, w_cash]
+
+Where:
+- wi = % allocated to each asset
+- w_cash = % allocated to risk-free asset
+- sum(weights) = 1
+
+--------------------------------
+
+CORE FUNCTIONALITY
+
+1. Portfolio Allocation
+- Decide how much capital to allocate to each asset
+- Include allocation to risk-free rate (cash/Selic)
+
+2. Risk Management
+- Control volatility and drawdowns
+- Adjust exposure based on risk level
+
+3. Dynamic Rebalancing
+- Update allocations periodically (e.g., monthly)
+- Avoid abrupt changes (low turnover)
+
+4. Regime Adaptation
+- Adjust behavior depending on market conditions:
+  - High interest rates → more selective in equities
+  - Crises → gradual accumulation (DCA)
+  - Bull markets → increase exposure
+
+5. Dividend Handling
+- Reinvest dividends automatically
+
+6. Capital Flow
+- Add fixed monthly contributions (inflation-adjusted) -> R$1000 in today's money -> Older assets don't get an unfair advantage
+
+--------------------------------
+
+OBJECTIVE FUNCTION
+
+Maximize:
+
+- Long-term portfolio growth
+
+While penalizing:
+
+- Volatility
+- Drawdowns
+- Turnover (excessive trading)
+
+Example:
+
+reward = return
+         - λ1 * volatility
+         - λ2 * drawdown
+         - λ3 * turnover
+
+--------------------------------
+
+CONSTRAINTS / RULES
+
+- Limit position size per asset
+- Enforce diversification (but not to much that it is meaningless)
+- Limit portfolio turnover (no shuffling money around every month, maybe a maximum of 10% or 20% every month)
+- Gradual rebalancing (no sudden full switches)
+- Always allow allocation to risk-free asset
+- Avoid large forced selling during drawdowns
+
+--------------------------------
+
+TRAINING SETUP
+
+- Historical simulation (backtesting style)
+- Monthly steps
+- Fixed capital contributions (e.g., $1000/month, inflation-adjusted)
+- Use only past data (no lookahead bias)
+- Include transaction costs
+
+--------------------------------
+
+EXPECTED BEHAVIOR
+
+- In crises:
+  - Avoid panic selling
+  - Gradually increase exposure
+
+- With high interest rates:
+  - Require higher expected return for equities
+  - Allocate more to risk-free asset if needed
+
+- In recoveries:
+  - Increase risk exposure progressively
+
+--------------------------------
+
+FINAL OUTPUTS
+
+- Portfolio allocation over time
+- Equity curve (portfolio value growth)
+- Performance metrics:
+  - Total return
+  - Annualized return
+  - Sharpe ratio
+  - Max drawdown
+  - Volatility
+
+--------------------------------
+
+CORE IDEA
+
+This is not a price prediction model.
+
+It is a:
+
+→ Sequential decision-making system for capital allocation under uncertainty
+
+This model should be better than the overall index (IBOV)
