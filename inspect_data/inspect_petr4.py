@@ -14,7 +14,7 @@ pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 200)
 pd.set_option("display.float_format", "{:.2f}".format)
 
-OUTPUT_PATH = "data/processed/ml_dataset.parquet"
+OUTPUT_PATH = "../data/processed/ml_dataset.parquet"
 
 df = pd.read_parquet(OUTPUT_PATH)
 petr = df[df["ticker"] == "PETR4"].copy()
