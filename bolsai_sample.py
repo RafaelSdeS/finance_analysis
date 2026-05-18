@@ -76,7 +76,7 @@ import pandas as pd
 
 BASE_URL = "https://api.usebolsai.com/api/v1"
 
-MAX_HIST = 80
+MAX_HIST = 365
 
 REPORT_TYPES = ["DFP", "ITR"]
 
