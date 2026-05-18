@@ -34,14 +34,17 @@ import pandas as pd
 
 PRICES_DIR = Path("data/raw/prices")
 FUNDAMENTALS_DIR = Path("data/raw/fundamentals")
+COMPANY_INFO_PATH = Path("data/raw/company_info/company_info.parquet")
+OUTPUT_PATH = Path("data/processed/ml_dataset.parquet")
 
-COMPANY_INFO_PATH = Path(
-    "data/raw/company_info/company_info.parquet"
-)
-
-OUTPUT_PATH = Path(
-    "data/processed/ml_dataset.parquet"
-)
+# Columns the fundamentals API doesn't actually populate
+FUNDAMENTALS_NULL_COLS = [
+    "sector",
+    "subsector",
+    "segment",
+    "listing_segment",
+    "stock_type",
+]
 
 
 # =============================================================================
@@ -51,7 +54,6 @@ OUTPUT_PATH = Path(
 def load_prices():
 
     dfs = []
-
     files = sorted(PRICES_DIR.glob("*.parquet"))
 
     print()
@@ -60,25 +62,13 @@ def load_prices():
     print("=" * 80)
 
     for file in files:
-
         print(f"Loading: {file.name}")
-
         df = pd.read_parquet(file)
-
-        df["trade_date"] = pd.to_datetime(
-            df["trade_date"]
-        )
-
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
         dfs.append(df)
 
-    prices = pd.concat(
-        dfs,
-        ignore_index=True
-    )
-
-    prices = prices.sort_values(
-        ["ticker", "trade_date"]
-    )
+    prices = pd.concat(dfs, ignore_index=True)
+    prices = prices.sort_values(["ticker", "trade_date"])
 
     print(f"Total price rows: {len(prices)}")
 
@@ -92,7 +82,6 @@ def load_prices():
 def load_fundamentals():
 
     dfs = []
-
     files = sorted(FUNDAMENTALS_DIR.glob("*.parquet"))
 
     print()
@@ -101,25 +90,28 @@ def load_fundamentals():
     print("=" * 80)
 
     for file in files:
-
         print(f"Loading: {file.name}")
-
         df = pd.read_parquet(file)
-
-        df["reference_date"] = pd.to_datetime(
-            df["reference_date"]
-        )
-
+        df["reference_date"] = pd.to_datetime(df["reference_date"])
         dfs.append(df)
 
-    fundamentals = pd.concat(
-        dfs,
-        ignore_index=True
-    )
+    fundamentals = pd.concat(dfs, ignore_index=True)
 
-    fundamentals = fundamentals.sort_values(
-        ["ticker", "reference_date"]
-    )
+    # Drop columns that are always null (API doesn't return them)
+    cols_to_drop = [
+        c for c in FUNDAMENTALS_NULL_COLS
+        if c in fundamentals.columns
+    ]
+    if cols_to_drop:
+        fundamentals = fundamentals.drop(columns=cols_to_drop)
+        print(f"Dropped always-null columns: {cols_to_drop}")
+
+    # Drop redundant corporate_name — company_info has it with more detail
+    if "corporate_name" in fundamentals.columns:
+        fundamentals = fundamentals.drop(columns=["corporate_name"])
+        print("Dropped redundant 'corporate_name' from fundamentals")
+
+    fundamentals = fundamentals.sort_values(["ticker", "reference_date"])
 
     print(f"Total fundamentals rows: {len(fundamentals)}")
 
@@ -148,10 +140,7 @@ def load_company_info():
 # MERGE DAILY PRICES + QUARTERLY FUNDAMENTALS
 # =============================================================================
 
-def merge_prices_and_fundamentals(
-    prices,
-    fundamentals
-):
+def merge_prices_and_fundamentals(prices, fundamentals):
 
     print()
     print("=" * 80)
@@ -160,49 +149,36 @@ def merge_prices_and_fundamentals(
 
     merged_dfs = []
 
-    tickers = sorted(
-        prices["ticker"].unique()
-    )
-
-    for ticker in tickers:
+    for ticker in sorted(prices["ticker"].unique()):
 
         print(f"Merging {ticker}")
 
         p = (
-            prices[
-                prices["ticker"] == ticker
-            ]
+            prices[prices["ticker"] == ticker]
             .copy()
             .sort_values("trade_date")
         )
 
         f = (
-            fundamentals[
-                fundamentals["ticker"] == ticker
-            ]
+            fundamentals[fundamentals["ticker"] == ticker]
             .copy()
             .sort_values("reference_date")
         )
 
-        # merge_asof:
-        # pega o fundamento mais recente
-        # disponível até aquela data
-
+        # merge_asof: uses the most recent fundamental
+        # available up to each trade_date (no lookahead bias)
         merged = pd.merge_asof(
             p,
             f,
             left_on="trade_date",
             right_on="reference_date",
             by="ticker",
-            direction="backward"
+            direction="backward",
         )
 
         merged_dfs.append(merged)
 
-    final_df = pd.concat(
-        merged_dfs,
-        ignore_index=True
-    )
+    final_df = pd.concat(merged_dfs, ignore_index=True)
 
     print(f"Merged rows: {len(final_df)}")
 
@@ -213,21 +189,22 @@ def merge_prices_and_fundamentals(
 # ADD STATIC COMPANY INFO
 # =============================================================================
 
-def merge_company_info(
-    df,
-    company_info
-):
+def merge_company_info(df, company_info):
 
     print()
     print("=" * 80)
     print("ADDING COMPANY INFO")
     print("=" * 80)
 
+    # ticker_primary duplicates ticker — drop before merging
+    company_info = company_info.drop(
+        columns=[c for c in ["ticker_primary"] if c in company_info.columns]
+    )
+
     merged = df.merge(
         company_info,
         on="ticker",
         how="left",
-        suffixes=("", "_company")
     )
 
     return merged
@@ -244,21 +221,11 @@ def clean_dataset(df):
     print("CLEANING DATASET")
     print("=" * 80)
 
-    # remove duplicados
     before = len(df)
-
     df = df.drop_duplicates()
+    print(f"Removed duplicates: {before - len(df)}")
 
-    after = len(df)
-
-    print(f"Removed duplicates: {before - after}")
-
-    # ordena
-    df = df.sort_values(
-        ["ticker", "trade_date"]
-    )
-
-    df = df.reset_index(drop=True)
+    df = df.sort_values(["ticker", "trade_date"]).reset_index(drop=True)
 
     return df
 
@@ -269,83 +236,38 @@ def clean_dataset(df):
 
 def main():
 
-    OUTPUT_PATH.parent.mkdir(
-        parents=True,
-        exist_ok=True
-    )
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    # =========================================================
-    # Load datasets
-    # =========================================================
-
-    prices = load_prices()
-
+    prices       = load_prices()
     fundamentals = load_fundamentals()
-
     company_info = load_company_info()
 
-    # =========================================================
-    # Merge
-    # =========================================================
-
-    dataset = merge_prices_and_fundamentals(
-        prices,
-        fundamentals
-    )
-
-    dataset = merge_company_info(
-        dataset,
-        company_info
-    )
-
-    # =========================================================
-    # Clean
-    # =========================================================
-
+    dataset = merge_prices_and_fundamentals(prices, fundamentals)
+    dataset = merge_company_info(dataset, company_info)
     dataset = clean_dataset(dataset)
-
-    # =========================================================
-    # Save
-    # =========================================================
 
     print()
     print("=" * 80)
     print("SAVING DATASET")
     print("=" * 80)
 
-    dataset.to_parquet(
-        OUTPUT_PATH,
-        index=False
-    )
+    dataset.to_parquet(OUTPUT_PATH, index=False)
 
     print(f"Saved to: {OUTPUT_PATH}")
-
-    # =========================================================
-    # Final summary
-    # =========================================================
 
     print()
     print("=" * 80)
     print("FINAL DATASET SUMMARY")
     print("=" * 80)
-
     print(f"Rows: {len(dataset)}")
     print(f"Columns: {len(dataset.columns)}")
-
     print()
-
     print("Columns:")
     for col in dataset.columns:
         print(f"  {col}")
-
     print()
-
     print(dataset.head())
 
-
-# =============================================================================
-# ENTRY POINT
-# =============================================================================
 
 if __name__ == "__main__":
     main()
