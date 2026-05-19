@@ -26,6 +26,7 @@ Uso:
 
 from pathlib import Path
 import pandas as pd
+from cagr_handler import fill_cagr_columns
 
 
 # =============================================================================
@@ -116,6 +117,46 @@ def load_fundamentals():
     print(f"Total fundamentals rows: {len(fundamentals)}")
 
     return fundamentals
+
+
+# =============================================================================
+# FILL MISSING CAGR VALUES
+# =============================================================================
+
+def fill_missing_cagr(fundamentals):
+
+    print()
+    print("=" * 80)
+    print("FILLING MISSING CAGR VALUES")
+    print("=" * 80)
+
+    # Group by ticker and apply CAGR filling
+    dfs = []
+    for ticker in sorted(fundamentals["ticker"].unique()):
+        ticker_df = fundamentals[fundamentals["ticker"] == ticker].copy()
+        
+        # Track coverage before
+        earnings_before = ticker_df["cagr_earnings_5y"].isna().sum() if "cagr_earnings_5y" in ticker_df.columns else 0
+        revenue_before = ticker_df["cagr_revenue_5y"].isna().sum() if "cagr_revenue_5y" in ticker_df.columns else 0
+        
+        # Fill CAGR
+        ticker_df = fill_cagr_columns(ticker_df)
+        
+        # Track coverage after
+        earnings_after = ticker_df["cagr_earnings_5y_final"].isna().sum()
+        revenue_after = ticker_df["cagr_revenue_5y_final"].isna().sum()
+        
+        dfs.append(ticker_df)
+        
+        print(f"{ticker}: earnings nulls {earnings_before} → {earnings_after}, revenue nulls {revenue_before} → {revenue_after}")
+
+    fundamentals = pd.concat(dfs, ignore_index=True)
+    fundamentals = fundamentals.sort_values(["ticker", "reference_date"])
+
+    print(f"CAGR filling complete: {len(fundamentals)} total rows")
+
+    return fundamentals
+
 
 
 # =============================================================================
@@ -240,6 +281,7 @@ def main():
 
     prices       = load_prices()
     fundamentals = load_fundamentals()
+    fundamentals = fill_missing_cagr(fundamentals)
     company_info = load_company_info()
 
     dataset = merge_prices_and_fundamentals(prices, fundamentals)
