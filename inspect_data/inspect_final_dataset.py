@@ -25,7 +25,7 @@ def main():
     parser.add_argument(
         "--file",
         type=str,
-        default="data/processed/ml_dataset.parquet",
+        default="../data/processed/ml_dataset.parquet",
         help="Path do parquet final"
     )
 

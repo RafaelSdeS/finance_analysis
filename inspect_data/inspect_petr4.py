@@ -17,7 +17,7 @@ pd.set_option("display.float_format", "{:.2f}".format)
 OUTPUT_PATH = "../data/processed/ml_dataset.parquet"
 
 df = pd.read_parquet(OUTPUT_PATH)
-petr = df[df["ticker"] == "PETR4"].copy()
+petr = df[df["ticker"] == "VALE3"].copy()
 
 # =============================================================================
 # 1. IDENTITY & COMPANY INFO

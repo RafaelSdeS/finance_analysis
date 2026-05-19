@@ -40,7 +40,7 @@ import pandas as pd
 # CONFIG
 # =============================================================================
 
-RAW_DIR = Path("data/raw")
+RAW_DIR = Path("../data/raw")
 
 FOLDERS = [
     "prices",

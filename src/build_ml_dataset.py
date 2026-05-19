@@ -32,10 +32,10 @@ import pandas as pd
 # PATHS
 # =============================================================================
 
-PRICES_DIR = Path("data/raw/prices")
-FUNDAMENTALS_DIR = Path("data/raw/fundamentals")
-COMPANY_INFO_PATH = Path("data/raw/company_info/company_info.parquet")
-OUTPUT_PATH = Path("data/processed/ml_dataset.parquet")
+PRICES_DIR = Path("../data/raw/prices")
+FUNDAMENTALS_DIR = Path("../data/raw/fundamentals")
+COMPANY_INFO_PATH = Path("../data/raw/company_info/company_info.parquet")
+OUTPUT_PATH = Path("../data/processed/ml_dataset.parquet")
 
 # Columns the fundamentals API doesn't actually populate
 FUNDAMENTALS_NULL_COLS = [

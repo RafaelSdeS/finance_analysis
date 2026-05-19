@@ -83,7 +83,7 @@ log = logging.getLogger(__name__)
 # FOLDERS
 # =============================================================================
 
-RAW_DIR       = Path("data/raw")
+RAW_DIR       = Path("../data/raw")
 PRICES_DIR    = RAW_DIR / "prices"
 FUND_DIR      = RAW_DIR / "fundamentals"
 MACRO_DIR     = RAW_DIR / "macro"
@@ -181,6 +181,8 @@ def fetch_prices_yfinance(ticker: str, start: str) -> pd.DataFrame:
         "volume",
     ]
     raw = raw[[c for c in keep if c in raw.columns]]
+
+    raw = raw[raw["volume"] > 0]
 
     raw = raw.drop_duplicates(subset=["ticker", "trade_date"])
     raw = raw.sort_values("trade_date").reset_index(drop=True)

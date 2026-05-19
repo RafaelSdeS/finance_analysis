@@ -128,8 +128,8 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-key", required=True)
-    parser.add_argument("--prices-dir", default="data/raw/prices")
-    parser.add_argument("--output", default="data/raw/company_info/company_info.parquet")
+    parser.add_argument("--prices-dir", default="../data/raw/prices")
+    parser.add_argument("--output", default="../data/raw/company_info/company_info.parquet")
     args = parser.parse_args()
 
     prices_dir  = Path(args.prices_dir)

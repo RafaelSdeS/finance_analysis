@@ -19,7 +19,7 @@ from pathlib import Path
 import pandas as pd
 
 
-PARQUET_PATH = "data/raw/company_info/company_info.parquet"
+PARQUET_PATH = "../data/raw/company_info/company_info.parquet"
 
 
 def print_header(title: str):
