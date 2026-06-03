@@ -3,10 +3,10 @@
 # Visualiza e inspeciona o dataset final consolidado.
 #
 # Uso:
-#   python inspect_final_dataset.py
+#   python test_final_dataset.py
 #
 # Ou:
-#   python inspect_final_dataset.py --file data/processed/ml_dataset.parquet
+#   python test_final_dataset.py --file data/processed/ml_dataset.parquet
 
 import argparse
 from pathlib import Path

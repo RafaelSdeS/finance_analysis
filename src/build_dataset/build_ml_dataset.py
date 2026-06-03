@@ -140,7 +140,7 @@ def fill_missing_cagr(fundamentals):
         revenue_before = ticker_df["cagr_revenue_5y"].isna().sum() if "cagr_revenue_5y" in ticker_df.columns else 0
         
         # Fill CAGR
-        ticker_df = fill_cagr_columns(ticker_df)
+        #ticker_df = fill_cagr_columns(ticker_df)
         
         # Track coverage after
         earnings_after = ticker_df["cagr_earnings_5y_final"].isna().sum()

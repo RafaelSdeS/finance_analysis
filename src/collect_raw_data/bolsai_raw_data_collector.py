@@ -2,11 +2,11 @@
 bolsai_data_pipeline.py
 =======================
 
-RAW DATA PIPELINE — fetches and saves all raw data separately.
+RAW DATA PIPELINE — fetches and saves all raw data using only the Bolsai API.
 
 Sources:
-    - yfinance      → daily prices (full history, free, no API limit)
-    - Bolsai API    → fundamentals (quarterly, up to 80 quarters ~20 years)
+    - Bolsai API    → daily prices  (paginated, 80 records/page)
+    - Bolsai API    → fundamentals  (quarterly, up to 80 quarters ~20 years)
     - Bolsai API    → macro: selic, ipca, cdi
 
 Folder structure:
@@ -34,12 +34,12 @@ Usage:
 import argparse
 import logging
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 import httpx
 import pandas as pd
-import yfinance as yf
 
 
 # =============================================================================
@@ -53,8 +53,8 @@ SAMPLE_TICKERS = [
     "PRIO3",
 ]
 
-# Bolsai hard limit for fundamentals endpoint
-MAX_FUNDAMENTALS = 80
+MAX_PRICES       = 80   # Bolsai hard limit per page for price history
+MAX_FUNDAMENTALS = 80   # Bolsai hard limit for fundamentals history
 
 MACRO_ENDPOINTS = {
     "selic": "/macro/selic",
@@ -64,7 +64,6 @@ MACRO_ENDPOINTS = {
 
 BASE_URL = "https://api.usebolsai.com/api/v1"
 
-# Default price history start date
 DEFAULT_START = "2005-01-01"
 
 
@@ -83,10 +82,18 @@ log = logging.getLogger(__name__)
 # FOLDERS
 # =============================================================================
 
-RAW_DIR       = Path("../data/raw")
-PRICES_DIR    = RAW_DIR / "prices"
-FUND_DIR      = RAW_DIR / "fundamentals"
-MACRO_DIR     = RAW_DIR / "macro"
+def _find_project_root(start):
+    markers = (".git", "pyproject.toml", "requirements.txt")
+    for p in [start, *start.parents]:
+        if any((p / m).exists() for m in markers):
+            return p
+    return start
+
+ROOT_DIR   = _find_project_root(Path(__file__).resolve().parent)
+RAW_DIR    = ROOT_DIR / "data" / "raw"
+PRICES_DIR = RAW_DIR / "prices"
+FUND_DIR   = RAW_DIR / "fundamentals"
+MACRO_DIR  = RAW_DIR / "macro"
 
 for d in [PRICES_DIR, FUND_DIR, MACRO_DIR]:
     d.mkdir(parents=True, exist_ok=True)
@@ -134,65 +141,82 @@ class BolsaiClient:
 
 
 # =============================================================================
-# STEP 1 — DAILY PRICES via yfinance (full history, no API cost)
+# STEP 1 — DAILY PRICES via Bolsai (paginated forward from start date)
 # =============================================================================
 
-def fetch_prices_yfinance(ticker: str, start: str) -> pd.DataFrame:
+def fetch_prices_bolsai(client: BolsaiClient, ticker: str, start: str) -> pd.DataFrame:
     """
-    Downloads full OHLCV history from Yahoo Finance.
-    Brazilian tickers need the .SA suffix (e.g. PETR4 → PETR4.SA).
-    Returns columns matching the Bolsai price schema where possible.
+    Downloads full OHLCV history from Bolsai, paginating forward from `start`.
+    The API returns at most MAX_PRICES (80) records per call, so we advance
+    the window by setting `start` to the day after the last received record.
     """
-    log.info(f"[{ticker}] Fetching prices via yfinance (start={start})...")
+    log.info(f"[{ticker}] Fetching prices via Bolsai (start={start})...")
 
-    yf_ticker = f"{ticker}.SA"
+    all_pages: list[pd.DataFrame] = []
+    cursor = start
 
-    raw = yf.download(
-    yf_ticker,
-    start=start,
-    auto_adjust=False,
-    progress=False,
-)
+    while True:
+        raw = client.get(
+            f"/stocks/{ticker}/history",
+            params={"start": cursor, "limit": MAX_PRICES},
+        )
+        if not raw:
+            break
 
-    # flatten multi-level columns if present (older yfinance versions)
-    if isinstance(raw.columns, pd.MultiIndex):
-        raw.columns = raw.columns.get_level_values(0)
+        page = raw.get("prices", [])
+        if not page:
+            break
 
-    if raw.empty:
-        log.warning(f"[{ticker}] yfinance returned no data.")
+        df_page = pd.DataFrame(page)
+        all_pages.append(df_page)
+
+        # If we got fewer records than the page limit, we've reached the end.
+        if len(page) < MAX_PRICES:
+            break
+
+        # Advance cursor to the day after the last record on this page.
+        last_date = page[-1]["trade_date"]
+        next_start = (
+            datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)
+        ).strftime("%Y-%m-%d")
+
+        # Safety guard: prevent infinite loop if the API echoes the same date.
+        if next_start <= cursor:
+            break
+
+        cursor = next_start
+
+    if not all_pages:
+        log.warning(f"[{ticker}] Bolsai returned no price data.")
         return pd.DataFrame()
 
-    raw = raw.reset_index()
-    raw.columns = [c.lower().replace(" ", "_") for c in raw.columns]
+    df = pd.concat(all_pages, ignore_index=True)
 
-    # Rename to match Bolsai schema
-    raw = raw.rename(columns={
-        "date":       "trade_date",
-        "adj_close":  "adjusted_close",
-    })
+    # Standardise schema
+    df.insert(0, "ticker", ticker)
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
 
-    raw["ticker"]     = ticker
-    raw["trade_date"] = pd.to_datetime(raw["trade_date"]).dt.tz_localize(None)
+    rename_map = {
+        "adjusted_open":   "adj_open",
+        "adjusted_high":   "adj_high",
+        "adjusted_low":    "adj_low",
+        "adjusted_close":  "adj_close",
+        "adjusted_volume": "volume_adjusted",
+        "traded_amount":   "traded_amount",
+        "num_trades":      "num_trades",
+    }
+    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
 
-    # Keep only the columns we care about
-    keep = [
-        "ticker", "trade_date",
-        "open", "high", "low", "close", "adjusted_close",
-        "volume",
-    ]
-    raw = raw[[c for c in keep if c in raw.columns]]
-
-    raw = raw[raw["volume"] > 0]
-
-    raw = raw.drop_duplicates(subset=["ticker", "trade_date"])
-    raw = raw.sort_values("trade_date").reset_index(drop=True)
+    df = df[df["volume"] > 0] if "volume" in df.columns else df
+    df = df.drop_duplicates(subset=["ticker", "trade_date"])
+    df = df.sort_values("trade_date").reset_index(drop=True)
 
     log.info(
-        f"[{ticker}] {len(raw)} trading days "
-        f"({raw['trade_date'].min().date()} → {raw['trade_date'].max().date()})"
+        f"[{ticker}] {len(df)} trading days "
+        f"({df['trade_date'].min().date()} → {df['trade_date'].max().date()})"
     )
 
-    return raw
+    return df
 
 
 def save_prices(df: pd.DataFrame, ticker: str):
@@ -290,11 +314,11 @@ def run_pipeline(api_key: str, tickers: list[str], start: str):
     log.info(f"PIPELINE START — {len(tickers)} ticker(s), start={start}")
     log.info("=" * 60)
 
-    # ── Prices (yfinance — no API cost) ──────────────────────────────────────
+    # ── Prices (Bolsai, paginated) ────────────────────────────────────────────
     log.info("")
-    log.info("── PRICES (yfinance) ────────────────────────────────────")
+    log.info("── PRICES (Bolsai) ──────────────────────────────────────")
     for ticker in tickers:
-        df = fetch_prices_yfinance(ticker, start)
+        df = fetch_prices_bolsai(client, ticker, start)
         if not df.empty:
             save_prices(df, ticker)
 
@@ -332,7 +356,7 @@ def run_pipeline(api_key: str, tickers: list[str], start: str):
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
-        description="Download raw market data for ML pipeline"
+        description="Download raw market data for ML pipeline (Bolsai only)"
     )
     parser.add_argument("--api-key", required=True, help="Bolsai API key")
     parser.add_argument(
