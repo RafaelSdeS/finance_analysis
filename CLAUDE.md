@@ -10,8 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Pipeline:** Structured three-stage approach:
 1. **Stage 1 (Data Collection):** Staged prototype→validation→full-scale pipeline with checkpointing, logging, validation
-2. **Stage 2 (Dataset Build):** Merge raw data into ML-ready parquets
-3. **Stage 3 (Model):** RL agent training (future)
+2. **Stage 2 (Dataset Build):** Merge raw data into ML-ready parquets (no lookahead bias, temporal alignment)
+3. **Stage 3 (Model):** RL agent training (future, separate branch)
 
 All scripts run from project root.
 
@@ -56,11 +56,22 @@ Resumes mid-run from checkpoints (idempotent: re-runs only fetch new data).
 
 ### Stage 2: Build ML Dataset
 
+**Prerequisites:** Stage 1 must be complete (raw data in `data/raw/`).
+
 Merges prices + fundamentals + company info (no lookahead bias; uses `merge_asof` backward):
 ```bash
 python "src/2. build_dataset/build_ml_dataset.py"
 ```
-Saves to `data/processed/ml_dataset.parquet`.
+Saves to `data/processed/ml_dataset.parquet` (one row per ticker + date).
+
+**Validation** (after build):
+```bash
+python tests/processed_data/test_final_dataset.py
+python tests/processed_data/test_final_dataset.py --file data/processed/ml_dataset.parquet
+```
+Checks schema, shape, lookahead, NaN counts, return distribution.
+
+See `BUILD_DATASET_ROADMAP.md` for phase-by-phase implementation guide (5 phases: load, merge, feature engineering, clean, validate).
 
 ### Utilities
 
@@ -83,6 +94,12 @@ python tests/processed_data/test_final_dataset.py --file data/processed/ml_datas
 python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY
 python tests/raw_data/test_cagr_calculation.py
 ```
+
+## Branches
+
+- **main:** Base branch, stable. Stages 1–2 merged here once validated.
+- **build_dataset:** Stage 2 (dataset building). Focus on merging raw data → ml_dataset.parquet. See `BUILD_DATASET_ROADMAP.md`.
+- **ml_agent:** Stage 3 (RL agent). Separate effort after Stage 2 complete. See `ML_AGENT_ROADMAP.md` (if exists on that branch).
 
 ## Architecture
 
@@ -109,20 +126,42 @@ data/processed/ml_dataset.parquet      (one row per ticker+date)
 
 ### Key Modules
 
+**Stage 1 (Data Collection):**
+
 | File | Purpose |
 |------|---------|
-| `src/cagr_handler.py` | CAGR calculation/filling: use BolsAI values first, backfill from earnings/revenue, flag negative-base-year rows. Includes CLI and module API. |
-| `src/2. build_dataset/build_ml_dataset.py` | Join prices + fundamentals + company info; calls `fill_cagr_columns()` (currently commented out at line 143). |
+| `src/data_collection/pipeline.py` | Orchestration (prototype/validation/full-scale modes, checkpointing) |
+| `src/data_collection/collectors.py` | All collectors: BCB macro, BolsAI prices/fundamentals/company info |
+
+**Stage 2 (Dataset Build, build_dataset branch):**
+
+| File | Purpose |
+|------|---------|
+| `src/data_loading.py` | Utilities: `load_prices()`, `load_fundamentals()`, `load_macro_series()`, `inspect_dataset()` |
+| `src/2. build_dataset/build_ml_dataset.py` | Orchestration: load → merge_asof → feature engineering → clean → save ml_dataset.parquet |
+| `src/cagr_handler.py` | CAGR calculation/filling: use BolsAI values first, backfill from earnings/revenue. Uncomment line 143 in build_ml_dataset.py to enable. |
+
+**Utilities:**
+
+| File | Purpose |
+|------|---------|
 | `src/visualizations/financial_view.py` | Standalone Plotly chart: BBAS3 nominal/inflation-adjusted prices + SELIC overlay (uses `yfinance`). |
 
 ## Critical Caveats
+
+### Stage 2: No Lookahead Bias (Temporal Merge)
+The merge of prices + fundamentals uses `pd.merge_asof(..., direction='backward')` to ensure no price date ever sees a *future* fundamental (e.g., a price from 2026-04-01 gets the Q1 2026 fundamental dated 2026-03-31, not a later quarter). This is critical for valid backtesting.
+
+**Check:** After merge, verify `fundamental_date <= price_date` for all rows.
 
 ### `fill_cagr_columns()` is Commented Out
 Line 143 in `build_ml_dataset.py` has the call commented out:
 ```python
 #ticker_df = fill_cagr_columns(ticker_df)
 ```
-This means the dataset will be missing `cagr_earnings_5y_final` and `cagr_revenue_5y_final` columns at runtime. Uncomment when CAGR backfilling is needed.
+Uncomment to add `cagr_earnings_5y_final` and `cagr_revenue_5y_final` columns (currently missing).
+
+**Note:** `BUILD_DATASET_ROADMAP.md` has Phase 3 (Feature Engineering) and Phase 4a (Missing Data Handling) guidance on when/how to enable CAGR backfilling and handle the resulting NaNs.
 
 ### BolsAI API Key Handling
 - Stored in `.env` (copied from `.env.example`)
