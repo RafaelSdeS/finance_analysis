@@ -1,0 +1,89 @@
+"""
+validate.py — lightweight per-collector data quality gate (runs before write).
+
+This is the *schema/sanity* gate, distinct from the cross-source check in
+tests/raw_data/validate_vs_yfinance.py (the validation STAGE). Returns a
+ValidationResult; collectors refuse to save on errors, log on warnings.
+"""
+
+from dataclasses import dataclass, field
+
+import pandas as pd
+
+PRICE_COLS = ["ticker", "trade_date", "open", "high", "low", "close",
+              "adj_open", "adj_high", "adj_low", "adj_close",
+              "volume", "volume_adjusted", "traded_amount", "num_trades"]
+
+FUND_COLS = ["ticker", "reference_date", "net_income", "equity", "net_revenue",
+             "total_assets", "ebitda", "shares_outstanding", "market_cap"]
+
+
+@dataclass
+class ValidationResult:
+    passed: bool = True
+    warnings: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+    def error(self, msg: str):
+        self.errors.append(msg)
+        self.passed = False
+
+    def warn(self, msg: str):
+        self.warnings.append(msg)
+
+
+def _common(df: pd.DataFrame, date_col: str, required: list[str]) -> ValidationResult:
+    r = ValidationResult()
+    if df.empty:
+        r.error("empty dataframe")
+        return r
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        r.error(f"missing columns: {missing}")
+        return r
+    future = df[df[date_col] > pd.Timestamp.now() + pd.Timedelta(days=2)]
+    if not future.empty:
+        r.error(f"{len(future)} rows with future {date_col}")
+    if df[date_col].duplicated().any():
+        r.warn(f"duplicate {date_col} values present")
+    return r
+
+
+def validate_prices(df: pd.DataFrame) -> ValidationResult:
+    r = _common(df, "trade_date", PRICE_COLS)
+    if not r.passed:
+        return r
+    if (df["close"] <= 0).any():
+        r.error(f"{(df['close'] <= 0).sum()} rows with close <= 0")
+    if (df["volume"] < 0).any():
+        r.error("negative volume present")
+    # daily gaps > 5 calendar days that aren't a weekend straddle → flag, don't fail
+    gaps = df.sort_values("trade_date")["trade_date"].diff().dt.days
+    if (gaps > 5).sum() > 0:
+        r.warn(f"{(gaps > 5).sum()} gaps > 5 days (holidays/halts?)")
+    return r
+
+
+def validate_fundamentals(df: pd.DataFrame) -> ValidationResult:
+    r = _common(df, "reference_date", FUND_COLS)
+    if not r.passed:
+        return r
+    # CAGR nulls are expected in the first ~20 quarters (need 5y history) AND in
+    # any quarter whose 5y-ago base earnings were negative (CAGR undefined).
+    # Only flag if the LATE null rate is implausibly high (>50%) → possible data issue.
+    if "cagr_earnings_5y" in df.columns:
+        late = df.sort_values("reference_date").iloc[20:]
+        if len(late):
+            null_rate = late["cagr_earnings_5y"].isna().mean()
+            if null_rate > 0.5:
+                r.warn(f"cagr_earnings_5y null rate {null_rate:.0%} after q20 (negative-base years, or data issue)")
+    return r
+
+
+def validate_macro(df: pd.DataFrame, name: str) -> ValidationResult:
+    r = _common(df, "reference_date", ["reference_date", name])
+    if not r.passed:
+        return r
+    if df[name].isna().all():
+        r.error("all values null")
+    return r

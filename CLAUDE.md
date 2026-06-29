@@ -36,7 +36,7 @@ cp .env.example .env
 
 **Prototype stage** (3–10 representative tickers, validates data quality):
 ```bash
-python src/data_collection/pipeline.py --mode prototype
+python -m src.data_collection.pipeline --mode prototype
 ```
 Collects: BCB macro (SELIC, CDI, IPCA), BolsAI prices + fundamentals + company info for PETR4, VALE3, WEGE3, ...
 
@@ -48,9 +48,11 @@ Cross-checks prototype data against yfinance; pass/fail determines full-scale re
 
 **Full-scale stage** (after validation passes):
 ```bash
-python src/data_collection/pipeline.py --mode full_scale
+python -m src.data_collection.pipeline --mode full_scale       # all ~500+ tickers
+python -m src.data_collection.pipeline --mode full_scale --dry-run   # preview ticker list
+python -m src.data_collection.pipeline --mode prototype --tickers PETR4 VALE3   # override
 ```
-Collects same data for all ~500+ Bovespa tickers. Can resume mid-run from checkpoints.
+Resumes mid-run from checkpoints (idempotent: re-runs only fetch new data).
 
 ### Stage 2: Build ML Dataset
 
@@ -125,14 +127,16 @@ This means the dataset will be missing `cagr_earnings_5y_final` and `cagr_revenu
 ### BolsAI API Key Handling
 - Stored in `.env` (copied from `.env.example`)
 - `.env` is gitignored (never commit your key)
-- Pipeline loads automatically: `from dotenv import load_dotenv`
+- Loaded by `config.load_env()` (stdlib parser, no `python-dotenv` dependency)
 - Required for `src/data_collection/pipeline.py` and API validator tests
 
 ### Data Collection Pipeline Structure
-- **Old code** (`src/1. collect_raw_data/`) is deprecated; use new `src/data_collection/pipeline.py`
+- All collection lives in `src/data_collection/` (old `src/1. collect_raw_data/` removed)
 - **Staged approach:** Prototype with 3–10 tickers first, validate against yfinance, unlock full-scale
-- **Checkpointing:** Pipeline resumes from `data/checkpoints/` on interrupt (idempotent)
+- **Checkpointing:** Pipeline resumes from `data/checkpoints/{mode}/` on interrupt (idempotent)
 - **Logging:** All collector activity goes to `data/logs/collection-YYYYMMDD-HHMMSS.log`
+- **API caps (probed):** prices `limit<=5000` (date-window paginated), fundamentals `limit<=88` (use 80)
+- **BCB series:** selic=11 (daily rate), cdi=12, ipca=433. NOT 432 (that's the annual meta target)
 
 ### Relative Paths
 New pipeline uses absolute paths via `Path(__file__).resolve().parents[N]`. Run all commands from project root.
