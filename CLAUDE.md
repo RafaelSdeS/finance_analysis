@@ -11,7 +11,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Pipeline:** Structured three-stage approach:
 1. **Stage 1 (Data Collection):** Staged prototype→validation→full-scale pipeline with checkpointing, logging, validation
 2. **Stage 2 (Dataset Build):** Merge raw data into ML-ready parquets
-3. **Stage 3 (Model):** RL agent training (future)
+3. **Stage 3 (ML Agent):** RL agent for portfolio allocation (PPO on gymnasium env)
 
 All scripts run from project root.
 
@@ -62,6 +62,31 @@ python "src/2. build_dataset/build_ml_dataset.py"
 ```
 Saves to `data/processed/ml_dataset.parquet`.
 
+### Stage 3: Train ML Agent
+
+**Prerequisites:**
+```bash
+pip install torch stable-baselines3 gymnasium scikit-learn
+```
+
+**Training** (see `ML_AGENT_ROADMAP.md` for phase-by-phase details):
+```bash
+python src/agent/trainer.py --config src/agent/config.py  # train PPO on ml_dataset
+```
+Saves checkpoint: `data/models/agent_checkpoint_epN.pt`, final: `data/models/agent_final.pt`
+
+**Evaluation** (backtest on test set):
+```bash
+python src/agent/evaluate.py --model data/models/agent_final.pt
+```
+Outputs: `data/backtest/results.parquet`, plots in `data/backtest/plots/`
+
+**Inference** (daily allocation):
+```bash
+python src/agent/run_allocation.py --date 2026-06-29
+```
+Outputs: portfolio weights (ticker, weight) as CSV/JSON
+
 ### Utilities
 
 **CAGR calculator** (CLI and module):
@@ -81,7 +106,13 @@ All tests are plain Python scripts (no pytest). Run from project root:
 python tests/processed_data/test_final_dataset.py
 python tests/processed_data/test_final_dataset.py --file data/processed/ml_dataset.parquet
 python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY
+python tests/api/bolsai_api_price_depth.py
+python tests/api/bolsai_api_macro_depth.py
+python tests/api/bolsai_test_cagr.py
 python tests/raw_data/test_cagr_calculation.py
+python tests/raw_data/test_ticker_data.py
+python tests/raw_data/inspect_all_data.py
+python tests/raw_data/inspect_company_info.py
 ```
 
 ## Architecture
@@ -97,7 +128,7 @@ data/raw/
   ├─ prices/{TICKER}.parquet           (daily)
   ├─ fundamentals/{TICKER}.parquet     (quarterly)
   └─ macro/{selic,cdi,ipca}.parquet
-        ↓
+        ↓ [Stage 2]
 build_ml_dataset.py
   → merge_asof(prices, fundamentals)   [no lookahead]
   → left join company_info
@@ -105,9 +136,28 @@ build_ml_dataset.py
   → clean (drop dupes, sort)
         ↓
 data/processed/ml_dataset.parquet      (one row per ticker+date)
+        ↓ [Stage 3]
+PortfolioEnv (gymnasium)
+  → state: normalized features (price, fundamentals, macro)
+  → action: portfolio weights (softmax)
+  → reward: daily log return
+        ↓
+trainer.py (PPO)
+  → train on [train_set: 60%], validate on [val_set: 20%]
+  → save checkpoints
+        ↓
+data/models/agent_final.pt             (trained policy)
+        ↓
+evaluate.py: backtest on [test_set: 20%]
+  → metrics: Sharpe, max drawdown, Sortino
+  → comparison: vs equal-weight, market-cap, 1/vol baselines
+        ↓
+data/backtest/results.parquet          (trajectory, weights, returns)
 ```
 
 ### Key Modules
+
+**Stages 1–2 (Data Collection & Dataset Build):**
 
 | File | Purpose |
 |------|---------|
@@ -115,7 +165,29 @@ data/processed/ml_dataset.parquet      (one row per ticker+date)
 | `src/2. build_dataset/build_ml_dataset.py` | Join prices + fundamentals + company info; calls `fill_cagr_columns()` (currently commented out at line 143). |
 | `src/visualizations/financial_view.py` | Standalone Plotly chart: BBAS3 nominal/inflation-adjusted prices + SELIC overlay (uses `yfinance`). |
 
+**Stage 3 (ML Agent):** See `ML_AGENT_ROADMAP.md` for detailed phase-by-phase guide.
+
+| File | Purpose |
+|------|---------|
+| `src/agent/config.py` | Hyperparameters, feature list, train/val/test split dates |
+| `src/agent/env.py` | PortfolioEnv (gymnasium interface): state normalization, step logic, reward |
+| `src/agent/policy.py` | Policy network (Actor-Critic MLP) or SB3 wrapper |
+| `src/agent/trainer.py` | PPO training loop, checkpointing, early stopping |
+| `src/agent/evaluate.py` | Backtesting on test set, metrics, baseline comparisons, plots |
+| `src/agent/infer.py` | Inference: load agent + features → weights |
+| `src/agent/run_allocation.py` | Daily entry point: predict portfolio weights for today |
+
+## Branches
+
+- **main:** Stages 1–2 (data collection + dataset build). Latest stable.
+- **ml_agent:** Stage 3 (ML agent training). See `ML_AGENT_ROADMAP.md` for phase-by-phase implementation guide.
+
 ## Critical Caveats
+
+### Stage 3 (ml_agent branch)
+- ML agent code lives in `src/agent/` (not yet implemented).
+- Detailed roadmap with 4 phases (foundation, training, eval, deploy) is in `ML_AGENT_ROADMAP.md`.
+- Add dependencies: `torch`, `stable-baselines3`, `gymnasium`, `scikit-learn` before running.
 
 ### `fill_cagr_columns()` is Commented Out
 Line 143 in `build_ml_dataset.py` has the call commented out:
@@ -159,26 +231,37 @@ New pipeline uses absolute paths via `Path(__file__).resolve().parents[N]`. Run 
 ## Technology Stack
 
 - **Python:** 3.10+ (uses `list[str]`, `dict | None` syntax)
-- **Data:** pandas, numpy, pyarrow (parquet)
+- **Data:** pandas, numpy, pyarrow (parquet), scikit-learn (scaler)
 - **APIs:** BolsAI REST (direct `httpx`), BCB SGS (direct requests), `yfinance` (validation only)
 - **Config:** `python-dotenv` (load `.env` for API keys)
 - **Logging:** Python built-in `logging` module (file + console)
 - **Viz:** Plotly (existing `financial_view.py`)
+- **ML/RL:** `torch==2.3.0`, `stable-baselines3==2.4.0`, `gymnasium==0.29.0` (Stage 3 only)
 - **No test framework:** tests are standalone `python script.py` invocations (no pytest)
 
 ## Data Collection Modules (Stage 1)
 
-New modular pipeline in `src/data_collection/`:
+Flat layout in `src/data_collection/` (no subdirectories):
 
 | Module | Purpose |
 |--------|---------|
 | `config.py` | Shared config (tickers, API keys, paths, retry limits) |
-| `core/client.py` | HTTP wrapper (retries, backoff, logging) |
-| `core/checkpoint.py` | Resume state tracking (JSON per collector) |
-| `core/validator.py` | Data quality checks (schemas, ranges, continuity) |
-| `collectors/base.py` | Abstract `BaseCollector` interface |
-| `collectors/bcb_macro.py` | SELIC, CDI, IPCA from BCB SGS |
-| `collectors/bolsai_prices.py` | Daily prices from BolsAI |
-| `collectors/bolsai_fundamentals.py` | Quarterly fundamentals from BolsAI |
-| `collectors/bolsai_company_info.py` | Company metadata from BolsAI |
+| `client.py` | HTTP helpers: retries, exponential backoff on 429/5xx, fast-fail on 4xx |
+| `checkpoint.py` | Resume state tracking (JSON per collector per mode) |
+| `validate.py` | Schema/sanity gate per collector (runs before write) |
+| `collectors.py` | All collectors in one file: BCB macro, BolsAI prices/fundamentals/company info |
 | `pipeline.py` | Orchestration (stages, error handling, checkpointing) |
+
+## ML Agent Modules (Stage 3, ml_agent branch)
+
+See `ML_AGENT_ROADMAP.md` for detailed phases and architecture. Skeleton in `src/agent/`:
+
+| Module | Purpose |
+|--------|---------|
+| `config.py` | Hyperparameters (learning_rate, gamma, n_steps, etc.), feature columns, split dates |
+| `env.py` | PortfolioEnv (gymnasium.Env): reset, step, render, state normalization |
+| `policy.py` | Policy network (MLP Actor-Critic) + value head, or SB3 wrapper |
+| `trainer.py` | PPO training loop: collect trajectories, compute advantages, update weights, checkpoint |
+| `evaluate.py` | Backtest + metrics (Sharpe, max drawdown, Sortino), baseline comparisons, plot generation |
+| `infer.py` | Inference helper: load agent, predict weights given latest features |
+| `run_allocation.py` | Daily CLI: load latest dataset, predict weights, output (ticker, weight) CSV |
