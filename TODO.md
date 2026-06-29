@@ -6,7 +6,7 @@ Goal: Validate API data accuracy against reliable sources before scaling.
 
 ### Blockers
 
-- [ ] Uncomment and test `fill_cagr_columns()` in `src/2. build_dataset/build_ml_dataset.py` (line 143)
+- [x] Uncomment and test `fill_cagr_columns()` in `src/2. build_dataset/build_ml_dataset.py`
 - [ ] Run full pipeline (Stages 1–2) on current 3 tickers
 - [ ] Validate metrics: compare BolsAI prices + fundamentals against Yahoo Finance, B3 official, other data sources
   - Note: minor diffs expected; flag only if >1% variance on key metrics (P/E, P/B, ROE, CAGR)

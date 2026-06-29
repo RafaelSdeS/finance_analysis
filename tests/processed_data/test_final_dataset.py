@@ -9,13 +9,64 @@
 #   python test_final_dataset.py --file data/processed/ml_dataset.parquet
 
 import argparse
+import sys
 from pathlib import Path
 
 import pandas as pd
 
+DEFAULT_FILE = Path(__file__).resolve().parents[2] / "data/processed/ml_dataset.parquet"
+
 
 def print_separator():
     print("-" * 80)
+
+
+def validate(df):
+    """Golden gate: collect failures, exit(1) if any. Inspector runs first."""
+
+    print("\n")
+    print("=" * 80)
+    print("VALIDATION")
+    print("=" * 80)
+
+    checks = []
+
+    # No lookahead: every merged fundamental is dated on/before its trade_date
+    has_dates = df["reference_date"].notna()
+    no_lookahead = (df.loc[has_dates, "reference_date"] <= df.loc[has_dates, "trade_date"]).all()
+    checks.append(("no lookahead (reference_date <= trade_date)", bool(no_lookahead)))
+
+    # No duplicate (ticker, trade_date) rows
+    dupes = df.duplicated(subset=["ticker", "trade_date"]).sum()
+    checks.append((f"no duplicate (ticker, trade_date) [{dupes} found]", dupes == 0))
+
+    # CAGR final columns present (proves fill_cagr_columns ran)
+    cagr_ok = {"cagr_earnings_5y_final", "cagr_revenue_5y_final"}.issubset(df.columns)
+    checks.append(("CAGR _final columns present", cagr_ok))
+
+    # Critical columns have no NaN
+    for col in ("close", "volume"):
+        checks.append((f"no NaN in {col}", col in df.columns and df[col].notna().all()))
+
+    # Macro merged and not entirely null
+    for col in ("selic", "cdi", "ipca"):
+        present = col in df.columns and df[col].notna().any()
+        checks.append((f"macro {col} merged", present))
+
+    # Every ticker has >= 252 rows (1 trading year)
+    min_rows = df.groupby("ticker").size().min()
+    checks.append((f"all tickers >= 252 rows [min {min_rows}]", min_rows >= 252))
+
+    failed = 0
+    for label, ok in checks:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {label}")
+        failed += not ok
+
+    print()
+    if failed:
+        print(f"VALIDATION FAILED: {failed} check(s)")
+        sys.exit(1)
+    print("VALIDATION PASSED")
 
 
 def main():
@@ -25,7 +76,7 @@ def main():
     parser.add_argument(
         "--file",
         type=str,
-        default="../data/processed/ml_dataset.parquet",
+        default=str(DEFAULT_FILE),
         help="Path do parquet final"
     )
 
@@ -235,6 +286,8 @@ def main():
     print("=" * 80)
     print("INSPECTION FINISHED")
     print("=" * 80)
+
+    validate(df)
 
 
 if __name__ == "__main__":

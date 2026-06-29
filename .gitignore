@@ -44,3 +44,6 @@ Thumbs.db
 # Pipeline state (not data)
 data/checkpoints/
 data/logs/
+
+# Build artifact (regenerable from data/raw via build_ml_dataset.py)
+data/processed/

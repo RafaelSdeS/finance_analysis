@@ -24,8 +24,12 @@ Uso:
     python build_ml_dataset.py
 """
 
+import sys
 from pathlib import Path
 import pandas as pd
+
+# cagr_handler.py lives in src/ — make it importable when run from project root
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cagr_handler import fill_cagr_columns
 
 
@@ -33,10 +37,12 @@ from cagr_handler import fill_cagr_columns
 # PATHS
 # =============================================================================
 
-PRICES_DIR = Path("../data/raw/prices")
-FUNDAMENTALS_DIR = Path("../data/raw/fundamentals")
-COMPANY_INFO_PATH = Path("../data/raw/company_info/company_info.parquet")
-OUTPUT_PATH = Path("../data/processed/ml_dataset.parquet")
+ROOT = Path(__file__).resolve().parents[2]
+PRICES_DIR = ROOT / "data/raw/prices"
+FUNDAMENTALS_DIR = ROOT / "data/raw/fundamentals"
+COMPANY_INFO_PATH = ROOT / "data/raw/company_info/company_info.parquet"
+MACRO_DIR = ROOT / "data/raw/macro"
+OUTPUT_PATH = ROOT / "data/processed/ml_dataset.parquet"
 
 # Columns the fundamentals API doesn't actually populate
 FUNDAMENTALS_NULL_COLS = [
@@ -140,7 +146,7 @@ def fill_missing_cagr(fundamentals):
         revenue_before = ticker_df["cagr_revenue_5y"].isna().sum() if "cagr_revenue_5y" in ticker_df.columns else 0
         
         # Fill CAGR
-        #ticker_df = fill_cagr_columns(ticker_df)
+        ticker_df = fill_cagr_columns(ticker_df)
         
         # Track coverage after
         earnings_after = ticker_df["cagr_earnings_5y_final"].isna().sum()
@@ -252,6 +258,35 @@ def merge_company_info(df, company_info):
 
 
 # =============================================================================
+# ADD MACRO SERIES (SELIC, CDI, IPCA)
+# =============================================================================
+
+def merge_macro(dataset):
+
+    print()
+    print("=" * 80)
+    print("ADDING MACRO SERIES")
+    print("=" * 80)
+
+    # Macro is ticker-independent: one value per calendar date applies to all
+    # tickers, so no `by=` and no per-ticker loop. Rename each macro date key
+    # to avoid colliding with the fundamentals `reference_date` already present.
+    for name in ("selic", "cdi", "ipca"):
+        print(f"Merging {name}")
+        m = pd.read_parquet(MACRO_DIR / f"{name}.parquet")[["reference_date", name]]
+        m = m.rename(columns={"reference_date": f"{name}_date"}).sort_values(f"{name}_date")
+        dataset = pd.merge_asof(
+            dataset.sort_values("trade_date"),
+            m,
+            left_on="trade_date",
+            right_on=f"{name}_date",
+            direction="backward",   # latest macro value <= trade_date (no lookahead)
+        ).drop(columns=f"{name}_date")
+
+    return dataset.sort_values(["ticker", "trade_date"]).reset_index(drop=True)
+
+
+# =============================================================================
 # CLEAN DATA
 # =============================================================================
 
@@ -286,6 +321,7 @@ def main():
 
     dataset = merge_prices_and_fundamentals(prices, fundamentals)
     dataset = merge_company_info(dataset, company_info)
+    dataset = merge_macro(dataset)
     dataset = clean_dataset(dataset)
 
     print()
