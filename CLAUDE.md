@@ -8,7 +8,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Goal:** Collect daily stock prices and quarterly company fundamentals, then build a machine-learning dataset ready for model training. See `specification.txt` for system design and RL objective.
 
-**Pipeline:** Three stages—data collection, processing, dataset build—each manual (no orchestration). All scripts run from project root.
+**Pipeline:** Structured three-stage approach:
+1. **Stage 1 (Data Collection):** Staged prototype→validation→full-scale pipeline with checkpointing, logging, validation
+2. **Stage 2 (Dataset Build):** Merge raw data into ML-ready parquets
+3. **Stage 3 (Model):** RL agent training (future)
+
+All scripts run from project root.
 
 ## Setup
 
@@ -20,17 +25,32 @@ pip install -r requirements.txt
 
 ### Stage 1: Collect Raw Data
 
-**Macro data** (SELIC, CDI, IPCA from BCB SGS API — no key needed):
+**Prerequisites:**
 ```bash
-python "src/1. collect_raw_data/bolsai_raw_data_collector.py" --start 1990-01-01 --end 2026-01-01
+# Set up environment (one-time)
+pip install -r requirements.txt
+# Copy .env.example to .env and add your BolsAI API key
+cp .env.example .env
+# Edit .env and add: BOLSAI_API_KEY=sk_...
 ```
-Saves to `data/raw/macro/{selic,cdi,ipca}.parquet`.
 
-**Company fundamentals and prices** (from BolsAI API — requires `--api-key`):
+**Prototype stage** (3–10 representative tickers, validates data quality):
 ```bash
-python "src/1. collect_raw_data/fetch_company_info.py" --api-key YOUR_API_KEY
+python src/data_collection/pipeline.py --mode prototype
 ```
-Looks for tickers in `data/raw/prices/`, fetches metadata, saves to `data/raw/company_info/company_info.parquet`.
+Collects: BCB macro (SELIC, CDI, IPCA), BolsAI prices + fundamentals + company info for PETR4, VALE3, WEGE3, ...
+
+**Validation stage** (after prototype):
+```bash
+python tests/raw_data/validate_vs_yfinance.py
+```
+Cross-checks prototype data against yfinance; pass/fail determines full-scale readiness.
+
+**Full-scale stage** (after validation passes):
+```bash
+python src/data_collection/pipeline.py --mode full_scale
+```
+Collects same data for all ~500+ Bovespa tickers. Can resume mid-run from checkpoints.
 
 ### Stage 2: Build ML Dataset
 
@@ -103,27 +123,58 @@ Line 143 in `build_ml_dataset.py` has the call commented out:
 This means the dataset will be missing `cagr_earnings_5y_final` and `cagr_revenue_5y_final` columns at runtime. Uncomment when CAGR backfilling is needed.
 
 ### BolsAI API Key Handling
-- No `.env` or `.env.example`
-- API key passed as `--api-key` CLI arg only
-- Required for `fetch_company_info.py` and API validator tests
+- Stored in `.env` (copied from `.env.example`)
+- `.env` is gitignored (never commit your key)
+- Pipeline loads automatically: `from dotenv import load_dotenv`
+- Required for `src/data_collection/pipeline.py` and API validator tests
 
-### Script Names vs. Behavior
-`src/1. collect_raw_data/bolsai_raw_data_collector.py` fetches **macro data** (SELIC/CDI/IPCA), not equity prices. The name is misleading; see docstring for clarification.
+### Data Collection Pipeline Structure
+- **Old code** (`src/1. collect_raw_data/`) is deprecated; use new `src/data_collection/pipeline.py`
+- **Staged approach:** Prototype with 3–10 tickers first, validate against yfinance, unlock full-scale
+- **Checkpointing:** Pipeline resumes from `data/checkpoints/` on interrupt (idempotent)
+- **Logging:** All collector activity goes to `data/logs/collection-YYYYMMDD-HHMMSS.log`
 
 ### Relative Paths
-All scripts use relative paths (e.g., `../data/raw/prices`). Run all commands from project root, not from script directories.
+New pipeline uses absolute paths via `Path(__file__).resolve().parents[N]`. Run all commands from project root.
 
 ## Data on Disk
 
-Currently tracked in git (not in `.gitignore`):
-- Three tickers: PETR4, VALE3, WEGE3
-- Data location: `data/raw/prices/`, `data/raw/fundamentals/`, `data/raw/macro/`
-- Processed dataset: `data/processed/` (created on first `build_ml_dataset.py` run)
+**Raw data** (tracked in git):
+- Three prototype tickers: PETR4, VALE3, WEGE3
+- Location: `data/raw/prices/`, `data/raw/fundamentals/`, `data/raw/macro/`, `data/raw/company_info/`
+- Status: prices current (2026-06-02), fundamentals stale (2026-03-31), macro current (2026-06-02)
+
+**Pipeline state** (NOT tracked in git):
+- Checkpoints: `data/checkpoints/prototype/` and `data/checkpoints/full_scale/` (resume state per collector)
+- Logs: `data/logs/collection-*.log` (timestamped collection runs)
+
+**Processed dataset** (created on first `build_ml_dataset.py` run):
+- Location: `data/processed/ml_dataset.parquet`
+- One row per ticker + date (daily prices merged with quarterly fundamentals)
 
 ## Technology Stack
 
 - **Python:** 3.10+ (uses `list[str]`, `dict | None` syntax)
 - **Data:** pandas, numpy, pyarrow (parquet)
-- **APIs:** `python-bcb` (BCB SGS wrapper), BolsAI REST (direct `httpx`), `yfinance` (viz only)
-- **Viz:** Plotly
-- **No test framework:** tests are standalone `python script.py` invocations
+- **APIs:** BolsAI REST (direct `httpx`), BCB SGS (direct requests), `yfinance` (validation only)
+- **Config:** `python-dotenv` (load `.env` for API keys)
+- **Logging:** Python built-in `logging` module (file + console)
+- **Viz:** Plotly (existing `financial_view.py`)
+- **No test framework:** tests are standalone `python script.py` invocations (no pytest)
+
+## Data Collection Modules (Stage 1)
+
+New modular pipeline in `src/data_collection/`:
+
+| Module | Purpose |
+|--------|---------|
+| `config.py` | Shared config (tickers, API keys, paths, retry limits) |
+| `core/client.py` | HTTP wrapper (retries, backoff, logging) |
+| `core/checkpoint.py` | Resume state tracking (JSON per collector) |
+| `core/validator.py` | Data quality checks (schemas, ranges, continuity) |
+| `collectors/base.py` | Abstract `BaseCollector` interface |
+| `collectors/bcb_macro.py` | SELIC, CDI, IPCA from BCB SGS |
+| `collectors/bolsai_prices.py` | Daily prices from BolsAI |
+| `collectors/bolsai_fundamentals.py` | Quarterly fundamentals from BolsAI |
+| `collectors/bolsai_company_info.py` | Company metadata from BolsAI |
+| `pipeline.py` | Orchestration (stages, error handling, checkpointing) |

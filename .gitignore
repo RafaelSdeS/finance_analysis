@@ -36,3 +36,7 @@ Thumbs.db
 # Python-Build artifacts
 *.egg
 *.whl
+
+# Environment variables
+.env
+.env.local
