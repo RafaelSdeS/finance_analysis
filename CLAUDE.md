@@ -100,6 +100,14 @@ python tests/raw_data/test_cagr_calculation.py
 - **main:** Base branch, stable. Stages 1–2 merged here once validated.
 - **build_dataset:** Stage 2 (dataset building). Focus on merging raw data → ml_dataset.parquet. See `BUILD_DATASET_ROADMAP.md`.
 - **ml_agent:** Stage 3 (RL agent). Separate effort after Stage 2 complete. See `ML_AGENT_ROADMAP.md` (if exists on that branch).
+**Generic API Endpoint Tester** (explore BolsAI endpoints without writing code):
+```bash
+# Test specific endpoint + params
+python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY --path /dividends/PETR4 --param years=5
+
+# Run full validation suite (9 checks)
+python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY
+```
 
 ## Architecture
 
@@ -108,12 +116,14 @@ python tests/raw_data/test_cagr_calculation.py
 ```
 External APIs
 ├─ BCB SGS (macro: SELIC, CDI, IPCA)
-└─ BolsAI (prices OHLCV + fundamentals quarterly)
+└─ BolsAI (prices OHLCV + fundamentals quarterly + dividends)
         ↓
 data/raw/
   ├─ prices/{TICKER}.parquet           (daily)
   ├─ fundamentals/{TICKER}.parquet     (quarterly)
-  └─ macro/{selic,cdi,ipca}.parquet
+  ├─ dividends/{TICKER}.parquet        (historical, ~20 years)
+  ├─ macro/{selic,cdi,ipca}.parquet
+  └─ company_info/company_info.parquet
         ↓
 build_ml_dataset.py
   → merge_asof(prices, fundamentals)   [no lookahead]
@@ -124,7 +134,7 @@ build_ml_dataset.py
   → fill_cagr_columns()                [backfill from earnings/revenue where API null]
   → clean (drop dupes, NaNs, outliers, sort)
         ↓
-data/processed/ml_dataset.parquet      (one row per ticker+date)
+data/processed/ml_dataset.parquet      (one row per ticker+date, includes dividend data)
 ```
 
 ### Key Modules
@@ -165,6 +175,9 @@ All feature engineering happens in Stage 2, not deferred to Stage 3 (RL Agent). 
 - **CAGR backfill:** `fill_cagr_columns()` (currently commented out at line 143 in `build_ml_dataset.py`)
 
 Uncomment line 143 to enable CAGR backfilling. See `BUILD_DATASET_ROADMAP.md` Phase 3 for full feature list and Phase 4a for NaN handling strategy.
+
+### FIIs Are Deferred
+Pipeline collects **stocks only** (prices, fundamentals, dividends). Real Estate Investment Trusts (FIIs) are a separate asset class with different fundamentals (NAV/P-VP vs earnings/revenue) and distributions (monthly vs irregular). Will add if Phase 3 RL agent scope expands to mixed-asset allocation.
 
 ### BolsAI API Key Handling
 - Stored in `.env` (copied from `.env.example`)
@@ -210,17 +223,15 @@ New pipeline uses absolute paths via `Path(__file__).resolve().parents[N]`. Run 
 
 ## Data Collection Modules (Stage 1)
 
-New modular pipeline in `src/data_collection/`:
+Pipeline in `src/data_collection/` with flat-function architecture:
 
 | Module | Purpose |
 |--------|---------|
 | `config.py` | Shared config (tickers, API keys, paths, retry limits) |
-| `core/client.py` | HTTP wrapper (retries, backoff, logging) |
-| `core/checkpoint.py` | Resume state tracking (JSON per collector) |
-| `core/validator.py` | Data quality checks (schemas, ranges, continuity) |
-| `collectors/base.py` | Abstract `BaseCollector` interface |
-| `collectors/bcb_macro.py` | SELIC, CDI, IPCA from BCB SGS |
-| `collectors/bolsai_prices.py` | Daily prices from BolsAI |
-| `collectors/bolsai_fundamentals.py` | Quarterly fundamentals from BolsAI |
-| `collectors/bolsai_company_info.py` | Company metadata from BolsAI |
-| `pipeline.py` | Orchestration (stages, error handling, checkpointing) |
+| `client.py` | HTTP wrapper (retries, backoff, logging); `make_client()`, `get_json()` |
+| `checkpoint.py` | Resume state tracking (JSON per collector) |
+| `validate.py` | Data quality gates (schemas, ranges, continuity); returns `ValidationResult` |
+| `collectors.py` | All collectors: `collect_macro()`, `collect_prices()`, `collect_fundamentals()`, `collect_company_info()`, `collect_dividends()` |
+| `pipeline.py` | Orchestration (stages in order, error handling, checkpointing) |
+
+**Helper:** `_merge_save()` in collectors.py — idempotent append + dedup + validate + write (shared by all collectors)

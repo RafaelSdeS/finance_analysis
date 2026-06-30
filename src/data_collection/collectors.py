@@ -283,3 +283,27 @@ def collect_company_info(tickers: list[str], mode: str):
         log.info("company_info: %d total companies", len(df_new))
     finally:
         c.close()
+
+
+# ---------------------------------------------------------------------------
+# BolsAI dividends
+# ---------------------------------------------------------------------------
+
+def collect_dividends(tickers: list[str], mode: str):
+    c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
+    try:
+        for ticker in tickers:
+            path = config.DIVIDENDS_DIR / f"{ticker}.parquet"
+            d = client.get_json(c, f"/dividends/{ticker}", {"years": config.DIVIDENDS_YEARS})
+            payments = d.get("payments", [])
+            if not payments:
+                log.warning("dividends %s: no data", ticker)
+                continue
+            df = pd.DataFrame(payments)
+            df["ticker"] = ticker
+            saved = _merge_save(df, path, "ex_date", validate.validate_dividends, f"dividends/{ticker}")
+            if saved is not None:
+                log.info("dividends %s: %d payments", ticker, len(saved))
+            sleep(config.RATE_LIMIT_SLEEP)
+    finally:
+        c.close()

@@ -396,6 +396,32 @@ if __name__ == "__main__":
         help="BolsaAI API key",
     )
 
+    parser.add_argument(
+        "--path",
+        help="single endpoint to test, e.g. /dividends/PETR4",
+    )
+
+    parser.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="query param (repeatable): --param years=5 --param limit=10",
+    )
+
     args = parser.parse_args()
 
-    run(args.api_key)
+    # Generic explorer mode
+    if args.path:
+        client = httpx.Client(
+            timeout=20,
+            headers={"X-API-Key": args.api_key},
+            follow_redirects=True,
+        )
+        params = dict(p.split("=", 1) for p in args.param)
+        data = get(client, args.path, params)
+        show_response(data)
+        client.close()
+    else:
+        # Full validation suite
+        run(args.api_key)

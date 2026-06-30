@@ -17,6 +17,8 @@ PRICE_COLS = ["ticker", "trade_date", "open", "high", "low", "close",
 FUND_COLS = ["ticker", "reference_date", "net_income", "equity", "net_revenue",
              "total_assets", "ebitda", "shares_outstanding", "market_cap"]
 
+DIVIDEND_COLS = ["ticker", "ex_date", "payment_date", "type", "value_per_share", "adjusted"]
+
 
 @dataclass
 class ValidationResult:
@@ -101,4 +103,13 @@ def validate_macro(df: pd.DataFrame, name: str) -> ValidationResult:
         return r
     if df[name].isna().all():
         r.error("all values null")
+    return r
+
+
+def validate_dividends(df: pd.DataFrame) -> ValidationResult:
+    r = _common(df, "ex_date", DIVIDEND_COLS)
+    if not r.passed:
+        return r
+    if (df["value_per_share"] <= 0).any():
+        r.error(f"{(df['value_per_share'] <= 0).sum()} rows with value_per_share <= 0")
     return r
