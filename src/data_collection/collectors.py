@@ -274,6 +274,10 @@ def collect_company_info(tickers: list[str], mode: str):
     cp = checkpoint.load("company_info", mode)
     done = set(cp.get("done", []))
     path = config.COMPANY_DIR / "company_info.parquet"
+    # Also skip tickers already in the parquet file (checkpoint-resilient)
+    if path.exists():
+        existing = set(pd.read_parquet(path)["ticker"].dropna().unique())
+        done.update(existing)
     try:
         rows = []
         for ticker in tickers:

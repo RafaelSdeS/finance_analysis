@@ -85,9 +85,6 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
     stages = [
         ("macro",        lambda: collectors.collect_macro(mode)),
         ("company_info", lambda: collectors.collect_company_info(tickers, mode)),
-        ("prices",       lambda: collectors.collect_prices(all_tickers, mode)),  # all_tickers includes benchmarks
-        ("fundamentals", lambda: collectors.collect_fundamentals(_active_tickers(), mode)),  # only ATIVO; exclude benchmarks
-        ("dividends",    lambda: collectors.collect_dividends(_active_tickers(), mode)),  # only ATIVO; exclude benchmarks
     ]
 
     for name, fn in stages:
@@ -95,7 +92,31 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
         try:
             fn()
         except Exception as e:
-            # Fail fast for operator visibility; checkpoints let the re-run resume.
+            log.error("stage %s failed: %s", name, e, exc_info=True)
+            return False
+
+    # After company_info, filter to only ATIVO tickers from the requested list.
+    # Benchmarks (ETFs) bypass company_info requirement and are always collected for prices.
+    active_all = _active_tickers()
+    active = [t for t in tickers if t in set(active_all)]
+    # Always include requested benchmarks; also include non-requested benchmarks
+    requested_benchmarks = [b for b in config.BENCHMARK_TICKERS if b in tickers]
+    other_benchmarks = [b for b in config.BENCHMARK_TICKERS if b not in tickers]
+    prices_tickers = sorted(set(active) | set(requested_benchmarks) | set(other_benchmarks))
+    log.info("filtered to %d/%d requested tickers (ATIVO) + %d benchmarks for prices",
+             len(active), len(tickers), len(requested_benchmarks) + len(other_benchmarks))
+
+    data_stages = [
+        ("prices",       lambda: collectors.collect_prices(prices_tickers, mode)),
+        ("fundamentals", lambda: collectors.collect_fundamentals(active, mode)),
+        ("dividends",    lambda: collectors.collect_dividends(active, mode)),
+    ]
+
+    for name, fn in data_stages:
+        log.info("--- stage: %s ---", name)
+        try:
+            fn()
+        except Exception as e:
             log.error("stage %s failed: %s", name, e, exc_info=True)
             return False
 
