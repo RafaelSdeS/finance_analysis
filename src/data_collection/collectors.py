@@ -233,7 +233,15 @@ COMPANY_FIELDS = ["ticker", "ticker_primary", "corporate_name", "trade_name",
 
 
 def _find_company(c, ticker):
-    """Try search terms of decreasing specificity until an exact ticker match."""
+    """Fetch company info directly from /companies/{ticker} endpoint."""
+    try:
+        co = client.get_json(c, f"/companies/{ticker}", {})
+        if co and co.get("ticker_primary"):
+            return {**{f: co.get(f) for f in COMPANY_FIELDS}, "ticker": ticker}
+    except Exception as e:
+        log.debug("company %s: direct lookup failed, trying search as fallback", ticker, exc_info=True)
+
+    # Fallback: fuzzy search if direct lookup fails
     base = ticker.rstrip("0123456789")
     for term in dict.fromkeys([base.lower(), base[:3].lower(), base[:2].lower()]):
         if not term:

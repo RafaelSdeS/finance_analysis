@@ -43,6 +43,7 @@ PRICES_DIR = ROOT / "data/raw/prices"
 FUNDAMENTALS_DIR = ROOT / "data/raw/fundamentals"
 COMPANY_INFO_PATH = ROOT / "data/raw/company_info/company_info.parquet"
 MACRO_DIR = ROOT / "data/raw/macro"
+DIVIDENDS_DIR = ROOT / "data/raw/dividends"
 OUTPUT_PATH = ROOT / "data/processed/ml_dataset.parquet"
 
 # Columns the fundamentals API doesn't actually populate
@@ -185,6 +186,34 @@ def load_company_info():
 
 
 # =============================================================================
+# LOAD DIVIDENDS
+# =============================================================================
+
+def load_dividends():
+
+    dfs = []
+    files = sorted(DIVIDENDS_DIR.glob("*.parquet"))
+
+    print()
+    print("=" * 80)
+    print("LOADING DIVIDENDS")
+    print("=" * 80)
+
+    for file in files:
+        print(f"Loading: {file.name}")
+        df = pd.read_parquet(file)
+        df["ex_date"] = pd.to_datetime(df["ex_date"])
+        dfs.append(df)
+
+    dividends = pd.concat(dfs, ignore_index=True)
+    dividends = dividends.sort_values(["ticker", "ex_date"])
+
+    print(f"Total dividend rows: {len(dividends)}")
+
+    return dividends
+
+
+# =============================================================================
 # MERGE DAILY PRICES + QUARTERLY FUNDAMENTALS
 # =============================================================================
 
@@ -285,6 +314,105 @@ def merge_macro(dataset):
         ).drop(columns=f"{name}_date")
 
     return dataset.sort_values(["ticker", "trade_date"]).reset_index(drop=True)
+
+
+# =============================================================================
+# MERGE DIVIDENDS AND COMPUTE DIVIDEND FEATURES
+# =============================================================================
+
+def merge_dividends(dataset, dividends):
+
+    print()
+    print("=" * 80)
+    print("MERGING DIVIDENDS")
+    print("=" * 80)
+
+    merged_dfs = []
+
+    for ticker in sorted(dataset["ticker"].unique()):
+
+        print(f"Processing dividends for {ticker}")
+
+        d = (
+            dataset[dataset["ticker"] == ticker]
+            .copy()
+            .sort_values("trade_date")
+        )
+
+        div = (
+            dividends[dividends["ticker"] == ticker]
+            .copy()
+            .sort_values("ex_date")
+        )
+
+        if len(div) == 0:
+            # No dividends for this ticker — add zero-value features
+            d["div_value_recent"] = 0.0
+            d["div_yield_12m"] = 0.0
+            d["div_count_12m"] = 0
+            merged_dfs.append(d)
+            continue
+
+        # Merge most recent dividend (ex_date <= trade_date) for each price row
+        merged = pd.merge_asof(
+            d,
+            div[["ex_date", "value_per_share"]].rename(
+                columns={"ex_date": "div_ex_date", "value_per_share": "div_value_recent"}
+            ),
+            left_on="trade_date",
+            right_on="div_ex_date",
+            direction="backward",
+        ).drop(columns="div_ex_date")
+
+        merged_dfs.append(merged)
+
+    result = pd.concat(merged_dfs, ignore_index=True)
+    print(f"Merged {len(dividends)} dividends into {len(result)} rows")
+
+    return result
+
+
+def compute_dividend_features(dataset, dividends):
+    """Compute rolling dividend yield and frequency after dividends are loaded."""
+
+    print()
+    print("=" * 80)
+    print("COMPUTING DIVIDEND FEATURES")
+    print("=" * 80)
+
+    result = []
+    for ticker, g in dataset.groupby("ticker", sort=False):
+        g = g.sort_values("trade_date")
+
+        div = dividends[dividends["ticker"] == ticker].copy()
+
+        if len(div) == 0:
+            g["div_yield_12m"] = 0.0
+            g["div_count_12m"] = 0
+            result.append(g)
+            continue
+
+        # For each trade_date, find all dividends within last 252 days (1 year)
+        for idx in g.index:
+            trade_date = g.loc[idx, "trade_date"]
+            price = g.loc[idx, "adj_close"]
+
+            # Dividends with ex_date in (trade_date - 252, trade_date]
+            div_in_period = div[
+                (div["ex_date"] > trade_date - pd.Timedelta(days=252)) &
+                (div["ex_date"] <= trade_date)
+            ]
+
+            div_yield_12m = div_in_period["value_per_share"].sum() / price if price > 0 else 0
+            div_count_12m = len(div_in_period)
+
+            g.loc[idx, "div_yield_12m"] = div_yield_12m
+            g.loc[idx, "div_count_12m"] = div_count_12m
+
+        result.append(g)
+
+    print(f"Dividend features added for {len(result)} tickers")
+    return pd.concat(result, ignore_index=True)
 
 
 # =============================================================================
@@ -392,6 +520,204 @@ def compute_macro_features(df):
 
 
 # =============================================================================
+# ADVANCED CONTEXTUAL FEATURES (for conservative long-term allocation)
+# =============================================================================
+
+def compute_advanced_features(df):
+    """
+    Add context-aware, raw metrics (no thresholds or hardcoded rules).
+    Model learns relationships from data, not from pre-baked heuristics.
+    """
+
+    print()
+    print("=" * 80)
+    print("COMPUTING ADVANCED CONTEXTUAL FEATURES")
+    print("=" * 80)
+
+    # --- DIVIDEND & PAYOUT ANALYSIS (raw, no thresholds) ---
+
+    # Use LPA (lucro per ação = EPS) directly from API
+    df["payout_ratio"] = df["div_value_recent"] / (df["lpa"] + 1e-8)
+
+    # Dividend coverage: can EBITDA support annual dividend?
+    # annual_dividend = div_value_recent * shares_outstanding
+    df["dividend_coverage_ratio"] = (
+        df["ebitda"] /
+        (df["div_value_recent"] * df["shares_outstanding"] + 1e-8)
+    )
+
+    # --- EARNINGS QUALITY (raw signals, no classification) ---
+
+    # Revenue-to-earnings trend: stable ratio suggests quality
+    df["revenue_per_earning"] = df["net_revenue"] / (df["net_income"] + 1e-8)
+
+    # YoY comparison: revenue growth aligned with earnings growth?
+    df["revenue_vs_earnings_growth_delta"] = (
+        df["revenue_growth_yoy"] - df["earnings_growth_yoy"]
+    )
+
+    # EBITDA margin as quality proxy (higher = better operational efficiency, but let model learn)
+    df["ebitda_margin"] = df["ebitda"] / (df["net_revenue"] + 1e-8)
+
+    # --- FUNDAMENTAL FRESHNESS (raw days, model learns staleness impact) ---
+
+    df["days_since_fundamental"] = (df["trade_date"] - df["reference_date"]).dt.days
+
+    # --- WITHIN-TICKER HISTORICAL PERCENTILES (context for model) ---
+
+    result = []
+    for ticker, g in df.groupby("ticker", sort=False):
+        g = g.sort_values("trade_date").reset_index(drop=True)
+
+        # Volatility percentile: where is current vol vs this stock's history?
+        g["volatility_20d_percentile"] = g["volatility_20d"].rank(pct=True)
+        g["volatility_60d_percentile"] = g["volatility_60d"].rank(pct=True)
+
+        # Price percentile: is price high/low vs own history (last 5 years)?
+        window_252 = 252 * 5  # 5 years
+        g["price_percentile_5y"] = g["adj_close"].rolling(
+            window=window_252, min_periods=1
+        ).apply(lambda x: (x <= x.iloc[-1]).sum() / len(x), raw=False)
+
+        # P/L (P/E) percentile within stock's history
+        g["pl_percentile_5y"] = g["pl"].rolling(
+            window=window_252, min_periods=1
+        ).apply(lambda x: (x <= x.iloc[-1]).sum() / len(x), raw=False)
+
+        # Drawdown percentile: how deep is current drawdown vs historical?
+        g["drawdown_percentile"] = g["drawdown"].rolling(
+            window=252, min_periods=1
+        ).apply(lambda x: (x <= x.iloc[-1]).sum() / len(x), raw=False)
+
+        result.append(g)
+
+    df = pd.concat(result, ignore_index=True).reset_index(drop=True)
+
+    # --- SECTOR-RELATIVE METRICS (Z-scores, percentiles) ---
+
+    # Initialize new columns
+    for col in ["pl", "pvp", "roe", "debt_equity"]:
+        df[f"{col}_zscore_sector"] = np.nan
+
+    df["div_yield_sector_percentile"] = np.nan
+
+    # Compute per date and sector
+    for date in df["trade_date"].unique():
+        date_mask = df["trade_date"] == date
+        date_df = df.loc[date_mask]
+
+        for sector in date_df["sector"].dropna().unique():
+            sector_mask = date_mask & (df["sector"] == sector)
+
+            # Z-score for fundamental metrics
+            for col in ["pl", "pvp", "roe", "debt_equity"]:
+                if col in df.columns:
+                    sector_vals = df.loc[sector_mask, col].dropna()
+                    if len(sector_vals) > 1:
+                        sector_mean = sector_vals.mean()
+                        sector_std = sector_vals.std()
+                        if sector_std > 0:
+                            df.loc[sector_mask, f"{col}_zscore_sector"] = (
+                                (df.loc[sector_mask, col] - sector_mean) / sector_std
+                            )
+
+            # Dividend yield percentile within sector
+            div_yields = df.loc[sector_mask, "div_yield_12m"].dropna()
+            if len(div_yields) > 0:
+                df.loc[sector_mask, "div_yield_sector_percentile"] = (
+                    df.loc[sector_mask, "div_yield_12m"].rank(pct=True)
+                )
+
+    # --- MOMENTUM DECOMPOSITION (stock vs sector vs market) ---
+
+    # Initialize columns
+    df["momentum_vs_sector_1m"] = np.nan
+    df["momentum_vs_sector_3m"] = np.nan
+    df["momentum_vs_sector_12m"] = np.nan
+    df["momentum_vs_market_1m"] = np.nan
+    df["momentum_vs_market_3m"] = np.nan
+    df["momentum_vs_market_12m"] = np.nan
+
+    # Compute per date
+    for date in df["trade_date"].unique():
+        date_mask = df["trade_date"] == date
+        date_df = df.loc[date_mask]
+
+        # Market momentum (mean return across all tickers on this date)
+        market_return_1m = date_df["return_1m"].mean()
+        market_return_3m = date_df["return_3m"].mean()
+        market_return_12m = date_df["return_12m"].mean()
+
+        df.loc[date_mask, "momentum_vs_market_1m"] = (
+            df.loc[date_mask, "return_1m"] - market_return_1m
+        )
+        df.loc[date_mask, "momentum_vs_market_3m"] = (
+            df.loc[date_mask, "return_3m"] - market_return_3m
+        )
+        df.loc[date_mask, "momentum_vs_market_12m"] = (
+            df.loc[date_mask, "return_12m"] - market_return_12m
+        )
+
+        # Sector momentum (mean return within sector on this date)
+        for sector in date_df["sector"].dropna().unique():
+            sector_mask = date_mask & (df["sector"] == sector)
+            sector_returns_1m = df.loc[sector_mask, "return_1m"]
+            sector_returns_3m = df.loc[sector_mask, "return_3m"]
+            sector_returns_12m = df.loc[sector_mask, "return_12m"]
+
+            if len(sector_returns_1m) > 0:
+                sector_avg_1m = sector_returns_1m.mean()
+                df.loc[sector_mask, "momentum_vs_sector_1m"] = (
+                    df.loc[sector_mask, "return_1m"] - sector_avg_1m
+                )
+
+            if len(sector_returns_3m) > 0:
+                sector_avg_3m = sector_returns_3m.mean()
+                df.loc[sector_mask, "momentum_vs_sector_3m"] = (
+                    df.loc[sector_mask, "return_3m"] - sector_avg_3m
+                )
+
+            if len(sector_returns_12m) > 0:
+                sector_avg_12m = sector_returns_12m.mean()
+                df.loc[sector_mask, "momentum_vs_sector_12m"] = (
+                    df.loc[sector_mask, "return_12m"] - sector_avg_12m
+                )
+
+    # --- FUNDAMENTAL TREND SIGNALS (raw, no thresholds) ---
+
+    # Initialize columns
+    df["roe_trend_4q"] = np.nan
+    df["margin_trend_4q"] = np.nan
+    df["debt_trend_4q"] = np.nan
+    df["roa_trend_4q"] = np.nan
+
+    for ticker in df["ticker"].unique():
+        ticker_mask = df["ticker"] == ticker
+        ticker_df = df.loc[ticker_mask].sort_values("reference_date")
+
+        # Fundamental momentum: is key metrics improving or deteriorating?
+        df.loc[ticker_mask, "roe_trend_4q"] = ticker_df["roe"].diff(4).values
+        df.loc[ticker_mask, "margin_trend_4q"] = ticker_df["net_margin"].diff(4).values
+        df.loc[ticker_mask, "debt_trend_4q"] = ticker_df["debt_equity"].diff(4).values
+        df.loc[ticker_mask, "roa_trend_4q"] = ticker_df["roa"].diff(4).values
+
+    # --- VALUATION RELATIVE TO FUNDAMENTALS (raw relationships) ---
+
+    # PEG ratio: P/L (P/E) relative to earnings growth
+    df["peg_ratio"] = df["pl"] / (df["earnings_growth_yoy"] * 100 + 1e-8)
+
+    # P/VP (P/B) relative to ROE (value signal: low P/VP + high ROE = cheap quality)
+    df["pvp_to_roe_ratio"] = df["pvp"] / (df["roe"] + 1e-8)
+
+    # Earnings yield (inverse P/L) vs macro rates
+    df["earnings_yield"] = 1.0 / (df["pl"] + 1e-8)
+    df["earnings_yield_vs_selic"] = df["earnings_yield"] - (df["selic"] / 100)
+
+    print(f"Advanced features computed for {len(df)} rows")
+    return df
+
+
+# =============================================================================
 # CLEAN DATA
 # =============================================================================
 
@@ -424,12 +750,16 @@ def main():
     fundamentals = compute_fundamental_features(fundamentals)
     fundamentals = fill_missing_cagr(fundamentals)
     company_info = load_company_info()
+    dividends    = load_dividends()
 
     dataset = merge_prices_and_fundamentals(prices, fundamentals)
     dataset = merge_company_info(dataset, company_info)
     dataset = merge_macro(dataset)
+    dataset = merge_dividends(dataset, dividends)
     dataset = compute_price_features(dataset)
+    dataset = compute_dividend_features(dataset, dividends)
     dataset = compute_macro_features(dataset)
+    dataset = compute_advanced_features(dataset)
     dataset = clean_dataset(dataset)
 
     print()
