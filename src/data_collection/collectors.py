@@ -75,19 +75,22 @@ def _merge_save(df_new, path, date_col, validator, ticker_label=""):
 # ---------------------------------------------------------------------------
 
 def get_all_tickers() -> list[str]:
+    import re
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
+    _standard = re.compile(r"^[A-Z0-9]{4}[3-8]$")
     try:
         tickers, offset = [], 0
         while True:
             d = client.get_json(c, "/stocks/", {"limit": 500, "offset": offset})
-            batch = d.get("data", [])
+            batch = d.get("tickers", [])
             if not batch:
                 break
-            tickers += [s.get("ticker") or s.get("ticker_primary") for s in batch]
+            tickers += batch
             offset += len(batch)
             if len(batch) < 500:
                 break
-        return sorted(t for t in tickers if t)
+        # exclude BDRs (34/35), FIIs/ETFs (11), and non-standard suffixes
+        return sorted(t for t in tickers if _standard.match(t))
     finally:
         c.close()
 
