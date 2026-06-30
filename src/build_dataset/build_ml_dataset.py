@@ -27,6 +27,7 @@ Uso:
 import sys
 from pathlib import Path
 import pandas as pd
+import numpy as np
 
 # cagr_handler.py lives in src/ — make it importable when run from project root
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -287,6 +288,110 @@ def merge_macro(dataset):
 
 
 # =============================================================================
+# FEATURE ENGINEERING
+# =============================================================================
+
+def _rsi(series, n=14):
+    delta = series.diff()
+    gain  = delta.clip(lower=0).rolling(n).mean()
+    loss  = (-delta.clip(upper=0)).rolling(n).mean()
+    return 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+
+
+def compute_price_features(df):
+
+    print()
+    print("=" * 80)
+    print("COMPUTING PRICE FEATURES")
+    print("=" * 80)
+
+    result = []
+    for ticker, g in df.groupby("ticker", sort=False):
+        g = g.sort_values("trade_date")
+        g["log_return"]     = np.log(g["adj_close"] / g["adj_close"].shift(1))
+        g["volatility_20d"] = g["log_return"].rolling(20).std()
+        g["volatility_60d"] = g["log_return"].rolling(60).std()
+        g["ma_20"]          = g["adj_close"].rolling(20).mean()
+        g["ma_60"]          = g["adj_close"].rolling(60).mean()
+        g["hl_ratio"]       = (g["high"] - g["low"]) / g["adj_close"]
+        g["drawdown"]       = (g["adj_close"] - g["adj_close"].cummax()) / g["adj_close"].cummax()
+        g["rsi_14"]         = _rsi(g["adj_close"], 14)
+        g["return_1m"]      = g["log_return"].rolling(21).sum()
+        g["return_3m"]      = g["log_return"].rolling(63).sum()
+        g["return_6m"]      = g["log_return"].rolling(126).sum()
+        g["return_12m"]     = g["log_return"].rolling(252).sum()
+        result.append(g)
+
+    print(f"Price features added for {len(result)} tickers")
+    return pd.concat(result, ignore_index=True)
+
+
+def compute_fundamental_features(df):
+    """Called on the fundamentals DataFrame BEFORE the asof merge."""
+
+    print()
+    print("=" * 80)
+    print("COMPUTING FUNDAMENTAL FEATURES")
+    print("=" * 80)
+
+    result = []
+    for ticker, g in df.groupby("ticker", sort=False):
+        g = g.sort_values("reference_date")
+
+        # Value signals (inverse/normalized forms not pre-computed by API)
+        g["book_to_market"]        = g["equity"] / g["market_cap"]
+        g["earnings_yield"]        = g["net_income"] / g["market_cap"]
+        g["cash_ratio"]            = g["cash"] / g["current_liabilities"]
+        g["net_debt_to_assets"]    = g["net_debt"] / g["total_assets"]
+        g["working_capital_ratio"] = (g["current_assets"] - g["current_liabilities"]) / g["total_assets"]
+
+        # YoY growth (4 quarters back)
+        g["revenue_growth_yoy"]       = g["net_revenue"].pct_change(4)
+        g["earnings_growth_yoy"]      = g["net_income"].pct_change(4)
+        g["ebitda_growth_yoy"]        = g["ebitda"].pct_change(4)
+        g["total_assets_growth_yoy"]  = g["total_assets"].pct_change(4)
+        g["total_debt_growth_yoy"]    = g["total_debt"].pct_change(4)
+
+        # QoQ trend (sequential quarter diff)
+        g["gross_margin_qoq"]  = g["gross_margin"].diff(1)
+        g["net_margin_qoq"]    = g["net_margin"].diff(1)
+        g["roe_qoq"]           = g["roe"].diff(1)
+        g["debt_equity_qoq"]   = g["debt_equity"].diff(1)
+        g["current_ratio_qoq"] = g["current_ratio"].diff(1)
+
+        # Partial Piotroski F-Score (5-point; omits cash-flow components we lack)
+        g["f_roa_positive"]        = (g["roa"] > 0).astype(int)
+        g["f_roa_improving"]       = (g["roa"] > g["roa"].shift(4)).astype(int)
+        g["f_margin_improving"]    = (g["gross_margin"] > g["gross_margin"].shift(4)).astype(int)
+        g["f_leverage_decreasing"] = (g["debt_equity"] < g["debt_equity"].shift(4)).astype(int)
+        g["f_liquidity_improving"] = (g["current_ratio"] > g["current_ratio"].shift(4)).astype(int)
+        f_cols = ["f_roa_positive", "f_roa_improving", "f_margin_improving",
+                  "f_leverage_decreasing", "f_liquidity_improving"]
+        g["f_score"] = g[f_cols].sum(axis=1)
+
+        result.append(g)
+
+    print(f"Fundamental features added for {len(result)} tickers")
+    return pd.concat(result, ignore_index=True)
+
+
+def compute_macro_features(df):
+    """Requires log_return (from compute_price_features) and selic/ipca already merged."""
+
+    print()
+    print("=" * 80)
+    print("COMPUTING MACRO FEATURES")
+    print("=" * 80)
+
+    # ponytail: selic/ipca are annual %; divide by 252 trading days for daily equivalent
+    df["excess_return"]    = df["log_return"] - df["selic"] / 252
+    df["real_return"]      = df["log_return"] - df["ipca"] / 252
+    df["selic_trend_20d"]  = df["selic"] - df["selic"].shift(20)
+
+    return df
+
+
+# =============================================================================
 # CLEAN DATA
 # =============================================================================
 
@@ -316,12 +421,15 @@ def main():
 
     prices       = load_prices()
     fundamentals = load_fundamentals()
+    fundamentals = compute_fundamental_features(fundamentals)
     fundamentals = fill_missing_cagr(fundamentals)
     company_info = load_company_info()
 
     dataset = merge_prices_and_fundamentals(prices, fundamentals)
     dataset = merge_company_info(dataset, company_info)
     dataset = merge_macro(dataset)
+    dataset = compute_price_features(dataset)
+    dataset = compute_macro_features(dataset)
     dataset = clean_dataset(dataset)
 
     print()
