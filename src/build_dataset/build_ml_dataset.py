@@ -84,6 +84,37 @@ def load_prices():
     return prices
 
 
+def filter_tickers_with_no_fundamentals(prices, fundamentals):
+    """Drop any ticker from prices that has zero fundamental rows.
+
+    Sparse fundamentals (e.g. PETR4 only goes back to 2010) are fine —
+    the model handles NaNs in early rows. Zero fundamentals means we have
+    no quality signal at all, which is not acceptable for this agent.
+    """
+
+    print()
+    print("=" * 80)
+    print("FUNDAMENTAL COVERAGE CHECK")
+    print("=" * 80)
+
+    tickers_with_prices = set(prices["ticker"].unique())
+    tickers_with_fundamentals = set(fundamentals["ticker"].unique())
+
+    missing = tickers_with_prices - tickers_with_fundamentals
+    covered = tickers_with_prices & tickers_with_fundamentals
+
+    if missing:
+        print(f"EXCLUDED (no fundamentals): {sorted(missing)}")
+        print("  These tickers have price data but zero fundamental coverage.")
+        print("  A conservative long-term agent requires fundamental quality signals.")
+        prices = prices[prices["ticker"].isin(covered)]
+
+    print(f"Tickers retained: {sorted(covered)}")
+    print(f"Price rows after filter: {len(prices)}")
+
+    return prices
+
+
 # =============================================================================
 # LOAD ALL FUNDAMENTALS
 # =============================================================================
@@ -747,6 +778,7 @@ def main():
 
     prices       = load_prices()
     fundamentals = load_fundamentals()
+    prices       = filter_tickers_with_no_fundamentals(prices, fundamentals)
     fundamentals = compute_fundamental_features(fundamentals)
     fundamentals = fill_missing_cagr(fundamentals)
     company_info = load_company_info()
