@@ -77,14 +77,17 @@ def merge_ticker_asof(ticker_prices, ticker_fundamentals, macro_series, company_
 
 ## Phase 3: Feature Engineering
 
-### 3a. Price-Derived Features
+### 3a. Price-Derived Features (Technical Indicators)
 For each ticker, compute from OHLCV:
 - **Returns:** daily log return = `log(close_t / close_{t-1})`
 - **Volatility (rolling 20d):** `std(returns_20d)`
 - **Volatility (rolling 60d):** `std(returns_60d)`
-- **RSI (14-period):** relative strength index
-- **Moving averages:** MA20, MA60 (optional, for trend)
-- **High-Low ratio:** `(high - low) / close` (volatility proxy)
+- **Momentum indicators:**
+  - RSI (14-period): relative strength index
+  - Moving averages: MA20, MA60 (for trend identification)
+  - MACD (optional): momentum divergence
+- **Drawdown:** running maximum drawdown (from peak)
+- **High-Low ratio:** `(high - low) / close` (intraday volatility proxy)
 
 ```python
 def compute_price_features(ticker_df):

@@ -35,10 +35,10 @@ Once Phase 1 validation passes:
 
 ## Phase 3: RL Agent
 
-### Feature Engineering
-
-- [ ] Technical indicators: momentum, moving averages, volatility, drawdowns
-- [ ] Macro context features: interest rate regime, market regime (bull/bear), VIX-like volatility proxy
+**Prerequisite:** Stage 2 (build_dataset branch) must be complete, including:
+- All 5 phases of dataset building (load, merge, **feature engineering**, clean, validate)
+- Feature engineering includes technical indicators (RSI, MA20/60, volatility), fundamental ratios (P/E, P/B, ROE), and macro-adjusted features (real return, excess return)
+- Output: `data/processed/ml_dataset.parquet` (feature-complete, ready for agent)
 
 ### Environment & Simulation
 

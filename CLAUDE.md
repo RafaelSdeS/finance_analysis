@@ -10,8 +10,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Pipeline:** Structured three-stage approach:
 1. **Stage 1 (Data Collection):** Staged prototype→validation→full-scale pipeline with checkpointing, logging, validation
-2. **Stage 2 (Dataset Build):** Merge raw data into ML-ready parquets (no lookahead bias, temporal alignment)
-3. **Stage 3 (Model):** RL agent training (future, separate branch)
+2. **Stage 2 (Dataset Build):** Merge raw data → add derived features (technical indicators, fundamentals, macro-adjusted) → clean → output ML-ready parquets (no lookahead bias)
+3. **Stage 3 (Model):** RL agent training (future, separate branch; consumes feature-complete dataset from Stage 2)
 
 All scripts run from project root.
 
@@ -118,8 +118,11 @@ data/raw/
 build_ml_dataset.py
   → merge_asof(prices, fundamentals)   [no lookahead]
   → left join company_info
-  → fill_cagr_columns()                [calculate from fundamentals where API null]
-  → clean (drop dupes, sort)
+  → compute_price_features()           [RSI, MA20/60, volatility, returns, drawdown]
+  → compute_fundamental_features()     [P/E, P/B, ROE, debt/equity, growth CAGR]
+  → compute_macro_features()           [real return, excess return, rate environment]
+  → fill_cagr_columns()                [backfill from earnings/revenue where API null]
+  → clean (drop dupes, NaNs, outliers, sort)
         ↓
 data/processed/ml_dataset.parquet      (one row per ticker+date)
 ```
@@ -154,14 +157,14 @@ The merge of prices + fundamentals uses `pd.merge_asof(..., direction='backward'
 
 **Check:** After merge, verify `fundamental_date <= price_date` for all rows.
 
-### `fill_cagr_columns()` is Commented Out
-Line 143 in `build_ml_dataset.py` has the call commented out:
-```python
-#ticker_df = fill_cagr_columns(ticker_df)
-```
-Uncomment to add `cagr_earnings_5y_final` and `cagr_revenue_5y_final` columns (currently missing).
+### Stage 2 Feature Engineering (Phase 3)
+All feature engineering happens in Stage 2, not deferred to Stage 3 (RL Agent). This includes:
+- **Technical indicators:** RSI, moving averages, volatility, momentum, drawdown
+- **Fundamental ratios:** P/E, P/B, ROE, leverage, growth CAGR
+- **Macro-adjusted:** real return, excess return, rate environment
+- **CAGR backfill:** `fill_cagr_columns()` (currently commented out at line 143 in `build_ml_dataset.py`)
 
-**Note:** `BUILD_DATASET_ROADMAP.md` has Phase 3 (Feature Engineering) and Phase 4a (Missing Data Handling) guidance on when/how to enable CAGR backfilling and handle the resulting NaNs.
+Uncomment line 143 to enable CAGR backfilling. See `BUILD_DATASET_ROADMAP.md` Phase 3 for full feature list and Phase 4a for NaN handling strategy.
 
 ### BolsAI API Key Handling
 - Stored in `.env` (copied from `.env.example`)
