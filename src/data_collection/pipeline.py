@@ -41,7 +41,7 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
     if dry_run:
         log.info("DRY RUN | mode=%s | %d tickers", mode, len(tickers))
         log.info("tickers: %s", tickers[:20] + (["..."] if len(tickers) > 20 else []))
-        log.info("would run: macro, company_info, prices, fundamentals")
+        log.info("would run: macro, company_info, prices, fundamentals, dividends")
         return True
 
     log.info("=" * 60)
@@ -55,6 +55,7 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
         ("company_info", lambda: collectors.collect_company_info(tickers, mode)),
         ("prices",       lambda: collectors.collect_prices(tickers, mode)),
         ("fundamentals", lambda: collectors.collect_fundamentals(tickers, mode)),
+        ("dividends",    lambda: collectors.collect_dividends(tickers, mode)),
     ]
 
     for name, fn in stages:
