@@ -22,10 +22,13 @@ def main():
 
     parser = argparse.ArgumentParser()
 
+    project_root = Path(__file__).resolve().parents[2]
+    default_path = project_root / "data/processed/ml_dataset.parquet"
+
     parser.add_argument(
         "--file",
         type=str,
-        default="../data/processed/ml_dataset.parquet",
+        default=str(default_path),
         help="Path do parquet final"
     )
 

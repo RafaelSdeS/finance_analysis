@@ -26,6 +26,8 @@ Uso:
 
 from pathlib import Path
 import pandas as pd
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
 from cagr_handler import fill_cagr_columns
 
 
@@ -33,10 +35,11 @@ from cagr_handler import fill_cagr_columns
 # PATHS
 # =============================================================================
 
-PRICES_DIR = Path("../data/raw/prices")
-FUNDAMENTALS_DIR = Path("../data/raw/fundamentals")
-COMPANY_INFO_PATH = Path("../data/raw/company_info/company_info.parquet")
-OUTPUT_PATH = Path("../data/processed/ml_dataset.parquet")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PRICES_DIR = PROJECT_ROOT / "data/raw/prices"
+FUNDAMENTALS_DIR = PROJECT_ROOT / "data/raw/fundamentals"
+COMPANY_INFO_PATH = PROJECT_ROOT / "data/raw/company_info/company_info.parquet"
+OUTPUT_PATH = PROJECT_ROOT / "data/processed/ml_dataset.parquet"
 
 # Columns the fundamentals API doesn't actually populate
 FUNDAMENTALS_NULL_COLS = [
@@ -140,7 +143,7 @@ def fill_missing_cagr(fundamentals):
         revenue_before = ticker_df["cagr_revenue_5y"].isna().sum() if "cagr_revenue_5y" in ticker_df.columns else 0
         
         # Fill CAGR
-        #ticker_df = fill_cagr_columns(ticker_df)
+        ticker_df = fill_cagr_columns(ticker_df)
         
         # Track coverage after
         earnings_after = ticker_df["cagr_earnings_5y_final"].isna().sum()
