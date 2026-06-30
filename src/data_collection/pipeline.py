@@ -20,7 +20,21 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import collectors, config
+from . import collectors, config, yf_collectors
+
+
+def _collect(name: str, tickers: list[str], mode: str):
+    """Per-data-type source switch. Flip config.DATA_SOURCE[name] to fall back to BolsAI."""
+    source = config.DATA_SOURCE.get(name, "bolsai")
+    fn = {
+        ("prices", "bolsai"): collectors.collect_prices,
+        ("prices", "yfinance"): yf_collectors.collect_prices_yf,
+        ("fundamentals", "bolsai"): collectors.collect_fundamentals,
+        ("fundamentals", "yfinance"): yf_collectors.collect_fundamentals_yf,
+        ("dividends", "bolsai"): collectors.collect_dividends,
+        ("dividends", "yfinance"): yf_collectors.collect_dividends_yf,
+    }[(name, source)]
+    return fn(tickers, mode)
 
 
 def _tickers_with_company_info() -> list[str]:
@@ -54,7 +68,12 @@ def setup_logging():
 def run(mode: str, tickers: list[str], dry_run: bool = False):
     log = logging.getLogger("pipeline")
 
-    if not config.BOLSAI_API_KEY:
+    # update mode skips company_info and may run prices/fundamentals/dividends
+    # entirely via yfinance — only require a BolsAI key if something actually needs it.
+    needs_bolsai = mode != "update" or any(
+        config.DATA_SOURCE.get(k) == "bolsai" for k in ("prices", "fundamentals", "dividends")
+    )
+    if needs_bolsai and not config.BOLSAI_API_KEY:
         log.error("BOLSAI_API_KEY not set (add it to .env)")
         return False
 
@@ -64,7 +83,8 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
     if dry_run:
         log.info("DRY RUN | mode=%s | %d tickers (+%d benchmarks)", mode, len(tickers), len(config.BENCHMARK_TICKERS))
         log.info("tickers: %s", all_tickers[:20] + (["..."] if len(all_tickers) > 20 else []))
-        log.info("would run: macro, company_info, prices, fundamentals, dividends")
+        stage_names = ["macro"] + ([] if mode == "update" else ["company_info"]) + ["prices", "fundamentals", "dividends"]
+        log.info("would run: %s (source: %s)", ", ".join(stage_names), config.DATA_SOURCE if mode == "update" else "bolsai")
         return True
 
     log.info("=" * 60)
@@ -82,10 +102,12 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
         log.info("data stages: %d/%d tickers confirmed on BolsAI", len(active), len(tickers))
         return active
 
-    stages = [
-        ("macro",        lambda: collectors.collect_macro(mode)),
-        ("company_info", lambda: collectors.collect_company_info(tickers, mode)),
-    ]
+    stages = [("macro", lambda: collectors.collect_macro(mode))]
+    if mode != "update":
+        # company_info is BolsAI-only and rarely changes; update mode skips it to
+        # minimize BolsAI usage. Run `--mode full_scale`/`prototype` manually to
+        # pick up new IPOs or status changes.
+        stages.append(("company_info", lambda: collectors.collect_company_info(tickers, mode)))
 
     for name, fn in stages:
         log.info("--- stage: %s ---", name)
@@ -107,9 +129,9 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
              len(active), len(tickers), len(requested_benchmarks) + len(other_benchmarks))
 
     data_stages = [
-        ("prices",       lambda: collectors.collect_prices(prices_tickers, mode)),
-        ("fundamentals", lambda: collectors.collect_fundamentals(active, mode)),
-        ("dividends",    lambda: collectors.collect_dividends(active, mode)),
+        ("prices",       lambda: _collect("prices", prices_tickers, mode)),
+        ("fundamentals", lambda: _collect("fundamentals", active, mode)),
+        ("dividends",    lambda: _collect("dividends", active, mode)),
     ]
 
     for name, fn in data_stages:
@@ -128,7 +150,7 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
 
 def main():
     p = argparse.ArgumentParser(description="Staged data collection pipeline")
-    p.add_argument("--mode", choices=["prototype", "full_scale"], default="prototype")
+    p.add_argument("--mode", choices=["prototype", "full_scale", "update"], default="prototype")
     p.add_argument("--tickers", nargs="+", help="override ticker list")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args()
@@ -139,6 +161,8 @@ def main():
         tickers = [t.upper() for t in args.tickers]
     elif args.mode == "prototype":
         tickers = config.PROTOTYPE_TICKERS
+    elif args.mode == "update":
+        tickers = _active_tickers()
     else:
         tickers = collectors.get_all_tickers()
 

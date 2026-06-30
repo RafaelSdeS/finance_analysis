@@ -72,6 +72,14 @@ LOG_DIR = PROJECT / "data/logs"
 # --- Collection limits ---
 DIVIDENDS_YEARS = 20  # API max; covers full history
 
+# --- yfinance update pipeline ---
+# Flip any entry to "bolsai" to fall back to the paid collector for that data type.
+DATA_SOURCE = {"prices": "yfinance", "fundamentals": "yfinance", "dividends": "yfinance"}
+YF_SUFFIX = ".SA"
+YF_RETRIES = 3
+YF_RETRY_SLEEP = 2          # seconds; doubles each retry
+TICKER_ALIASES: dict[str, str] = {}  # old_ticker -> new_yf_ticker, hand-maintained on B3 renames
+
 
 def tickers_for(mode: str) -> list[str]:
     """Prototype returns the hardcoded sample; full_scale is resolved at runtime."""

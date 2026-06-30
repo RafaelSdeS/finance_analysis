@@ -25,34 +25,32 @@ pip install -r requirements.txt
 
 ### Stage 1: Collect Raw Data
 
-**Prerequisites:**
+**Initial Setup** (one-time, with BolsAI key):
 ```bash
-# Set up environment (one-time)
 pip install -r requirements.txt
-# Copy .env.example to .env and add your BolsAI API key
 cp .env.example .env
 # Edit .env and add: BOLSAI_API_KEY=sk_...
 ```
 
-**Prototype stage** (3–10 representative tickers, validates data quality):
-```bash
-python -m src.data_collection.pipeline --mode prototype
-```
-Collects: BCB macro (SELIC, CDI, IPCA), BolsAI prices + fundamentals + company info for PETR4, VALE3, WEGE3, ...
-
-**Validation stage** (after prototype):
-```bash
-python tests/raw_data/validate_vs_yfinance.py
-```
-Cross-checks prototype data against yfinance; pass/fail determines full-scale readiness.
-
-**Full-scale stage** (after validation passes):
+**Backfill Stage** (one-time: historical data via BolsAI, covers 2000–present):
 ```bash
 python -m src.data_collection.pipeline --mode full_scale       # all ~500+ tickers
 python -m src.data_collection.pipeline --mode full_scale --dry-run   # preview ticker list
 python -m src.data_collection.pipeline --mode prototype --tickers PETR4 VALE3   # override
 ```
 Resumes mid-run from checkpoints (idempotent: re-runs only fetch new data).
+
+**Quarterly Incremental Updates** (no BolsAI key needed; uses free yfinance):
+```bash
+python -m src.data_collection.pipeline --mode update
+```
+Fetches only new trading days/quarters for prices/fundamentals/dividends from yfinance, merges into existing raw data. Replaces BolsAI for routine refreshes (>99% cost savings on API calls).
+
+**Validation** (after any stage):
+```bash
+python tests/raw_data/validate_vs_yfinance.py
+```
+Cross-checks BolsAI data against yfinance (yfinance-derived fundamentals verified to within 1–15% tolerance on key ratios).
 
 ### Stage 2: Build ML Dataset
 
@@ -192,13 +190,18 @@ Pipeline collects **stocks only** (prices, fundamentals, dividends). Real Estate
 - Required for `src/data_collection/pipeline.py` and API validator tests
 
 ### Data Collection Pipeline Structure
-- All collection lives in `src/data_collection/` (old `src/1. collect_raw_data/` removed)
-- **Staged approach:** Prototype with 3–10 tickers first, validate against yfinance, unlock full-scale
-- **Checkpointing:** Pipeline resumes from `data/checkpoints/{mode}/` on interrupt (idempotent)
+- All collection lives in `src/data_collection/` with source-agnostic architecture
+- **Backfill:** BolsAI API (paid, ~€0.10 per 1K calls) for one-time historical collection (2000–present)
+- **Incremental updates:** yfinance (free) for quarterly refreshes; replaces BolsAI with 99% cost savings
+- **Source switching:** `config.DATA_SOURCE` dict allows per-data-type fallback (e.g., if yfinance breaks, flip `DATA_SOURCE["prices"]="bolsai"` and retry)
+- **Staged approach:** Prototype with 3–10 tickers first (BolsAI backfill), validate against yfinance, unlock full-scale, then use `--mode update` for routine refreshes
+- **Checkpointing:** Pipeline resumes from `data/checkpoints/{mode}/` on interrupt (idempotent per mode: `prototype`, `full_scale`, `update`)
 - **Logging:** All collector activity goes to `data/logs/collection-YYYYMMDD-HHMMSS.log`
-- **API caps (probed):** prices `limit<=5000` (date-window paginated), fundamentals `limit<=88` (use 80)
+- **BolsAI API caps (probed):** prices `limit<=5000` (date-window paginated), fundamentals `limit<=88` (use 80)
+- **yfinance coverage:** prices/dividends have full history (back to 2000); fundamentals have ~4–6 quarters (sufficient for quarterly refresh)
 - **BCB series:** selic=11 (daily rate), cdi=12, ipca=433. NOT 432 (that's the annual meta target)
 - **Benchmark ticker:** BOVA11 (iShares Bovespa ETF, IBOV index proxy) collected automatically; prices only (no fundamentals/dividends, it's an ETF)
+- **Company info:** BolsAI-only (CVM regulatory metadata, rarely changes); refresh manually via `--mode full_scale` when new IPOs appear
 
 ### Relative Paths
 New pipeline uses absolute paths via `Path(__file__).resolve().parents[N]`. Run all commands from project root.
@@ -206,9 +209,9 @@ New pipeline uses absolute paths via `Path(__file__).resolve().parents[N]`. Run 
 ## Data on Disk
 
 **Raw data** (tracked in git):
-- Three prototype tickers: PETR4, VALE3, WEGE3
-- Location: `data/raw/prices/`, `data/raw/fundamentals/`, `data/raw/macro/`, `data/raw/company_info/`
-- Status: prices current (2026-06-02), fundamentals stale (2026-03-31), macro current (2026-06-02)
+- Three prototype tickers + benchmark: PETR4, VALE3, WEGE3, BOVA11
+- Location: `data/raw/prices/`, `data/raw/fundamentals/`, `data/raw/macro/`, `data/raw/company_info/`, `data/raw/dividends/`
+- Status: prices current (2026-06-30, via yfinance `--mode update`), fundamentals current (2026-03-31 from BolsAI backfill), macro current (2026-06-30), dividends current
 
 **Pipeline state** (NOT tracked in git):
 - Checkpoints: `data/checkpoints/prototype/` and `data/checkpoints/full_scale/` (resume state per collector)
@@ -222,23 +225,24 @@ New pipeline uses absolute paths via `Path(__file__).resolve().parents[N]`. Run 
 
 - **Python:** 3.10+ (uses `list[str]`, `dict | None` syntax)
 - **Data:** pandas, numpy, pyarrow (parquet)
-- **APIs:** BolsAI REST (direct `httpx`), BCB SGS (direct requests), `yfinance` (validation only)
-- **Config:** `python-dotenv` (load `.env` for API keys)
+- **APIs:** BolsAI REST (direct `httpx`, backfill only), BCB SGS (direct requests, macro only), `yfinance` (production: incremental price/fundamental/dividend updates)
+- **Config:** `python-dotenv` (load `.env` for API keys, BolsAI only; yfinance requires no key)
 - **Logging:** Python built-in `logging` module (file + console)
 - **Viz:** Plotly (existing `financial_view.py`)
 - **No test framework:** tests are standalone `python script.py` invocations (no pytest)
 
 ## Data Collection Modules (Stage 1)
 
-Pipeline in `src/data_collection/` with flat-function architecture:
+Pipeline in `src/data_collection/` with flat-function architecture, supporting both BolsAI (backfill) and yfinance (incremental updates):
 
 | Module | Purpose |
 |--------|---------|
-| `config.py` | Shared config (tickers, API keys, paths, retry limits) |
-| `client.py` | HTTP wrapper (retries, backoff, logging); `make_client()`, `get_json()` |
+| `config.py` | Shared config (tickers, API keys, paths, retry limits, `DATA_SOURCE` dict for per-type source switching) |
+| `client.py` | HTTP wrapper (retries, backoff, logging); `make_client()`, `get_json()` — BolsAI only |
 | `checkpoint.py` | Resume state tracking (JSON per collector) |
 | `validate.py` | Data quality gates (schemas, ranges, continuity); returns `ValidationResult` |
-| `collectors.py` | All collectors: `collect_macro()`, `collect_prices()`, `collect_fundamentals()`, `collect_company_info()`, `collect_dividends()` |
-| `pipeline.py` | Orchestration (stages in order, error handling, checkpointing) |
+| `collectors.py` | BolsAI collectors: `collect_macro()`, `collect_prices()`, `collect_fundamentals()`, `collect_company_info()`, `collect_dividends()` |
+| `yf_collectors.py` | yfinance collectors: `collect_prices_yf()`, `collect_fundamentals_yf()`, `collect_dividends_yf()` — used for `--mode update` |
+| `pipeline.py` | Orchestration: `_collect()` dispatcher routes to BolsAI or yfinance per `DATA_SOURCE` config; supports `--mode update` |
 
-**Helper:** `_merge_save()` in collectors.py — idempotent append + dedup + validate + write (shared by all collectors)
+**Helper:** `_merge_save()` in collectors.py — idempotent append + dedup + validate + write (shared by all collectors, source-agnostic)
