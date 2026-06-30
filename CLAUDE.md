@@ -198,6 +198,7 @@ Pipeline collects **stocks only** (prices, fundamentals, dividends). Real Estate
 - **Logging:** All collector activity goes to `data/logs/collection-YYYYMMDD-HHMMSS.log`
 - **API caps (probed):** prices `limit<=5000` (date-window paginated), fundamentals `limit<=88` (use 80)
 - **BCB series:** selic=11 (daily rate), cdi=12, ipca=433. NOT 432 (that's the annual meta target)
+- **Benchmark ticker:** BOVA11 (iShares Bovespa ETF, IBOV index proxy) collected automatically; prices only (no fundamentals/dividends, it's an ETF)
 
 ### Relative Paths
 New pipeline uses absolute paths via `Path(__file__).resolve().parents[N]`. Run all commands from project root.

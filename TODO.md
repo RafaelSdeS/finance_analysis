@@ -6,11 +6,12 @@ Goal: Validate API data accuracy against reliable sources before scaling.
 
 ### Blockers
 
-- [x] Uncomment and test `fill_cagr_columns()` in `src/2. build_dataset/build_ml_dataset.py`
-- [ ] Run full pipeline (Stages 1–2) on current 3 tickers
-- [ ] Validate metrics: compare BolsAI prices + fundamentals against Yahoo Finance, B3 official, other data sources
+- [x] Uncomment and test `fill_cagr_columns()` in `src/build_dataset/build_ml_dataset.py`
+- [x] Collect BOVA11 (iShares Bovespa ETF / IBOV benchmark) in pipeline
+- [ ] Run full pipeline (Stages 1–2) on 463+ tickers (data already collected; need to validate ml_dataset.parquet)
+- [ ] Validate metrics: sample comparison of BolsAI prices + fundamentals against Yahoo Finance, B3 official
   - Note: minor diffs expected; flag only if >1% variance on key metrics (P/E, P/B, ROE, CAGR)
-- [ ] Verify macro data (SELIC, CDI, IPCA) matches official BCB sources
+- [ ] Verify macro data (SELIC, CDI, IPCA) matches official BCB sources (spot check)
 - [ ] Document any known discrepancies with links to reference sources
 
 ### Done

@@ -31,6 +31,15 @@ def _tickers_with_company_info() -> list[str]:
     return sorted(pd.read_parquet(path)["ticker"].dropna().unique().tolist())
 
 
+def _active_tickers() -> list[str]:
+    """Return only tickers with status='ATIVO' (exclude delisted/suspended)."""
+    path = config.COMPANY_DIR / "company_info.parquet"
+    if not path.exists():
+        return []
+    df = pd.read_parquet(path)
+    return sorted(df[df["status"] == "ATIVO"]["ticker"].dropna().unique().tolist())
+
+
 def setup_logging():
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
     logfile = config.LOG_DIR / f"collection-{datetime.now():%Y%m%d-%H%M%S}.log"
@@ -49,14 +58,17 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
         log.error("BOLSAI_API_KEY not set (add it to .env)")
         return False
 
+    # Always append benchmark tickers (prices only, for performance comparison)
+    all_tickers = sorted(set(tickers) | set(config.BENCHMARK_TICKERS))
+
     if dry_run:
-        log.info("DRY RUN | mode=%s | %d tickers", mode, len(tickers))
-        log.info("tickers: %s", tickers[:20] + (["..."] if len(tickers) > 20 else []))
+        log.info("DRY RUN | mode=%s | %d tickers (+%d benchmarks)", mode, len(tickers), len(config.BENCHMARK_TICKERS))
+        log.info("tickers: %s", all_tickers[:20] + (["..."] if len(all_tickers) > 20 else []))
         log.info("would run: macro, company_info, prices, fundamentals, dividends")
         return True
 
     log.info("=" * 60)
-    log.info("DATA COLLECTION | mode=%s | %d tickers", mode, len(tickers))
+    log.info("DATA COLLECTION | mode=%s | %d tickers (+%d benchmarks)", mode, len(tickers), len(config.BENCHMARK_TICKERS))
     log.info("=" * 60)
 
     # (name, callable) in dependency order: macro is ticker-independent; prices
@@ -65,6 +77,7 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
     # saves ~2x requests by skipping ghost tickers in the per-ticker collectors.
     def _data_tickers():
         matched = _tickers_with_company_info()
+        # Exclude benchmarks from company_info/fundamentals/dividends (they're ETFs, not stocks)
         active = [t for t in tickers if t in set(matched)]
         log.info("data stages: %d/%d tickers confirmed on BolsAI", len(active), len(tickers))
         return active
@@ -72,9 +85,9 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
     stages = [
         ("macro",        lambda: collectors.collect_macro(mode)),
         ("company_info", lambda: collectors.collect_company_info(tickers, mode)),
-        ("prices",       lambda: collectors.collect_prices(_data_tickers(), mode)),
-        ("fundamentals", lambda: collectors.collect_fundamentals(_data_tickers(), mode)),
-        ("dividends",    lambda: collectors.collect_dividends(_data_tickers(), mode)),
+        ("prices",       lambda: collectors.collect_prices(all_tickers, mode)),  # all_tickers includes benchmarks
+        ("fundamentals", lambda: collectors.collect_fundamentals(_active_tickers(), mode)),  # only ATIVO; exclude benchmarks
+        ("dividends",    lambda: collectors.collect_dividends(_active_tickers(), mode)),  # only ATIVO; exclude benchmarks
     ]
 
     for name, fn in stages:

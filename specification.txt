@@ -331,7 +331,8 @@ Backtest Report:
     * Turnover (average % per month)
 
 Benchmark Comparison:
-  - vs IBOV (B3 Bovespa index): Sharpe ratio, Calmar ratio, drawdown recovery time
+  - vs BOVA11 (iShares Bovespa ETF, IBOV proxy): Sharpe ratio, Calmar ratio, drawdown recovery time
+    [BOVA11 data collected automatically in Stage 1; prices only, no fundamentals]
   - vs SELIC/CDI: risk-adjusted outperformance
   - vs S&P 500: for context (global benchmark)
 

@@ -90,7 +90,11 @@ def get_all_tickers() -> list[str]:
             if len(batch) < 500:
                 break
         # exclude BDRs (34/35), FIIs/ETFs (11), and non-standard suffixes
-        return sorted(t for t in tickers if _standard.match(t))
+        # But explicitly include BOVA11 (iShares Bovespa ETF, used as IBOV benchmark)
+        result = sorted(t for t in tickers if _standard.match(t))
+        if "BOVA11" not in result:
+            result.append("BOVA11")
+        return sorted(result)
     finally:
         c.close()
 

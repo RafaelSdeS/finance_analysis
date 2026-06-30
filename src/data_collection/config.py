@@ -37,6 +37,8 @@ BCB_BASE = "https://api.bcb.gov.br/dados/serie/bcdata.sgs"
 # Prototype: small representative sample (validated against yfinance).
 PROTOTYPE_TICKERS = ["PETR4", "VALE3", "WEGE3"]
 # Full-scale: fetched dynamically from BolsAI /stocks/ (see collectors.get_all_tickers).
+# Benchmarks: prices only (no fundamentals/dividends); used for performance comparison.
+BENCHMARK_TICKERS = ["BOVA11"]  # iShares Bovespa ETF (IBOV index proxy)
 
 # --- BCB macro series IDs (confirmed against existing data units) ---
 # selic=11 (daily rate ~0.0534), NOT 432 (annual meta target 14.50); cdi=12; ipca=433
