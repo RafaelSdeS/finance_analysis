@@ -21,7 +21,8 @@ Goal: Validate API data accuracy against reliable sources before scaling.
 - [x] Generic API endpoint tester (`tests/api/bolsai_api_validator.py --path / --param`)
 - [x] ML dataset builder: `merge_asof(prices, fundamentals)` + company info (no lookahead bias)
 - [x] CAGR calculation and backfill logic (`cagr_handler.py`)
-- [x] Interactive visualization: nominal price vs inflation-adjusted vs SELIC
+- [x] Interactive visualization: nominal price vs inflation-adjusted vs SELIC (`financial_view.py`)
+- [x] Data validation & exploration notebook (`src/visualizations/exploration.ipynb`): coverage heatmap, completeness, liquidity, sector distribution, inflation-adjusted returns, fundamentals insights, dividend analysis
 
 ---
 

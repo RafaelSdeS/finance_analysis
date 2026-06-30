@@ -80,10 +80,16 @@ See `BUILD_DATASET_ROADMAP.md` for phase-by-phase implementation guide (5 phases
 python src/cagr_handler.py --ticker PETR4
 ```
 
-**Visualization** (BBAS3 nominal price vs SELIC vs inflation, browser-based):
+**Visualization — Quick Snapshot** (BBAS3 nominal vs inflation-adjusted vs SELIC, live yfinance data):
 ```bash
 python src/visualizations/financial_view.py
 ```
+
+**Exploration Notebook** (full dataset validation + insights, Jupyter):
+```bash
+jupyter notebook src/visualizations/exploration.ipynb
+```
+Charts: price coverage, data completeness, liquidity, sector breakdown, inflation-adjusted returns (PETR4/VALE3/WEGE3/ITUB4), P/E/ROE/net margin by sector, market cap distribution, leverage, growth CAGR, dividend analysis.
 
 ### Tests
 
