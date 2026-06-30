@@ -248,25 +248,38 @@ def _find_company(c, ticker):
 
 def collect_company_info(tickers: list[str], mode: str):
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
+    cp = checkpoint.load("company_info", mode)
+    done = set(cp.get("done", []))
+    path = config.COMPANY_DIR / "company_info.parquet"
     try:
         rows = []
         for ticker in tickers:
+            if ticker in done:
+                log.info("company %s: already collected", ticker)
+                continue
             row = _find_company(c, ticker)
             if row:
                 rows.append(row)
                 log.info("company %s: matched", ticker)
             else:
                 log.warning("company %s: no exact match (skipped)", ticker)
+            done.add(ticker)
+            checkpoint.save("company_info", mode, {"done": sorted(done)})
             sleep(config.RATE_LIMIT_SLEEP)
 
         if not rows:
-            log.warning("company_info: nothing collected")
+            log.info("company_info: no new companies collected")
             return
-        df = pd.DataFrame(rows, columns=COMPANY_FIELDS).drop_duplicates("ticker").sort_values("ticker")
-        path = config.COMPANY_DIR / "company_info.parquet"
+        df_new = pd.DataFrame(rows, columns=COMPANY_FIELDS)
+        if path.exists():
+            df_new = pd.concat([pd.read_parquet(path), df_new], ignore_index=True)
+        df_new = df_new.drop_duplicates("ticker", keep="last").sort_values("ticker").reset_index(drop=True)
+        vr = validate.validate_company_info(df_new)
+        if not vr.passed:
+            log.error("company_info validation FAILED: %s", vr.errors)
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(path, index=False)
-        checkpoint.save("company_info", mode, {"tickers": len(df)})
-        log.info("company_info: %d companies", len(df))
+        df_new.to_parquet(path, index=False)
+        log.info("company_info: %d total companies", len(df_new))
     finally:
         c.close()

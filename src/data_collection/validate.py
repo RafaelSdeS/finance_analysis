@@ -80,6 +80,21 @@ def validate_fundamentals(df: pd.DataFrame) -> ValidationResult:
     return r
 
 
+def validate_company_info(df: pd.DataFrame) -> ValidationResult:
+    r = ValidationResult()
+    if df.empty:
+        r.error("empty dataframe")
+        return r
+    required = ["ticker", "ticker_primary", "corporate_name", "cvm_code", "cnpj"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        r.error(f"missing columns: {missing}")
+        return r
+    if df["ticker"].duplicated().any():
+        r.error(f"{df['ticker'].duplicated().sum()} duplicate tickers")
+    return r
+
+
 def validate_macro(df: pd.DataFrame, name: str) -> ValidationResult:
     r = _common(df, "reference_date", ["reference_date", name])
     if not r.passed:
