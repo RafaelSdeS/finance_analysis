@@ -17,6 +17,8 @@ Goal: Validate API data accuracy against reliable sources before scaling.
 
 - [x] Macro data collection (SELIC, CDI, IPCA) via BCB SGS API
 - [x] Stock prices and fundamentals collection via BolsAI API (PETR4, VALE3, WEGE3)
+- [x] Dividend collection via BolsAI API (20-year history)
+- [x] Generic API endpoint tester (`tests/api/bolsai_api_validator.py --path / --param`)
 - [x] ML dataset builder: `merge_asof(prices, fundamentals)` + company info (no lookahead bias)
 - [x] CAGR calculation and backfill logic (`cagr_handler.py`)
 - [x] Interactive visualization: nominal price vs inflation-adjusted vs SELIC
@@ -31,14 +33,14 @@ Once Phase 1 validation passes:
 - [ ] Re-validate on full dataset
 - [ ] Create `.env.example` documenting BolsAI API key requirement
 
+- [ ] Technical indicators: momentum, moving averages, volatility, drawdowns
+- [ ] Macro context features: interest rate regime, market regime (bull/bear), VIX-like volatility proxy
 ---
 
 ## Phase 3: RL Agent
 
 ### Feature Engineering
 
-- [ ] Technical indicators: momentum, moving averages, volatility, drawdowns
-- [ ] Macro context features: interest rate regime, market regime (bull/bear), VIX-like volatility proxy
 
 ### Environment & Simulation
 
@@ -58,6 +60,12 @@ Once Phase 1 validation passes:
 - [ ] Backtesting harness: full historical simulation (no lookahead bias)
 - [ ] Performance metrics: total return, annualized return, Sharpe ratio, max drawdown, Calmar ratio
 - [ ] Benchmark comparison: IBOV (B3 Bovespa index)
+
+---
+
+## Future Scope (Out of Phase 1–3)
+
+- [ ] **FIIs (Real Estate Investment Trusts):** Deferred pending Phase 3 scope decision. If RL agent expands to mixed-asset allocation, add separate collectors for FII prices + distributions. API endpoints exist; collector skeleton pattern is proven. **Why deferred**: FIIs have different fundamentals (NAV/P-VP vs earnings) and require separate dataset build logic.
 
 ---
 

@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Goal:** Collect daily stock prices and quarterly company fundamentals, then build a machine-learning dataset ready for model training. See `specification.txt` for system design and RL objective.
 
 **Pipeline:** Structured three-stage approach:
-1. **Stage 1 (Data Collection):** Staged prototype→validation→full-scale pipeline with checkpointing, logging, validation
+1. **Stage 1 (Data Collection):** Staged prototype→validation→full-scale pipeline; collects prices, fundamentals, dividends, macro, company info
 2. **Stage 2 (Dataset Build):** Merge raw data into ML-ready parquets
 3. **Stage 3 (Model):** RL agent training (future)
 
@@ -84,6 +84,15 @@ python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY
 python tests/raw_data/test_cagr_calculation.py
 ```
 
+**Generic API Endpoint Tester** (explore BolsAI endpoints without writing code):
+```bash
+# Test specific endpoint + params
+python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY --path /dividends/PETR4 --param years=5
+
+# Run full validation suite (9 checks)
+python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY
+```
+
 ## Architecture
 
 ### Data Flow
@@ -91,12 +100,14 @@ python tests/raw_data/test_cagr_calculation.py
 ```
 External APIs
 ├─ BCB SGS (macro: SELIC, CDI, IPCA)
-└─ BolsAI (prices OHLCV + fundamentals quarterly)
+└─ BolsAI (prices OHLCV + fundamentals quarterly + dividends)
         ↓
 data/raw/
   ├─ prices/{TICKER}.parquet           (daily)
   ├─ fundamentals/{TICKER}.parquet     (quarterly)
-  └─ macro/{selic,cdi,ipca}.parquet
+  ├─ dividends/{TICKER}.parquet        (historical, ~20 years)
+  ├─ macro/{selic,cdi,ipca}.parquet
+  └─ company_info/company_info.parquet
         ↓
 build_ml_dataset.py
   → merge_asof(prices, fundamentals)   [no lookahead]
@@ -104,7 +115,7 @@ build_ml_dataset.py
   → fill_cagr_columns()                [calculate from fundamentals where API null]
   → clean (drop dupes, sort)
         ↓
-data/processed/ml_dataset.parquet      (one row per ticker+date)
+data/processed/ml_dataset.parquet      (one row per ticker+date, includes dividend data)
 ```
 
 ### Key Modules
@@ -123,6 +134,9 @@ Line 143 in `build_ml_dataset.py` has the call commented out:
 #ticker_df = fill_cagr_columns(ticker_df)
 ```
 This means the dataset will be missing `cagr_earnings_5y_final` and `cagr_revenue_5y_final` columns at runtime. Uncomment when CAGR backfilling is needed.
+
+### FIIs Are Deferred
+Pipeline collects **stocks only** (prices, fundamentals, dividends). Real Estate Investment Trusts (FIIs) are a separate asset class with different fundamentals (NAV/P-VP vs earnings/revenue) and distributions (monthly vs irregular). Will add if Phase 3 RL agent scope expands to mixed-asset allocation.
 
 ### BolsAI API Key Handling
 - Stored in `.env` (copied from `.env.example`)
@@ -168,17 +182,15 @@ New pipeline uses absolute paths via `Path(__file__).resolve().parents[N]`. Run 
 
 ## Data Collection Modules (Stage 1)
 
-New modular pipeline in `src/data_collection/`:
+Pipeline in `src/data_collection/` with flat-function architecture:
 
 | Module | Purpose |
 |--------|---------|
 | `config.py` | Shared config (tickers, API keys, paths, retry limits) |
-| `core/client.py` | HTTP wrapper (retries, backoff, logging) |
-| `core/checkpoint.py` | Resume state tracking (JSON per collector) |
-| `core/validator.py` | Data quality checks (schemas, ranges, continuity) |
-| `collectors/base.py` | Abstract `BaseCollector` interface |
-| `collectors/bcb_macro.py` | SELIC, CDI, IPCA from BCB SGS |
-| `collectors/bolsai_prices.py` | Daily prices from BolsAI |
-| `collectors/bolsai_fundamentals.py` | Quarterly fundamentals from BolsAI |
-| `collectors/bolsai_company_info.py` | Company metadata from BolsAI |
-| `pipeline.py` | Orchestration (stages, error handling, checkpointing) |
+| `client.py` | HTTP wrapper (retries, backoff, logging); `make_client()`, `get_json()` |
+| `checkpoint.py` | Resume state tracking (JSON per collector) |
+| `validate.py` | Data quality gates (schemas, ranges, continuity); returns `ValidationResult` |
+| `collectors.py` | All collectors: `collect_macro()`, `collect_prices()`, `collect_fundamentals()`, `collect_company_info()`, `collect_dividends()` |
+| `pipeline.py` | Orchestration (stages in order, error handling, checkpointing) |
+
+**Helper:** `_merge_save()` in collectors.py — idempotent append + dedup + validate + write (shared by all collectors)
