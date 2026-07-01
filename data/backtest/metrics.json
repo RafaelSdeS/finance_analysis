@@ -1,0 +1,38 @@
+{
+  "agent": {
+    "cumulative_return": 1.0707491550467516,
+    "annualized_return": 0.14920463213410495,
+    "sharpe": 0.7145108225988003,
+    "sortino": 1.0798013737589824,
+    "max_drawdown": 0.24573846984045944,
+    "win_rate": 0.5185746777862017,
+    "n_days": 1319
+  },
+  "equal_weight": {
+    "cumulative_return": 1.056463636350807,
+    "annualized_return": 0.14768570538575343,
+    "sharpe": 0.7078546376915016,
+    "sortino": 1.0689484091453771,
+    "max_drawdown": 0.24788614905977174,
+    "win_rate": 0.5178165276724791,
+    "n_days": 1319
+  },
+  "market_cap": {
+    "cumulative_return": 0.6607831216775926,
+    "annualized_return": 0.10177173656682093,
+    "sharpe": 0.5611388153215,
+    "sortino": 0.832848320687745,
+    "max_drawdown": 0.2019418266065372,
+    "win_rate": 0.5155420773313116,
+    "n_days": 1319
+  },
+  "inv_vol": {
+    "cumulative_return": 0.2620655369256717,
+    "annualized_return": 0.04547122847414564,
+    "sharpe": 0.24661557184999566,
+    "sortino": 0.30692203883321556,
+    "max_drawdown": 0.37950927013267305,
+    "win_rate": 0.5216072782410918,
+    "n_days": 1319
+  }
+}

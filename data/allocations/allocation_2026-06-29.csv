@@ -1,0 +1,242 @@
+ticker,weight,sector
+ITUB4,0.004648801945624037,Bancos
+FHER3,0.004601035509925625,Petroquímicos e Borracha
+CASH3,0.00458802663437194,Comunicação e Informática
+GGBR4,0.004474964404915194,Metalurgia e Siderurgia
+FRAS3,0.0044210360108991745,"Máquinas, Equipamentos, Veículos e Peças"
+RAIL3,0.004420508914943264,Emp. Adm. Part. - Serviços Transporte e Logística
+AZZA3,0.0044175884479698115,Têxtil e Vestuário
+BALM4,0.004404336334803533,Metalurgia e Siderurgia
+TRIS3,0.004403825240156865,"Emp. Adm. Part. - Const. Civil, Mat. Const. e Decoração"
+ONCO3,0.004391729304283218,Serviços Médicos
+BHIA3,0.0043863879178975464,Comércio (Atacado e Varejo)
+NGRD3,0.004382106704377058,Comunicação e Informática
+IFCM3,0.004381455449427699,Comércio (Atacado e Varejo)
+BRKM5,0.004378667347374835,Petroquímicos e Borracha
+PRNR3,0.004365554646006569,"Construção Civil, Mat. Constr. e Decoração"
+CSUD3,0.004365226943432647,Emp. Adm. Part. - Sem Setor Principal
+ROMI3,0.0043636092166388606,"Máquinas, Equipamentos, Veículos e Peças"
+SYNE3,0.004350557849007171,"Emp. Adm. Part. - Const. Civil, Mat. Const. e Decoração"
+ARML3,0.0043492188307723235,Serviços Transporte e Logística
+VITT3,0.004340446862026654,"Agricultura (Açúcar, Álcool e Cana)"
+NORD3,0.004329425246970662,Metalurgia e Siderurgia
+SAUD3,0.0043241294011052795,Serviços Médicos
+MNPR3,0.004322260124050126,Emp. Adm. Part. - Alimentos
+YDUQ3,0.004321611178710963,Emp. Adm. Part. - Educação
+EMAE4,0.004320064767713261,Energia Elétrica
+SUZB3,0.004318938756052649,Papel e Celulose
+VVEO3,0.004318543073918956,Comércio (Atacado e Varejo)
+LUXM4,0.004316864490731553,Emp. Adm. Part. - Sem Setor Principal
+BLAU3,0.0043164579033781085,Farmacêutico e Higiene
+RSUL4,0.004313180665338811,"Máquinas, Equipamentos, Veículos e Peças"
+CPFE3,0.004312681691050852,Emp. Adm. Part. - Energia Elétrica
+CTKA4,0.004310107627377501,Têxtil e Vestuário
+CSAN3,0.004305739883376509,"Agricultura (Açúcar, Álcool e Cana)"
+EQPA3,0.0042966575766016,Energia Elétrica
+MNDL3,0.004290506362346631,Têxtil e Vestuário
+MEAL3,0.00428957504785192,Alimentos
+AMAR3,0.004287706731935359,Comércio (Atacado e Varejo)
+AGRO3,0.0042857324505137006,"Agricultura (Açúcar, Álcool e Cana)"
+EZTC3,0.004277320213701073,"Emp. Adm. Part. - Const. Civil, Mat. Const. e Decoração"
+BRAP4,0.004269349389962616,Emp. Adm. Part. - Extração Mineral
+CXSE3,0.004269283617137137,Emp. Adm. Part. - Seguradoras e Corretoras
+LWSA3,0.004269160519468525,Comunicação e Informática
+SEQL3,0.004267823794458903,Serviços Transporte e Logística
+OPCT3,0.004266002203169518,Petróleo e Gás
+MULT3,0.004265786306554181,"Emp. Adm. Part. - Const. Civil, Mat. Const. e Decoração"
+GMAT3,0.004264392518357625,Emp. Adm. Part. - Comércio (Atacado e Varejo)
+PFRM3,0.004264134583551666,Comércio (Atacado e Varejo)
+PDGR3,0.004260031425966108,"Emp. Adm. Part. - Const. Civil, Mat. Const. e Decoração"
+PDTC3,0.004259195055697781,Emp. Adm. Part. - Telecomunicações
+MDIA3,0.004254992555834057,Alimentos
+PSSA3,0.004253978112395538,Seguradoras e Corretoras
+MGLU3,0.0042521948485036345,Comércio (Atacado e Varejo)
+LPSB3,0.0042517323580598745,"Emp. Adm. Part. - Const. Civil, Mat. Const. e Decoração"
+NATU3,0.004250933857590299,Farmacêutico e Higiene
+TPIS3,0.004248387983672582,Emp. Adm. Part. - Serviços Transporte e Logística
+TGMA3,0.004244793333699058,Serviços Transporte e Logística
+EUCA4,0.004242983721926647,"Construção Civil, Mat. Constr. e Decoração"
+CURY3,0.004242204240351875,"Construção Civil, Mat. Constr. e Decoração"
+SHUL4,0.004240605170232353,Metalurgia e Siderurgia
+PTBL3,0.004240558528413509,"Construção Civil, Mat. Constr. e Decoração"
+TEND3,0.0042403654896603065,"Construção Civil, Mat. Constr. e Decoração"
+GRND3,0.004238590774363553,Têxtil e Vestuário
+CMIN3,0.004237693090586545,Extração Mineral
+DOTZ3,0.0042372986008917535,Comunicação e Informática
+KEPL3,0.004236912647450128,Emp. Adm. Part. - Metalurgia e Siderurgia
+CRPG5,0.004236291082425023,Petroquímicos e Borracha
+ISAE4,0.00423387170159531,Energia Elétrica
+VIVT3,0.004231876348059341,Telecomunicações
+SEER3,0.004224831250204948,Educação
+EMBJ3,0.0042226443463989575,"Máquinas, Equipamentos, Veículos e Peças"
+BMOB3,0.004222031075441423,Comunicação e Informática
+EKTR4,0.00421998102484673,Energia Elétrica
+SBFG3,0.004219456239154377,Comércio (Atacado e Varejo)
+ASAI3,0.004218538048723805,Comércio (Atacado e Varejo)
+JSLG3,0.004218020148142735,Serviços Transporte e Logística
+IRBR3,0.004217195670714751,Seguradoras e Corretoras
+MOTV3,0.0042149518346903895,Emp. Adm. Part. - Serviços Transporte e Logística
+SOJA3,0.004212567317257538,Alimentos
+ABEV3,0.004211646150454302,Bebidas e Fumo
+SHOW3,0.004209636364255274,Brinquedos e Lazer
+JHSF3,0.004206326018879998,"Emp. Adm. Part. - Const. Civil, Mat. Const. e Decoração"
+CMIG4,0.0042059926143153195,Energia Elétrica
+ABCB4,0.00420479570792848,Bancos
+RECV3,0.0042018521766603945,Emp. Adm. Part. - Petróleo e Gás
+CSMG3,0.00419975198267202,"Saneamento, Serv. Água e Gás"
+UGPA3,0.00419642107931527,Emp. Adm. Part. - Petróleo e Gás
+NUTR3,0.004194656899885042,"Agricultura (Açúcar, Álcool e Cana)"
+DEXP3,0.0041939029432778675,Emp. Adm. Part. - Sem Setor Principal
+UNIP6,0.004190202674754817,Petroquímicos e Borracha
+RAPT4,0.0041889146648875115,"Máquinas, Equipamentos, Veículos e Peças"
+TRAD3,0.004184655756924681,Comunicação e Informática
+BRAV3,0.004182518851970095,Petróleo e Gás
+VALE3,0.0041823203632437075,Extração Mineral
+FLRY3,0.004182046376052118,Serviços Médicos
+B3SA3,0.004181569330863737,Bolsas de Valores/Mercadorias e Futuros
+DOHL4,0.004181313738182131,Têxtil e Vestuário
+WEGE3,0.004180758108835949,"Emp. Adm. Part. - Máqs., Equip., Veíc. e Peças"
+ALPK3,0.00417821388120624,Serviços Transporte e Logística
+EPAR3,0.004177415353224825,Emp. Adm. Part. - Sem Setor Principal
+MILS3,0.004176839257336176,Serviços Transporte e Logística
+DESK3,0.004175675434949231,Telecomunicações
+TIMS3,0.004175439680882783,Telecomunicações
+JALL3,0.004175170575314593,"Agricultura (Açúcar, Álcool e Cana)"
+RANI3,0.004175041273389547,Embalagens
+VSTE3,0.004172779233984123,Emp. Adm. Part. - Comércio (Atacado e Varejo)
+RIAA3,0.0041725726485200626,Têxtil e Vestuário
+AMOB3,0.004172526936650365,Serviços Transporte e Logística
+ENEV3,0.004171105041762628,Energia Elétrica
+WLMM4,0.004171046403469302,"Emp. Adm. Part. - Máqs., Equip., Veíc. e Peças"
+DXCO3,0.00416891193463815,"Construção Civil, Mat. Constr. e Decoração"
+LOGN3,0.00416642637612265,Serviços Transporte e Logística
+GOAU4,0.004163770584465681,Emp. Adm. Part. - Metalurgia e Siderurgia
+MBRF3,0.004163081421223814,Alimentos
+PGMN3,0.004162664938825942,Comércio (Atacado e Varejo)
+SBSP3,0.0041623754684736065,"Saneamento, Serv. Água e Gás"
+VIVA3,0.00416221390043425,Comércio (Atacado e Varejo)
+SIMH3,0.004161465393448036,Serviços Transporte e Logística
+SCAR3,0.004159319834111983,Emp. Adm. Part. - Sem Setor Principal
+REDE3,0.0041532816016392445,Energia Elétrica
+MTRE3,0.004151522777659018,"Construção Civil, Mat. Constr. e Decoração"
+COGN3,0.004149431729114765,Emp. Adm. Part. - Educação
+RADL3,0.004148878860347741,Comércio (Atacado e Varejo)
+CLSC4,0.004144027579889373,Energia Elétrica
+DIRR3,0.004142784137708835,"Construção Civil, Mat. Constr. e Decoração"
+QUAL3,0.004142526342023813,Seguradoras e Corretoras
+BMGB4,0.004142435453661222,Bancos
+CEBR6,0.004142169964274008,Energia Elétrica
+CSNA3,0.004139538457023187,Metalurgia e Siderurgia
+LEVE3,0.004138930483177908,"Máquinas, Equipamentos, Veículos e Peças"
+PINE4,0.0041379004386667044,Bancos
+AALR3,0.004133897133876847,Serviços Médicos
+BBSE3,0.004132653036520524,Emp. Adm. Part. - Seguradoras e Corretoras
+BMKS3,0.004130836823087927,Brinquedos e Lazer
+INEP3,0.004130567474251575,"Máquinas, Equipamentos, Veículos e Peças"
+CBAV3,0.004129742654371001,Extração Mineral
+BRST3,0.004129312284144523,Telecomunicações
+BSLI3,0.0041288888322849075,Bancos
+MDNE3,0.00412885885614415,"Construção Civil, Mat. Constr. e Decoração"
+WEST3,0.00412762725778767,Comércio (Atacado e Varejo)
+BBAS3,0.0041272707741730336,Bancos
+DMVF3,0.004126718386877052,Comércio (Atacado e Varejo)
+BBDC4,0.004125200452637318,Bancos
+LREN3,0.0041242342069612485,Comércio (Atacado e Varejo)
+TOTS3,0.004119864686517577,Comunicação e Informática
+CGRA4,0.004119264163592095,Comércio (Atacado e Varejo)
+CEEB3,0.004116500338970296,Energia Elétrica
+WDCN3,0.0041108728350448525,Comércio (Atacado e Varejo)
+HBOR3,0.004110491881476062,"Construção Civil, Mat. Constr. e Decoração"
+EVEN3,0.004107426733445064,"Construção Civil, Mat. Constr. e Decoração"
+ITSA4,0.004105732228268583,Emp. Adm. Part. - Intermediação Financeira
+CVCB3,0.004104019567366017,Hospedagem e Turismo
+VULC3,0.004100382523687712,Têxtil e Vestuário
+UCAS3,0.004099353484307559,"Construção Civil, Mat. Constr. e Decoração"
+RDOR3,0.004099284179998931,Serviços Médicos
+FIQE3,0.004096479055261348,Emp. Adm. Part. - Telecomunicações
+COCE5,0.0040937356729482755,Energia Elétrica
+ECOR3,0.004091935505344062,Serviços Transporte e Logística
+POMO4,0.004090694769107235,"Máquinas, Equipamentos, Veículos e Peças"
+HBRE3,0.0040885208751488804,"Construção Civil, Mat. Constr. e Decoração"
+BAZA3,0.00408829076516178,Bancos
+INTB3,0.004085020776418246,Comércio (Atacado e Varejo)
+AERI3,0.004080409059113687,"Máquinas, Equipamentos, Veículos e Peças"
+PLPL3,0.004080029537879797,"Construção Civil, Mat. Constr. e Decoração"
+RNEW4,0.004078119046422428,Energia Elétrica
+SMTO3,0.004075582711473716,"Agricultura (Açúcar, Álcool e Cana)"
+USIM5,0.004073963233537108,Metalurgia e Siderurgia
+HAPV3,0.004072281175862045,Serviços Médicos
+VLID3,0.0040720570692729646,Comunicação e Informática
+CAMB3,0.00407081700723646,Têxtil e Vestuário
+AZTE3,0.004068551035459735,Petróleo e Gás
+ATED3,0.0040678866121241775,Educação
+HAGA4,0.004065937524740291,Metalurgia e Siderurgia
+LAVV3,0.004063630822190241,"Construção Civil, Mat. Constr. e Decoração"
+ALLD3,0.004063257266320141,Comércio (Atacado e Varejo)
+VBBR3,0.00406267864230386,Comércio (Atacado e Varejo)
+ESPA3,0.004059565796466164,Serviços Médicos
+WHRL4,0.004054840588207331,"Máquinas, Equipamentos, Veículos e Peças"
+POSI3,0.004054470000276326,Comunicação e Informática
+WIZC3,0.0040537051415151515,Seguradoras e Corretoras
+ENMT3,0.004053312256794095,Energia Elétrica
+CPLE3,0.0040510857890987935,Energia Elétrica
+VTRU3,0.004048924158208209,Educação
+GFSA3,0.004047738624325557,"Construção Civil, Mat. Constr. e Decoração"
+AURE3,0.0040475349347599545,Energia Elétrica
+MOVI3,0.00404535014445538,Serviços Transporte e Logística
+MGEL4,0.004044214108604576,Emp. Adm. Part. - Metalurgia e Siderurgia
+PRIO3,0.0040393867981604594,Petróleo e Gás
+ANIM3,0.004037827987290239,Educação
+BNBR3,0.00403616550273801,Bancos
+EQTL3,0.004034060651522627,Energia Elétrica
+CGAS5,0.004028890592207985,"Emp. Adm. Part. - Saneamento, Serv. Água e Gás"
+CYRE3,0.004027333356360106,"Construção Civil, Mat. Constr. e Decoração"
+BEEF3,0.0040268041158015595,Alimentos
+ALOS3,0.004026064018775201,Emp. Adm. Part. - Comércio (Atacado e Varejo)
+VIVR3,0.004025419340312127,"Construção Civil, Mat. Constr. e Decoração"
+BRSR6,0.00402517464537768,Bancos
+MYPK3,0.004024434428054776,"Máquinas, Equipamentos, Veículos e Peças"
+LJQQ3,0.00402166693788101,Comércio (Atacado e Varejo)
+ETER3,0.004019981140995394,"Construção Civil, Mat. Constr. e Decoração"
+ALPA4,0.0040131444761204865,Têxtil e Vestuário
+ARND3,0.00401163100130113,Emp. Adm. Part. - Intermediação Financeira
+ORVR3,0.00401143344000749,"Saneamento, Serv. Água e Gás"
+LOGG3,0.004010611557965341,"Construção Civil, Mat. Constr. e Decoração"
+PETR4,0.004009815731312835,Petróleo e Gás
+VAMO3,0.004002552334825354,Serviços Transporte e Logística
+GEPA4,0.004001491700537476,Energia Elétrica
+RENT3,0.003998178057689628,Serviços Transporte e Logística
+AFLT3,0.003988418177961966,Energia Elétrica
+MRVE3,0.003985257719393999,"Construção Civil, Mat. Constr. e Decoração"
+BEES3,0.003980867878248162,Bancos
+CSED3,0.003979924052919743,Educação
+ENJU3,0.003977532358726352,Comércio (Atacado e Varejo)
+TELB4,0.003977391358250463,Telecomunicações
+TASA4,0.003975876896321288,"Máquinas, Equipamentos, Veículos e Peças"
+CEAB3,0.003974382791455806,Têxtil e Vestuário
+PNVL3,0.003971929410477154,Comércio (Atacado e Varejo)
+MATD3,0.003968842399605975,Serviços Médicos
+LAND3,0.003968413921256104,"Agricultura (Açúcar, Álcool e Cana)"
+DASA3,0.003964433275365375,Serviços Médicos
+TECN3,0.003964369918299571,Comércio (Atacado e Varejo)
+TFCO4,0.003961207797400298,Têxtil e Vestuário
+BMEB4,0.003957695487451494,Bancos
+OFSA3,0.003954696574214792,Comércio (Atacado e Varejo)
+SLCE3,0.0039474787129917446,"Agricultura (Açúcar, Álcool e Cana)"
+RCSL4,0.0039462106846073495,"Máquinas, Equipamentos, Veículos e Peças"
+TUPY3,0.003945574265645093,Metalurgia e Siderurgia
+GGPS3,0.00394091872100001,Emp. Adm. Part. - Sem Setor Principal
+HBSA3,0.003919759604939694,Serviços Transporte e Logística
+AXIA3,0.0039191210278887575,Emp. Adm. Part. - Energia Elétrica
+TTEN3,0.003913874096603462,"Agricultura (Açúcar, Álcool e Cana)"
+MELK3,0.0039101132205523505,"Emp. Adm. Part. - Const. Civil, Mat. Const. e Decoração"
+EGIE3,0.0039071748735619236,Energia Elétrica
+HYPE3,0.0039002253600988208,Farmacêutico e Higiene
+MLAS3,0.003896384149504658,Comunicação e Informática
+TCSA3,0.00388954535927641,"Construção Civil, Mat. Constr. e Decoração"
+AZEV4,0.00388771041274861,"Construção Civil, Mat. Constr. e Decoração"
+SMFT3,0.00388519798701776,Brinquedos e Lazer
+EALT4,0.0038709734338280696,Metalurgia e Siderurgia
+MTSA4,0.003855171431905466,Metalurgia e Siderurgia
+BIOM3,0.0038484311551265802,Farmacêutico e Higiene
+FESA4,0.0038422134441180337,Metalurgia e Siderurgia

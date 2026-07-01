@@ -56,134 +56,92 @@ Once Phase 1 validation passes:
 
 ### Phase 3a: Foundation & Environment Design
 
-**Goal:** Build PortfolioEnv, define state/action spaces, validate with random policy.
+**Goal:** Verify dataset quality, build PortfolioEnv, define state/action spaces, validate with random policy.
 
-- [ ] Update `requirements.txt`: add `torch==2.3.0`, `stable-baselines3==2.4.0`, `gymnasium==0.29.0`, `scikit-learn>=1.5.0`
-- [ ] Create `src/agent/` directory structure (with `__init__.py`)
-- [ ] **config.py:** Immutable `AgentConfig` dataclass
-  - [ ] Hyperparams: learning_rate=3e-4, gamma=0.99, gae_lambda=0.95, entropy_coef=0.01
-  - [ ] Feature list: list of feature column names from `ml_dataset.parquet`
-  - [ ] Train/val/test date splits (60/20/20 by date, not rows)
-  - [ ] Paths: data_dir, model_dir, log_dir
-  - [ ] Action: n_tickers (inferred from data)
-- [ ] **env.py:** `PortfolioEnv(gymnasium.Env)` class
-  - [ ] `__init__`: Load `ml_dataset.parquet`, initialize scaler, store date ranges
-  - [ ] State space: concatenated normalized features for all tickers [n_tickers × feature_dim]
-  - [ ] Action space: `Box(0, 1, shape=(n_tickers,))` continuous weights (no sum constraint in space; enforce in step)
-  - [ ] `reset(date_range)`: Return normalized state for first date in range
-  - [ ] `step(action)`: Apply softmax weights, compute daily log return as reward, advance date
-  - [ ] `_normalize_state()`: Z-score normalize using train scaler (fit-once-reuse principle)
-  - [ ] Handle edge cases: insufficient data, missing values, date bounds
-- [ ] **test_env_basic.py:** Validation script
-  - [ ] Instantiate env, call reset(), verify state shape [n_tickers × feature_dim]
-  - [ ] Step 100 times with random actions, verify portfolio value > 0
-  - [ ] Verify weights sum to 1 after softmax in step()
-  - [ ] Log: initial state, sample actions, sample returns
+#### Dataset Verification (DO FIRST)
+- [ ] **Run verification script** (see CLAUDE.md "Dataset Verification Plan"):
+  - [ ] Inspect date range: earliest & latest date, total span in years
+  - [ ] Check ticker coverage: unique tickers, rows per ticker, exclude short-history tickers
+  - [ ] Verify feature completeness: all expected columns present
+  - [ ] Measure NaN rates: overall <5%, per-column <30%, critical columns 0%
+  - [ ] Check for duplicates: 0 duplicate (ticker, date) pairs
+  - [ ] Verify temporal alignment: no lookahead bias (fundamental_date ≤ price_date)
+  - [ ] Analyze distributions: returns ~0, no extreme outliers
+  - [ ] Sector coverage: ≥3 sectors represented
+  - [ ] Output: Use script `tests/agent/verify_dataset_for_training.py`
+- [ ] **Determine train/val/test split dates** (based on actual data coverage):
+  - [ ] Calculate 60/20/20 split by date (not rows)
+  - [ ] Verify each split has ≥252 rows (minimum 1 year)
+  - [ ] Document dates in config.py
+  - [ ] Example: If data spans 2017-2026 (9 years), use: train=2017-06-30, val=2022-12-31, test=2026-06-30
 
-### Phase 3b: Training Infrastructure
+#### Environment Setup
+- [x] Update `requirements.txt`: add `torch==2.3.0`, `stable-baselines3==2.4.0`, `gymnasium==0.29.0`, `scikit-learn>=1.5.0`
+- [x] Create `src/agent/` directory structure
+- [x] **feature_engineering.py:** Functions to compute missing returns and prepare dataset
+  - [x] `compute_returns()`: Log returns from prices (grouped by ticker)
+  - [x] `prepare_training_dataset()`: Load dataset, compute returns, save to ml_dataset_training.parquet
+  - [x] Handles NaN gracefully (first row per ticker is NaN, expected behavior)
+- [x] **__init__.py:** Package exports (compute_returns, prepare_training_dataset)
+- [x] **config.py:** Immutable `AgentConfig` dataclass with verified dates from dataset inspection
+  - [x] Train/val/test date splits: 2000-01-03 / 2015-11-25 / 2021-03-13 / 2026-06-30
+  - [x] Hyperparams: learning_rate=3e-4, gamma=0.99, gae_lambda=0.95, entropy_coef=0.01
+  - [x] Feature list: 23 state features (6 price + 14 fundamental + 3 macro)
+  - [x] Paths: data_dir, model_dir, log_dir, dataset_path
+  - [x] Validation on load (checks dataset exists, dates are valid)
+  - [x] Method: `log_summary()` for debugging
+- [x] **data_pipeline.py:** Dense tensors + train-only scaler
+  - [x] Pivot long-format dataset → [6565 dates × 279 tickers × 23 features] numpy tensor
+  - [x] Activity mask [dates × tickers] (46.2% cells active — universe grows 30 → 245 tickers)
+  - [x] Universe: all tickers ≥252 rows (279; drops 9 stubs) — **full universe with masking, no survivorship bias**
+  - [x] StandardScaler fit on train dates only → `data/models/feature_scaler.pkl`
+  - [x] Output: `data/processed/agent_tensors.npz`
+- [x] **env.py:** `PortfolioEnv(gymnasium.Env)` with time-varying universe
+  - [x] State: normalized features (NaN→0 after z-score) + activity mask = 6,696-dim obs
+  - [x] Action: 279-dim logits → **masked softmax** (inactive tickers get exactly 0 weight)
+  - [x] Reward: daily log portfolio return; delisted-next-day positions carry flat
+  - [x] Splits via `date_range="train"/"val"/"test"`
+- [x] **test_env_basic.py:** All invariants pass
+  - [x] Obs shapes across all 3 splits; weights sum to 1; inactive weight always 0
+  - [x] 16,451 steps/sec (fast enough for 1M timesteps); deterministic under fixed seed
 
-**Goal:** Implement PPO training loop, logging, checkpointing, early stopping.
+### Phase 3b: Training Infrastructure — DONE (smoke-tested; full run pending)
 
-- [ ] **trainer.py:** Main training orchestration
-  - [ ] Data pipeline: Load ml_dataset, create train/val/test date-splits
-  - [ ] Scaler: Fit StandardScaler on train features only, save to `data/models/feature_scaler.pkl`
-  - [ ] PPO initialization: use `stable-baselines3.PPO("MlpPolicy", env, learning_rate=3e-4, verbose=1)`
-  - [ ] Training loop: call `agent.learn(total_timesteps=1_000_000)`
-  - [ ] Logging (JSONL): Per 100 episodes, log {episode, train_return, train_sharpe, val_sharpe, val_max_dd}
-  - [ ] Checkpointing: Save model every 100 episodes to `data/models/agent_checkpoint_ep{N}.pt`
-  - [ ] Early stopping: Monitor val Sharpe over last 10 eval cycles, stop if degrades 3 cycles in a row
-  - [ ] Config integration: All hyperparams from `AgentConfig`, zero hardcoding
-- [ ] **Hyperparameter tuning placeholder**
-  - [ ] Document which params to tune first: learning_rate, n_steps, batch_size
-  - [ ] Add CLI flags: `--learning-rate 3e-4`, `--gamma 0.95`, `--episodes 1000`
-- [ ] **Logging setup**
-  - [ ] File: `data/logs/agent_training_YYYYMMDD-HHMMSS.jsonl` (structured, one JSON object per line)
-  - [ ] Console: INFO level (episode progress, not step-level noise)
-  - [ ] Log per-100-episodes: episode, average return, sharpe, max drawdown, learning rate
+- [x] **trainer.py:** SB3 PPO ("MlpPolicy", CUDA), all hyperparams from `AgentConfig`
+  - [x] `ValSharpeCallback`: deterministic val rollout every `eval_freq` rollouts
+  - [x] JSONL logging → `data/logs/agent_training_YYYYMMDD-HHMMSS.jsonl`
+  - [x] Checkpoints per eval + `agent_best.zip` (best val Sharpe) + `agent_final.zip`
+  - [x] Early stopping: val Sharpe degrades `early_stopping_patience` (3) consecutive evals
+  - [x] CLI: `--timesteps`, `--learning-rate`, `--device`
+  - [x] Smoke run (12K steps, GPU) verified end-to-end
+- [ ] **Full training run:** `python -m src.agent.trainer` (1M timesteps, ~hours on RTX 4060) — run when ready
+- [ ] Hyperparameter tuning if val Sharpe plateaus: learning_rate first, then n_steps, batch_size
 
-### Phase 3c: Evaluation & Backtesting
+### Phase 3c: Evaluation & Backtesting — DONE
 
-**Goal:** Backtest trained agent on test set, compute metrics, generate plots, compare baselines.
+- [x] **metrics.py:** Sharpe, Sortino, max drawdown, cumulative/annualized return, win rate (unit-tested vs hand-computed values)
+- [x] **evaluate.py:** All strategies rolled through the same env (portfolio math in one place)
+  - [x] Baselines: equal-weight, market-cap (ffill, no lookahead), 1/vol (trailing 60d)
+  - [x] Comparison table + `data/backtest/metrics.json` + `results.parquet`
+  - [x] Plotly plots: cumulative value (log scale), drawdown, return distribution, top-10 weights timeline
+- [x] **Found & fixed real data bug:** returns were computed from raw `close` → stock-split artifacts (±4.7 log returns, spurious 84%/yr equal-weight). Now from `adj_close` with corrupt-observation cleaning (|log r| > 1.0 → NaN, 332 rows / 0.04%). Post-fix equal-weight: 14.8%/yr, Sharpe 0.71 — realistic.
 
-- [ ] **evaluate.py:** Backtesting harness
-  - [ ] Load trained model + scaler from `data/models/`
-  - [ ] Create fresh PortfolioEnv on test date range (deterministic, no exploration)
-  - [ ] Step through test set, collect: portfolio_values, weights, returns, dates
-  - [ ] Save results to `data/backtest/results.parquet` (columns: date, portfolio_value, weights, returns)
-  - [ ] Compute metrics (on test set only):
-    - [ ] Cumulative return: (V_final - V_0) / V_0
-    - [ ] Annualized Sharpe: mean(returns) / std(returns) × sqrt(252)
-    - [ ] Max drawdown: min( (peak - V_t) / peak )
-    - [ ] Sortino ratio: mean(returns) / std(downside_returns) × sqrt(252)
-    - [ ] Win rate: % of days with positive return
-    - [ ] Sector exposure: distribution of weights by sector
-  - [ ] Implement baseline policies (test set only):
-    - [ ] Equal-weight: w_i = 1/n (daily rebalance)
-    - [ ] Market-cap weight: w_i ∝ market_cap (from company_info)
-    - [ ] 1/Vol weight: w_i ∝ 1/volatility (from dataset)
-  - [ ] Compute same metrics for baselines
-  - [ ] Output comparison table: agent vs 3 baselines on all metrics
-- [ ] **Visualization module** (in evaluate.py or separate `viz.py`)
-  - [ ] Cumulative value: agent vs 3 baselines (Plotly line chart, save to HTML)
-  - [ ] Drawdown over time: agent only (Plotly area chart)
-  - [ ] Sector allocation heatmap: date × sector (weights over time, Plotly)
-  - [ ] Return distribution: histogram of daily returns (Plotly)
-  - [ ] Weights timeline: stacked bar chart (top 10 holdings over time)
-  - [ ] Save all plots to `data/backtest/plots/`
-  - [ ] Summary: metrics.json with {sharpe, max_dd, sortino, win_rate, ...}
+### Phase 3d: Deployment & Inference — DONE
 
-### Phase 3d: Deployment & Inference
-
-**Goal:** Build inference script for daily portfolio allocation, integrate with production workflow.
-
-- [ ] **infer.py:** Inference module
-  - [ ] Function: `predict_weights(agent, latest_features_df) -> np.ndarray`
-  - [ ] Input: DataFrame [n_tickers × feature_dim] (latest date from ml_dataset)
-  - [ ] Load trained model + feature scaler
-  - [ ] Normalize features using train scaler
-  - [ ] Forward pass through policy (deterministic, no noise)
-  - [ ] Apply softmax, return weights summing to 1
-  - [ ] Error handling: return equal-weight if inference fails
-- [ ] **run_allocation.py:** Daily entry point
-  - [ ] Load latest `ml_dataset.parquet` (most recent date per ticker)
-  - [ ] Call `predict_weights(agent, latest_features)`
-  - [ ] Output: CSV with columns {ticker, weight, sector} (sorted by weight descending)
-  - [ ] Alternative output: JSON with {timestamp, total_value, tickers: [{ticker, weight, sector}]}
-  - [ ] Logging: timestamp, total_value, any warnings (extreme weights, NaNs, model errors)
-  - [ ] CLI: `python src/agent/run_allocation.py --date 2026-07-01 --format csv`
-- [ ] **Model versioning**
-  - [ ] Save final model: `data/models/agent_final.pt`
-  - [ ] Save metadata: training_date, test_sharpe, test_max_dd, scaler_version, feature_list
-  - [ ] Fallback logic: If load fails, return equal-weight portfolio + log warning
-- [ ] **Integration testing**
-  - [ ] `test_inference_daily.py`: Load model, run inference, verify output shape & sum
-  - [ ] `test_allocation_output.py`: Run run_allocation.py, verify CSV/JSON validity
+- [x] **infer.py:** `predict_weights(date)` reuses env obs pipeline (state identical to training)
+  - [x] Equal-weight fallback on load failure or invalid weights (never crashes)
+- [x] **run_allocation.py:** CLI `--date --format csv|json --model`; sector-enriched output → `data/allocations/allocation_YYYY-MM-DD.{csv,json}`
+- [x] **test_inference_output.py:** sum=1, sorted, no dupes, fallback path, pre-range date error
 
 ### Phase 3 Quality Gates (Before Merge)
 
-- [ ] **Correctness checks:**
-  - [ ] No lookahead bias: all validation/test dates use only past data
-  - [ ] Weights sum to 1.0 (within 1e-6 tolerance)
-  - [ ] No NaN in portfolio values or weights
-  - [ ] Portfolio value always ≥ initial capital (no rounding errors)
-
-- [ ] **Performance checks:**
-  - [ ] Test Sharpe ratio ≥ 0.5 (better than random baseline)
-  - [ ] Test max drawdown < 50% (not catastrophic losses)
-  - [ ] Training curves show convergence (loss/reward improving over time)
-  - [ ] Validation Sharpe tracks training (not overfitting)
-
-- [ ] **Code checks:**
-  - [ ] Type hints on all functions
-  - [ ] Docstrings on public API
-  - [ ] No print() statements (use logger)
-  - [ ] No hardcoded paths (use config)
-  - [ ] Each file ≤ 300 lines
-  - [ ] All imports at top, organized by stdlib/3rd-party/local
-
-- [ ] **Documentation:**
-  - [ ] README in `src/agent/`: quick-start guide, config example, output format
-  - [ ] Inline comments on complex logic (RL algorithms, normalization)
+- [x] **Correctness:** no lookahead (train-only scaler, backward merges, trailing vol); weights sum to 1 (1e-9); no NaN in values/weights; inactive tickers always 0 weight
+- [ ] **Performance (needs full training run):**
+  - [ ] Test Sharpe ≥ equal-weight baseline (0.71) — smoke agent merely matches it
+  - [ ] Test max drawdown < 50%
+  - [ ] Training curves converge; val Sharpe tracks training (not overfitting)
+- [x] **Code:** type hints, docstrings, logger (no print in src modules), config-driven paths, files ≤300 lines
+- [x] **Documentation:** `src/agent/README.md`, CLAUDE.md architecture guide updated with as-built design
   - [ ] Architecture diagram (state flow, module dependencies)
 
 ---
