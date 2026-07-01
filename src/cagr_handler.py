@@ -49,31 +49,38 @@ def calc_annual_cagr(df: pd.DataFrame, col: str, lookback: int = 20) -> pd.Serie
     """
     Calculate CAGR using December values only (annual anchors),
     then forward-fill Q1/Q2/Q3 within each year.
-    
+
     This matches Bolsai's reported methodology where CAGR is anchored
     to fiscal year ends.
-    
+
     Parameters:
         df: DataFrame with 'reference_date' and a data column
         col: Column name containing values to calculate CAGR from
         lookback: Number of quarters to look back (default 20 = 5 years)
-    
+
     Returns:
         Series with CAGR values and annual forward-fill applied
     """
-    result = pd.Series(np.nan, index=df.index)
-    
-    # Calculate CAGR for each quarter by looking back exactly 'lookback' quarters
-    for i in range(lookback, len(df)):
-        result.iloc[i] = cagr_standard(df[col].iloc[i], df[col].iloc[i - lookback])
-    
+    values = df[col].to_numpy()
+    result = np.full(len(values), np.nan, dtype=np.float64)
+
+    # ponytail: vectorized CAGR calculation using numpy shift
+    # Avoid loop over .iloc[], use numpy slicing instead
+    v_now = values[lookback:]
+    v_ago = values[:-lookback]
+
+    # Apply CAGR formula element-wise: only where both values are positive.
+    # lookback is in quarters; CAGR exponent is per-year → years = lookback / 4
+    years = lookback / 4
+    valid = (v_now > 0) & (v_ago > 0) & (~np.isnan(v_now)) & (~np.isnan(v_ago))
+    result[lookback:][valid] = ((v_now[valid] / v_ago[valid]) ** (1 / years) - 1) * 100
+
     # Forward-fill within each calendar year
-    # (CAGR is based on fiscal year end, so same value for all quarters of that year)
     df_temp = df.copy()
     df_temp["_cagr"] = result
     df_temp["_year"] = df_temp["reference_date"].dt.year
     df_temp["_cagr"] = df_temp.groupby("_year")["_cagr"].ffill()
-    
+
     return df_temp["_cagr"]
 
 
@@ -81,26 +88,26 @@ def had_negative_base(df: pd.DataFrame, col: str, lookback: int = 20) -> pd.Seri
     """
     Binary flag indicating whether base year (lookback quarters ago)
     had negative or zero value, making standard CAGR undefined.
-    
+
     This is important for earnings: negative earnings 5 years ago
     means we can't compute a meaningful CAGR.
-    
+
     Returns:
         Series with 1 where base was negative/zero, 0 otherwise
     """
-    result = pd.Series(0, index=df.index)
-    
-    for i in range(lookback, len(df)):
-        v_ago = df[col].iloc[i - lookback]
-        if pd.isna(v_ago) or v_ago <= 0:
-            result.iloc[i] = 1
-    
+    values = df[col].to_numpy()
+    result = np.zeros(len(values), dtype=np.int32)
+
+    # ponytail: vectorized flag check using numpy slicing
+    v_ago = values[:-lookback]
+    result[lookback:] = (v_ago <= 0) | np.isnan(v_ago)
+
     # Forward-fill within year (same logic as CAGR)
     df_temp = df.copy()
     df_temp["_flag"] = result
     df_temp["_year"] = df_temp["reference_date"].dt.year
     df_temp["_flag"] = df_temp.groupby("_year")["_flag"].ffill()
-    
+
     return df_temp["_flag"].astype(int)
 
 
