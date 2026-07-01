@@ -8,45 +8,141 @@ Goal:
 - Allocate capital between equities, ETFs, crypto, and risk-free assets (e.g., Selic/CDI)
 - NOT predict prices — instead, decide how to allocate capital
 
-Overall: the model will betweene given a certain amount every month (R$1000) to invest however it wants. With each passing month, it can 
-also move some of the invested money to other assets. The model should not try to predict prices, but it should learn how to invest and 
-when to invest, avoiding risk and getting a good return. 
+Core Idea:
+The model receives a fixed monthly contribution (R$1000 in today's money, inflation-adjusted) and decides
+how to allocate it across available assets. Each month it can also rebalance existing positions. The goal is
+to learn a strategy that maximizes long-term growth while controlling volatility, drawdowns, and turnover.
 
---------------------------------
+Key Constraint: No lookahead bias. The model can only use data up to the current month; no future information
+leaks into training or decisions.
 
+===============================
+PIPELINE STRUCTURE
+===============================
+
+Stage 1: Data Collection (src/data_collection/)
+- Fetch daily prices (OHLCV) for all B3 equities via BolsAI API
+- Fetch quarterly fundamentals (P/E, P/B, ROE, debt, growth) via BolsAI API
+- Fetch dividend history (20 years) via BolsAI API
+- Fetch company metadata (sector, status) via BolsAI API
+- Fetch macro data (SELIC, CDI, IPCA) from BCB SGS API
+- Checkpoint & resume mid-run; idempotent (re-run fetches only new data)
+- Output: raw parquets in data/raw/
+
+Stage 2: Dataset Build (src/build_dataset/)
+- Load all raw data; filter tickers with fundamentals coverage
+- Merge prices + fundamentals (quarterly onto daily) with no lookahead bias (merge_asof backward)
+- Join company info (sector, status) and dividends
+- Compute features:
+  * Price features: returns, volatility, RSI, moving averages, drawdown
+  * Fundamental features: P/E, P/B, ROE, leverage, profitability margins, growth CAGR
+  * Macro features: real return (adjusted for IPCA), excess return (vs SELIC), rate environment
+  * Dividend features: yield, frequency, payout ratio
+- Clean: remove duplicates, handle NaNs, remove outliers, sort by ticker+date
+- Output: feature-complete parquet in data/processed/ml_dataset.parquet (one row per ticker+date)
+
+Stage 3: Exploration & Validation (src/visualizations/)
+- Validate data quality: price coverage, completeness, liquidity, trading gaps
+- Analyze macro environment: SELIC and IPCA regimes
+- Compare inflation-adjusted returns across key tickers
+- Examine fundamental distributions by sector (P/E, ROE, margins, leverage)
+- Review dividend payout trends
+- Output: interactive Jupyter notebook (exploration.ipynb) with 15+ charts
+
+Stage 4: RL Agent Training (ml_agent branch, future)
+- Consume feature-complete dataset from Stage 2
+- Train RL agent (DQN, PPO, or actor-critic) to learn allocation strategy
+- Backtesting harness: monthly steps, fixed contributions, transaction costs
+- Reward function: return − λ1·volatility − λ2·max_drawdown − λ3·turnover
+- Constraints: position limits, turnover cap (~10–20% per month), gradual rebalancing
+- Output: trained agent, performance metrics (Sharpe, Calmar, max drawdown vs IBOV benchmark) 
+
+================================
+DATA VALIDATION & QUALITY CHECKS
+================================
+
+Before training, Stage 3 (Exploration Notebook) validates:
+
+1. Price Coverage
+   - Which tickers have continuous historical data
+   - Identify missing years / trading gaps (flag if >100 days)
+   - Confirm date range spans sufficient history for learning
+
+2. Data Completeness
+   - % of missing fundamentals per column
+   - Identify columns with poor coverage (<5% present = drop)
+   - Cross-check ticker count: prices vs fundamentals vs company_info
+
+3. Liquidity & Viability
+   - Median daily traded amount per ticker (log scale)
+   - Flag micro-caps (<1M BRL/day) — may introduce noise
+   - Exclude illiquid tickers if they skew statistics
+
+4. Macro Regime
+   - SELIC and IPCA trends over historical period
+   - Validate rate environment covers multiple regimes (high/low/volatile)
+   - Ensure sufficient economic variation for learning
+
+5. Fundamental Sanity
+   - Distribution of key ratios by sector (P/E, ROE, net margin, leverage)
+   - Identify outliers (clip extremes for charting)
+   - Confirm sector metadata coverage (no unknown sectors)
+
+6. Return & Risk Patterns
+   - Inflation-adjusted returns for key tickers (PETR4, VALE3, WEGE3, ITUB4)
+   - Compare nominal vs real vs SELIC benchmark
+   - Validate dividend data (20-year history coverage)
+
+Output: Interactive charts + summary statistics. All data is local (no API calls); ready for Stage 2 dataset build.
+
+================================
 INPUT DATA (FEATURES)
+================================
 
-1. Market Data (per asset):
-- Historical prices (OHLC)
-- Returns
-- Volume
-- Technical indicators:
-  - Momentum
-  - Moving averages
-  - Volatility
-  - Drawdowns
+Source: Feature-complete parquet from Stage 2 (data/processed/ml_dataset.parquet)
 
-2. Fundamental Data (for equities only):
-- P/E (Price/Earnings)
-- P/B (Price/Book)
-- ROE
-- Dividend Yield
-- Growth metrics
-- Other data may also be included
+1. Market Data (per asset, daily):
+   - OHLCV (open, high, low, close, volume)
+   - Log returns (price changes)
+   - Volume-weighted price (traded_amount, num_trades)
 
-3. Macro / Context Features:
-- Risk-free rate (e.g., Selic/CDI)
-- Trend of interest rates
-- Market regime (bull / bear)
-- Market volatility indicators
+2. Technical Indicators (per asset, computed on daily prices):
+   - Momentum: log returns over 1m, 3m, 6m, 12m windows
+   - Volatility: rolling 20-day and 60-day standard deviations
+   - RSI (Relative Strength Index, 14-day)
+   - Moving averages: MA20, MA60
+   - Drawdown: max peak-to-trough decline
 
-4. Optional:
-- Sentiment (news, trends)
+3. Fundamental Data (per asset, quarterly; forward-filled to daily):
+   - Valuation: P/E (pl), P/B (pvp), EV/EBITDA, EV/EBIT
+   - Profitability: ROE, ROA, net margin, EBITDA margin, EBIT margin
+   - Leverage: debt/equity, net_debt/equity, net_debt/EBITDA, current ratio
+   - Growth: CAGR revenue (5Y), CAGR earnings (5Y)
+   - Scale: market cap, total assets
 
-5. Portfolio State:
-- Current asset allocation
-- Available cash
-- User risk profile (low / medium / high)
+4. Dividend Features (per asset, computed monthly):
+   - Dividend yield (12-month rolling)
+   - Dividend frequency (payments per year)
+   - Payout ratio (dividend per share / earnings per share)
+
+5. Macro / Context Features (market-wide, daily):
+   - Risk-free rate: SELIC daily (annualized; = benchmark cost of capital)
+   - Rate trend: SELIC 20-day momentum
+   - Inflation: IPCA monthly (forward-filled to daily)
+   - Real return: log_return − IPCA inflation
+   - Excess return: log_return − SELIC risk-free rate
+   - Rate environment: high/low/stable (derived from SELIC levels)
+
+6. Company / Sector Features:
+   - Sector classification (18+ sectors: Bancos, Bebidas, Energia, Varejo, etc.)
+   - Listing segment (IBOVESPA, SMALL CAP, etc.)
+   - Status (ATIVO, SUSPENSO, CANCELADO)
+
+7. Portfolio State (at rebalancing date):
+   - Current weights (allocation per asset)
+   - Available cash (% uninvested)
+   - User risk profile (input: low / medium / high)
+   - Performance YTD, max drawdown realized
 
 --------------------------------
 
@@ -91,84 +187,181 @@ CORE FUNCTIONALITY
 6. Capital Flow
 - Add fixed monthly contributions (inflation-adjusted) -> R$1000 in today's money -> Older assets don't get an unfair advantage
 
---------------------------------
-
+================================
 OBJECTIVE FUNCTION
+================================
 
-Maximize:
+Monthly Reward (to maximize over 20-year backtest):
 
-- Long-term portfolio growth
+  reward(t) = portfolio_return(t)
+              − λ₁ * volatility(t)
+              − λ₂ * max_drawdown(t)
+              − λ₃ * turnover(t)
+              − λ₄ * concentration_penalty(t)
 
-While penalizing:
+Where:
+  portfolio_return(t)   = % gain this month (including dividends + new contributions)
+  volatility(t)         = rolling 60-day standard deviation of daily returns
+  max_drawdown(t)       = max peak-to-trough decline over 12-month window
+  turnover(t)           = % of portfolio value rebalanced (bought + sold)
+  concentration_penalty = extra cost if any single asset exceeds position limit
 
-- Volatility
-- Drawdowns
-- Turnover (excessive trading)
+Hyperparameters (λ₁, λ₂, λ₃, λ₄) tune risk aversion. Suggested starting point:
+  λ₁ = 2.0   (penalize volatility)
+  λ₂ = 5.0   (heavily penalize large drawdowns)
+  λ₃ = 1.0   (moderate penalty for turnover)
+  λ₄ = 0.5   (soft penalty for concentration)
 
-Example:
+Long-term Goal: Outperform IBOV (Bovespa index) on risk-adjusted basis (Sharpe > 1.0, Calmar > 0.5).
 
-reward = return
-         - λ1 * volatility
-         - λ2 * drawdown
-         - λ3 * turnover
-
---------------------------------
-
+================================
 CONSTRAINTS / RULES
+================================
 
-- Limit position size per asset
-- Enforce diversification (but not to much that it is meaningless)
-- Limit portfolio turnover (no shuffling money around every month, maybe a maximum of 10% or 20% every month)
-- Gradual rebalancing (no sudden full switches)
-- Always allow allocation to risk-free asset
-- Avoid large forced selling during drawdowns
+Hard Constraints (enforced during rebalancing):
+  - Position limit: no single asset >15% of portfolio
+  - Cash allocation: always maintain 5–20% in risk-free asset (SELIC/CDI)
+  - Turnover cap: ≤20% of portfolio value per month (to avoid churn & transaction costs)
+  - Diversification: ≥10 distinct assets (if available; excludes cash)
+  - No short selling (long-only portfolio)
 
---------------------------------
+Soft Constraints (factored into reward):
+  - Gradual rebalancing: avoid large single-month switches (enforce smooth weights)
+  - No panic selling: avoid forced liquidation during drawdowns; prefer accumulation (DCA)
+  - Dividend reinvestment: automatically add dividends to cash allocation at month-end
 
-TRAINING SETUP
+Transaction Costs:
+  - Assume 0.1% fee per buy/sell (realistic for institutional trading in Brazil)
+  - Deduct from portfolio return on rebalance days
 
-- Historical simulation (backtesting style)
-- Monthly steps
-- Fixed capital contributions (e.g., $1000/month, inflation-adjusted)
-- Use only past data (no lookahead bias)
-- Include transaction costs
+Risk Profile Modes:
+  - Low risk: max volatility = 10%, min cash = 15%, turnover limit = 10%
+  - Medium risk: max volatility = 15%, min cash = 10%, turnover limit = 20%
+  - High risk: max volatility = 20%, min cash = 5%, turnover limit = 25%
 
---------------------------------
+================================
+TRAINING SETUP (Stage 4)
+================================
 
+Simulation Environment:
+  - Historical backtest: 2005–2026 (20 years of data)
+  - Monthly decision steps (252 trading days ≈ 21 months)
+  - Starting capital: R$10,000 (arbitrary; normalized for performance comparison)
+  - Monthly contribution: R$1,000 (inflation-adjusted to constant 2026 BRL)
+  - Rebalancing: monthly at month-end
+
+Data Feed:
+  - Input features: all columns from ml_dataset.parquet, indexed by (ticker, date)
+  - Lookahead protection: agent sees only data ≤ current_month; no future prices/fundamentals leak
+  - Resampling: daily features aggregated/forward-filled to monthly decisions
+
+RL Training:
+  - Algorithm: DQN, PPO, or Actor-Critic (TBD)
+  - State space: 50–200 dimensional (features + portfolio state + market regime)
+  - Action space: continuous weights [0, 1] per asset, sum to 1
+  - Episode length: 240 months (20 years per training run)
+  - Batch training: experience replay from historical episodes
+  - Target: maximize cumulative discounted reward (gamma = 0.99)
+
+Cost Model:
+  - Transaction fees: 0.1% per trade
+  - No slippage (assume order execution at mid-price)
+  - No bid-ask spread
+  - Dividend reinvestment: automatic, no fee
+
+Validation & Testing:
+  - Train on 2005–2020 (15 years)
+  - Validate on 2020–2023 (3 years, unseen during training)
+  - Test on 2024–2026 (2 years, pure holdout)
+  - Performance comparison: vs IBOV, vs S&P 500, vs risk-free SELIC/CDI
+
+================================
 EXPECTED BEHAVIOR
+================================
 
-- In crises:
-  - Avoid panic selling
-  - Gradually increase exposure
+High Interest Rate Environment (SELIC > 12% annualized):
+  - Allocate more to SELIC/CDI (attractive risk-free rate)
+  - Select equities with high dividend yield or growth CAGR
+  - Avoid highly leveraged sectors; favor debt-light industries
 
-- With high interest rates:
-  - Require higher expected return for equities
-  - Allocate more to risk-free asset if needed
+Crisis Period (market down >20%, volatility spike):
+  - Avoid panic selling; increase cash buffer (10–15%)
+  - Implement dollar-cost averaging (DCA): deploy contributions gradually
+  - Accumulate high-quality assets at lower prices
+  - Reduce concentration; increase diversification
 
-- In recoveries:
-  - Increase risk exposure progressively
+Recovery / Bull Market (market up >10%, SELIC declining):
+  - Gradually increase equity exposure (raise from ~70% to ~80–85%)
+  - Favor growth stocks (high CAGR, P/E expansion room)
+  - Rebalance profits into risk-free asset (take gains off the table)
+  - Avoid overconcentration in momentum stocks
 
---------------------------------
+Sector Rotation:
+  - When SELIC is high: favor finance, utilities (stable dividends)
+  - When growth strong: favor technology, consumer discretionary
+  - During transition: hedge with defensive sectors (healthcare, staples)
+  - Always maintain diversification (no single sector >25%)
 
+Dividend-Paying Assets:
+  - Recognize and reinvest steady dividend streams (especially during low-growth periods)
+  - Prioritize dividend aristocrats (consistent payout history)
+  - Tax-efficient: prefer JCP (juros sobre capital próprio) over dividendos in high-tax scenarios
+
+================================
 FINAL OUTPUTS
+================================
 
-- Portfolio allocation over time
-- Equity curve (portfolio value growth)
-- Performance metrics:
-  - Total return
-  - Annualized return
-  - Sharpe ratio
-  - Max drawdown
-  - Volatility
+Trained Agent Artifacts:
+  - Model weights (saved checkpoint)
+  - Allocation policy (learned mapping from features → weights)
+  - Training history (loss, reward, Sharpe ratio over epochs)
 
---------------------------------
+Backtest Report:
+  - Equity curve: portfolio value over time
+  - Monthly allocations: weights per asset each month
+  - Transaction log: all buy/sell orders + fees
+  - Performance metrics:
+    * Total return (%)
+    * Annualized return (CAGR)
+    * Volatility (annualized σ)
+    * Sharpe ratio (return / volatility)
+    * Calmar ratio (return / max drawdown)
+    * Max drawdown (%)
+    * Win rate (% of months with positive return)
+    * Turnover (average % per month)
 
-CORE IDEA
+Benchmark Comparison:
+  - vs BOVA11 (iShares Bovespa ETF, IBOV proxy): Sharpe ratio, Calmar ratio, drawdown recovery time
+    [BOVA11 data collected automatically in Stage 1; prices only, no fundamentals]
+  - vs SELIC/CDI: risk-adjusted outperformance
+  - vs S&P 500: for context (global benchmark)
 
-This is not a price prediction model.
+Risk Attribution:
+  - Source of volatility: sector allocation, single-position concentration, timing
+  - Worst month / worst quarter analysis
+  - Recovery pattern: how quickly portfolio rebounds after drawdowns
+
+Sensitivity Analysis:
+  - Impact of λ₁, λ₂, λ₃ hyperparameters on final returns
+  - Robustness to market regimes (high SELIC, low SELIC, crisis)
+  - Sensitivity to transaction costs (test 0%, 0.1%, 0.5%)
+
+Deployment Bundle:
+  - Agent code (inference only, no training)
+  - Feature pipeline (data loading, normalization, forward-fill for missing data)
+  - Allocation logic (weights to portfolio orders)
+  - Risk guardrails (position limits, turnover checks, VaR monitoring)
+
+================================
+CORE INSIGHT
+================================
+
+This is NOT a price prediction model.
 
 It is a:
 
-→ Sequential decision-making system for capital allocation under uncertainty
+  → Sequential decision-making system for capital allocation under uncertainty
 
-This model should be better than the overall index (IBOV)
+The agent learns WHEN and HOW to allocate capital, not WHERE prices are going.
+
+Success = Outperform IBOV on risk-adjusted basis (Sharpe > 1.0, Calmar > 0.5) over 20-year history.

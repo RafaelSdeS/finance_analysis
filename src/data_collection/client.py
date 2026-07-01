@@ -52,6 +52,7 @@ def get_json(client: httpx.Client, path: str, params: dict | None = None) -> dic
                 continue
 
         if r.status_code in RETRYABLE_STATUS:
+            last_err = f"HTTP {r.status_code}"
             wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
             log.warning("%s: HTTP %d, retry in %ds", path, r.status_code, wait)
             time.sleep(wait)

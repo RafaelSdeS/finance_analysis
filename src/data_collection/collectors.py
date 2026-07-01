@@ -75,19 +75,26 @@ def _merge_save(df_new, path, date_col, validator, ticker_label=""):
 # ---------------------------------------------------------------------------
 
 def get_all_tickers() -> list[str]:
+    import re
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
+    _standard = re.compile(r"^[A-Z0-9]{4}[3-8]$")
     try:
         tickers, offset = [], 0
         while True:
             d = client.get_json(c, "/stocks/", {"limit": 500, "offset": offset})
-            batch = d.get("data", [])
+            batch = d.get("tickers", [])
             if not batch:
                 break
-            tickers += [s.get("ticker") or s.get("ticker_primary") for s in batch]
+            tickers += batch
             offset += len(batch)
             if len(batch) < 500:
                 break
-        return sorted(t for t in tickers if t)
+        # exclude BDRs (34/35), FIIs/ETFs (11), and non-standard suffixes
+        # But explicitly include BOVA11 (iShares Bovespa ETF, used as IBOV benchmark)
+        result = sorted(t for t in tickers if _standard.match(t))
+        if "BOVA11" not in result:
+            result.append("BOVA11")
+        return sorted(result)
     finally:
         c.close()
 
@@ -160,36 +167,40 @@ def collect_prices(tickers: list[str], mode: str):
     cp = checkpoint.load("prices", mode)
     try:
         for ticker in tickers:
-            path = config.PRICES_DIR / f"{ticker}.parquet"
-            last = cp.get(ticker, {}).get("last_date")
-            end = datetime.now().strftime("%Y-%m-%d")
+            try:
+                path = config.PRICES_DIR / f"{ticker}.parquet"
+                last = cp.get(ticker, {}).get("last_date")
+                end = datetime.now().strftime("%Y-%m-%d")
 
-            if last:  # incremental: one small window from day after last
-                start = (pd.to_datetime(last) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-                if start > end:
-                    log.info("prices %s: up to date", ticker)
+                if last:  # incremental: one small window from day after last
+                    start = (pd.to_datetime(last) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+                    if start > end:
+                        log.info("prices %s: up to date", ticker)
+                        continue
+                    windows = [(start, end)]
+                else:      # backfill: chunk to stay under the 5000-row cap
+                    windows = list(_chunk_dates(config.START_DATE, end, config.PRICE_CHUNK_YEARS))
+
+                records = []
+                for s, e in windows:
+                    records += _fetch_price_window(c, ticker, s, e)
+                if not records:
+                    log.info("prices %s: no new rows", ticker)
                     continue
-                windows = [(start, end)]
-            else:      # backfill: chunk to stay under the 5000-row cap
-                windows = list(_chunk_dates(config.START_DATE, end, config.PRICE_CHUNK_YEARS))
 
-            records = []
-            for s, e in windows:
-                records += _fetch_price_window(c, ticker, s, e)
-            if not records:
-                log.info("prices %s: no new rows", ticker)
-                continue
+                df = pd.DataFrame(records).rename(columns=PRICE_RENAME)
+                df["ticker"] = ticker
+                df = df[validate.PRICE_COLS]
 
-            df = pd.DataFrame(records).rename(columns=PRICE_RENAME)
-            df["ticker"] = ticker
-            df = df[validate.PRICE_COLS]
-
-            saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"prices/{ticker}")
-            if saved is not None:
-                cp[ticker] = {"last_date": str(saved["trade_date"].max().date()), "rows": len(saved)}
-                checkpoint.save("prices", mode, cp)
-                log.info("prices %s: %d total rows", ticker, len(saved))
-            sleep(config.RATE_LIMIT_SLEEP)
+                saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"prices/{ticker}")
+                if saved is not None:
+                    cp[ticker] = {"last_date": str(saved["trade_date"].max().date()), "rows": len(saved)}
+                    checkpoint.save("prices", mode, cp)
+                    log.info("prices %s: %d total rows", ticker, len(saved))
+            except Exception as e:
+                log.warning("prices %s: skipping after error: %s", ticker, e)
+            finally:
+                sleep(config.RATE_LIMIT_SLEEP)
     finally:
         c.close()
 
@@ -203,23 +214,27 @@ def collect_fundamentals(tickers: list[str], mode: str):
     cp = checkpoint.load("fundamentals", mode)
     try:
         for ticker in tickers:
-            path = config.FUND_DIR / f"{ticker}.parquet"
-            d = client.get_json(c, f"/fundamentals/{ticker}/history", {"limit": config.FUND_LIMIT})
-            hist = d.get("history", [])
-            if not hist:
-                log.warning("fundamentals %s: no data", ticker)
-                continue
+            try:
+                path = config.FUND_DIR / f"{ticker}.parquet"
+                d = client.get_json(c, f"/fundamentals/{ticker}/history", {"limit": config.FUND_LIMIT})
+                hist = d.get("history", [])
+                if not hist:
+                    log.warning("fundamentals %s: no data", ticker)
+                    continue
 
-            df = pd.DataFrame(hist)
-            df["ticker"] = ticker
+                df = pd.DataFrame(hist)
+                df["ticker"] = ticker
 
-            saved = _merge_save(df, path, "reference_date",
-                                validate.validate_fundamentals, f"fundamentals/{ticker}")
-            if saved is not None:
-                cp[ticker] = {"last_quarter": str(saved["reference_date"].max().date()), "rows": len(saved)}
-                checkpoint.save("fundamentals", mode, cp)
-                log.info("fundamentals %s: %d quarters", ticker, len(saved))
-            sleep(config.RATE_LIMIT_SLEEP)
+                saved = _merge_save(df, path, "reference_date",
+                                    validate.validate_fundamentals, f"fundamentals/{ticker}")
+                if saved is not None:
+                    cp[ticker] = {"last_quarter": str(saved["reference_date"].max().date()), "rows": len(saved)}
+                    checkpoint.save("fundamentals", mode, cp)
+                    log.info("fundamentals %s: %d quarters", ticker, len(saved))
+            except Exception as e:
+                log.warning("fundamentals %s: skipping after error: %s", ticker, e)
+            finally:
+                sleep(config.RATE_LIMIT_SLEEP)
     finally:
         c.close()
 
@@ -232,41 +247,94 @@ COMPANY_FIELDS = ["ticker", "ticker_primary", "corporate_name", "trade_name",
                   "cvm_code", "cnpj", "sector", "status"]
 
 
-def _find_company(c, ticker):
-    """Try search terms of decreasing specificity until an exact ticker match."""
-    base = ticker.rstrip("0123456789")
-    for term in dict.fromkeys([base.lower(), base[:3].lower(), base[:2].lower()]):
-        if not term:
-            continue
-        d = client.get_json(c, "/companies/", {"search": term, "limit": 20})
-        for co in d.get("data", []):
-            if str(co.get("ticker_primary", "")).strip().upper() == ticker:
-                return {**{f: co.get(f) for f in COMPANY_FIELDS}, "ticker": ticker}
-        sleep(0.2)
-    return None
+def _fetch_all_companies(c):
+    """Paginate through all companies once. Returns dict: ticker_primary -> company_info."""
+    all_companies = {}
+    offset = 0
+    while True:
+        d = client.get_json(c, "/companies/", {"offset": offset, "limit": 500})
+        batch = d.get("data", [])
+        if not batch:
+            break
+        for co in batch:
+            ticker = str(co.get("ticker_primary", "")).strip().upper()
+            if ticker:  # only companies with a ticker
+                all_companies[ticker] = co
+        offset += len(batch)
+        if len(batch) < 500:  # last page
+            break
+    return all_companies
 
 
 def collect_company_info(tickers: list[str], mode: str):
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
+    cp = checkpoint.load("company_info", mode)
+    done = set(cp.get("done", []))
+    path = config.COMPANY_DIR / "company_info.parquet"
+    # Also skip tickers already in the parquet file (checkpoint-resilient)
+    if path.exists():
+        existing = set(pd.read_parquet(path)["ticker"].dropna().unique())
+        done.update(existing)
     try:
+        # Single paginated fetch of all companies (1-2 API calls vs 500+)
+        all_companies = _fetch_all_companies(c)
+
         rows = []
         for ticker in tickers:
-            row = _find_company(c, ticker)
-            if row:
+            if ticker in done:
+                log.info("company %s: already collected", ticker)
+                continue
+            co = all_companies.get(ticker)
+            if co:
+                row = {**{f: co.get(f) for f in COMPANY_FIELDS}, "ticker": ticker}
                 rows.append(row)
                 log.info("company %s: matched", ticker)
             else:
-                log.warning("company %s: no exact match (skipped)", ticker)
-            sleep(config.RATE_LIMIT_SLEEP)
+                log.warning("company %s: not found on B3", ticker)
+            done.add(ticker)
+            checkpoint.save("company_info", mode, {"done": sorted(done)})
 
         if not rows:
-            log.warning("company_info: nothing collected")
+            log.info("company_info: no new companies collected")
             return
-        df = pd.DataFrame(rows, columns=COMPANY_FIELDS).drop_duplicates("ticker").sort_values("ticker")
-        path = config.COMPANY_DIR / "company_info.parquet"
+        df_new = pd.DataFrame(rows, columns=COMPANY_FIELDS)
+        if path.exists():
+            df_new = pd.concat([pd.read_parquet(path), df_new], ignore_index=True)
+        df_new = df_new.drop_duplicates("ticker", keep="last").sort_values("ticker").reset_index(drop=True)
+        vr = validate.validate_company_info(df_new)
+        if not vr.passed:
+            log.error("company_info validation FAILED: %s", vr.errors)
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(path, index=False)
-        checkpoint.save("company_info", mode, {"tickers": len(df)})
-        log.info("company_info: %d companies", len(df))
+        df_new.to_parquet(path, index=False)
+        log.info("company_info: %d total companies", len(df_new))
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# BolsAI dividends
+# ---------------------------------------------------------------------------
+
+def collect_dividends(tickers: list[str], mode: str):
+    c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
+    try:
+        for ticker in tickers:
+            try:
+                path = config.DIVIDENDS_DIR / f"{ticker}.parquet"
+                d = client.get_json(c, f"/dividends/{ticker}", {"years": config.DIVIDENDS_YEARS})
+                payments = d.get("payments", [])
+                if not payments:
+                    log.warning("dividends %s: no data", ticker)
+                    continue
+                df = pd.DataFrame(payments)
+                df["ticker"] = ticker
+                saved = _merge_save(df, path, "ex_date", validate.validate_dividends, f"dividends/{ticker}")
+                if saved is not None:
+                    log.info("dividends %s: %d payments", ticker, len(saved))
+            except Exception as e:
+                log.warning("dividends %s: skipping after error: %s", ticker, e)
+            finally:
+                sleep(config.RATE_LIMIT_SLEEP)
     finally:
         c.close()

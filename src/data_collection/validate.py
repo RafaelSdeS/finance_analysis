@@ -17,6 +17,8 @@ PRICE_COLS = ["ticker", "trade_date", "open", "high", "low", "close",
 FUND_COLS = ["ticker", "reference_date", "net_income", "equity", "net_revenue",
              "total_assets", "ebitda", "shares_outstanding", "market_cap"]
 
+DIVIDEND_COLS = ["ticker", "ex_date", "payment_date", "type", "value_per_share", "adjusted"]
+
 
 @dataclass
 class ValidationResult:
@@ -80,10 +82,34 @@ def validate_fundamentals(df: pd.DataFrame) -> ValidationResult:
     return r
 
 
+def validate_company_info(df: pd.DataFrame) -> ValidationResult:
+    r = ValidationResult()
+    if df.empty:
+        r.error("empty dataframe")
+        return r
+    required = ["ticker", "ticker_primary", "corporate_name", "cvm_code", "cnpj"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        r.error(f"missing columns: {missing}")
+        return r
+    if df["ticker"].duplicated().any():
+        r.error(f"{df['ticker'].duplicated().sum()} duplicate tickers")
+    return r
+
+
 def validate_macro(df: pd.DataFrame, name: str) -> ValidationResult:
     r = _common(df, "reference_date", ["reference_date", name])
     if not r.passed:
         return r
     if df[name].isna().all():
         r.error("all values null")
+    return r
+
+
+def validate_dividends(df: pd.DataFrame) -> ValidationResult:
+    r = _common(df, "ex_date", DIVIDEND_COLS)
+    if not r.passed:
+        return r
+    if (df["value_per_share"] <= 0).any():
+        r.error(f"{(df['value_per_share'] <= 0).sum()} rows with value_per_share <= 0")
     return r

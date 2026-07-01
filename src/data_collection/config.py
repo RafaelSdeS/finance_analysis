@@ -37,6 +37,8 @@ BCB_BASE = "https://api.bcb.gov.br/dados/serie/bcdata.sgs"
 # Prototype: small representative sample (validated against yfinance).
 PROTOTYPE_TICKERS = ["PETR4", "VALE3", "WEGE3"]
 # Full-scale: fetched dynamically from BolsAI /stocks/ (see collectors.get_all_tickers).
+# Benchmarks: prices only (no fundamentals/dividends); used for performance comparison.
+BENCHMARK_TICKERS = ["BOVA11"]  # iShares Bovespa ETF (IBOV index proxy)
 
 # --- BCB macro series IDs (confirmed against existing data units) ---
 # selic=11 (daily rate ~0.0534), NOT 432 (annual meta target 14.50); cdi=12; ipca=433
@@ -51,9 +53,9 @@ PRICE_CHUNK_YEARS = 10      # ~250 trading days/yr * 10 = 2500 rows < cap
 START_DATE = "2000-01-01"   # backfill floor; API returns what it has
 
 # --- HTTP retry/backoff ---
-MAX_RETRIES = 5
+MAX_RETRIES = 3
 BACKOFF_BASE = 1            # seconds; wait = min(BACKOFF_BASE * 2**attempt, BACKOFF_MAX)
-BACKOFF_MAX = 60
+BACKOFF_MAX = 30
 HTTP_TIMEOUT = 60
 RATE_LIMIT_SLEEP = 0.3      # polite pause between per-ticker calls
 
@@ -63,8 +65,21 @@ PRICES_DIR = RAW_DIR / "prices"
 FUND_DIR = RAW_DIR / "fundamentals"
 MACRO_DIR = RAW_DIR / "macro"
 COMPANY_DIR = RAW_DIR / "company_info"
+DIVIDENDS_DIR = RAW_DIR / "dividends"
 CHECKPOINT_ROOT = PROJECT / "data/checkpoints"
 LOG_DIR = PROJECT / "data/logs"
+
+# --- Collection limits ---
+DIVIDENDS_YEARS = 20  # API max; covers full history
+
+# --- yfinance update pipeline ---
+# Flip any entry to "yfinance" to fall back to the free collector for that data type.
+DATA_SOURCE = {"prices": "bolsai", "fundamentals": "bolsai", "dividends": "bolsai"}
+YF_SUFFIX = ".SA"
+YF_RETRIES = 3
+YF_RETRY_SLEEP = 2          # seconds; doubles each retry
+TICKER_ALIASES: dict[str, str] = {}  # old_ticker -> new_yf_ticker, hand-maintained on B3 renames
+YFINANCE_ONLY_TICKERS = {"BOVA11"}  # ETFs/benchmarks not in BolsAI; always fetch from yfinance
 
 
 def tickers_for(mode: str) -> list[str]:
