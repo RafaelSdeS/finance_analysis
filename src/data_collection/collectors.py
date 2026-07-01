@@ -247,26 +247,23 @@ COMPANY_FIELDS = ["ticker", "ticker_primary", "corporate_name", "trade_name",
                   "cvm_code", "cnpj", "sector", "status"]
 
 
-def _find_company(c, ticker):
-    """Fetch company info directly from /companies/{ticker} endpoint."""
-    try:
-        co = client.get_json(c, f"/companies/{ticker}", {})
-        if co and co.get("ticker_primary"):
-            return {**{f: co.get(f) for f in COMPANY_FIELDS}, "ticker": ticker}
-    except Exception as e:
-        log.debug("company %s: direct lookup failed, trying search as fallback", ticker, exc_info=True)
-
-    # Fallback: fuzzy search if direct lookup fails
-    base = ticker.rstrip("0123456789")
-    for term in dict.fromkeys([base.lower(), base[:3].lower(), base[:2].lower()]):
-        if not term:
-            continue
-        d = client.get_json(c, "/companies/", {"search": term, "limit": 20})
-        for co in d.get("data", []):
-            if str(co.get("ticker_primary", "")).strip().upper() == ticker:
-                return {**{f: co.get(f) for f in COMPANY_FIELDS}, "ticker": ticker}
-        sleep(0.2)
-    return None
+def _fetch_all_companies(c):
+    """Paginate through all companies once. Returns dict: ticker_primary -> company_info."""
+    all_companies = {}
+    offset = 0
+    while True:
+        d = client.get_json(c, "/companies/", {"offset": offset, "limit": 500})
+        batch = d.get("data", [])
+        if not batch:
+            break
+        for co in batch:
+            ticker = str(co.get("ticker_primary", "")).strip().upper()
+            if ticker:  # only companies with a ticker
+                all_companies[ticker] = co
+        offset += len(batch)
+        if len(batch) < 500:  # last page
+            break
+    return all_companies
 
 
 def collect_company_info(tickers: list[str], mode: str):
@@ -279,20 +276,23 @@ def collect_company_info(tickers: list[str], mode: str):
         existing = set(pd.read_parquet(path)["ticker"].dropna().unique())
         done.update(existing)
     try:
+        # Single paginated fetch of all companies (1-2 API calls vs 500+)
+        all_companies = _fetch_all_companies(c)
+
         rows = []
         for ticker in tickers:
             if ticker in done:
                 log.info("company %s: already collected", ticker)
                 continue
-            row = _find_company(c, ticker)
-            if row:
+            co = all_companies.get(ticker)
+            if co:
+                row = {**{f: co.get(f) for f in COMPANY_FIELDS}, "ticker": ticker}
                 rows.append(row)
                 log.info("company %s: matched", ticker)
             else:
-                log.warning("company %s: no exact match (skipped)", ticker)
+                log.warning("company %s: not found on B3", ticker)
             done.add(ticker)
             checkpoint.save("company_info", mode, {"done": sorted(done)})
-            sleep(config.RATE_LIMIT_SLEEP)
 
         if not rows:
             log.info("company_info: no new companies collected")

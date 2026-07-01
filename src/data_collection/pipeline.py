@@ -24,17 +24,33 @@ from . import collectors, config, yf_collectors
 
 
 def _collect(name: str, tickers: list[str], mode: str):
-    """Per-data-type source switch. Flip config.DATA_SOURCE[name] to fall back to BolsAI."""
-    source = config.DATA_SOURCE.get(name, "bolsai")
-    fn = {
+    """Per-data-type source switch. Flip config.DATA_SOURCE[name] to fall back to BolsAI.
+
+    Special handling: YFINANCE_ONLY_TICKERS (e.g. BOVA11) always use yfinance.
+    """
+    # Split tickers: yfinance-only vs global data source
+    yf_only = [t for t in tickers if t in config.YFINANCE_ONLY_TICKERS]
+    others = [t for t in tickers if t not in config.YFINANCE_ONLY_TICKERS]
+
+    fn_map = {
         ("prices", "bolsai"): collectors.collect_prices,
         ("prices", "yfinance"): yf_collectors.collect_prices_yf,
         ("fundamentals", "bolsai"): collectors.collect_fundamentals,
         ("fundamentals", "yfinance"): yf_collectors.collect_fundamentals_yf,
         ("dividends", "bolsai"): collectors.collect_dividends,
         ("dividends", "yfinance"): yf_collectors.collect_dividends_yf,
-    }[(name, source)]
-    return fn(tickers, mode)
+    }
+
+    # Collect from others using global DATA_SOURCE
+    if others:
+        source = config.DATA_SOURCE.get(name, "bolsai")
+        fn = fn_map[(name, source)]
+        fn(others, mode)
+
+    # Collect yfinance-only tickers via yfinance
+    if yf_only:
+        fn = fn_map[(name, "yfinance")]
+        fn(yf_only, mode)
 
 
 def _tickers_with_company_info() -> list[str]:
