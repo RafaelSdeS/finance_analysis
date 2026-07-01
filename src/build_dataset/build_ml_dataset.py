@@ -46,6 +46,9 @@ MACRO_DIR = ROOT / "data/raw/macro"
 DIVIDENDS_DIR = ROOT / "data/raw/dividends"
 OUTPUT_PATH = ROOT / "data/processed/ml_dataset.parquet"
 
+# Tickers with fewer price rows than this carry no usable history (e.g. EGGY3 has 1 row)
+MIN_PRICE_ROWS = 10
+
 # Columns the fundamentals API doesn't actually populate
 FUNDAMENTALS_NULL_COLS = [
     "sector",
@@ -108,6 +111,14 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
         print("  These tickers have price data but zero fundamental coverage.")
         print("  A conservative long-term agent requires fundamental quality signals.")
         prices = prices[prices["ticker"].isin(covered)]
+
+    # Drop tickers with almost no price history — nothing to learn from them
+    row_counts = prices.groupby("ticker").size()
+    too_short = set(row_counts[row_counts < MIN_PRICE_ROWS].index)
+    if too_short:
+        print(f"EXCLUDED (< {MIN_PRICE_ROWS} price rows): {sorted(too_short)}")
+        prices = prices[~prices["ticker"].isin(too_short)]
+        covered -= too_short
 
     print(f"Tickers retained: {sorted(covered)}")
     print(f"Price rows after filter: {len(prices)}")
