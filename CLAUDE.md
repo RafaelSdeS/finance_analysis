@@ -71,30 +71,33 @@ Checks schema, shape, lookahead, NaN counts, return distribution.
 
 See `BUILD_DATASET_ROADMAP.md` for phase-by-phase implementation guide (5 phases: load, merge, feature engineering, clean, validate).
 
-### Stage 3: Train ML Agent
+### Stage 3: Train ML Agent (ml_agent branch)
 
 **Prerequisites:**
 ```bash
 pip install torch stable-baselines3 gymnasium scikit-learn
 ```
 
-**Training** (see `ML_AGENT_ROADMAP.md` for phase-by-phase details):
+**Quick Start** (see `ML_AGENT_ROADMAP.md` for detailed 4-phase guide):
 ```bash
-python src/agent/trainer.py --config src/agent/config.py  # train PPO on ml_dataset
-```
-Saves checkpoint: `data/models/agent_checkpoint_epN.pt`, final: `data/models/agent_final.pt`
+# Phase 1: Environment setup
+python -c "from src.agent.env import PortfolioEnv; print('Environment ready')"
 
-**Evaluation** (backtest on test set):
-```bash
+# Phase 2: Train PPO agent
+python src/agent/trainer.py --config src/agent/config.py
+
+# Phase 3: Backtest on test set
 python src/agent/evaluate.py --model data/models/agent_final.pt
-```
-Outputs: `data/backtest/results.parquet`, plots in `data/backtest/plots/`
 
-**Inference** (daily allocation):
-```bash
+# Phase 4: Daily inference
 python src/agent/run_allocation.py --date 2026-06-29
 ```
-Outputs: portfolio weights (ticker, weight) as CSV/JSON
+
+**Outputs:**
+- Trained model: `data/models/agent_final.pt`
+- Backtest results: `data/backtest/results.parquet`
+- Visualizations: `data/backtest/plots/*.html`
+- Portfolio weights (daily): CSV/JSON with (ticker, weight) pairs
 
 ### Utilities
 
@@ -117,6 +120,8 @@ Charts: price coverage, data completeness, liquidity, sector breakdown, inflatio
 ### Tests
 
 All tests are plain Python scripts (no pytest). Run from project root:
+
+**Stages 1–2 (Data Collection & Dataset Build):**
 ```bash
 python tests/processed_data/test_final_dataset.py
 python tests/processed_data/test_final_dataset.py --file data/processed/ml_dataset.parquet
@@ -129,6 +134,26 @@ python tests/raw_data/test_ticker_data.py
 python tests/raw_data/inspect_all_data.py
 python tests/raw_data/inspect_company_info.py
 ```
+
+**Stage 3 (ML Agent, ml_agent branch):**
+```bash
+# Phase 1: Environment validation
+python tests/agent/test_env_basic.py           # Verify PortfolioEnv reset/step, state shapes
+
+# Phase 2: Training validation
+python tests/agent/test_training_convergence.py  # Run N episodes, verify loss decreases
+
+# Phase 3: Evaluation validation
+python tests/agent/test_backtest_metrics.py    # Run backtest, verify Sharpe/max_dd are reasonable
+
+# Phase 4: Inference validation
+python tests/agent/test_inference_output.py    # Verify weights sum to 1, no NaN, valid shape
+```
+
+**Development workflow:**
+- After each phase implementation, run corresponding test
+- Keep tests lightweight (no fixtures, direct function calls)
+- Log results to console; save detailed output to `data/logs/test_*.log`
 
 ## Branches
 
@@ -216,29 +241,225 @@ data/processed/ml_dataset.parquet      (one row per ticker+date, includes divide
 |------|---------|
 | `src/visualizations/financial_view.py` | Standalone Plotly chart: BBAS3 nominal/inflation-adjusted prices + SELIC overlay (uses `yfinance`). |
 
-**Stage 3 (ML Agent):** See `ML_AGENT_ROADMAP.md` for detailed phase-by-phase guide.
+**Stage 3 (ML Agent, ml_agent branch):** See `ML_AGENT_ROADMAP.md` for detailed 4-phase guide (foundation → training → evaluation → deployment).
 
-| File | Purpose |
-|------|---------|
-| `src/agent/config.py` | Hyperparameters, feature list, train/val/test split dates |
-| `src/agent/env.py` | PortfolioEnv (gymnasium interface): state normalization, step logic, reward |
-| `src/agent/policy.py` | Policy network (Actor-Critic MLP) or SB3 wrapper |
-| `src/agent/trainer.py` | PPO training loop, checkpointing, early stopping |
-| `src/agent/evaluate.py` | Backtesting on test set, metrics, baseline comparisons, plots |
-| `src/agent/infer.py` | Inference: load agent + features → weights |
-| `src/agent/run_allocation.py` | Daily entry point: predict portfolio weights for today |
+| File | Purpose | Status |
+|------|---------|--------|
+| `src/agent/__init__.py` | Package exports | Phase 1 |
+| `src/agent/config.py` | Hyperparams: learning rate, gamma, feature list, train/val/test split dates, paths | Phase 1 |
+| `src/agent/env.py` | PortfolioEnv (gymnasium interface): state space, action space, reward, normalization | Phase 1 |
+| `src/agent/policy.py` | Policy network: MLP actor-critic or stable-baselines3 wrapper | Phase 2 |
+| `src/agent/trainer.py` | Training loop: PPO (or SB3), checkpointing, logging, early stopping on val metrics | Phase 2 |
+| `src/agent/evaluate.py` | Backtesting: metrics (Sharpe, max DD, Sortino), baseline comparisons, plots | Phase 3 |
+| `src/agent/infer.py` | Inference: load trained agent, predict weights from feature state | Phase 4 |
+| `src/agent/run_allocation.py` | Daily entry point: load latest data, predict weights, output CSV/JSON | Phase 4 |
 
 ## Branches
 
 - **main:** Stages 1–2 (data collection + dataset build). Latest stable.
-- **ml_agent:** Stage 3 (ML agent training). See `ML_AGENT_ROADMAP.md` for phase-by-phase implementation guide.
+- **ml_agent:** Stage 3 (RL agent training). See `ML_AGENT_ROADMAP.md` for phase-by-phase implementation guide.
+
+---
+
+## Stage 3: ML Agent Architecture & Development Guide (ml_agent branch)
+
+### Purpose & Scope
+
+**Goal:** Build and train a reinforcement learning agent to allocate a portfolio across B3 equities by learning to maximize risk-adjusted returns (Sharpe ratio) using the feature-complete dataset from Stage 2.
+
+**Scope:**
+- **Input:** `data/processed/ml_dataset.parquet` (one row per ticker + date, with prices, fundamentals, macro features)
+- **Environment:** PortfolioEnv (gymnasium interface) simulating daily portfolio rebalancing
+- **Agent:** PPO (Proximal Policy Optimization) via stable-baselines3
+- **Output:** Trained policy network, backtest results, daily allocation weights
+- **Timeline:** 4 phases (foundation → training → evaluation → deployment)
+
+### Key Architectural Decisions
+
+#### 1. **Data Splits: Temporal, Not Random**
+- **Train (60%):** Oldest dates → mid-period (learn from historical trends)
+- **Val (20%):** Mid-period → near-recent (hyperparameter tuning, early stopping)
+- **Test (20%):** Most recent → now (final evaluation, no touching during training)
+- **Why:** Prevents lookahead bias and respects market regime shifts
+- **Implementation:** Config specifies date ranges, not row counts
+
+#### 2. **Normalization: Train-Set-Only Scaler**
+- Fit StandardScaler on training data only
+- Apply same scaler to val and test (prevents leakage)
+- Store scaler in `data/models/feature_scaler.pkl` for inference
+- **Why:** Production inference must use train-set statistics, not future data
+
+#### 3. **State Space: Concatenated Normalized Features**
+- Per-ticker features (normalized): prices, technicals, fundamentals, macro
+- All tickers' features concatenated into one state vector: shape `[n_tickers * feature_dim]`
+- Example: 50 tickers × 30 features = 1500-dim state
+- **Why:** Simple, end-to-end learnable (agent discovers feature importance)
+
+#### 4. **Action Space: Continuous Weights via Softmax**
+- Raw network output → softmax → probability distribution (simplex: Σw_i = 1, w_i ≥ 0)
+- No-shorting constraint built-in; no manual clipping
+- **Why:** Mathematically clean, stable gradient flow
+
+#### 5. **Reward Function: Daily Log Return (Simple)**
+- `r_t = log(portfolio_value_t / portfolio_value_{t-1})`
+- No transaction costs, no risk penalties (v1)
+- **Future:** Switch to Sharpe-based reward if convergence is poor
+- **Why:** Unambiguous signal; easier to debug than composite rewards
+
+#### 6. **Algorithm: PPO via stable-baselines3**
+- Use SB3's PPO implementation (vetted, production-ready)
+- Hyperparameters: learning_rate=3e-4, gamma=0.99, gae_lambda=0.95
+- **Alternative:** Custom torch loop if research requires fine-grained control
+- **Why:** Faster iteration, fewer bugs, strong convergence guarantees
+
+### Coding Conventions & Style
+
+#### File Organization (Small File Principle)
+- Each module ≤300 lines (config, env, trainer, evaluate, infer are separate)
+- `__init__.py` exports public API only
+- Helper functions (e.g., `_compute_returns()`) go in same file or a dedicated `_utils.py`
+
+#### Configuration: Immutable Dataclasses
+```python
+# src/agent/config.py
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class AgentConfig:
+    learning_rate: float = 3e-4
+    gamma: float = 0.99
+    train_split: float = 0.60  # Date range split
+    feature_list: list[str] = field(default_factory=lambda: [...])
+```
+- All hyperparameters in config, zero hardcoding
+- Frozen prevents accidental mutation
+
+#### Type Hints: Mandatory
+```python
+def train_agent(config: AgentConfig, env: PortfolioEnv) -> PPO:
+    """Train PPO on PortfolioEnv."""
+    ...
+```
+- All function signatures include type hints
+- Use `Optional[T]` explicitly, never bare `None`
+
+#### Logging: Structured, Not Print
+```python
+import logging
+logger = logging.getLogger(__name__)
+
+# Good
+logger.info(f"Epoch {ep}: sharpe={sharpe:.3f}, max_dd={max_dd:.3f}")
+
+# Bad
+print(f"Epoch {ep}: ...")
+```
+- File: `data/logs/agent_training_YYYYMMDD-HHMMSS.jsonl` (one JSON per line)
+- Log levels: DEBUG (step-level), INFO (episode-level), WARNING (anomalies)
+
+#### Testing: Lightweight, No pytest
+- One-shot validation scripts in `tests/agent/`
+- Example: `test_env_reset.py` manually checks PortfolioEnv reset logic
+- No fixtures, no parametrization; just `if __name__ == '__main__':`
+
+#### Naming: Snake Case + Descriptor
+```python
+# Good
+portfolio_value_trajectory = [...]
+compute_sharpe_ratio(returns)
+class PortfolioEnv(gym.Env):
+
+# Bad
+pv = [...]
+sharpe_fn(r)
+class Env:
+```
+
+### Module Responsibilities & Data Flow
+
+**src/agent/config.py**
+- Single source of truth for hyperparams, paths, feature list
+- No external reads (no `yaml`, no `.env`); all hardcoded or passed via CLI args
+- Exports: `AgentConfig` dataclass
+
+**src/agent/env.py**
+- Implements `gymnasium.Env` interface
+- Loads `ml_dataset.parquet` once in `__init__`
+- `reset()`: Return normalized state for first date in date range
+- `step(action)`: Apply weights, compute reward, advance date, return next state
+- Handles train/val/test date ranges via config
+
+**src/agent/trainer.py**
+- Instantiates `PortfolioEnv` and PPO agent
+- Training loop: collect trajectories, compute returns, update policy
+- Logging: log metrics to file every N episodes
+- Checkpointing: save model every N episodes
+- Early stopping: monitor val Sharpe, stop if degrades for M cycles
+
+**src/agent/evaluate.py**
+- Instantiate fresh PortfolioEnv on test date range
+- Run trained agent deterministically (no exploration noise)
+- Compute metrics: Sharpe, max DD, Sortino, win rate
+- Compare vs baselines (equal-weight, market-cap, 1/vol)
+- Generate plots: cumulative value, drawdown, sector allocation, weights timeline
+- Save: results.parquet, plots/*.html, metrics.json
+
+**src/agent/infer.py**
+- Load trained model and feature scaler
+- Single function: `predict_weights(agent, latest_features_df) -> np.ndarray`
+- Returns weights [n_tickers] summing to 1
+
+**src/agent/run_allocation.py**
+- Entry point for daily production use
+- Load latest data from `ml_dataset.parquet`
+- Call `predict_weights()`, output as CSV/JSON
+- Logging: timestamp, total value, any warnings
+
+### Key Assumptions & Constraints
+
+#### Assumptions
+1. **Feature Completeness:** All features in `ml_dataset.parquet` are present and up-to-date
+2. **No Transaction Costs (v1):** Reward ignores trading friction; v2 can add cost penalties
+3. **Daily Rebalancing:** Agent rebalances portfolio weights every day (high turnover; add cost constraints in v2)
+4. **No Bankruptcy Risk:** All stocks remain liquid and tradeable throughout simulation
+5. **Macro Stationarity:** SELIC, inflation regime doesn't change catastrophically (strong assumption; add regime detection in v2)
+
+#### Constraints
+1. **No Shorting:** Weights w_i ≥ 0 (enforced by softmax)
+2. **Full Allocation:** Σw_i = 1 (no cash buffer; future versions can add cash_allocation feature)
+3. **Training Data:** ≥2 years of history (train+val+test; if <2y, reduce test set)
+4. **Feature NaNs:** Dataset must have <5% NaN in critical columns after Stage 2 cleaning
+
+### Development Workflow
+
+#### Incremental Phases (See ML_AGENT_ROADMAP.md)
+1. **Phase 1 (Week 1):** Foundation - environment, state/action spaces, random policy testing
+2. **Phase 2 (Week 2):** Training - PPO agent, hyperparameter tuning, convergence checks
+3. **Phase 3 (Week 3):** Evaluation - backtesting, metrics, baseline comparisons, plots
+4. **Phase 4 (Week 4):** Deployment - inference script, daily integration, fallback logic
+
+#### Verification Checkpoints
+- **After Phase 1:** `test_env_reset.py` passes, portfolio value tracks correctly for random policy
+- **After Phase 2:** Agent loss curves downward, portfolio value trends positive over time
+- **After Phase 3:** Test Sharpe ≥ baseline, max drawdown < 30%, consistent across runs
+- **After Phase 4:** Daily inference produces valid weights [0, 1], sums to 1, logs complete
+
+#### Branch Strategy
+- Work on `ml_agent` branch throughout all 4 phases
+- Commit after each phase with clear message: "phase: 1. foundation - env & state space"
+- Merge to main only after Phase 3 passes all metrics
+
+---
 
 ## Critical Caveats
 
 ### Stage 3 (ml_agent branch)
-- ML agent code lives in `src/agent/` (not yet implemented).
-- Detailed roadmap with 4 phases (foundation, training, eval, deploy) is in `ML_AGENT_ROADMAP.md`.
-- Add dependencies: `torch`, `stable-baselines3`, `gymnasium`, `scikit-learn` before running.
+- ML agent code lives in `src/agent/` (see comprehensive guide above in "Stage 3: ML Agent Architecture & Development Guide")
+- Detailed roadmap with 4 phases (foundation, training, eval, deploy) is in `ML_AGENT_ROADMAP.md`
+- **Dependencies required:** `torch==2.3.0`, `stable-baselines3==2.4.0`, `gymnasium==0.29.0`, `scikit-learn>=1.5.0` (add to requirements.txt)
+- **Data dependency:** Stage 2 must be complete; `data/processed/ml_dataset.parquet` must exist and pass validation
+- **Temporal splits required:** Never split by rows; use date ranges (train/val/test by date order)
+- **Scaler management:** Fit StandardScaler on train set only; save and load for inference (prevent lookahead)
 
 ### `fill_cagr_columns()` is Commented Out
 Line 143 in `build_ml_dataset.py` has the call commented out:

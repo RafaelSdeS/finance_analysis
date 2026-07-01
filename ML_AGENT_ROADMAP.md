@@ -2,7 +2,27 @@
 
 Building the RL agent for portfolio allocation (Stage 3).
 
+**See also:** `CLAUDE.md` ("Stage 3: ML Agent Architecture & Development Guide") for architectural decisions, coding conventions, and development workflow. `TODO.md` contains actionable task checklists for each phase below.
+
+---
+
+## Key Architectural Decisions (from CLAUDE.md)
+
+This roadmap implements the following architectural decisions; **read CLAUDE.md for full rationale:**
+
+1. **Temporal Data Splits (60/20/20 by date):** Train on oldest dates, validate on mid-period, test on most recent. Prevents lookahead bias and respects market regime shifts.
+2. **Train-Only Scaler:** Fit StandardScaler on training data only; reuse for validation/test/inference. Stored as `data/models/feature_scaler.pkl`.
+3. **State Space:** Concatenated normalized features `[n_tickers * feature_dim]`. Simple, learnable end-to-end.
+4. **Action Space:** Continuous weights via softmax output (guarantees simplex: Σw_i=1, w_i≥0). No-shorting constraint built-in.
+5. **Reward Function:** Daily log return `r_t = log(V_t / V_{t-1})` (simple, unambiguous; switch to Sharpe-based if variance is high).
+6. **Algorithm:** PPO via `stable-baselines3` (vetted, production-ready, fast iteration).
+7. **Code Style:** Immutable dataclasses (config), type hints (all functions), ≤300 lines per file, structured logging (JSONL).
+
+---
+
 ## Phase 1: Foundation & Environment Design
+
+**Task List:** See `TODO.md` → "Phase 3a: Foundation & Environment Design" for detailed checkboxes and sub-tasks.
 
 ### 1a. State Space Definition
 From `ml_dataset.parquet`, each state (ticker, date) includes:
@@ -58,6 +78,8 @@ Encourages risk-adjusted returns; adds complexity.
   - `render()`: (Optional) Print portfolio value and weights
 
 ## Phase 2: Training Loop & Infrastructure
+
+**Task List:** See `TODO.md` → "Phase 3b: Training Infrastructure" for detailed checkboxes and sub-tasks.
 
 ### 2a. Data Pipeline
 - [ ] Split timeline into train (60%) / val (20%) / test (20%) by date (preserve temporal order)
@@ -115,6 +137,8 @@ for episode in range(num_episodes):
 
 ## Phase 3: Evaluation & Backtesting
 
+**Task List:** See `TODO.md` → "Phase 3c: Evaluation & Backtesting" for detailed checkboxes and sub-tasks.
+
 ### 3a. Metrics (compute on *test set only*)
 - **Cumulative Return:** `(V_final - V_init) / V_init`
 - **Annualized Sharpe:** `mean(daily_returns) / std(daily_returns) * sqrt(252)`
@@ -167,6 +191,8 @@ def backtest(agent, env_test, metrics_to_compute):
 - [ ] Comparative table: agent vs 3 baselines on all metrics
 
 ## Phase 4: Deployment & Inference
+
+**Task List:** See `TODO.md` → "Phase 3d: Deployment & Inference" for detailed checkboxes and sub-tasks.
 
 ### 4a. Inference Module (`src/agent/infer.py`)
 ```python
@@ -242,6 +268,18 @@ scikit-learn==1.5.0  # (for scaler)
 
 ---
 
+## Quality Gates (Before Merge to main)
+
+**See `TODO.md` → "Phase 3 Quality Gates (Before Merge)" for the full checklist.**
+
+After Phase 4, verify:
+- **Correctness:** No lookahead bias, weights sum to 1, no NaN, portfolio value ≥ initial capital
+- **Performance:** Test Sharpe ≥ 0.5, max drawdown < 50%, training curves converge, val Sharpe tracks training
+- **Code Quality:** Type hints on all functions, docstrings on public API, no print() (use logger), no hardcoding (use config), each file ≤ 300 lines
+- **Documentation:** README in `src/agent/`, inline comments on complex logic, architecture diagram
+
+---
+
 ## Start Here
 1. **Week 1:** Phase 1a–1d
    - Inspect `ml_dataset.parquet` columns (run `python tests/processed_data/test_final_dataset.py`)
@@ -262,3 +300,20 @@ scikit-learn==1.5.0  # (for scaler)
    - Write inference script
    - Test daily rebalancing logic
    - Ready for live integration
+
+---
+
+## Documentation Cross-Reference
+
+| Document | Purpose | Key Sections |
+|----------|---------|--------------|
+| **CLAUDE.md** | Project guide & architecture | "Stage 3: ML Agent Architecture & Development Guide" — architectural decisions, coding conventions, module responsibilities, development workflow, assumptions, constraints |
+| **TODO.md** | Actionable task checklists | "Phase 3: RL Agent" with Phase 3a–3d sub-sections + Quality Gates checklist |
+| **ML_AGENT_ROADMAP.md** | Phase-by-phase technical guide | This file — design decisions, implementation examples, outputs per phase |
+| **BUILD_DATASET_ROADMAP.md** | Stage 2 prerequisite guide | Data loading, merging, feature engineering, cleaning — must complete before Stage 3 |
+
+**Quick Links:**
+- Data flow diagram: CLAUDE.md § "Architecture" → "Data Flow"
+- File structure: CLAUDE.md § "Key Modules" → Stage 3 table
+- Development workflow: CLAUDE.md § "Stage 3" → "Development Workflow"
+- Assumptions & constraints: CLAUDE.md § "Stage 3" → "Key Assumptions & Constraints"
