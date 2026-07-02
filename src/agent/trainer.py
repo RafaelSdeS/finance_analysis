@@ -20,6 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from tqdm import tqdm
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 
@@ -50,16 +51,20 @@ def evaluate_on_env(model: PPO, env: PortfolioEnv) -> dict:
 class ValSharpeCallback(BaseCallback):
     """Periodic val evaluation + JSONL logging + checkpoints + early stopping."""
 
-    def __init__(self, config: AgentConfig, val_env: PortfolioEnv, log_path: Path):
+    def __init__(self, config: AgentConfig, val_env: PortfolioEnv, log_path: Path, total_timesteps: int):
         super().__init__()
         self.config = config
         self.val_env = val_env
         self.log_path = log_path
+        self.total_timesteps_target = total_timesteps
         self.eval_every_steps = config.eval_freq * config.n_steps
         self.best_sharpe = -np.inf
         self.degrade_count = 0
+        self.pbar = tqdm(total=total_timesteps, unit="step", unit_scale=True, desc="Training")
 
     def _on_step(self) -> bool:
+        self.pbar.update(self.num_timesteps - self.pbar.n)
+
         if self.num_timesteps % self.eval_every_steps != 0:
             return True
 
@@ -73,11 +78,13 @@ class ValSharpeCallback(BaseCallback):
         }
         with open(self.log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
-        logger.info(
-            "eval @ %s steps: val_sharpe=%.3f, val_max_dd=%.1f%%, val_value=%s",
-            f"{self.num_timesteps:,}", val["sharpe"], val["max_drawdown"] * 100,
-            f"{val['final_value']:,.0f}",
-        )
+
+        # One-line summary
+        self.pbar.set_postfix({
+            "sharpe": f"{val['sharpe']:.3f}",
+            "dd%": f"{val['max_drawdown']*100:.1f}",
+            "value": f"{val['final_value']:,.0f}"
+        })
 
         # Checkpoint
         ckpt = self.config.model_dir / f"agent_checkpoint_{self.num_timesteps}.zip"
@@ -91,6 +98,7 @@ class ValSharpeCallback(BaseCallback):
         else:
             self.degrade_count += 1
             if self.degrade_count >= self.config.early_stopping_patience:
+                self.pbar.close()
                 logger.warning(
                     "Early stopping: val Sharpe degraded %d consecutive evals "
                     "(best=%.3f)", self.degrade_count, self.best_sharpe,
@@ -98,8 +106,19 @@ class ValSharpeCallback(BaseCallback):
                 return False
         return True
 
+    def _on_training_end(self) -> None:
+        self.pbar.close()
 
-def train(config: AgentConfig) -> Path:
+
+def _find_latest_checkpoint(config: AgentConfig) -> Path | None:
+    """Find the latest checkpoint by timestep number."""
+    checkpoints = list(config.model_dir.glob("agent_checkpoint_*.zip"))
+    if not checkpoints:
+        return None
+    return max(checkpoints, key=lambda p: int(p.stem.split("_")[-1]))
+
+
+def train(config: AgentConfig, resume: bool = False) -> Path:
     """Run PPO training; returns path to the final model."""
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = config.log_dir / f"{config.log_file_prefix}_{run_id}.jsonl"
@@ -107,25 +126,33 @@ def train(config: AgentConfig) -> Path:
     train_env = PortfolioEnv(config, date_range="train")
     val_env = PortfolioEnv(config, date_range="val")
 
-    model = PPO(
-        "MlpPolicy",
-        train_env,
-        learning_rate=config.learning_rate,
-        gamma=config.gamma,
-        gae_lambda=config.gae_lambda,
-        ent_coef=config.entropy_coef,
-        n_steps=config.n_steps,
-        batch_size=config.batch_size,
-        n_epochs=config.n_epochs,
-        seed=config.seed,
-        device=config.device,
-        verbose=config.verbose,
-    )
-    logger.info("Training PPO for %s timesteps (device=%s), log → %s",
-                f"{config.total_timesteps:,}", model.device, log_path)
+    ckpt_path = _find_latest_checkpoint(config) if resume else None
+    if ckpt_path:
+        model = PPO.load(ckpt_path, env=train_env)
+        resumed_steps = int(ckpt_path.stem.split("_")[-1])
+        logger.info("Resumed from checkpoint %s (timestep=%s)", ckpt_path.name, f"{resumed_steps:,}")
+    else:
+        if resume:
+            logger.warning("No checkpoint found; starting fresh")
+        model = PPO(
+            "MlpPolicy",
+            train_env,
+            learning_rate=config.learning_rate,
+            gamma=config.gamma,
+            gae_lambda=config.gae_lambda,
+            ent_coef=config.entropy_coef,
+            n_steps=config.n_steps,
+            batch_size=config.batch_size,
+            n_epochs=config.n_epochs,
+            seed=config.seed,
+            device=config.device,
+            verbose=config.verbose,
+        )
+    logger.info("Training PPO (device=%s), log → %s", model.device, log_path)
 
     t0 = time.time()
-    model.learn(total_timesteps=config.total_timesteps, callback=ValSharpeCallback(config, val_env, log_path))
+    callback = ValSharpeCallback(config, val_env, log_path, config.total_timesteps)
+    model.learn(total_timesteps=config.total_timesteps, callback=callback)
     logger.info("Training finished in %.1f min", (time.time() - t0) / 60)
 
     final_path = config.model_dir / "agent_final.zip"
@@ -136,9 +163,11 @@ def train(config: AgentConfig) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train PPO portfolio agent")
-    parser.add_argument("--timesteps", type=int, default=None, help="Override total timesteps")
-    parser.add_argument("--learning-rate", type=float, default=None)
-    parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"])
+    parser.add_argument("--timesteps", type=int, default=None, help="Override total timesteps (default: 1,000,000)")
+    parser.add_argument("--learning-rate", type=float, default=None, help="Override learning rate (default: 3e-4)")
+    parser.add_argument("--batch-size", type=int, default=None, help="Override batch size (default: 64)")
+    parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     args = parser.parse_args()
 
     overrides = {}
@@ -146,12 +175,14 @@ def main() -> None:
         overrides["total_timesteps"] = args.timesteps
     if args.learning_rate is not None:
         overrides["learning_rate"] = args.learning_rate
+    if args.batch_size is not None:
+        overrides["batch_size"] = args.batch_size
     if args.device is not None:
         overrides["device"] = args.device
 
     config = AgentConfig(**overrides) if overrides else DEFAULT_CONFIG
     config.log_summary()
-    train(config)
+    train(config, resume=args.resume)
 
 
 if __name__ == "__main__":

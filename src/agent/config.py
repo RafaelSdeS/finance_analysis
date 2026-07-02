@@ -62,11 +62,6 @@ class AgentConfig:
         ]
     )
 
-    # Meta features (used for grouping/filtering, not as state)
-    meta_features: list[str] = field(
-        default_factory=lambda: ["ticker", "sector"]
-    )
-
     # Combined state features (price + fundamental + macro, excluding meta)
     @property
     def state_features(self) -> list[str]:
@@ -86,23 +81,19 @@ class AgentConfig:
     n_epochs: int = 10  # Gradient updates per rollout
 
     # ===== Checkpointing & Early Stopping =====
-    checkpoint_freq: int = 100  # Save checkpoint every N episodes
     eval_freq: int = 100  # Evaluate on val set every N episodes
     early_stopping_patience: int = 3  # Stop if val Sharpe degrades 3x in a row
 
     # ===== Logging =====
-    log_level: str = "INFO"
     log_file_prefix: str = "agent_training"
 
     # ===== Portfolio Constraints =====
     initial_capital: float = 100_000.0  # R$ (Brazilian Real)
-    min_weight: float = 0.0  # No shorting
-    max_weight: float = 1.0  # Continuous weights (softmax enforces sum=1)
 
     # ===== Misc =====
     seed: int = 42
     device: str = "cuda"  # or "cpu"
-    verbose: int = 1  # 0=silent, 1=progress, 2=debug
+    verbose: int = 0  # 0=silent, 1=progress, 2=debug
 
     def __post_init__(self) -> None:
         """Validate configuration after initialization."""
@@ -125,26 +116,15 @@ class AgentConfig:
 
     def log_summary(self) -> None:
         """Print configuration summary."""
-        print("=" * 70)
-        print("AGENT CONFIGURATION")
-        print("=" * 70)
-        print(f"\nData:")
-        print(f"  Dataset: {self.dataset_path}")
-        print(f"  Output: {self.model_dir}")
-        print(f"\nTemporal Splits:")
-        print(f"  Train: {self.train_start} → {self.train_end}")
-        print(f"  Val:   {self.val_start} → {self.val_end}")
-        print(f"  Test:  {self.test_start} → {self.test_end}")
-        print(f"\nFeatures:")
-        print(f"  State: {len(self.state_features)} features")
-        print(f"    Price: {len(self.price_features)}")
-        print(f"    Fundamental: {len(self.fundamental_features)}")
-        print(f"    Macro: {len(self.macro_features)}")
-        print(f"\nHyperparameters:")
-        print(f"  LR: {self.learning_rate}, γ: {self.gamma}, λ: {self.gae_lambda}")
-        print(f"  Timesteps: {self.total_timesteps:,}")
-        print(f"  Batch: {self.batch_size}, Epochs: {self.n_epochs}")
-        print("=" * 70 + "\n")
+        print(
+            f"AgentConfig | {self.dataset_path.name} | "
+            f"{len(self.state_features)} features "
+            f"({len(self.price_features)}p+{len(self.fundamental_features)}f+{len(self.macro_features)}m)\n"
+            f"  splits: train {self.train_start}→{self.train_end} | "
+            f"val {self.val_start}→{self.val_end} | test {self.test_start}→{self.test_end}\n"
+            f"  ppo: lr={self.learning_rate} γ={self.gamma} λ={self.gae_lambda} "
+            f"steps={self.total_timesteps:,} batch={self.batch_size} epochs={self.n_epochs}"
+        )
 
 
 # Default configuration (can be overridden via CLI args in trainer.py)

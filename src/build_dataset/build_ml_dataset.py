@@ -394,11 +394,10 @@ def merge_dividends(dataset, dividends):
         )
 
         if len(div) == 0:
-            # No dividends for this ticker — add zero-value features
+            # No dividends — set div_value_recent (used downstream); yield/count are
+            # (re)computed for all tickers in compute_dividend_features.
             d = d.copy()
             d["div_value_recent"] = 0.0
-            d["div_yield_12m"] = 0.0
-            d["div_count_12m"] = 0
             merged_dfs.append(d)
             continue
 
