@@ -8,7 +8,7 @@ Given a fixed monthly capital contribution (R$1000, inflation-adjusted), the mod
 
 ## Pipeline
 
-Three stages: collect → build dataset → train (RL agent not yet implemented).
+Three stages: collect → build dataset → train (RL agent on `ml_agent` branch).
 
 ### Stage 1: Raw Data Collection
 
@@ -32,7 +32,7 @@ Output: `data/processed/ml_dataset.parquet`
 
 ### Stage 3: Train RL Agent
 
-Not yet implemented. See `docs/specification.txt` for system design.
+Implemented on `ml_agent` branch. PPO agent with masked 279-ticker universe, temporal train/val/test splits, and equal-weight baseline (Sharpe 0.71). See CLAUDE.md for training commands, or `docs/ML_AGENT_ROADMAP.md` for deep dive.
 
 ## Setup
 
@@ -44,8 +44,9 @@ pip install -r requirements.txt
 
 ## Current Data
 
-Three tickers: PETR4 (Petrobrás), VALE3 (Vale), WEGE3 (WEG).  
-Macro: SELIC, CDI, IPCA daily rates (1990 onward).
+**Prototype (main branch):** PETR4, VALE3, WEGE3 + BOVA11 (IBOV proxy ETF).  
+**Macro:** SELIC, CDI, IPCA daily rates (1990–2026-06-30).  
+**Data currency:** Prices/macro current to 2026-06-30; fundamentals to 2026-03-31. Refreshed via yfinance quarterly incremental updates.
 
 ## Visualization
 
