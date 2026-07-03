@@ -9,6 +9,7 @@ into rolling windows where:
 This simulates continuous retraining and tests robustness across different market regimes.
 """
 
+import argparse
 import json
 import logging
 from dataclasses import dataclass
@@ -64,6 +65,9 @@ class WindowResult:
     test_end: str
     metrics: dict  # {strategy_name: compute_all() output}
     model_path: str
+    # Per-day OOS rollouts, kept for stitching one continuous walk-forward curve.
+    # {"strategies": {name: rollout_dict}, "tickers": ndarray}. Not JSON-serialized.
+    rollouts: dict | None = None
 
 
 def generate_windows(
@@ -204,9 +208,11 @@ def eval_window(
         }
 
         metrics = {}
+        rollouts = {}
         for name, fn in policies.items():
             logger.info("  Window %d: Rolling out %s...", window.window_id, name)
             res = rollout(env, fn)
+            rollouts[name] = res
             metrics[name] = compute_all(res["rewards"], res["values"])
             logger.info("  Window %d:   ✓ %s sharpe=%.3f, max_dd=%.1f%%",
                        window.window_id, name, metrics[name]['sharpe'], metrics[name]['max_drawdown'] * 100)
@@ -221,6 +227,7 @@ def eval_window(
             test_end=window.test_end,
             metrics=metrics,
             model_path="",
+            rollouts={"strategies": rollouts, "tickers": env.tickers},
         )
 
     except Exception as e:
@@ -318,7 +325,106 @@ def summarize_rolling_results(results: list[WindowResult]) -> dict:
     return summary
 
 
+def stitch_walkforward(
+    window_rollouts: list[dict],   # each: {"strategies": {name: rollout}, "tickers": ndarray}
+    initial_capital: float,
+) -> tuple[pd.DataFrame, dict]:
+    """Concatenate per-window OOS rollouts into one continuous walk-forward curve.
+
+    Windows are chronological & non-overlapping. Each window's env reseeds its
+    portfolio at `initial_capital`, so we chain by compounding the *concatenated
+    daily log returns* — window N+1 continues from where N ended — rather than
+    gluing the raw per-window value series (which would jump back to 100k).
+
+    Returns a DataFrame in evaluate.py's results.parquet schema (date, log_return,
+    value_<strategy>, w_<ticker>) plus a metrics dict computed over the full OOS span.
+    """
+    strategies = list(window_rollouts[0]["strategies"].keys())
+    tickers = window_rollouts[0]["tickers"]
+
+    log_returns = {
+        s: np.concatenate([w["strategies"][s]["rewards"] for w in window_rollouts])
+        for s in strategies
+    }
+    dates = pd.DatetimeIndex(
+        np.concatenate([w["strategies"]["agent"]["dates"] for w in window_rollouts])
+    )
+    weights = np.concatenate([w["strategies"]["agent"]["weights"] for w in window_rollouts])  # [T, N]
+
+    # continuous value = compound stitched returns; metrics need the initial-capital seed
+    values = {s: initial_capital * np.exp(np.cumsum(log_returns[s])) for s in strategies}
+    metrics = {
+        s: compute_all(log_returns[s], np.concatenate([[initial_capital], values[s]]))
+        for s in strategies
+    }
+
+    keep = [i for i in range(len(tickers)) if weights[:, i].max() > 0.001]
+    df = pd.concat(
+        [
+            pd.DataFrame({
+                "date": dates,
+                "log_return": log_returns["agent"],
+                **{f"value_{s}": values[s] for s in strategies},
+            }),
+            pd.DataFrame(weights[:, keep], columns=[f"w_{tickers[i]}" for i in keep]),
+        ],
+        axis=1,
+    )
+    return df, metrics
+
+
+def save_walkforward(results: list[WindowResult], config: AgentConfig) -> None:
+    """Stitch all windows' OOS rollouts and write the walk-forward parquet + metrics."""
+    bundles = [r.rollouts for r in results if r.rollouts is not None]
+    if not bundles:
+        logger.warning("No rollouts to stitch — skipping walk-forward output")
+        return
+
+    df, metrics = stitch_walkforward(bundles, config.initial_capital)
+    config.backtest_dir.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(config.backtest_dir / "walkforward_results.parquet", index=False)
+    with open(config.backtest_dir / "walkforward_metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+    logger.info(
+        "✓ Walk-forward OOS %s→%s (%d days) → walkforward_results.parquet + walkforward_metrics.json",
+        df["date"].min().date(), df["date"].max().date(), len(df),
+    )
+
+
+def _selfcheck_stitch() -> None:
+    """Synthetic 2-window stitch: assert continuity (values chain) and schema."""
+    tickers = np.array(["AAA", "BBB"])
+    def win(rewards, weights, dates):
+        r = np.array(rewards)
+        return {"strategies": {"agent": {
+            "rewards": r,
+            "values": np.concatenate([[100.0], 100.0 * np.exp(np.cumsum(r))]),
+            "weights": np.array(weights),
+            "dates": pd.DatetimeIndex(dates),
+        }}, "tickers": tickers}
+
+    bundles = [
+        win([0.1, -0.05], [[0.6, 0.4], [0.7, 0.3]], ["2010-01-01", "2010-01-02"]),
+        win([0.2, 0.00], [[0.5, 0.5], [0.5, 0.5]], ["2012-01-01", "2012-01-02"]),
+    ]
+    df, metrics = stitch_walkforward(bundles, initial_capital=100.0)
+
+    assert len(df) == 4, "stitched length must be sum of window lengths"
+    expected = 100.0 * np.exp(0.1 - 0.05 + 0.2 + 0.0)  # continuous compounding across windows
+    assert abs(df["value_agent"].iloc[-1] - expected) < 1e-9, "windows must chain, not reset to 100"
+    assert "agent" in metrics and {"w_AAA", "w_BBB"} <= set(df.columns), "schema mismatch"
+    print("✓ stitch self-check passed:", df["value_agent"].round(3).tolist())
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Anchored walk-forward train + eval")
+    parser.add_argument("--timesteps", type=int, default=1_000_000,
+                        help="PPO timesteps per window (lower = faster; 100000 ≈ 10x quicker)")
+    parser.add_argument("--test-years", type=int, default=2, help="Test span per window")
+    parser.add_argument("--skip-training", action="store_true",
+                        help="Reuse existing window_*_model.zip; only eval + stitch")
+    args = parser.parse_args()
+
     # Setup detailed logging with timestamp
     logging.basicConfig(
         level=logging.INFO,
@@ -334,11 +440,13 @@ def main():
         results = run_rolling_eval(
             config=config,
             train_years=10,
-            test_years=2,
-            timesteps_per_window=1_000_000,
-            skip_training=False,
+            test_years=args.test_years,
+            timesteps_per_window=args.timesteps,
+            skip_training=args.skip_training,
         )
         logger.info("All windows complete; summarizing results")
+
+        save_walkforward(results, config)  # continuous OOS curve for the notebooks
 
         summary = summarize_rolling_results(results)
 
@@ -385,4 +493,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--selfcheck" in sys.argv:
+        _selfcheck_stitch()
+    else:
+        main()

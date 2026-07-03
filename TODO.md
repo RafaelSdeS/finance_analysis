@@ -114,6 +114,12 @@ Once Phase 1 validation passes:
   - [x] Early stopping: val Sharpe degrades `early_stopping_patience` (3) consecutive evals
   - [x] CLI: `--timesteps`, `--learning-rate`, `--device`
   - [x] Smoke run (12K steps, GPU) verified end-to-end
+- [x] **rolling_eval.py:** Anchored rolling-window robustness eval (8 windows, train anchored at 2000, ~2y test each); reuses `evaluate.py` policies + `metrics.compute_all`
+- [x] **Over-engineering cleanup (ponytail-audit):**
+  - Dropped ~130-line hand-rolled progress renderer in `rolling_eval.py` → SB3 built-in `progress_bar=True`
+  - Deduped the twice-copied `WindowConfig` shim (one module-level class) and the duplicated trainer PPO constructor
+  - Pruned dead `AgentConfig` fields (`checkpoint_freq`, `min_weight`, `max_weight`, `log_level`, `meta_features`); condensed `log_summary()`
+  - Removed dead `div_yield_12m`/`div_count_12m` writes in `build_ml_dataset.merge_dividends` (overwritten by `compute_dividend_features`)
 - [ ] **Full training run:** `python -m src.agent.trainer` (1M timesteps, ~hours on RTX 4060) — run when ready
 - [ ] Hyperparameter tuning if val Sharpe plateaus: learning_rate first, then n_steps, batch_size
 

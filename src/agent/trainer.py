@@ -23,6 +23,7 @@ import numpy as np
 from tqdm import tqdm
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from src.agent.config import AgentConfig, DEFAULT_CONFIG
 from src.agent.env import PortfolioEnv
@@ -58,6 +59,7 @@ class ValSharpeCallback(BaseCallback):
         self.log_path = log_path
         self.total_timesteps_target = total_timesteps
         self.eval_every_steps = config.eval_freq * config.n_steps
+        self._next_eval = self.eval_every_steps  # threshold, not modulo: robust to vec-env timestep jumps
         self.best_sharpe = -np.inf
         self.degrade_count = 0
         self.pbar = tqdm(total=total_timesteps, unit="step", unit_scale=True, desc="Training")
@@ -65,8 +67,9 @@ class ValSharpeCallback(BaseCallback):
     def _on_step(self) -> bool:
         self.pbar.update(self.num_timesteps - self.pbar.n)
 
-        if self.num_timesteps % self.eval_every_steps != 0:
+        if self.num_timesteps < self._next_eval:
             return True
+        self._next_eval += self.eval_every_steps
 
         val = evaluate_on_env(self.model, self.val_env)
         record = {
@@ -123,8 +126,16 @@ def train(config: AgentConfig, resume: bool = False) -> Path:
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = config.log_dir / f"{config.log_file_prefix}_{run_id}.jsonl"
 
-    train_env = PortfolioEnv(config, date_range="train")
-    val_env = PortfolioEnv(config, date_range="val")
+    # Parallel rollout collection: N envs stepped at once → ~N× throughput.
+    # SubprocVecEnv (separate processes) sidesteps the GIL; 1 env stays single-process.
+    def _make_train_env():
+        return PortfolioEnv(config, date_range="train")
+
+    if config.n_envs > 1:
+        train_env = SubprocVecEnv([_make_train_env for _ in range(config.n_envs)])
+    else:
+        train_env = DummyVecEnv([_make_train_env])
+    val_env = PortfolioEnv(config, date_range="val")  # single deterministic pass, no need to parallelize
 
     ckpt_path = _find_latest_checkpoint(config) if resume else None
     if ckpt_path:
@@ -167,6 +178,7 @@ def main() -> None:
     parser.add_argument("--learning-rate", type=float, default=None, help="Override learning rate (default: 3e-4)")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size (default: 64)")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
+    parser.add_argument("--n-envs", type=int, default=None, help="Parallel rollout workers (default: 8; use 1 to disable)")
     parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
     args = parser.parse_args()
 
@@ -179,6 +191,8 @@ def main() -> None:
         overrides["batch_size"] = args.batch_size
     if args.device is not None:
         overrides["device"] = args.device
+    if args.n_envs is not None:
+        overrides["n_envs"] = args.n_envs
 
     config = AgentConfig(**overrides) if overrides else DEFAULT_CONFIG
     config.log_summary()

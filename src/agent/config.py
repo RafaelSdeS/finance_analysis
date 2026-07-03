@@ -76,7 +76,8 @@ class AgentConfig:
 
     # ===== Training Configuration =====
     total_timesteps: int = 1_000_000
-    n_steps: int = 2048  # Trajectory length per update
+    n_envs: int = 8  # Parallel rollout workers (SubprocVecEnv); 1 = single-process
+    n_steps: int = 2048  # Trajectory length per update, PER env
     batch_size: int = 64
     n_epochs: int = 10  # Gradient updates per rollout
 
