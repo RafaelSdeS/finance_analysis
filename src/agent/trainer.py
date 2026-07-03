@@ -156,6 +156,7 @@ def train(config: AgentConfig, resume: bool = False) -> Path:
             batch_size=config.batch_size,
             n_epochs=config.n_epochs,
             seed=config.seed,
+            policy_kwargs=dict(net_arch=[256, 256]),
             device=config.device,
             verbose=config.verbose,
         )

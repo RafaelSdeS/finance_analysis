@@ -147,8 +147,14 @@ def train_window(
             learning_rate=config.learning_rate,
             gamma=config.gamma,
             gae_lambda=config.gae_lambda,
+            ent_coef=config.entropy_coef,
+            n_steps=config.n_steps,
+            batch_size=config.batch_size,
+            n_epochs=config.n_epochs,
+            seed=config.seed,
+            policy_kwargs=dict(net_arch=[256, 256]),
             device="cpu",  # MlpPolicy runs better on CPU
-            verbose=1,
+            verbose=config.verbose,
         )
 
         logger.info("Window %d: Training for %d timesteps...", window.window_id, timesteps)

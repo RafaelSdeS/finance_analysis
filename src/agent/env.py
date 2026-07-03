@@ -104,6 +104,13 @@ class PortfolioEnv(gym.Env):
         simple_return = float(np.dot(weights, np.expm1(next_returns)))
         # Clip at -99.99% to keep log finite even on catastrophic days
         reward = float(np.log1p(max(simple_return, -0.9999)))
+
+        # Risk-adjusted reward: maximize return while penalizing volatility
+        # penytail: reward = r - lambda*r^2 penalizes extreme moves as high-risk
+        # Tunable: higher risk_aversion → more conservative allocations
+        risk_aversion = 0.1
+        reward = reward - risk_aversion * (reward ** 2)
+
         self.portfolio_value *= 1.0 + max(simple_return, -0.9999)
 
         self._t += 1
