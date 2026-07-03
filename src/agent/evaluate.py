@@ -42,6 +42,18 @@ def _weights_to_logits(weights: np.ndarray) -> np.ndarray:
     return np.log(np.maximum(weights, 1e-12)).astype(np.float32)
 
 
+def _exclude_cash_from_weights(w: np.ndarray, env: PortfolioEnv) -> np.ndarray:
+    """
+    Zero out CASH weight before normalization (exclude from baselines).
+    Baselines stay pure-equity; only the RL agent gets CASH as an option.
+    """
+    if "CASH" in env.tickers:
+        w = w.copy()
+        cash_idx = np.where(env.tickers == "CASH")[0][0]
+        w[cash_idx] = 0.0
+    return w
+
+
 def rollout(env: PortfolioEnv, act_fn: Callable[[np.ndarray, int], np.ndarray]) -> dict:
     """Roll a policy through an env split. act_fn(obs, t) → action logits."""
     obs, _ = env.reset()
@@ -72,7 +84,10 @@ def agent_policy(model: PPO) -> Callable:
 
 def equal_weight_policy(env: PortfolioEnv) -> Callable:
     def act(obs: np.ndarray, t: int) -> np.ndarray:
-        active = env.mask[t]
+        active = env.mask[t].astype(float)
+        active = _exclude_cash_from_weights(active, env)
+        if active.sum() == 0:  # shouldn't happen, but be safe
+            active = env.mask[t].astype(float)
         return _weights_to_logits(active / active.sum())
     return act
 
@@ -90,8 +105,10 @@ def market_cap_policy(env: PortfolioEnv, config: AgentConfig) -> Callable:
     def act(obs: np.ndarray, t: int) -> np.ndarray:
         w = np.where(env.mask[t], np.nan_to_num(caps[t], nan=0.0), 0.0)
         w = np.maximum(w, 0.0)
+        w = _exclude_cash_from_weights(w, env)
         if w.sum() == 0:  # no caps known yet → fall back to equal weight
             w = env.mask[t].astype(float)
+            w = _exclude_cash_from_weights(w, env)
         return _weights_to_logits(w / w.sum())
     return act
 
@@ -104,8 +121,10 @@ def inv_vol_policy(env: PortfolioEnv) -> Callable:
         lo = max(0, t - VOL_WINDOW)
         vol = returns[lo: t + 1].std(axis=0)
         w = np.where(env.mask[t] & (vol > 1e-8), 1.0 / (vol + 1e-8), 0.0)
+        w = _exclude_cash_from_weights(w, env)
         if w.sum() == 0:  # first day / degenerate → equal weight
             w = env.mask[t].astype(float)
+            w = _exclude_cash_from_weights(w, env)
         return _weights_to_logits(w / w.sum())
     return act
 

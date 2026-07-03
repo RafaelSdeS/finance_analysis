@@ -7,8 +7,52 @@ Handles missing feature computation and data preparation.
 import pandas as pd
 import numpy as np
 
+from src.agent.config import AgentConfig
+
 
 MAX_ABS_LOG_RETURN = 1.0  # |log r| > 1.0 (±172%/day) on B3 = data error or untradeable event
+CASH_ANNUALIZED_RANGE = (0.01, 0.30)  # sane historical SELIC bounds (~2%-26% seen 2000-2026)
+
+
+def synthesize_cash_asset(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Create synthetic CASH rows (one per trading date) representing a risk-free
+    SELIC-earning position. CASH is always active, giving the agent an option
+    to go to cash on every step without forcing full equity investment.
+
+    The synthetic price index compounds at the daily SELIC rate (selic as %/day).
+    """
+    # Extract one macro row per date (SELIC/CDI/IPCA are date-level constants)
+    macro = (
+        df[["trade_date", "selic", "cdi", "ipca"]]
+        .drop_duplicates("trade_date")
+        .sort_values("trade_date")
+        .reset_index(drop=True)
+    )
+
+    # Synthetic price index: starts at 100, compounds daily at SELIC rate
+    # selic column is daily %; convert to fraction for compounding
+    price = 100.0 * (1.0 + macro["selic"] / 100.0).cumprod()
+
+    # Build CASH rows: one per date, all 23 state features set
+    config = AgentConfig()
+    cash = pd.DataFrame({
+        "ticker": "CASH",
+        "trade_date": macro["trade_date"],
+        "open": price, "high": price, "low": price,
+        "close": price, "adj_open": price, "adj_high": price,
+        "adj_low": price, "adj_close": price,
+        "volume": 0.0,
+        "sector": "Cash",
+        "selic": macro["selic"], "cdi": macro["cdi"], "ipca": macro["ipca"],
+    })
+
+    # Fundamentals are not applicable to risk-free cash; set to 0
+    # (StandardScaler treats zero-variance columns as scale_=1.0 in fit_train_scaler)
+    for col in config.fundamental_features:
+        cash[col] = 0.0
+
+    return cash
 
 
 def compute_returns(df: pd.DataFrame, price_col: str = "adj_close", ticker_col: str = "ticker") -> pd.DataFrame:
@@ -62,6 +106,7 @@ def prepare_training_dataset(
 ) -> pd.DataFrame:
     """
     Load and prepare dataset for training (ensure returns are computed).
+    Adds synthetic CASH asset representing a risk-free SELIC-earning position.
 
     Args:
         dataset_path: Path to raw ml_dataset.parquet
@@ -79,8 +124,25 @@ def prepare_training_dataset(
     df = pd.read_parquet(dataset_path)
     print(f"✓ Loaded {len(df):,} rows, {len(df.columns)} columns")
 
+    # Synthesize CASH asset (risk-free SELIC-earning position, always active)
+    print("\nSynthesizing CASH asset (compounded daily at SELIC rate)...")
+    cash_df = synthesize_cash_asset(df)
+    df = pd.concat([df, cash_df], ignore_index=True)
+    print(f"✓ Added {len(cash_df):,} CASH rows (one per trading date)")
+
     # Always recompute: returns definition may change (e.g., close → adj_close fix)
     df = compute_returns(df)
+
+    # Sanity check: CASH annualized return should be in the expected range
+    cash_returns = df[df["ticker"] == "CASH"]["returns"]
+    cash_annual = (1.0 + cash_returns).prod() ** (252 / len(cash_returns)) - 1.0
+    if not (CASH_ANNUALIZED_RANGE[0] <= cash_annual <= CASH_ANNUALIZED_RANGE[1]):
+        raise ValueError(
+            f"CASH annualized return {cash_annual:.2%} out of expected range "
+            f"{CASH_ANNUALIZED_RANGE[0]:.1%}-{CASH_ANNUALIZED_RANGE[1]:.1%}. "
+            f"Unit error likely (selic should be daily %, not annualized)."
+        )
+    print(f"✓ CASH annualized return: {cash_annual:.2%} ✓")
 
     # Save prepared dataset
     print(f"\nSaving to {output_path}...")
