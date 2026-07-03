@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""
+Build dataset price and fundamental feature computations.
+
+Validates that feature formulas (RSI, MAs, volatility, drawdown, returns, etc.)
+compute correct values from synthetic price data.
+
+Run from project root: python tests/build_dataset/test_build_dataset_features.py
+or: pytest tests/build_dataset/test_build_dataset_features.py -v
+"""
+
+import sys
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from src.build_dataset.build_ml_dataset import (
+    compute_price_features,
+    compute_fundamental_features,
+)
+
+
+def approx(a: float, b: float, tol: float = 1e-6) -> bool:
+    """Approximate equality allowing for floating-point rounding."""
+    if pd.isna(a) and pd.isna(b):
+        return True
+    if pd.isna(a) or pd.isna(b):
+        return False
+    return abs(a - b) < tol
+
+
+def test_log_return_basic() -> None:
+    """Log returns: [100, 102, 101] → [NaN, log(1.02), log(101/102)]."""
+    df = pd.DataFrame({
+        "ticker": ["A"] * 3,
+        "trade_date": pd.date_range("2026-01-01", periods=3),
+        "adj_close": [100.0, 102.0, 101.0],
+        "high": [100.0, 102.0, 101.0],
+        "low": [100.0, 102.0, 101.0],
+    })
+    result = compute_price_features(df)
+
+    assert pd.isna(result.iloc[0]["log_return"]), "first row: no prior price"
+    assert approx(result.iloc[1]["log_return"], np.log(102.0 / 100.0), tol=1e-9)
+    assert approx(result.iloc[2]["log_return"], np.log(101.0 / 102.0), tol=1e-9)
+
+
+def test_moving_averages() -> None:
+    """MA20/60: rolling mean of prices. First 19/59 rows should be NaN."""
+    prices = [100.0 + i * 0.5 for i in range(100)]  # Linear increase
+    df = pd.DataFrame({
+        "ticker": ["A"] * 100,
+        "trade_date": pd.date_range("2026-01-01", periods=100),
+        "adj_close": prices,
+        "high": prices,
+        "low": prices,
+    })
+    result = compute_price_features(df)
+
+    # First 19 rows (indices 0-18) should have NaN ma_20
+    for i in range(19):
+        assert pd.isna(result.iloc[i]["ma_20"]), f"row {i}: ma_20 should be NaN"
+
+    # Row 19 (index 19) is first non-NaN: mean of indices 0-19 (20 values)
+    expected_ma20_at_19 = np.mean(prices[0:20])
+    assert approx(result.iloc[19]["ma_20"], expected_ma20_at_19, tol=1e-6)
+
+    # Similarly for MA60: first 59 should be NaN
+    for i in range(59):
+        assert pd.isna(result.iloc[i]["ma_60"]), f"row {i}: ma_60 should be NaN"
+
+    # Row 59 is first non-NaN MA60: mean of indices 0-59 (60 values)
+    expected_ma60_at_59 = np.mean(prices[0:60])
+    assert approx(result.iloc[59]["ma_60"], expected_ma60_at_59, tol=1e-6)
+
+
+def test_volatility() -> None:
+    """Volatility: std dev of log returns over window. Zero std when prices constant."""
+    # Constant prices → zero returns → zero volatility
+    df = pd.DataFrame({
+        "ticker": ["A"] * 30,
+        "trade_date": pd.date_range("2026-01-01", periods=30),
+        "adj_close": [100.0] * 30,
+        "high": [100.0] * 30,
+        "low": [100.0] * 30,
+    })
+    result = compute_price_features(df)
+
+    # After the first 20 returns (at index 20+), volatility_20d should be ~0
+    assert result.iloc[25]["volatility_20d"] < 1e-10, "constant prices should give ~0 volatility"
+
+
+def test_rsi_calculation() -> None:
+    """RSI formula: 100 - (100 / (1 + avg_gain / avg_loss))."""
+    # Simple test: alternating up/down → balanced RSI
+    prices = [100.0, 101.0, 100.0, 101.0, 100.0, 101.0, 100.0, 101.0, 100.0] * 2
+    df = pd.DataFrame({
+        "ticker": ["A"] * len(prices),
+        "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
+        "adj_close": prices,
+        "high": prices,
+        "low": prices,
+    })
+    result = compute_price_features(df)
+
+    # After 14 periods, RSI with balanced gains/losses should be ~50
+    rsi_14 = result.iloc[15]["rsi_14"]
+    assert not pd.isna(rsi_14), "RSI should not be NaN at row 15"
+    # Balanced up/down → RS = 1 → RSI = 100 - 100/2 = 50
+    assert 40 < rsi_14 < 60, f"balanced alternating should give RSI ~50, got {rsi_14:.1f}"
+
+
+def test_rsi_mixed_trend() -> None:
+    """Mixed trend with both gains and losses → RSI should be valid (not NaN)."""
+    # Create series with alternating ups and downs: +3%, -1%, +3%, -1%, ...
+    prices = []
+    price = 100.0
+    for i in range(50):
+        if i % 2 == 0:
+            price *= 1.03  # up 3%
+        else:
+            price *= 0.99  # down 1%
+        prices.append(price)
+
+    df = pd.DataFrame({
+        "ticker": ["A"] * len(prices),
+        "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
+        "adj_close": prices,
+        "high": prices,
+        "low": prices,
+    })
+    result = compute_price_features(df)
+
+    # At index 20+, should have valid RSI with both gains and losses
+    rsi_14 = result.iloc[25]["rsi_14"]
+    assert not pd.isna(rsi_14), f"RSI should be valid (not NaN) at index 25, got {rsi_14}"
+    # Bigger ups than downs should give RSI moderately high (>50)
+    assert 40 < rsi_14 < 90, f"mixed trend should give RSI 40-90, got {rsi_14:.1f}"
+
+
+def test_rsi_downtrend() -> None:
+    """Pure downtrend → RSI should be very low (near 0)."""
+    prices = np.linspace(110.0, 100.0, 30)  # Monotonic decrease
+    df = pd.DataFrame({
+        "ticker": ["A"] * len(prices),
+        "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
+        "adj_close": prices,
+        "high": prices,
+        "low": prices,
+    })
+    result = compute_price_features(df)
+
+    # After 14 periods, pure downtrend should give low RSI (<30)
+    rsi_14 = result.iloc[15]["rsi_14"]
+    assert rsi_14 < 30, f"downtrend should give RSI <30, got {rsi_14:.1f}"
+
+
+def test_drawdown_calculation() -> None:
+    """Drawdown: (price - running_max) / running_max. All-time high → 0, crash → negative."""
+    prices = [100.0, 120.0, 110.0, 90.0, 95.0, 105.0]
+    df = pd.DataFrame({
+        "ticker": ["A"] * len(prices),
+        "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
+        "adj_close": prices,
+        "high": prices,
+        "low": prices,
+    })
+    result = compute_price_features(df)
+
+    # Row 0: no prior max, so (100 - 100) / 100 = 0
+    assert approx(result.iloc[0]["drawdown"], 0.0)
+
+    # Row 1: max is 120, price is 120 → (120 - 120) / 120 = 0
+    assert approx(result.iloc[1]["drawdown"], 0.0)
+
+    # Row 2: max is 120, price is 110 → (110 - 120) / 120 = -10/120 ≈ -0.0833
+    assert approx(result.iloc[2]["drawdown"], -10.0 / 120.0, tol=1e-4)
+
+    # Row 3: max is 120, price is 90 → (90 - 120) / 120 = -30/120 = -0.25
+    assert approx(result.iloc[3]["drawdown"], -30.0 / 120.0, tol=1e-4)
+
+
+def test_hl_ratio() -> None:
+    """HL ratio: (high - low) / close."""
+    df = pd.DataFrame({
+        "ticker": ["A"] * 3,
+        "trade_date": pd.date_range("2026-01-01", periods=3),
+        "adj_close": [100.0, 102.0, 101.0],
+        "high": [105.0, 106.0, 104.0],
+        "low": [95.0, 98.0, 99.0],
+    })
+    result = compute_price_features(df)
+
+    # Row 0: (105 - 95) / 100 = 0.1
+    assert approx(result.iloc[0]["hl_ratio"], 0.1)
+
+    # Row 1: (106 - 98) / 102 = 8/102 ≈ 0.0784
+    assert approx(result.iloc[1]["hl_ratio"], 8.0 / 102.0, tol=1e-4)
+
+
+def test_return_windows() -> None:
+    """Cumulative log returns over 21/63/126/252 day windows."""
+    # Constant daily return of log(1.01)
+    daily_ret = np.log(1.01)
+    prices = [100.0 * (1.01 ** i) for i in range(300)]
+    df = pd.DataFrame({
+        "ticker": ["A"] * len(prices),
+        "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
+        "adj_close": prices,
+        "high": prices,
+        "low": prices,
+    })
+    result = compute_price_features(df)
+
+    # After 21 days (row 21), return_1m should be ~21 * daily_ret
+    ret_1m_at_21 = result.iloc[21]["return_1m"]
+    expected = 21 * daily_ret
+    assert approx(ret_1m_at_21, expected, tol=1e-4), f"1m return at row 21: expected {expected:.6f}, got {ret_1m_at_21:.6f}"
+
+    # After 63 days (row 63), return_3m should be ~63 * daily_ret
+    ret_3m_at_63 = result.iloc[63]["return_3m"]
+    expected = 63 * daily_ret
+    assert approx(ret_3m_at_63, expected, tol=1e-4)
+
+
+def test_ticker_grouping_isolation() -> None:
+    """Price features computed separately per ticker (no cross-contamination)."""
+    df = pd.DataFrame({
+        "ticker": ["A", "A", "B", "B"],
+        "trade_date": pd.date_range("2026-01-01", periods=4),
+        "adj_close": [100.0, 102.0, 50.0, 52.0],
+        "high": [100.0, 102.0, 50.0, 52.0],
+        "low": [100.0, 102.0, 50.0, 52.0],
+    })
+    result = compute_price_features(df)
+
+    # Ticker A: [100, 102] → log_return [NaN, log(1.02)]
+    assert pd.isna(result.iloc[0]["log_return"])
+    assert approx(result.iloc[1]["log_return"], np.log(102.0 / 100.0))
+
+    # Ticker B: [50, 52] → log_return [NaN, log(1.04)], NOT log(52/102)
+    assert pd.isna(result.iloc[2]["log_return"])
+    assert approx(result.iloc[3]["log_return"], np.log(52.0 / 50.0))
+
+
+def test_non_positive_prices_masked() -> None:
+    """Non-positive prices → NaN in log_return (no div-by-zero crashes)."""
+    df = pd.DataFrame({
+        "ticker": ["A", "A", "A", "A"],
+        "trade_date": pd.date_range("2026-01-01", periods=4),
+        "adj_close": [100.0, 0.0, -50.0, 101.0],
+        "high": [100.0, 1.0, 1.0, 101.0],
+        "low": [100.0, 0.0, 0.0, 101.0],
+    })
+    result = compute_price_features(df)
+
+    # Row 1: price=0 → NaN after masking
+    assert pd.isna(result.iloc[1]["log_return"])
+
+    # Row 2: price=-50 → NaN after masking
+    assert pd.isna(result.iloc[2]["log_return"])
+
+
+def test_fundamental_features_ratios() -> None:
+    """Fundamental derived ratios: book_to_market, earnings_yield, etc."""
+    df = pd.DataFrame({
+        "ticker": ["A"],
+        "reference_date": pd.to_datetime(["2026-01-01"]),
+        "market_cap": [1000.0],
+        "equity": [500.0],
+        "net_income": [100.0],
+        "net_revenue": [1000.0],
+        "cash": [200.0],
+        "current_assets": [1200.0],
+        "current_liabilities": [400.0],
+        "total_assets": [2000.0],
+        "total_debt": [600.0],
+        "net_debt": [300.0],
+        "gross_margin": [0.5],
+        "net_margin": [0.1],
+        "roe": [0.2],
+        "roa": [0.05],
+        "current_ratio": [1.5],
+        "debt_equity": [0.6],
+        "ebitda": [150.0],
+    })
+    result = compute_fundamental_features(df)
+
+    # book_to_market = equity / market_cap = 500 / 1000 = 0.5
+    assert approx(result.iloc[0]["book_to_market"], 0.5)
+
+    # earnings_yield = net_income / market_cap = 100 / 1000 = 0.1
+    assert approx(result.iloc[0]["earnings_yield"], 0.1)
+
+    # cash_ratio = cash / current_liabilities = 200 / 400 = 0.5
+    assert approx(result.iloc[0]["cash_ratio"], 0.5)
+
+    # net_debt_to_assets = net_debt / total_assets = 300 / 2000 = 0.15
+    assert approx(result.iloc[0]["net_debt_to_assets"], 0.15)
+
+    # working_capital_ratio = (current_assets - current_liabilities) / total_assets = (1200 - 400) / 2000 = 0.4
+    assert approx(result.iloc[0]["working_capital_ratio"], 0.4)
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

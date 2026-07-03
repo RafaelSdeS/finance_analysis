@@ -44,10 +44,13 @@ def compute_returns(df: pd.DataFrame, price_col: str = "adj_close", ticker_col: 
     print(f"✓ Computed returns:")
     print(f"  Valid: {df['returns'].notna().sum():,} rows")
     print(f"  Corrupt (|log r| > {MAX_ABS_LOG_RETURN}) → NaN: {corrupt.sum():,} rows")
-    print(f"  Total NaN: {nan_count:,} (~{nan_count/len(df)*100:.2f}%)")
-    print(f"  Mean: {df['returns'].mean():.6f}")
-    print(f"  Std:  {df['returns'].std():.6f}")
-    print(f"  Range: [{df['returns'].min():.4f}, {df['returns'].max():.4f}]")
+    if len(df) > 0:
+        print(f"  Total NaN: {nan_count:,} (~{nan_count/len(df)*100:.2f}%)")
+        print(f"  Mean: {df['returns'].mean():.6f}")
+        print(f"  Std:  {df['returns'].std():.6f}")
+        print(f"  Range: [{df['returns'].min():.4f}, {df['returns'].max():.4f}]")
+    else:
+        print(f"  Total NaN: 0 (empty dataset)")
 
     return df
 

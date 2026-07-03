@@ -28,7 +28,7 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
-from cagr_handler import fill_cagr_columns
+from .cagr_handler import fill_cagr_columns
 
 
 # =============================================================================
