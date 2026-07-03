@@ -4,7 +4,7 @@ Guidance for Claude Code working in this repo.
 
 ## Overview
 
-**Project:** Brazilian-equity ML pipeline for RL-based portfolio allocation. See `specification.txt` for system design and RL objective.
+**Project:** Brazilian-equity ML pipeline for RL-based portfolio allocation. See `docs/specification.txt` for system design and RL objective.
 
 **Three stages** (all scripts run from project root):
 1. **Data Collection** — staged prototype→validation→full-scale pipeline (checkpointing, logging, validation).
@@ -32,7 +32,7 @@ python -m src.data_collection.pipeline --mode prototype --tickers PETR4 VALE3
 python -m src.data_collection.pipeline --mode update
 
 # Validate (cross-check vs yfinance, 1–15% tolerance on key ratios)
-python tests/raw_data/validate_vs_yfinance.py
+python tests/data_collection/validate_vs_yfinance.py
 ```
 
 ### Stage 2: Build ML Dataset
@@ -40,15 +40,13 @@ python tests/raw_data/validate_vs_yfinance.py
 Prereq: Stage 1 complete (raw data in `data/raw/`). Merges prices + fundamentals + company info via `merge_asof` backward (no lookahead).
 
 ```bash
-python "src/2. build_dataset/build_ml_dataset.py"      # → data/processed/ml_dataset.parquet
-python tests/processed_data/test_final_dataset.py      # schema, shape, lookahead, NaN, returns
+python src/build_dataset/build_ml_dataset.py            # → data/processed/ml_dataset.parquet
+python tests/build_dataset/test_final_dataset.py        # schema, shape, lookahead, NaN, returns
 ```
-
-See `BUILD_DATASET_ROADMAP.md` for the phase-by-phase guide.
 
 ### Stage 3: Train ML Agent (ml_agent branch)
 
-Prereq: `pip install torch stable-baselines3 gymnasium scikit-learn`. Deep-dive: `ML_AGENT_ROADMAP.md`, `src/agent/README.md`.
+Prereq: `pip install torch stable-baselines3 gymnasium scikit-learn`. Deep-dive: `docs/ML_AGENT_ROADMAP.md`, `src/agent/README.md`.
 
 ```bash
 # One-time data prep: returns from adj_close + env tensors + train-only scaler
@@ -74,7 +72,7 @@ python -m src.agent.rolling_eval
 ### Utilities
 
 ```bash
-python src/cagr_handler.py --ticker PETR4           # CAGR calculator
+python src/build_dataset/cagr_handler.py --ticker PETR4  # CAGR calculator
 python src/visualizations/financial_view.py         # BBAS3 nominal vs inflation-adjusted vs SELIC (live yfinance)
 jupyter notebook src/visualizations/exploration.ipynb   # full dataset validation + insights
 ```
@@ -85,10 +83,10 @@ Plain Python scripts, no pytest. Run from project root.
 
 ```bash
 # Stages 1–2
-python tests/processed_data/test_final_dataset.py
+python tests/build_dataset/test_final_dataset.py
 python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY   # full 9-check suite
 python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY --path /dividends/PETR4 --param years=5
-python tests/raw_data/{test_cagr_calculation,test_ticker_data,inspect_all_data,inspect_company_info}.py
+python tests/data_collection/{test_cagr_calculation,test_ticker_data,inspect_all_data,inspect_company_info}.py
 
 # Stage 3
 python tests/agent/verify_dataset_for_training.py   # dataset quality gates V1–V7 (see below)
@@ -100,8 +98,8 @@ python tests/agent/test_inference_output.py         # inference invariants + equ
 ## Branches
 
 - **main:** Stages 1–2 (data collection + dataset build). Latest stable.
-- **build_dataset:** Stage 2 focus. See `BUILD_DATASET_ROADMAP.md`.
-- **ml_agent:** Stage 3 RL agent. See `ML_AGENT_ROADMAP.md`.
+- **build_dataset:** Stage 2 focus.
+- **ml_agent:** Stage 3 RL agent. See `docs/ML_AGENT_ROADMAP.md`.
 
 ## Architecture
 
@@ -116,7 +114,7 @@ data/raw/{prices,fundamentals,macro,dividends,company_info}/
   → compute_price_features()       [RSI, MA20/60, volatility, returns, drawdown]
   → compute_fundamental_features() [P/E, P/B, ROE, debt/equity, growth CAGR]
   → compute_macro_features()       [real return, excess return, rate environment]
-  → fill_cagr_columns()            [backfill from earnings/revenue where API null — currently OFF]
+  → fill_missing_cagr()            [backfill from earnings/revenue where API null]
   → clean (dupes, NaNs, outliers, sort)
         ↓
 data/processed/ml_dataset.parquet  (one row per ticker+date)
@@ -144,9 +142,8 @@ data/backtest/results.parquet, data/allocations/*.csv
 
 | File | Purpose |
 |------|---------|
-| `src/data_loading.py` | `load_prices()`, `load_fundamentals()`, `load_macro_series()`, `inspect_dataset()` |
-| `src/2. build_dataset/build_ml_dataset.py` | Orchestration: load → merge_asof → features → clean → save |
-| `src/cagr_handler.py` | CAGR calc/fill (BolsAI first, backfill from earnings/revenue). Enable via line 143 in build script. |
+| `src/build_dataset/build_ml_dataset.py` | Orchestration: load → merge_asof → features → clean → save. Also defines `load_prices()`, `load_fundamentals()` |
+| `src/build_dataset/cagr_handler.py` | CAGR calc/fill (BolsAI first, backfill from earnings/revenue) |
 
 **Stage 3 (ML Agent)** — `src/agent/`, all implemented:
 
@@ -187,7 +184,7 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 
 ## Critical Caveats
 
-- **`fill_cagr_columns()` is OFF:** commented out at line 143 of `build_ml_dataset.py` → dataset lacks `cagr_{earnings,revenue}_5y_final`. Uncomment to enable.
+- **CAGR backfill is ON:** `fill_missing_cagr()` (which calls `fill_cagr_columns()` per ticker) runs unconditionally in `build_ml_dataset.py`'s main pipeline → dataset has `cagr_{earnings,revenue}_5y_final` populated.
 - **No lookahead (Stage 2):** `merge_asof(..., direction='backward')` — a price never sees a future fundamental. Verify `fundamental_date <= price_date` after merge.
 - **All feature engineering is in Stage 2**, not deferred to the agent (technicals, fundamental ratios, macro-adjusted, CAGR backfill).
 - **FIIs deferred:** stocks only (prices/fundamentals/dividends). FIIs are a separate asset class; add if agent scope expands to mixed-asset.

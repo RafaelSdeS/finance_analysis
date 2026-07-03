@@ -7,10 +7,10 @@ Prices:       BolsAI close vs yfinance Close (auto_adjust=False), post-last-spli
               (adj_close skipped — dividend-adjustment methods diverge, uninformative.)
 Fundamentals: BolsAI net_revenue/net_income (BRL thousands, TTM) vs yfinance
               quarterly_financials (single-quarter -> rolling 4Q TTM).
-CAGR:         Not re-checked here. Run: python src/cagr_handler.py --ticker PETR4
+CAGR:         Not re-checked here. Run: python src/build_dataset/cagr_handler.py --ticker PETR4
 
 Usage (from project root):
-    python tests/raw_data/validate_vs_yfinance.py
+    python tests/data_collection/validate_vs_yfinance.py
 """
 
 from pathlib import Path
@@ -164,7 +164,7 @@ def main():
     print("\n" + "=" * 70)
     print("CAGR — not checked here. Run:")
     for t in TICKERS:
-        print(f"  python src/cagr_handler.py --ticker {t}")
+        print(f"  python src/build_dataset/cagr_handler.py --ticker {t}")
 
 
 if __name__ == "__main__":

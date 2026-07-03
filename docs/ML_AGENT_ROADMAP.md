@@ -282,7 +282,7 @@ After Phase 4, verify:
 
 ## Start Here
 1. **Week 1:** Phase 1a–1d
-   - Inspect `ml_dataset.parquet` columns (run `python tests/processed_data/test_final_dataset.py`)
+   - Inspect `ml_dataset.parquet` columns (run `python tests/build_dataset/test_final_dataset.py`)
    - Build `PortfolioEnv` (gym interface)
    - Run 100 random episodes, log returns
 
@@ -310,7 +310,6 @@ After Phase 4, verify:
 | **CLAUDE.md** | Project guide & architecture | "Stage 3: ML Agent Architecture & Development Guide" — architectural decisions, coding conventions, module responsibilities, development workflow, assumptions, constraints |
 | **TODO.md** | Actionable task checklists | "Phase 3: RL Agent" with Phase 3a–3d sub-sections + Quality Gates checklist |
 | **ML_AGENT_ROADMAP.md** | Phase-by-phase technical guide | This file — design decisions, implementation examples, outputs per phase |
-| **BUILD_DATASET_ROADMAP.md** | Stage 2 prerequisite guide | Data loading, merging, feature engineering, cleaning — must complete before Stage 3 |
 
 **Quick Links:**
 - Data flow diagram: CLAUDE.md § "Architecture" → "Data Flow"

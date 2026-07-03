@@ -146,7 +146,7 @@ def _compute_ratios(r: dict) -> dict:
     """Recompute BolsAI-equivalent ratios from yfinance raw figures.
     Formulas for market_cap/lpa/vpa/pl/pvp/roe/roa/net_margin/ebitda_margin/
     net_debt/debt_equity/ev_ebitda are the exact ones already verified at 5%
-    tolerance against live BolsAI data in tests/raw_data/validate_vs_yfinance.py's
+    tolerance against live BolsAI data in tests/data_collection/validate_vs_yfinance.py's
     check_internal_consistency(). The rest extend the same algebraic pattern.
     All divisions propagate NaN naturally on missing/zero inputs — no extra guards needed.
     """

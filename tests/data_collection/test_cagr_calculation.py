@@ -26,8 +26,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# Add src/build_dataset to path
+sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "build_dataset"))
 
 # Import our modules
 from cagr_handler import fill_cagr_columns, get_cagr_statistics

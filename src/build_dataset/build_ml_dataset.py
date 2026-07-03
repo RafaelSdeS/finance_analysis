@@ -24,13 +24,10 @@ Uso:
     python build_ml_dataset.py
 """
 
-import sys
 from pathlib import Path
 import pandas as pd
 import numpy as np
 
-# cagr_handler.py lives in src/ — make it importable when run from project root
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from cagr_handler import fill_cagr_columns
 
 

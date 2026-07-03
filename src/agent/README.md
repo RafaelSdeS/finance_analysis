@@ -233,6 +233,6 @@ Forces recomputation of returns even if they exist (useful for debugging).
 ## References
 
 - Architecture: See `CLAUDE.md` → "Stage 3: ML Agent Architecture & Development Guide"
-- Roadmap: See `ML_AGENT_ROADMAP.md` → Phase 1–4 details
-- Tasks: See `TODO.md` → Phase 3a–3d checkboxes
+- Roadmap: See `docs/ML_AGENT_ROADMAP.md` → Phase 1–4 details
+- Tasks: See `docs/TODO.md` → Phase 3a–3d checkboxes
 - Dataset verification: Run `python tests/agent/verify_dataset_for_training.py`

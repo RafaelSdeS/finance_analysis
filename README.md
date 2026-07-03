@@ -26,13 +26,13 @@ python "src/1. collect_raw_data/fetch_company_info.py" --api-key YOUR_API_KEY
 
 Merges prices + quarterly fundamentals + company metadata into a single machine-learning-ready parquet:
 ```bash
-python "src/2. build_dataset/build_ml_dataset.py
+python src/build_dataset/build_ml_dataset.py
 ```
 Output: `data/processed/ml_dataset.parquet`
 
 ### Stage 3: Train RL Agent
 
-Not yet implemented. See `specification.txt` for system design.
+Not yet implemented. See `docs/specification.txt` for system design.
 
 ## Setup
 
@@ -57,5 +57,5 @@ python src/visualizations/financial_view.py
 ## See Also
 
 - `CLAUDE.md` — development guide (run commands, architecture, caveats)
-- `specification.txt` — full RL system design (features, objective, constraints, expected behavior)
-- `TODO.md` — work roadmap
+- `docs/specification.txt` — full RL system design (features, objective, constraints, expected behavior)
+- `docs/TODO.md` — work roadmap

@@ -2,7 +2,7 @@
 validate.py — lightweight per-collector data quality gate (runs before write).
 
 This is the *schema/sanity* gate, distinct from the cross-source check in
-tests/raw_data/validate_vs_yfinance.py (the validation STAGE). Returns a
+tests/data_collection/validate_vs_yfinance.py (the validation STAGE). Returns a
 ValidationResult; collectors refuse to save on errors, log on warnings.
 """
 

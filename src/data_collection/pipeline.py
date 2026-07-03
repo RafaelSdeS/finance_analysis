@@ -159,7 +159,7 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
             return False
 
     log.info("=" * 60)
-    log.info("DONE. Next: python tests/raw_data/validate_vs_yfinance.py")
+    log.info("DONE. Next: python tests/data_collection/validate_vs_yfinance.py")
     log.info("=" * 60)
     return True
 
