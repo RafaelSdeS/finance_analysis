@@ -27,9 +27,45 @@ from src.agent.data_pipeline import SCALER_PATH, TENSORS_PATH
 logger = logging.getLogger(__name__)
 
 
+@lru_cache(maxsize=1)
+def _load_raw_tensors():
+    """Load raw tensors and per-window scalers once per process.
+
+    TENSORS_PATH contains raw (unscaled) features. SCALER_PATH contains a dict
+    of scalers indexed by window_id, allowing each window to normalize using
+    its own distribution (fitted on that window's train span, no lookahead).
+    """
+    data = np.load(TENSORS_PATH, allow_pickle=True)
+    with open(SCALER_PATH, "rb") as f:
+        scalers = pickle.load(f)
+    dates = pd.to_datetime(data["dates"])
+    tickers = data["tickers"]
+    mask = data["mask"]
+    returns = data["returns"]
+    feats = data["features"]
+    return dates, tickers, mask, returns, feats, scalers
+
+
+@lru_cache(maxsize=None)
+def _load_normalized_tensors(window_id: int):
+    """Load, normalize, and clip features for a specific window.
+
+    Each window has its own scaler (fitted on that window's train span).
+    Clipping at ±10 std devs provides defense-in-depth against outliers.
+    """
+    dates, tickers, mask, returns, feats, scalers = _load_raw_tensors()
+    if window_id not in scalers:
+        raise KeyError(f"window_id={window_id} not in scalers. Available: {sorted(scalers.keys())}")
+    scaler = scalers[window_id]
+    feats = (feats - scaler.mean_) / scaler.scale_
+    feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
+    feats = np.clip(feats, -10.0, 10.0)  # ponytail: outlier defense-in-depth; ±10 std is generous
+    return dates, tickers, mask, returns, feats
+
+
 @lru_cache(maxsize=4)
-def _load_slice(start: str, end: str):
-    """Slice + mask the shared tensors once per (start, end) and cache the result.
+def _load_slice(start: str, end: str, window_id: int):
+    """Slice + mask the shared tensors once per (start, end, window_id) and cache the result.
 
     The online-backtest retrain loop builds a 16-worker DummyVecEnv per chunk where
     every worker uses the SAME date bounds; without this cache each of the 16 identical
@@ -37,33 +73,12 @@ def _load_slice(start: str, end: str):
     slice, i.e. 16x redundant multi-hundred-MB arrays rebuilt every chunk. Safe to share
     by reference since PortfolioEnv never mutates features/mask/returns after __init__.
     """
-    dates, tickers, mask, returns, feats_all = _load_normalized_tensors()
+    dates, tickers, mask, returns, feats_all = _load_normalized_tensors(window_id)
     sel = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
     sliced_mask = mask[sel]
     feats = feats_all[sel].copy()
     feats[~sliced_mask] = 0.0
     return dates[sel], tickers, sliced_mask, returns[sel], feats.astype(np.float32)
-
-
-@lru_cache(maxsize=1)
-def _load_normalized_tensors():
-    """Load + normalize the full tensor dataset once per process.
-
-    TENSORS_PATH/SCALER_PATH are fixed constants, so every PortfolioEnv
-    construction (e.g. the 16 DummyVecEnv workers rebuilt per online-backtest
-    chunk) reuses this instead of re-reading a 21.5MB npz + rescaling from
-    scratch each time.
-    """
-    data = np.load(TENSORS_PATH, allow_pickle=True)
-    with open(SCALER_PATH, "rb") as f:
-        scaler = pickle.load(f)
-    dates = pd.to_datetime(data["dates"])
-    tickers = data["tickers"]
-    mask = data["mask"]
-    returns = data["returns"]
-    feats = (data["features"] - scaler.mean_) / scaler.scale_
-    feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
-    return dates, tickers, mask, returns, feats
 
 
 class PortfolioEnv(gym.Env):
@@ -74,7 +89,7 @@ class PortfolioEnv(gym.Env):
     def __init__(self, config: AgentConfig = DEFAULT_CONFIG, date_range: str = "train"):
         """
         Args:
-            config: AgentConfig with paths and split dates.
+            config: AgentConfig with paths, split dates, and window_id for per-window scaling.
             date_range: "train", "val", or "test" (selects date slice).
         """
         super().__init__()
@@ -89,7 +104,7 @@ class PortfolioEnv(gym.Env):
         if date_range not in bounds:
             raise ValueError(f"date_range must be one of {list(bounds)}, got '{date_range}'")
         start, end = bounds[date_range]
-        self.dates, self.tickers, self.mask, self.returns, self.features = _load_slice(start, end)
+        self.dates, self.tickers, self.mask, self.returns, self.features = _load_slice(start, end, config.window_id)
         n_tickers = len(self.tickers)
         n_features = self.features.shape[2]
 

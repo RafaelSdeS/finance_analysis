@@ -52,6 +52,7 @@ class AgentConfig:
     window_train_years: int = 10  # each window's train span, always anchored at dataset_start
     window_test_years: int = 2    # each window's held-out test span
     window_val_fraction: float = 0.15  # tail fraction of a window's train span carved out for early-stopping val
+    window_id: int = -1  # stamped by window_to_config(); -1 = template default, never used directly
 
     # ===== Feature Configuration =====
     # Price & technical features
@@ -104,7 +105,7 @@ class AgentConfig:
 
     # ===== Checkpointing & Early Stopping =====
     eval_freq: int = 20  # Evaluate on val set every N episodes (20 * n_steps = 40,960 timesteps)
-    early_stopping_patience: int = 3  # Stop if val Sharpe degrades 3x in a row
+    early_stopping_patience: int = 5  # Stop if val Sharpe degrades 5x in a row (with 0.15 Sharpe threshold for meaningful improvement)
 
     # ===== Logging =====
     log_file_prefix: str = "agent_training"
@@ -209,6 +210,7 @@ def window_to_config(window: RollingWindow, base: "AgentConfig") -> "AgentConfig
     train_end, val_start = _carve_val_tail(window.train_start, window.train_end, base.window_val_fraction)
     return dataclasses.replace(
         base,
+        window_id=window.window_id,
         train_start=window.train_start, train_end=train_end,
         val_start=val_start, val_end=window.train_end,
         test_start=window.test_start, test_end=window.test_end,

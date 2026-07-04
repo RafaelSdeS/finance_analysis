@@ -76,6 +76,7 @@ class ValSharpeCallback(BaseCallback):
         self._next_eval = self.eval_every_steps  # threshold, not modulo: robust to vec-env timestep jumps
         self.best_sharpe = -np.inf
         self.degrade_count = 0
+        self.improvement_threshold = 0.15  # ponytail: noise floor; only reset degrade counter on meaningful improvement
         self.pbar = tqdm(total=total_timesteps, unit="step", unit_scale=True, desc=f"Training [{model_tag}]")
 
     def _on_step(self) -> bool:
@@ -107,8 +108,9 @@ class ValSharpeCallback(BaseCallback):
         ckpt = self.config.model_dir / f"{self.model_tag}_checkpoint_{self.num_timesteps}.zip"
         self.model.save(ckpt)
 
-        # Early stopping on degrading val Sharpe
-        if val["sharpe"] > self.best_sharpe:
+        # Early stopping: degrade counter resets only on meaningful improvement (>= threshold)
+        # to avoid noise-driven early stops from small sample validation splits.
+        if val["sharpe"] > self.best_sharpe + self.improvement_threshold:
             self.best_sharpe = val["sharpe"]
             self.degrade_count = 0
             self.model.save(self.config.model_dir / f"{self.model_tag}_best.zip")

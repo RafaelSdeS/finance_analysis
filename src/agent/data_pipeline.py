@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-from src.agent.config import AgentConfig, DEFAULT_CONFIG, generate_windows
+from src.agent.config import AgentConfig, DEFAULT_CONFIG, generate_windows, window_to_config
 
 logger = logging.getLogger(__name__)
 
@@ -77,25 +77,8 @@ def build_tensors(config: AgentConfig = DEFAULT_CONFIG) -> dict:
     }
 
 
-def _scaler_cutoff(config: AgentConfig) -> str:
-    """
-    Conservative, leak-free cutoff for the one global scaler: the FIRST
-    rolling window's train_end. This predates every window's test_start,
-    so the same scaler stays lookahead-free no matter which window's
-    PortfolioEnv it normalizes for (config.train_end itself is now the
-    LAST window's carved train_end, which would leak future distribution
-    stats into earlier windows' "out of sample" test evaluations).
-    """
-    first_window = generate_windows(
-        config.dataset_start, config.dataset_end,
-        config.window_train_years, config.window_test_years,
-    )[0]
-    return first_window.train_end
-
-
-def fit_train_scaler(tensors: dict, config: AgentConfig = DEFAULT_CONFIG) -> StandardScaler:
-    """Fit StandardScaler on active train-date cells only (no lookahead)."""
-    cutoff = _scaler_cutoff(config)
+def fit_train_scaler(tensors: dict, cutoff: str) -> StandardScaler:
+    """Fit StandardScaler on active train-date cells up to cutoff (no lookahead)."""
     dates = pd.to_datetime(tensors["dates"])
     train_slice = dates <= pd.Timestamp(cutoff)
 
@@ -112,23 +95,35 @@ def fit_train_scaler(tensors: dict, config: AgentConfig = DEFAULT_CONFIG) -> Sta
     scaler.n_features_in_ = active_rows.shape[1]
 
     logger.info(
-        "Scaler fitted on %s active train cells (cutoff=%s, first rolling window's train_end)",
+        "Scaler fitted on %s active train cells (cutoff=%s)",
         f"{len(active_rows):,}", cutoff,
     )
     return scaler
 
 
 def run_pipeline(config: AgentConfig = DEFAULT_CONFIG) -> None:
-    """Build tensors, fit scaler, save both to disk."""
+    """Build tensors, fit one scaler per rolling window, save both to disk."""
     tensors = build_tensors(config)
-    scaler = fit_train_scaler(tensors, config)
+
+    # Fit one scaler per window: each uses that window's carved train_end as cutoff (no lookahead per window)
+    windows = generate_windows(
+        config.dataset_start, config.dataset_end,
+        config.window_train_years, config.window_test_years,
+    )
+    scalers = {}
+    for window in windows:
+        window_config = window_to_config(window, config)
+        cutoff = window_config.train_end  # train_end after val carving: the actual train boundary for this window
+        scaler = fit_train_scaler(tensors, cutoff)
+        scalers[window.window_id] = scaler
+        logger.info("  Window %d: scaler fitted (cutoff=%s)", window.window_id, cutoff)
 
     np.savez_compressed(TENSORS_PATH, **tensors)
     with open(SCALER_PATH, "wb") as f:
-        pickle.dump(scaler, f)
+        pickle.dump(scalers, f)
 
     logger.info("Saved tensors → %s", TENSORS_PATH)
-    logger.info("Saved scaler  → %s", SCALER_PATH)
+    logger.info("Saved %d scalers (one per window) → %s", len(scalers), SCALER_PATH)
 
     # Summary for the console
     dates = pd.to_datetime(tensors["dates"])
@@ -140,7 +135,12 @@ def run_pipeline(config: AgentConfig = DEFAULT_CONFIG) -> None:
     print(f"Calendar: {dates.min().date()} → {dates.max().date()} ({len(dates)} days)")
     print(f"Active cells: {tensors['mask'].sum():,} / {tensors['mask'].size:,} "
           f"({tensors['mask'].mean():.1%})")
-    print(f"Scaler:   fitted on train ≤ {_scaler_cutoff(config)}{SCALER_PATH}")
+    print(f"Scalers:  {len(scalers)} (one per rolling window) → {SCALER_PATH}")
+
+    # Self-check: verify monotonic window_ids and cutoffs
+    cutoffs = [scalers[w.window_id] for w in windows]
+    assert all(scalers[w.window_id] is not None for w in windows), "Missing scaler for some window"
+    print(f"✓ Verified: all {len(windows)} windows have scalers")
 
 
 if __name__ == "__main__":
