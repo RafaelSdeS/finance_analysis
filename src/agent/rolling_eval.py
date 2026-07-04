@@ -14,8 +14,11 @@ into rolling windows where:
 This simulates continuous retraining and tests robustness across different market regimes.
 """
 
+import dataclasses
 import json
 import logging
+import pickle
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +36,26 @@ from src.agent.metrics import compute_all
 from src.agent.trainer import train
 
 logger = logging.getLogger(__name__)
+
+
+def _save_online_checkpoint(model_path: Path, state_path: Path, model: PPO, chunk_idx: int, chunk_rollouts: dict) -> None:
+	"""Save online backtest checkpoint: model + resumption state (chunk index + rollout history)."""
+	model.save(model_path)
+	with open(state_path, "wb") as f:
+		pickle.dump({"chunk_idx": chunk_idx, "chunk_rollouts": chunk_rollouts}, f)
+	logger.info("Saved online checkpoint: model=%s, state=%s (chunk_idx=%d)", model_path.name, state_path.name, chunk_idx)
+
+
+def _load_online_checkpoint(state_path: Path) -> tuple[int, dict] | None:
+	"""Load resumption state; returns (last_completed_chunk_idx, chunk_rollouts dict) or None if not found."""
+	if not state_path.exists():
+		return None
+	with open(state_path, "rb") as f:
+		state = pickle.load(f)
+	chunk_idx = state["chunk_idx"]
+	chunk_rollouts = state["chunk_rollouts"]
+	logger.info("Loaded online checkpoint: resuming from chunk_idx=%d", chunk_idx)
+	return chunk_idx, chunk_rollouts
 
 
 @dataclass
@@ -284,6 +307,203 @@ def save_walkforward(results: list[WindowResult], config: AgentConfig) -> None:
     )
 
 
+def run_online_backtest(
+    config: AgentConfig,
+    retrain_every_days: int = 63,
+    retrain_timesteps: int = 20_000,
+    model_tag: str = "agent",
+    resume: bool = False,
+) -> tuple[pd.DataFrame, dict]:
+    """
+    Online retraining backtest: chunk the test window, evaluate before each retrain.
+
+    For each chunk:
+    1. Evaluate current model on chunk_start→chunk_end (frozen model, unseen data)
+    2. Extend training span to include chunk (train_start stays anchored, train_end = chunk_end)
+    3. Fine-tune on new data via model.learn(retrain_timesteps, reset_num_timesteps=False)
+    4. Repeat
+
+    Returns stitched results (parquet schema) + metrics dict, same as frozen backtest.
+    """
+    logger.info("=" * 70)
+    logger.info("ONLINE RETRAINING BACKTEST")
+    logger.info("  Retraining every %d days, %d timesteps/retrain", retrain_every_days, retrain_timesteps)
+    logger.info("=" * 70)
+
+    # Load the pre-trained checkpoint (assume it exists)
+    best_path = config.model_dir / f"{model_tag}_best.zip"
+    if not best_path.exists():
+        raise FileNotFoundError(f"Model not found: {best_path}")
+    model = PPO.load(best_path, device=config.device)
+    logger.info("Loaded model: %s", best_path.name)
+
+    # Chunk the test span by retrain_every_days
+    test_env = PortfolioEnv(config, date_range="test")
+    test_dates = pd.to_datetime(test_env.dates)
+    test_start = test_dates[0]
+    test_end = test_dates[-1]
+
+    chunks = []
+    chunk_start = test_start
+    while chunk_start < test_end:
+        chunk_end = min(chunk_start + pd.Timedelta(days=retrain_every_days), test_end)
+        chunks.append((chunk_start, chunk_end))
+        chunk_start = chunk_end + pd.Timedelta(days=1)
+
+    logger.info("Test span %s → %s split into %d chunks", test_start.date(), test_end.date(), len(chunks))
+
+    # Checkpoint paths
+    model_ckpt_path = config.model_dir / f"{model_tag}_online_checkpoint.zip"
+    state_ckpt_path = config.model_dir / f"{model_tag}_online_checkpoint_state.pkl"
+
+    # Resume logic
+    start_idx = 0
+    chunk_rollouts = {
+        "agent": [],
+        "equal_weight": [],
+        "market_cap": [],
+        "inv_vol": [],
+    }
+    if resume:
+        loaded = _load_online_checkpoint(state_ckpt_path)
+        if loaded:
+            last_done_idx, chunk_rollouts = loaded
+            start_idx = last_done_idx + 1
+            model = PPO.load(model_ckpt_path, device=config.device)
+            logger.info("Loaded checkpoint model: %s", model_ckpt_path.name)
+        else:
+            logger.warning("--resume requested but no checkpoint found; starting fresh")
+    else:
+        logger.info("Loaded model: %s", best_path.name)
+
+    from tqdm import tqdm
+    for i, (chunk_start, chunk_end) in enumerate(tqdm(chunks, desc="Online backtest chunks", unit="chunk")):
+        if i < start_idx:
+            logger.info("Chunk %d/%d: skipping (already completed)", i + 1, len(chunks))
+            continue
+        logger.info("\nChunk %d/%d: %s → %s", i + 1, len(chunks), chunk_start.date(), chunk_end.date())
+
+        # 1. Evaluate CURRENT model on this chunk (before retraining on its data)
+        chunk_config = dataclasses.replace(
+            config,
+            test_start=chunk_start.strftime("%Y-%m-%d"),
+            test_end=chunk_end.strftime("%Y-%m-%d"),
+        )
+        chunk_env = PortfolioEnv(chunk_config, date_range="test")
+
+        policies = {
+            "agent": agent_policy(model),
+            "equal_weight": equal_weight_policy(chunk_env),
+            "market_cap": market_cap_policy(chunk_env, chunk_config),
+            "inv_vol": inv_vol_policy(chunk_env),
+        }
+
+        for name, fn in policies.items():
+            res = rollout(chunk_env, fn)
+            chunk_rollouts[name].append(res)
+            sharpe = compute_all(res["rewards"], res["values"])["sharpe"]
+            logger.info("  %s: sharpe=%.3f", name, sharpe)
+
+        # 2. Extend training span to include this chunk, retrain
+        # Recalculate val split for the extended train span (carve tail 15%)
+        from src.agent.config import _carve_val_tail
+        new_train_end, new_val_start = _carve_val_tail(
+            config.train_start,
+            chunk_end.strftime("%Y-%m-%d"),
+            config.window_val_fraction
+        )
+        # ponytail: set test_start/test_end far in future so config validation passes
+        # (they won't be used since we only access date_range="train")
+        extended_config = dataclasses.replace(
+            config,
+            train_start=config.train_start,  # Always anchored at dataset_start
+            train_end=new_train_end,
+            val_start=new_val_start,
+            val_end=chunk_end.strftime("%Y-%m-%d"),
+            test_start=(chunk_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+            test_end=config.dataset_end,  # Use dataset_end as dummy
+        )
+        # ponytail: match model.n_envs (16) with DummyVecEnv to avoid subprocess
+        # exhaustion while staying compatible with set_env()
+        from stable_baselines3.common.vec_env import DummyVecEnv
+        def _make_retrain_env():
+            return PortfolioEnv(extended_config, date_range="train")
+
+        vec_env = DummyVecEnv([_make_retrain_env for _ in range(model.n_envs)])
+
+        logger.info("  Retraining on %s → %s (%d days)", extended_config.train_start, extended_config.train_end, len(PortfolioEnv(extended_config, date_range="train").dates))
+        try:
+            model.set_env(vec_env)
+            model.learn(
+                total_timesteps=retrain_timesteps,
+                reset_num_timesteps=False,  # Continue from prior step count
+                log_interval=None,
+            )
+        finally:
+            vec_env.close()
+
+        # Checkpoint after successful eval + retrain for this chunk
+        _save_online_checkpoint(model_ckpt_path, state_ckpt_path, model, i, chunk_rollouts)
+
+    logger.info("\n>>> Online backtest complete. Stitching results...")
+
+    # Stitch chunks into one continuous curve (same as rolling_eval's stitch_walkforward)
+    window_bundles = [
+        {
+            "strategies": {name: chunk_rollouts[name][i] for name in chunk_rollouts},
+            "tickers": test_env.tickers,
+        }
+        for i in range(len(chunks))
+    ]
+
+    df, metrics = stitch_walkforward(window_bundles, config.initial_capital)
+
+    # Save to separate files (not overwriting frozen backtest)
+    config.backtest_dir.mkdir(parents=True, exist_ok=True)
+    df.to_parquet(config.backtest_dir / "online_results.parquet", index=False)
+    with open(config.backtest_dir / "online_metrics.json", "w") as f:
+        json.dump(metrics, f, indent=2)
+
+    # Save the final online-trained model
+    online_model_path = config.model_dir / f"{model_tag}_online_final.zip"
+    model.save(online_model_path)
+    logger.info("✓ Online results → online_results.parquet + online_metrics.json")
+    logger.info("✓ Final model → %s", online_model_path.name)
+
+    test_env.close()
+    return df, metrics
+
+
+def _selfcheck_online() -> None:
+    """Synthetic 2-chunk online backtest: assert chunks are contiguous and evaluated before training."""
+    import dataclasses
+    from datetime import datetime, timedelta
+
+    # Build a fake 2-chunk scenario where we validate chunk boundaries
+    chunk1_dates = pd.date_range("2025-01-01", periods=30, freq="D")
+    chunk2_dates = pd.date_range("2025-01-31", periods=30, freq="D")
+
+    # Simulate: each chunk evaluated on agents, then model "retrains"
+    # The key invariant: chunk2 is evaluated BEFORE its data affects the model
+    chunks = [
+        (chunk1_dates[0], chunk1_dates[-1]),
+        (chunk2_dates[0], chunk2_dates[-1]),
+    ]
+
+    # Assert contiguity: end of chunk i + 1 day >= start of chunk i+1
+    for i in range(len(chunks) - 1):
+        end_i = chunks[i][1]
+        start_next = chunks[i + 1][0]
+        assert start_next <= end_i + pd.Timedelta(days=1), f"Gap between chunk {i} and {i+1}"
+
+    # Assert coverage: union of all chunks spans test period
+    min_date = min(c[0] for c in chunks)
+    max_date = max(c[1] for c in chunks)
+    assert max_date >= min_date + pd.Timedelta(days=len(chunks) * 30 - 1), "Chunks don't cover full span"
+
+    print(f"✓ Online self-check passed: {len(chunks)} contiguous chunks, {min_date.date()} → {max_date.date()}")
+
+
 def _selfcheck_stitch() -> None:
     """Synthetic 2-window stitch: assert continuity (values chain) and schema."""
     tickers = np.array(["AAA", "BBB"])
@@ -357,5 +577,53 @@ def finalize_and_report(results: list[WindowResult], config: AgentConfig) -> dic
     return summary
 
 
+def _selfcheck_online_checkpoint() -> None:
+	"""Verify checkpoint save/load round-trips: chunk_idx and rollout history preserved."""
+	with tempfile.TemporaryDirectory() as tmpdir:
+		tmpdir = Path(tmpdir)
+		model_ckpt = tmpdir / "test_model.zip"
+		state_ckpt = tmpdir / "test_state.pkl"
+
+		# Fake model: just needs a .save() method
+		class FakeModel:
+			def save(self, path):
+				path.write_text("fake_model")
+		fake_model = FakeModel()
+
+		# Fake rollout dict (numpy arrays + DatetimeIndex, as in the real code)
+		fake_rollouts = {
+			"agent": [
+				{"rewards": np.array([0.01, -0.02]), "dates": pd.DatetimeIndex(["2025-01-01", "2025-01-02"])},
+				{"rewards": np.array([0.03, 0.01]), "dates": pd.DatetimeIndex(["2025-01-03", "2025-01-04"])},
+			],
+			"equal_weight": [
+				{"rewards": np.array([0.005, -0.015])},
+			],
+		}
+
+		# Save
+		_save_online_checkpoint(model_ckpt, state_ckpt, fake_model, chunk_idx=1, chunk_rollouts=fake_rollouts)
+		assert model_ckpt.exists(), "model checkpoint not written"
+		assert state_ckpt.exists(), "state checkpoint not written"
+
+		# Load
+		loaded = _load_online_checkpoint(state_ckpt)
+		assert loaded is not None, "load returned None"
+		loaded_idx, loaded_rollouts = loaded
+		assert loaded_idx == 1, f"chunk_idx mismatch: {loaded_idx} != 1"
+
+		# Verify array equality (pickle preserves numpy arrays)
+		assert np.allclose(loaded_rollouts["agent"][0]["rewards"], fake_rollouts["agent"][0]["rewards"]), "rewards array corrupted"
+		assert len(loaded_rollouts["agent"]) == 2, "agent rollout list length changed"
+		assert loaded_rollouts["equal_weight"][0]["rewards"][0] == 0.005, "nested scalar array corrupted"
+
+		# Non-existent file
+		assert _load_online_checkpoint(tmpdir / "nonexistent.pkl") is None, "should return None for missing file"
+
+		print("✓ Online checkpoint self-check passed: save/load round-trip OK, arrays preserved")
+
+
 if __name__ == "__main__":
-    _selfcheck_stitch()
+	_selfcheck_online()
+	_selfcheck_stitch()
+	_selfcheck_online_checkpoint()

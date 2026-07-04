@@ -226,8 +226,29 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest agent vs baselines on test set")
     parser.add_argument("--model", type=Path, default=Path("data/models/agent_best.zip"))
+    parser.add_argument("--online", action="store_true", help="Run online retraining backtest instead of frozen model")
+    parser.add_argument("--retrain-every-days", type=int, default=63, help="Retrain every N days (default: 63)")
+    parser.add_argument("--retrain-timesteps", type=int, default=20_000, help="Timesteps per retrain (default: 20,000)")
+    parser.add_argument("--resume", action="store_true", help="Resume the online backtest from its last checkpointed chunk")
     args = parser.parse_args()
-    backtest(args.model)
+
+    if args.online:
+        # Deferred import to avoid circular dependency (rolling_eval imports from evaluate)
+        from src.agent.rolling_eval import run_online_backtest
+        df, metrics = run_online_backtest(
+            DEFAULT_CONFIG,
+            retrain_every_days=args.retrain_every_days,
+            retrain_timesteps=args.retrain_timesteps,
+            resume=args.resume,
+        )
+        # Print summary
+        print("\n" + "=" * 78)
+        print("ONLINE RETRAINING BACKTEST RESULTS")
+        print("=" * 78)
+        table = pd.DataFrame(metrics).T
+        print(table.round(4).to_string())
+    else:
+        backtest(args.model)
 
 
 if __name__ == "__main__":
