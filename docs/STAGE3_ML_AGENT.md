@@ -1,6 +1,12 @@
 # Stage 3: ML Agent — How It Actually Works
 
-Source: `src/agent/` (on the `ml_agent` branch). This explains the implemented mechanics — for run commands see `CLAUDE.md`, for the phase-by-phase build plan see `ML_AGENT_ROADMAP.md`, citations reference `docs/RESEARCH_REFERENCES.md`. **Status caveat, stated up front:** per `TODO.md`, only a 12K-timestep smoke test has been run so far — the full 1M-timestep training run per window hasn't executed yet, and the agent has not yet been confirmed to beat the equal-weight baseline (Sharpe 0.71). Everything below describes what the code does when run, not a claim that a fully-trained agent currently outperforms.
+Source: `src/agent/` (on the `ml_agent` branch). This explains the implemented mechanics — for run commands see `CLAUDE.md`, for the phase-by-phase build plan see `ML_AGENT_ROADMAP.md`, citations reference `docs/RESEARCH_REFERENCES.md`. 
+
+**Status (July 2026):** 
+- Anchored rolling-window training: Implemented and tested (8 windows, 1M timesteps/window).
+- Online retraining pipeline: Implemented (continuous rollout with trailing-window fine-tuning, revert-if-worse guard).
+- Agent conviction improvements: Implemented (excess-return reward, reduced exploration noise).
+- **Important caveat:** Reward function changed in July 2026 (absolute return → excess return). All models trained under the old reward are stale. Full retraining required before performance claims.
 
 ## Why RL, and why this reward shape
 
@@ -38,19 +44,27 @@ Each episode resets to **100% CASH** (a new investor with no positions), so the 
 
 PPO via Stable-Baselines3, `MlpPolicy` with `net_arch=[256, 256]`:
 
-| Hyperparameter | Value |
-|---|---|
-| learning_rate | 3e-4 |
-| gamma (discount) | 0.99 |
-| gae_lambda | 0.95 |
-| ent_coef (entropy bonus) | 0.01 |
-| n_steps (rollout length/env) | 2048 |
-| batch_size | 64 |
-| n_epochs | 10 |
-| n_envs (parallel rollout workers) | 8 |
-| total_timesteps per window | 1,000,000 |
+| Hyperparameter | Value | Notes |
+|---|---|---|
+| learning_rate | 3e-4 | Base training rate; 3e-5 for online fine-tuning |
+| gamma (discount) | 0.99 | |
+| gae_lambda | 0.95 | |
+| ent_coef (entropy bonus) | 0.0 | Reduced from 0.01; entropy-driven exploration disabled |
+| log_std_init | -2.0 | Reduced exploration noise (σ ≈ 0.135 per logit) for better concentration |
+| n_steps (rollout length/env) | 2048 | |
+| batch_size | 64 | |
+| n_epochs | 10 | |
+| n_envs (parallel rollout workers) | 8 | |
+| total_timesteps per window | 1,000,000 | |
+| eval_freq | 100 | Evaluation every 100 * n_steps timesteps (~204k steps) |
+| early_stopping_patience | 3 | Stop if val-Sharpe doesn't improve for 3 consecutive evals |
 
 PPO (Schulman et al., 2017) and its GAE advantage estimator (Schulman et al., 2015) — both already in `RESEARCH_REFERENCES.md` — were chosen over value-based methods (DQN) because the action space here is continuous-valued allocation weights rather than a discrete "buy/sell/hold" choice; PPO's clipped surrogate objective is also comparatively forgiving of the noisy, non-stationary reward signal financial time series produce.
+
+**Recent improvements (July 2026):**
+- **Excess-return reward signal:** Changed from absolute portfolio return to excess of daily market-mean return. Reduces the impact of market-wide noise (±1–2%/day) and amplifies per-ticker alpha signal (~0.1%/day), making per-stock credit assignment tractable.
+- **Reduced exploration:** log_std_init = -2.0 (down from default 1.0), entropy_coef = 0.0 (down from 0.01). Gentler random exploration allows the agent to develop conviction (concentrate weight on high-conviction positions) instead of spreading equally.
+- **New metrics:** max_weight (concentration) and avg_daily_turnover (rebalance cost) added to monitor allocation behavior. Agent should exceed equal-weight baseline (max_weight ≈ 0.4%, turnover ≈ 0) if alpha exists in the 23 features.
 
 ## Anchored rolling windows — the training strategy
 
@@ -95,6 +109,34 @@ Results are written to `data/backtest/metrics.json` (per-strategy metric dict), 
 ## Walk-forward stitching
 
 Each rolling window's environment resets its portfolio to `initial_capital` independently, so naively concatenating raw portfolio-value series across windows would show a discontinuous jump back to 100,000 at every window boundary. `stitch_walkforward` instead concatenates the **log returns** across windows and recompounds a single continuous value curve: `values = initial_capital * exp(cumsum(concatenated_log_returns))`. This produces one honest out-of-sample equity curve spanning every window's test period, rather than eight disconnected mini-backtests.
+
+## Online retraining — continuous rollout with trailing-window fine-tuning
+
+**Problem:** The anchored rolling-window strategy trains on a fixed historical span (e.g., 2000–2024, 2000–2026). Once deployed in production, the agent never retrains on new data. Market regimes shift (2020 pandemic, 2021–2022 rate hikes, 2024 AI boom); a model trained on 24 years of history with only 0.5× coverage of the most recent year (20k steps on 2 years of data) cannot adapt.
+
+**Solution (`run_online_backtest`):** A continuous rollout (not windowed) that:
+
+1. **Steps the environment continuously** (day-by-day) from the dataset's end into the backtest period, starting from 100% CASH and paying the one-time deployment cost, then holding. Same starting conditions and cost model as the anchored-window frozen backtest, enabling fair comparison.
+
+2. **Fine-tunes every 63 trading days** on a **trailing 3-year span** (750 trading days), not anchored to 2000. With 20k timesteps, the agent covers the new data 2–3× (vs. 0.5× under anchored training), allowing recent regime shifts to dominate the gradient signal.
+
+3. **Revert-if-worse guard:** Before fine-tuning, evaluate the current model's trailing-window Sharpe (information ratio). After fine-tuning, re-evaluate. If performance degrades, reload the pre-fine-tune weights. Prevents unlucky gradient steps from destabilizing a working strategy.
+
+4. **Continuous baseline rollout:** All four strategies (agent + 3 baselines) roll continuously without window resets, building results incrementally. Baseline results are no longer stitched — they grow from a single 100% CASH deployment through the entire backtest span, ensuring fair comparison.
+
+5. **Checkpoint format:** State stored as `day_idx` (current position in the dataset) plus mutable fields (prev_weights, portfolio_value, agent_results_so_far). Old anchored-window checkpoints are incompatible; fresh runs overwrite.
+
+**Metrics added:**
+- **max_weight:** Largest position weight on any day. Equal-weight baseline ≈ 0.4% (1/252 tickers); agent with conviction should exceed 1%. 
+- **avg_daily_turnover:** Average absolute weight change excluding CASH leg. Tracks rebalancing frequency and transaction-cost drag over the backtest span.
+
+**Usage:**
+```bash
+python -m src.agent.rolling_eval --mode online_backtest                 # Fresh run from dataset end
+python -m src.agent.rolling_eval --mode online_backtest --resume       # Resume from checkpoint
+```
+
+Expected behavior: Online Sharpe ≥ frozen backtest (≈0.61); max_weight stable and > 1%; effective_N and turnover show no spikes across retrain boundaries (old issue: 75% → 0.02% weight crashes).
 
 ## Inference
 

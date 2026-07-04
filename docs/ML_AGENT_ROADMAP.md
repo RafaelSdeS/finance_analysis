@@ -2,7 +2,14 @@
 
 Building the RL agent for portfolio allocation (Stage 3).
 
-**See also:** `CLAUDE.md` ("Stage 3: ML Agent Architecture & Development Guide") for architectural decisions, coding conventions, and development workflow. `TODO.md` contains actionable task checklists for each phase below.
+**Status (July 2026):** All four phases below are implemented and tested:
+- **Phase 1** ✓ — PortfolioEnv, state/action spaces, reward function
+- **Phase 2** ✓ — Training loop with SB3 PPO, validation callback, early stopping
+- **Phase 3** ✓ — Backtesting, metrics, walk-forward stitching, baseline comparisons
+- **Phase 4** ✓ — Inference, daily allocation script, fallback to equal-weight
+- **Bonus: Online Retraining** ✓ — Continuous rollout with trailing-window fine-tuning (see `STAGE3_ML_AGENT.md`)
+
+**See also:** `CLAUDE.md` ("Stage 3: ML Agent") for architectural decisions, coding conventions, and development workflow. `STAGE3_ML_AGENT.md` for mechanics of online training. `TODO.md` contains actionable task checklists.
 
 ---
 
@@ -14,9 +21,10 @@ This roadmap implements the following architectural decisions; **read CLAUDE.md 
 2. **Train-Only Scaler:** Fit StandardScaler on training data only; reuse for validation/test/inference. Stored as `data/models/feature_scaler.pkl`.
 3. **State Space:** Concatenated normalized features `[n_tickers * feature_dim]`. Simple, learnable end-to-end.
 4. **Action Space:** Continuous weights via softmax output (guarantees simplex: Σw_i=1, w_i≥0). No-shorting constraint built-in.
-5. **Reward Function:** Daily log return `r_t = log(V_t / V_{t-1})` (simple, unambiguous; switch to Sharpe-based if variance is high).
+5. **Reward Function:** Excess-return signal — daily log return net of market-mean return, minus transaction cost. Reduces market-wide noise (±1–2%/day common to all allocations) and amplifies per-ticker alpha signal (~0.1%/day), making per-stock credit assignment tractable. See `STAGE3_ML_AGENT.md` § "Recent improvements".
 6. **Algorithm:** PPO via `stable-baselines3` (vetted, production-ready, fast iteration).
-7. **Code Style:** Immutable dataclasses (config), type hints (all functions), ≤300 lines per file, structured logging (JSONL).
+7. **Online Retraining:** Post-deployment, the agent retrains every 63 trading days on a trailing 3-year span (not anchored to 2000). A revert-if-worse guard prevents degradation from unlucky gradient steps. Supports continuous rollout backtest and checkpoint resume. See `STAGE3_ML_AGENT.md` § "Online retraining".
+8. **Code Style:** Immutable dataclasses (config), type hints (all functions), ≤300 lines per file, structured logging (JSONL).
 
 ---
 
@@ -90,15 +98,18 @@ Encourages risk-adjusted returns; adds complexity.
 ### 2b. Algorithm: PPO (Proximal Policy Optimization)
 **Why PPO:** Stable, sample-efficient, handles continuous actions well, SOTA for portfolio RL.
 
-**Hyperparameters to tune:**
+**Hyperparameters (current — July 2026):**
 ```python
-learning_rate = 3e-4
-gamma = 0.99           # discount factor
-gae_lambda = 0.95      # GAE smoothing
-n_steps = 2048         # trajectory length per update
+learning_rate = 3e-4           # base training LR; 3e-5 for online fine-tuning
+gamma = 0.99                   # discount factor
+gae_lambda = 0.95              # GAE smoothing
+n_steps = 2048                 # trajectory length per update
 batch_size = 64
-n_epochs = 10          # gradient updates per rollout
-entropy_coef = 0.01    # exploration bonus
+n_epochs = 10                  # gradient updates per rollout
+ent_coef = 0.0                 # entropy bonus (disabled for conviction)
+log_std_init = -2.0            # reduced exploration noise (σ ≈ 0.135 per logit)
+eval_freq = 100                # eval every 100*n_steps timesteps
+early_stopping_patience = 3    # stop if no val-Sharpe improvement for 3 evals
 ```
 
 - [ ] Implement PPO from scratch *or* use `stable-baselines3.PPO`:

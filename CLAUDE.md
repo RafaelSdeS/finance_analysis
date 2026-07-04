@@ -46,7 +46,7 @@ python tests/build_dataset/test_final_dataset.py        # schema, shape, lookahe
 
 ### Stage 3: Train ML Agent (ml_agent branch)
 
-Prereq: `pip install torch stable-baselines3 gymnasium scikit-learn`. Deep-dive: `docs/ML_AGENT_ROADMAP.md`, `src/agent/README.md`.
+Prereq: `pip install torch stable-baselines3 gymnasium scikit-learn`. Deep-dive: `docs/STAGE3_ML_AGENT.md`, `docs/ML_AGENT_ROADMAP.md`, `src/agent/README.md`.
 
 ```bash
 # One-time data prep: returns from adj_close + env tensors + train-only scaler
@@ -62,9 +62,15 @@ python -m src.agent.trainer --train-years 2 --test-years 1 --timesteps 2048  # f
 # Backtest vs equal-weight / market-cap / inv-vol baselines (uses the most recent window's test split)
 python -m src.agent.evaluate --model data/models/agent_best.zip
 
-# Daily inference
+# Online retraining: continuous rollout with trailing-window fine-tuning every N days
+# Retrain every 63 trading days on the last ~3 years of data, with revert-if-worse guard
+python -m src.agent.rolling_eval --mode online_backtest --resume  # resume from checkpoint if exists
+
+# Daily inference (uses production model from most recent training window)
 python -m src.agent.run_allocation --date 2026-06-29 --format csv
 ```
+
+**Note on recent changes (July 2026):** Agent reward function changed from absolute portfolio return to excess-return signal (excess of market mean) to improve conviction. All models trained under old reward are stale; retraining required. See "Agent conviction improvements" in `STAGE3_ML_AGENT.md`.
 
 **Outputs:** production model (most recent window) `data/models/agent_{best,final}.zip` + checkpoints; earlier windows namespaced `data/models/window_{id}_{best,final}.zip`; scaler `data/models/feature_scaler.pkl`; env tensors `data/processed/agent_tensors.npz` ([6565 dates × 279 tickers × 23 features] + mask); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; stitched multi-window walk-forward `data/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
 
@@ -151,13 +157,13 @@ data/backtest/results.parquet, data/allocations/*.csv
 | `config.py` | Frozen `AgentConfig`: hyperparams, 23-feature list, paths, `generate_windows()`/`window_to_config()`; `DEFAULT_CONFIG` = most recent rolling window |
 | `feature_engineering.py` | Returns from `adj_close` (split-safe), corrupt-observation cleaning |
 | `data_pipeline.py` | Pivot to dense tensors [dates×tickers×features] + activity mask; train-only scaler (fit on the earliest window's train_end — conservative, no lookahead into any window's test) |
-| `env.py` | PortfolioEnv: masked time-varying universe, masked-softmax action, transaction-cost reward |
-| `metrics.py` | Sharpe, Sortino, max drawdown, win rate (shared by trainer + evaluator) |
+| `env.py` | PortfolioEnv: masked time-varying universe, masked-softmax action, excess-return reward (net of market mean), transaction-cost term; cached load+normalization for online training |
+| `metrics.py` | Sharpe, Sortino, max drawdown, win rate, max_weight, avg_daily_turnover (shared by trainer + evaluator) |
 | `trainer.py` | SB3 PPO per window, val-Sharpe eval callback, JSONL logging, checkpoints, early stopping; `main()` = sole rolling-window training CLI |
-| `evaluate.py` | Backtest vs 3 baselines, metrics.json, Plotly plots |
+| `evaluate.py` | Backtest vs 3 baselines, metrics.json, Plotly plots; supports both anchored-window and continuous-rollout backtests |
 | `infer.py` | `predict_weights(date)` reusing env obs pipeline; equal-weight fallback |
 | `run_allocation.py` | Daily CLI: weights + sector → CSV/JSON |
-| `rolling_eval.py` | Window training/eval orchestration (called by `trainer.py`); walk-forward stitching; reuses `evaluate.py` policies |
+| `rolling_eval.py` | Window training/eval orchestration (`trainer.py`); online continuous-rollout backtest with trailing-window fine-tuning; walk-forward stitching; checkpoint resume support |
 
 No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progress_bar=True`.
 
@@ -167,8 +173,9 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 - **Train-only scaler:** fit StandardScaler on the FIRST window's train span only (earliest of all windows' train_end, so it can never leak future data into any window's test), apply to val/test/inference; save to `feature_scaler.pkl` (no leakage).
 - **State:** all tickers' 23 normalized features + per-ticker activity mask + previous weights (for turnover calculation) concatenated → 280×23 + 280 + 280 = **7,000-dim**. Runtime NaN → 0 (mean imputation); dataset on disk keeps honest NaNs.
 - **Action:** masked softmax over full 280-ticker universe (279 stocks + CASH; every ticker with ≥252 rows → no survivorship bias). Inactive tickers → −∞ → weight 0; active weights sum to 1. No shorting.
-- **Reward:** daily log return minus transaction cost. Cost = `transaction_cost_bps / 10000 × one-way-turnover` (excluding CASH leg which trades free). Turnover computed on non-CASH tickers only; CASH weight change absorbed by the equity side. Episodes start/reset at 100% CASH (new investor), so the first allocation pays full deployment cost.
-- **Algorithm:** PPO via stable-baselines3 (lr=3e-4, gamma=0.99, gae_lambda=0.95).
+- **Reward (July 2026 update):** excess-return signal = (portfolio log return) − (market-mean log return) − transaction_cost. Cost = `transaction_cost_bps / 10000 × one-way-turnover` (excluding CASH leg which trades free). The excess signal amplifies per-ticker alpha (~0.1%/day) and reduces market noise (±1–2%/day), making gradient credit assignment tractable. Episodes start/reset at 100% CASH (new investor), so the first allocation pays full deployment cost.
+- **Algorithm:** PPO via stable-baselines3 with reduced exploration: lr=3e-4 (3e-5 for online fine-tuning), gamma=0.99, gae_lambda=0.95, ent_coef=0.0 (entropy disabled), log_std_init=-2.0 (σ ≈ 0.135, down from default 1.0). Lower exploration noise allows the agent to develop conviction (concentrated positions) instead of spreading equally.
+- **Online retraining:** Post-deployment, fine-tunes every 63 trading days on the last ~3 years of data (not anchored to 2000), with a revert-if-worse guard. Supports continuous-rollout backtest (`--mode online_backtest`) and checkpoint resume (`--resume`). See `STAGE3_ML_AGENT.md` § "Online retraining" for details.
 
 ## Dataset Verification (before Stage 3 training)
 
