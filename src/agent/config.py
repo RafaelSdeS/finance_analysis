@@ -92,7 +92,8 @@ class AgentConfig:
     learning_rate: float = 3e-4
     gamma: float = 0.99  # Discount factor
     gae_lambda: float = 0.95  # GAE smoothing
-    entropy_coef: float = 0.01  # Exploration bonus
+    entropy_coef: float = 0.0  # No entropy bonus; excess reward removes market noise (variance reduction)
+    log_std_init: float = -2.0  # Initial exploration noise: σ ≈ 0.135 so per-ticker credit assignment is learnable
 
     # ===== Training Configuration =====
     total_timesteps: int = 1_000_000

@@ -171,7 +171,7 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
                 batch_size=config.batch_size,
                 n_epochs=config.n_epochs,
                 seed=config.seed,
-                policy_kwargs=dict(net_arch=[256, 256]),
+                policy_kwargs=dict(net_arch=[256, 256], log_std_init=config.log_std_init),
                 device=config.device,
                 verbose=config.verbose,
             )

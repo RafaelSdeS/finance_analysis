@@ -1,11 +1,12 @@
 """
 PortfolioEnv: gymnasium environment for daily portfolio allocation.
 
-State:  normalized features for all tickers + activity mask
-        obs = [n_tickers * n_features + n_tickers]  (flattened, float32)
+State:  normalized features for all tickers + activity mask + prev weights
+        obs = [n_tickers * n_features + 2*n_tickers]  (flattened, float32)
 Action: raw logits [n_tickers]; env applies masked softmax so that
         inactive tickers get exactly 0 weight and active weights sum to 1.
-Reward: daily log return of the portfolio (next trading day).
+Reward: daily excess log return vs equal-weight (variance-reduced training signal).
+        info["log_return"] carries absolute portfolio log return for backtest metrics.
 
 Prerequisite: run `python -m src.agent.data_pipeline` once to build
 data/processed/agent_tensors.npz and data/models/feature_scaler.pkl.
@@ -24,6 +25,24 @@ from src.agent.config import AgentConfig, DEFAULT_CONFIG
 from src.agent.data_pipeline import SCALER_PATH, TENSORS_PATH
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=4)
+def _load_slice(start: str, end: str):
+    """Slice + mask the shared tensors once per (start, end) and cache the result.
+
+    The online-backtest retrain loop builds a 16-worker DummyVecEnv per chunk where
+    every worker uses the SAME date bounds; without this cache each of the 16 identical
+    PortfolioEnv instances independently copies the (growing, anchored-at-2000) train
+    slice, i.e. 16x redundant multi-hundred-MB arrays rebuilt every chunk. Safe to share
+    by reference since PortfolioEnv never mutates features/mask/returns after __init__.
+    """
+    dates, tickers, mask, returns, feats_all = _load_normalized_tensors()
+    sel = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
+    sliced_mask = mask[sel]
+    feats = feats_all[sel].copy()
+    feats[~sliced_mask] = 0.0
+    return dates[sel], tickers, sliced_mask, returns[sel], feats.astype(np.float32)
 
 
 @lru_cache(maxsize=1)
@@ -62,11 +81,6 @@ class PortfolioEnv(gym.Env):
         self.config = config
         self.date_range = date_range
 
-        dates, self.tickers, mask, returns, feats_all = _load_normalized_tensors()
-        n_tickers = len(self.tickers)
-        n_features = feats_all.shape[2]
-
-        # Slice the requested date range
         bounds = {
             "train": (config.train_start, config.train_end),
             "val": (config.val_start, config.val_end),
@@ -74,17 +88,10 @@ class PortfolioEnv(gym.Env):
         }
         if date_range not in bounds:
             raise ValueError(f"date_range must be one of {list(bounds)}, got '{date_range}'")
-        start, end = (pd.Timestamp(b) for b in bounds[date_range])
-        sel = (dates >= start) & (dates <= end)
-
-        self.dates = dates[sel]
-        self.mask = mask[sel]                                # [T, N] bool
-        self.returns = returns[sel]                          # [T, N] log returns, NaN if inactive
-
-        # feats_all is already normalized (mean-imputed for NaN/inf); zero out inactive cells per-slice
-        feats = feats_all[sel].copy()                        # fancy-index copy, safe to mutate
-        feats[~self.mask] = 0.0
-        self.features = feats.astype(np.float32)            # [T, N, F]
+        start, end = bounds[date_range]
+        self.dates, self.tickers, self.mask, self.returns, self.features = _load_slice(start, end)
+        n_tickers = len(self.tickers)
+        n_features = self.features.shape[2]
 
         self.n_steps = len(self.dates) - 1  # last date has no next-day return
         if self.n_steps < 2:
@@ -129,7 +136,20 @@ class PortfolioEnv(gym.Env):
 
         simple_return = float(np.dot(weights, np.expm1(next_returns))) - transaction_cost
         # Clip at -99.99% to keep log finite even on catastrophic days
-        reward = float(np.log1p(max(simple_return, -0.9999)))
+        portfolio_log_return = float(np.log1p(max(simple_return, -0.9999)))
+
+        # Equal-weight baseline for variance-reduced training signal
+        # (excludes CASH, so baseline = 1/n_active_noncash of active non-cash tickers)
+        active_noncash = self.mask[self._t + 1] & ~self._is_cash_mask
+        n_active_noncash = int(active_noncash.sum())
+        if n_active_noncash > 0:
+            ew_return = float(np.expm1(next_returns[active_noncash]).mean())
+        else:
+            ew_return = 0.0
+        ew_log_return = float(np.log1p(max(ew_return, -0.9999)))
+
+        # Reward: excess log return (agent vs equal-weight) for credit assignment
+        reward = portfolio_log_return - ew_log_return
 
         self.portfolio_value *= 1.0 + max(simple_return, -0.9999)
         self._prev_weights = weights.copy()
@@ -140,6 +160,7 @@ class PortfolioEnv(gym.Env):
             "date": self.dates[self._t],
             "portfolio_value": self.portfolio_value,
             "weights": weights,
+            "log_return": portfolio_log_return,  # absolute return for backtest metrics
             "n_active": int(self.mask[self._t].sum()),
             "turnover": float(traded),
         }

@@ -51,6 +51,7 @@ def main() -> None:
         w = info["weights"]
         active = env.mask[env._t - 1]  # mask at decision time
         assert np.isfinite(reward), f"non-finite reward at step {n_checked}"
+        assert np.isfinite(info["log_return"]), f"non-finite log_return at step {n_checked}"
         assert abs(w.sum() - 1.0) < 1e-9, f"weights sum {w.sum()} != 1"
         assert (w >= 0).all(), "negative weight found"
         assert (w[~active] == 0).all(), "INACTIVE TICKER GOT NONZERO WEIGHT"
@@ -119,6 +120,29 @@ def main() -> None:
     # Second step should have near-zero turnover (only mask changes, not policy choice)
     assert turnover2 < turnover1 * 0.1, f"repeated action should have low turnover: {turnover1:.4f} → {turnover2:.4f}"
     print(f"✓ reward penalty: turnover tracked correctly ({turnover1:.4f} → {turnover2:.4f})")
+
+    # --- 7. Equal-weight action yields zero excess reward (reward = log_return - ew_log_return) ---
+    env_ew = PortfolioEnv(cfg, date_range="val")
+    env_ew.reset(seed=99)
+
+    # Equal-weight action: all tickers get the same logit (softmax is uniform)
+    ew_action = np.zeros(len(env_ew.tickers), dtype=np.float32)
+    obs, rew, _, _, info = env_ew.step(ew_action)
+
+    # excess reward should be ≈ 0 (agent return ≈ equal-weight return), maybe slightly negative due to cost
+    assert rew < 0.01, f"equal-weight action should yield ~0 excess reward, got {rew:.4f}"
+    assert np.isfinite(info["log_return"]), "log_return must be finite"
+    print(f"✓ excess reward model: equal-weight action → reward={rew:.5f} (cost drag only)")
+
+    # --- 8. Identical-bounds envs share cached tensors (online-backtest memory fix) ---
+    env_a = PortfolioEnv(cfg, date_range="train")
+    env_b = PortfolioEnv(cfg, date_range="train")
+    assert env_a.features is env_b.features, "same-bounds envs should share the cached array, not copy it"
+    env_a.reset(seed=1)
+    env_b.reset(seed=2)
+    env_a._prev_weights[0] = 999.0  # mutate one instance's private state
+    assert env_b._prev_weights[0] != 999.0, "per-env mutable state leaked across shared-cache instances"
+    print("✓ identical-bounds envs share cached tensors without leaking mutable state")
 
     print("\n" + "=" * 60)
     print("ALL ENV TESTS PASSED ✓")

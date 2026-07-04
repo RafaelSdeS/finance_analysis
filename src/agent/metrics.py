@@ -87,4 +87,10 @@ def compute_all(log_returns: np.ndarray, portfolio_values: np.ndarray, weights: 
     }
     if weights is not None:
         metrics["effective_n"] = effective_n_positions(weights)
+        # Concentration: mean of daily max weight (0.004 for equal weight, >0.01 for conviction)
+        metrics["max_weight"] = float(weights.max(axis=1).mean())
+        # Turnover: mean one-way daily rebalance cost (as fraction of portfolio)
+        w = np.asarray(weights, dtype=np.float64)
+        daily_turnover = np.abs(np.diff(w, axis=0)).sum(axis=1)
+        metrics["avg_daily_turnover"] = float(daily_turnover.mean())
     return metrics
