@@ -1,38 +1,42 @@
 {
   "agent": {
-    "cumulative_return": 0.7902578876883279,
-    "annualized_return": 0.1176877548424573,
-    "sharpe": 0.573968335713203,
-    "sortino": 0.8689991097256974,
-    "max_drawdown": 0.2738869205391956,
-    "win_rate": 0.5178165276724791,
-    "n_days": 1319
+    "cumulative_return": 0.25475034562170995,
+    "annualized_return": 0.12117367306800175,
+    "sharpe": 0.7077631653749558,
+    "sortino": 1.0448229205778616,
+    "max_drawdown": 0.14370195528778154,
+    "win_rate": 0.516,
+    "n_days": 500,
+    "effective_n": 249.0061549791197
   },
   "equal_weight": {
-    "cumulative_return": 1.056463636350807,
-    "annualized_return": 0.14768570538575343,
-    "sharpe": 0.7078546376915016,
-    "sortino": 1.0689484091453771,
-    "max_drawdown": 0.24788614905977174,
-    "win_rate": 0.5178165276724791,
-    "n_days": 1319
+    "cumulative_return": 0.27140874153125627,
+    "annualized_return": 0.12865117310017937,
+    "sharpe": 0.7448531323871258,
+    "sortino": 1.09689345912432,
+    "max_drawdown": 0.14323825312384947,
+    "win_rate": 0.514,
+    "n_days": 500,
+    "effective_n": 251.35400000050274
   },
   "market_cap": {
-    "cumulative_return": 0.6607831216775926,
-    "annualized_return": 0.10177173656682093,
-    "sharpe": 0.5611388153215,
-    "sortino": 0.832848320687745,
-    "max_drawdown": 0.2019418266065372,
-    "win_rate": 0.5155420773313116,
-    "n_days": 1319
+    "cumulative_return": 0.17362237538945458,
+    "annualized_return": 0.08403250278404206,
+    "sharpe": 0.5472309944084403,
+    "sortino": 0.7691789394530766,
+    "max_drawdown": 0.1646992819337134,
+    "win_rate": 0.53,
+    "n_days": 500,
+    "effective_n": 25.354720914168844
   },
   "inv_vol": {
-    "cumulative_return": 0.2620655369256717,
-    "annualized_return": 0.04547122847414564,
-    "sharpe": 0.24661557184999566,
-    "sortino": 0.30692203883321556,
-    "max_drawdown": 0.37950927013267305,
-    "win_rate": 0.5216072782410918,
-    "n_days": 1319
+    "cumulative_return": 0.17407544511541095,
+    "annualized_return": 0.08424339858381247,
+    "sharpe": 0.5885113664127211,
+    "sortino": 0.8647858349192635,
+    "max_drawdown": 0.143477090350369,
+    "win_rate": 0.532,
+    "n_days": 500,
+    "effective_n": 176.3983010776221
   }
 }

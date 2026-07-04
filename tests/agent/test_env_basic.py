@@ -33,7 +33,9 @@ def main() -> None:
         obs, info = env.reset(seed=cfg.seed)
         assert obs.shape == (obs_dim_expected,), f"{split}: obs shape {obs.shape}"
         assert np.isfinite(obs).all(), f"{split}: obs has non-finite values"
-        print(f"✓ {split}: reset OK, obs_dim={obs.shape[0]}, days={len(env.dates)}")
+        assert env._prev_weights.sum() == 1.0, f"{split}: initial weights don't sum to 1"
+        assert (env._prev_weights[env._is_cash_mask] == 1.0).all(), f"{split}: should start 100% CASH"
+        print(f"✓ {split}: reset OK, obs_dim={obs.shape[0]}, days={len(env.dates)}, starts 100% CASH")
 
     # --- 2. Random policy episode on train (masking + reward invariants) ---
     env = PortfolioEnv(cfg, date_range="train")

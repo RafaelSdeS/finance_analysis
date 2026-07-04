@@ -82,7 +82,7 @@ class PortfolioEnv(gym.Env):
 
         self._t = 0
         self.portfolio_value = config.initial_capital
-        self._prev_weights = np.zeros(n_tickers, dtype=np.float32)  # zero-init at start; updated after each step
+        self._prev_weights = self._is_cash_mask.astype(np.float32)  # start 100% CASH (new investor)
         logger.info(
             "PortfolioEnv[%s]: %d days (%s → %s), %d tickers, obs_dim=%d",
             date_range, len(self.dates), self.dates[0].date(), self.dates[-1].date(),
@@ -95,7 +95,7 @@ class PortfolioEnv(gym.Env):
         super().reset(seed=seed)
         self._t = 0
         self.portfolio_value = self.config.initial_capital
-        self._prev_weights[:] = 0.0  # fresh start; first allocation incurs full deployment cost
+        self._prev_weights[:] = self._is_cash_mask  # fresh start: 100% CASH; first allocation incurs full deployment cost
         return self._obs(), {"date": self.dates[0], "portfolio_value": self.portfolio_value}
 
     def step(self, action: np.ndarray):
