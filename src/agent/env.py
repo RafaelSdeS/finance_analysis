@@ -13,6 +13,7 @@ data/processed/agent_tensors.npz and data/models/feature_scaler.pkl.
 
 import logging
 import pickle
+from functools import lru_cache
 
 import gymnasium as gym
 import numpy as np
@@ -23,6 +24,27 @@ from src.agent.config import AgentConfig, DEFAULT_CONFIG
 from src.agent.data_pipeline import SCALER_PATH, TENSORS_PATH
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _load_normalized_tensors():
+    """Load + normalize the full tensor dataset once per process.
+
+    TENSORS_PATH/SCALER_PATH are fixed constants, so every PortfolioEnv
+    construction (e.g. the 16 DummyVecEnv workers rebuilt per online-backtest
+    chunk) reuses this instead of re-reading a 21.5MB npz + rescaling from
+    scratch each time.
+    """
+    data = np.load(TENSORS_PATH, allow_pickle=True)
+    with open(SCALER_PATH, "rb") as f:
+        scaler = pickle.load(f)
+    dates = pd.to_datetime(data["dates"])
+    tickers = data["tickers"]
+    mask = data["mask"]
+    returns = data["returns"]
+    feats = (data["features"] - scaler.mean_) / scaler.scale_
+    feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
+    return dates, tickers, mask, returns, feats
 
 
 class PortfolioEnv(gym.Env):
@@ -40,14 +62,9 @@ class PortfolioEnv(gym.Env):
         self.config = config
         self.date_range = date_range
 
-        data = np.load(TENSORS_PATH, allow_pickle=True)
-        with open(SCALER_PATH, "rb") as f:
-            scaler = pickle.load(f)
-
-        dates = pd.to_datetime(data["dates"])
-        self.tickers: np.ndarray = data["tickers"]
+        dates, self.tickers, mask, returns, feats_all = _load_normalized_tensors()
         n_tickers = len(self.tickers)
-        n_features = data["features"].shape[2]
+        n_features = feats_all.shape[2]
 
         # Slice the requested date range
         bounds = {
@@ -61,12 +78,11 @@ class PortfolioEnv(gym.Env):
         sel = (dates >= start) & (dates <= end)
 
         self.dates = dates[sel]
-        self.mask = data["mask"][sel]                       # [T, N] bool
-        self.returns = data["returns"][sel]                 # [T, N] log returns, NaN if inactive
+        self.mask = mask[sel]                                # [T, N] bool
+        self.returns = returns[sel]                          # [T, N] log returns, NaN if inactive
 
-        # Normalize once with the train-only scaler; NaN and inactive cells → 0 (mean-imputed)
-        feats = (data["features"][sel] - scaler.mean_) / scaler.scale_
-        feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
+        # feats_all is already normalized (mean-imputed for NaN/inf); zero out inactive cells per-slice
+        feats = feats_all[sel].copy()                        # fancy-index copy, safe to mutate
         feats[~self.mask] = 0.0
         self.features = feats.astype(np.float32)            # [T, N, F]
 
