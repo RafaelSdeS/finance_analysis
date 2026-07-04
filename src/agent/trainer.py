@@ -33,7 +33,7 @@ import numpy as np
 from tqdm import tqdm
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv
 
 from src.agent.config import AgentConfig, DEFAULT_CONFIG
 from src.agent.env import PortfolioEnv
@@ -104,9 +104,13 @@ class ValSharpeCallback(BaseCallback):
             "value": f"{val['final_value']:,.0f}"
         })
 
-        # Checkpoint
+        # Checkpoint: keep only the latest (resume only ever reads the newest)
+        prev_ckpts = list(self.config.model_dir.glob(f"{self.model_tag}_checkpoint_*.zip"))
         ckpt = self.config.model_dir / f"{self.model_tag}_checkpoint_{self.num_timesteps}.zip"
         self.model.save(ckpt)
+        for old in prev_ckpts:
+            if old != ckpt:
+                old.unlink(missing_ok=True)
 
         # Early stopping: degrade counter resets only on meaningful improvement (>= threshold)
         # to avoid noise-driven early stops from small sample validation splits.
@@ -142,15 +146,15 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     log_path = config.log_dir / f"{config.log_file_prefix}_{model_tag}_{run_id}.jsonl"
 
-    # Parallel rollout collection: N envs stepped at once → ~N× throughput.
-    # SubprocVecEnv (separate processes) sidesteps the GIL; 1 env stays single-process.
+    # Parallel rollout collection: N envs batched N-wide through the policy.
+    # DummyVecEnv (in-process) on purpose: env.step is cheap numpy, so the
+    # N-wide policy forward is the real speedup, and all N envs share the
+    # lru_cache'd tensors by reference. SubprocVecEnv would fork N workers
+    # that each load+normalize the full tensor set (~0.5GB each → OOM).
     def _make_train_env():
         return PortfolioEnv(config, date_range="train")
 
-    if config.n_envs > 1:
-        train_env = SubprocVecEnv([_make_train_env for _ in range(config.n_envs)])
-    else:
-        train_env = DummyVecEnv([_make_train_env])
+    train_env = DummyVecEnv([_make_train_env for _ in range(config.n_envs)])
     val_env = PortfolioEnv(config, date_range="val")  # single deterministic pass, no need to parallelize
 
     try:
@@ -189,9 +193,8 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
         logger.info("Saved final model → %s (best-val model → %s_best.zip)", final_path, model_tag)
         return final_path
     finally:
-        # Tear down subprocess pools explicitly: main() calls train() once per
-        # rolling window in the same process, so leaked SubprocVecEnv workers
-        # from an earlier window would otherwise pile up across windows.
+        # main() calls train() once per rolling window in the same process;
+        # close envs explicitly so nothing piles up across windows.
         train_env.close()
         val_env.close()
 
@@ -206,7 +209,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size (default: 64)")
     parser.add_argument("--eval-freq", type=int, default=None, help="Evaluate on val set every N episodes (default: 20)")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
-    parser.add_argument("--n-envs", type=int, default=None, help="Parallel rollout workers (default: 8; use 1 to disable)")
+    parser.add_argument("--n-envs", type=int, default=None, help="In-process envs batched through the policy (default: 8)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
     args = parser.parse_args()
 

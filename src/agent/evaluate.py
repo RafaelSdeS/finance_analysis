@@ -19,6 +19,7 @@ Usage:
 import argparse
 import json
 import logging
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
@@ -93,12 +94,17 @@ def equal_weight_policy(env: PortfolioEnv) -> Callable:
     return act
 
 
+@lru_cache(maxsize=1)
+def _market_cap_pivot(dataset_path: Path) -> pd.DataFrame:
+    """Full-history ffilled market-cap pivot; read+pivot the 180MB parquet once per process."""
+    df = pd.read_parquet(dataset_path, columns=["ticker", "trade_date", "market_cap"])
+    return df.pivot(index="trade_date", columns="ticker", values="market_cap").ffill()
+
+
 def market_cap_policy(env: PortfolioEnv, config: AgentConfig) -> Callable:
     """w ∝ market cap; ffill per ticker so caps are 'last known at t' (no lookahead)."""
-    df = pd.read_parquet(config.dataset_path, columns=["ticker", "trade_date", "market_cap"])
     caps = (
-        df.pivot(index="trade_date", columns="ticker", values="market_cap")
-        .ffill()
+        _market_cap_pivot(config.dataset_path)
         .reindex(index=env.dates, columns=env.tickers)
         .to_numpy()
     )

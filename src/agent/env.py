@@ -46,7 +46,7 @@ def _load_raw_tensors():
     return dates, tickers, mask, returns, feats, scalers
 
 
-@lru_cache(maxsize=None)
+@lru_cache(maxsize=1)  # windows train sequentially; unbounded cache leaked ~170MB per window
 def _load_normalized_tensors(window_id: int):
     """Load, normalize, and clip features for a specific window.
 
@@ -67,18 +67,41 @@ def _load_normalized_tensors(window_id: int):
 def _load_slice(start: str, end: str, window_id: int):
     """Slice + mask the shared tensors once per (start, end, window_id) and cache the result.
 
-    The online-backtest retrain loop builds a 16-worker DummyVecEnv per chunk where
-    every worker uses the SAME date bounds; without this cache each of the 16 identical
-    PortfolioEnv instances independently copies the (growing, anchored-at-2000) train
-    slice, i.e. 16x redundant multi-hundred-MB arrays rebuilt every chunk. Safe to share
-    by reference since PortfolioEnv never mutates features/mask/returns after __init__.
+    All PortfolioEnv instances with the same bounds (e.g. the N envs of a
+    DummyVecEnv) share these arrays by reference — safe since PortfolioEnv
+    never mutates them after __init__.
+
+    Besides the raw slices, precomputes everything step() needs that depends
+    only on the day index t, never on the action (computed once here instead
+    of ~1M+ times in the hot loop):
+      simple_rets    [D,N] next-day simple returns, 0 where inactive/NaN
+      ew_log_returns [D]   equal-weight (active non-cash) log return per day
+      mask_f32       [D,N] mask as float32 for the observation vector
+      n_active       [D]   active-ticker count per day
     """
     dates, tickers, mask, returns, feats_all = _load_normalized_tensors(window_id)
     sel = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
     sliced_mask = mask[sel]
     feats = feats_all[sel].copy()
     feats[~sliced_mask] = 0.0
-    return dates[sel], tickers, sliced_mask, returns[sel], feats.astype(np.float32)
+
+    sliced_returns = returns[sel]
+    simple_rets = np.where(sliced_mask, np.expm1(np.nan_to_num(sliced_returns, nan=0.0)), 0.0)
+
+    is_cash = tickers == "CASH"
+    active_noncash = sliced_mask & ~is_cash                       # [D, N]
+    n_active_noncash = active_noncash.sum(axis=1)                 # [D]
+    ew_sum = np.where(active_noncash, simple_rets, 0.0).sum(axis=1)
+    ew_return = np.where(n_active_noncash > 0, ew_sum / np.maximum(n_active_noncash, 1), 0.0)
+    ew_log_returns = np.log1p(np.maximum(ew_return, -0.9999))     # [D]
+
+    derived = {
+        "simple_rets": simple_rets,
+        "ew_log_returns": ew_log_returns,
+        "mask_f32": sliced_mask.astype(np.float32),
+        "n_active": sliced_mask.sum(axis=1),
+    }
+    return dates[sel], tickers, sliced_mask, sliced_returns, feats.astype(np.float32), derived
 
 
 class PortfolioEnv(gym.Env):
@@ -104,7 +127,11 @@ class PortfolioEnv(gym.Env):
         if date_range not in bounds:
             raise ValueError(f"date_range must be one of {list(bounds)}, got '{date_range}'")
         start, end = bounds[date_range]
-        self.dates, self.tickers, self.mask, self.returns, self.features = _load_slice(start, end, config.window_id)
+        self.dates, self.tickers, self.mask, self.returns, self.features, derived = _load_slice(start, end, config.window_id)
+        self._simple_rets = derived["simple_rets"]       # [D,N] next-day simple returns, 0 if inactive
+        self._ew_log_returns = derived["ew_log_returns"] # [D] equal-weight log return per day
+        self._mask_f32 = derived["mask_f32"]             # [D,N] mask as float32 for obs
+        self._n_active = derived["n_active"]             # [D] active count per day
         n_tickers = len(self.tickers)
         n_features = self.features.shape[2]
 
@@ -145,26 +172,14 @@ class PortfolioEnv(gym.Env):
         traded = np.abs(weights - self._prev_weights)[~self._is_cash_mask].sum()
         transaction_cost = traded * (self.config.transaction_cost_bps / 10_000)
 
-        # Next-day log returns; inactive-tomorrow or missing → 0 (position carried flat)
-        next_returns = np.nan_to_num(self.returns[self._t + 1], nan=0.0)
-        next_returns = np.where(self.mask[self._t + 1], next_returns, 0.0)
-
-        simple_return = float(np.dot(weights, np.expm1(next_returns))) - transaction_cost
+        # Next-day simple returns and equal-weight baseline are precomputed per
+        # day in _load_slice (they depend only on t, not the action).
+        simple_return = float(np.dot(weights, self._simple_rets[self._t + 1])) - transaction_cost
         # Clip at -99.99% to keep log finite even on catastrophic days
         portfolio_log_return = float(np.log1p(max(simple_return, -0.9999)))
 
-        # Equal-weight baseline for variance-reduced training signal
-        # (excludes CASH, so baseline = 1/n_active_noncash of active non-cash tickers)
-        active_noncash = self.mask[self._t + 1] & ~self._is_cash_mask
-        n_active_noncash = int(active_noncash.sum())
-        if n_active_noncash > 0:
-            ew_return = float(np.expm1(next_returns[active_noncash]).mean())
-        else:
-            ew_return = 0.0
-        ew_log_return = float(np.log1p(max(ew_return, -0.9999)))
-
         # Reward: excess log return (agent vs equal-weight) for credit assignment
-        reward = portfolio_log_return - ew_log_return
+        reward = portfolio_log_return - float(self._ew_log_returns[self._t + 1])
 
         self.portfolio_value *= 1.0 + max(simple_return, -0.9999)
         self._prev_weights = weights.copy()
@@ -176,7 +191,7 @@ class PortfolioEnv(gym.Env):
             "portfolio_value": self.portfolio_value,
             "weights": weights,
             "log_return": portfolio_log_return,  # absolute return for backtest metrics
-            "n_active": int(self.mask[self._t].sum()),
+            "n_active": int(self._n_active[self._t]),
             "turnover": float(traded),
         }
         return self._obs(), reward, terminated, False, info
@@ -186,7 +201,7 @@ class PortfolioEnv(gym.Env):
     def _obs(self) -> np.ndarray:
         t = min(self._t, self.n_steps)
         return np.concatenate(
-            [self.features[t].ravel(), self.mask[t].astype(np.float32), self._prev_weights]
+            [self.features[t].ravel(), self._mask_f32[t], self._prev_weights]
         )
 
     @staticmethod
