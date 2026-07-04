@@ -202,6 +202,7 @@ def main() -> None:
     parser.add_argument("--val-fraction", type=float, default=None, help="Fraction of each window's train span carved out for early-stopping val (default: 0.15)")
     parser.add_argument("--learning-rate", type=float, default=None, help="Override learning rate (default: 3e-4)")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size (default: 64)")
+    parser.add_argument("--eval-freq", type=int, default=None, help="Evaluate on val set every N episodes (default: 20)")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
     parser.add_argument("--n-envs", type=int, default=None, help="Parallel rollout workers (default: 8; use 1 to disable)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
@@ -220,6 +221,8 @@ def main() -> None:
         overrides["learning_rate"] = args.learning_rate
     if args.batch_size is not None:
         overrides["batch_size"] = args.batch_size
+    if args.eval_freq is not None:
+        overrides["eval_freq"] = args.eval_freq
     if args.device is not None:
         overrides["device"] = args.device
     if args.n_envs is not None:

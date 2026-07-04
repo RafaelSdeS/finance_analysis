@@ -60,3 +60,6 @@ python src/visualizations/financial_view.py
 - `CLAUDE.md` — development guide (run commands, architecture, caveats)
 - `docs/specification.txt` — full RL system design (features, objective, constraints, expected behavior)
 - `docs/TODO.md` — work roadmap
+- `docs/STAGE1_DATA_COLLECTION.md`, `docs/STAGE2_DATASET_BUILD.md`, `docs/STAGE3_ML_AGENT.md` — how each stage actually works, with formulas and citations
+- `docs/RESEARCH_REFERENCES.md` — papers behind the design choices
+- `docs/ML_AGENT_ROADMAP.md` — phase-by-phase RL agent build plan

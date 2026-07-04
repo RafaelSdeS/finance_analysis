@@ -102,7 +102,7 @@ class AgentConfig:
     n_epochs: int = 10  # Gradient updates per rollout
 
     # ===== Checkpointing & Early Stopping =====
-    eval_freq: int = 100  # Evaluate on val set every N episodes
+    eval_freq: int = 20  # Evaluate on val set every N episodes (20 * n_steps = 40,960 timesteps)
     early_stopping_patience: int = 3  # Stop if val Sharpe degrades 3x in a row
 
     # ===== Logging =====

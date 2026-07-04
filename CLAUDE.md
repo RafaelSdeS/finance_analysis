@@ -167,7 +167,7 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 - **Train-only scaler:** fit StandardScaler on the FIRST window's train span only (earliest of all windows' train_end, so it can never leak future data into any window's test), apply to val/test/inference; save to `feature_scaler.pkl` (no leakage).
 - **State:** all tickers' 23 normalized features + per-ticker activity mask + previous weights (for turnover calculation) concatenated → 280×23 + 280 + 280 = **7,000-dim**. Runtime NaN → 0 (mean imputation); dataset on disk keeps honest NaNs.
 - **Action:** masked softmax over full 280-ticker universe (279 stocks + CASH; every ticker with ≥252 rows → no survivorship bias). Inactive tickers → −∞ → weight 0; active weights sum to 1. No shorting.
-- **Reward:** daily log return minus transaction cost. Cost = `transaction_cost_bps / 10000 × one-way-turnover` (excluding CASH leg which trades free). Turnover computed on non-CASH tickers only; CASH weight change absorbed by the equity side.
+- **Reward:** daily log return minus transaction cost. Cost = `transaction_cost_bps / 10000 × one-way-turnover` (excluding CASH leg which trades free). Turnover computed on non-CASH tickers only; CASH weight change absorbed by the equity side. Episodes start/reset at 100% CASH (new investor), so the first allocation pays full deployment cost.
 - **Algorithm:** PPO via stable-baselines3 (lr=3e-4, gamma=0.99, gae_lambda=0.95).
 
 ## Dataset Verification (before Stage 3 training)
