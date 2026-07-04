@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.agent.metrics import (
     compute_all,
     cumulative_return,
+    effective_n_positions,
     max_drawdown,
     sharpe_ratio,
     sortino_ratio,
@@ -64,6 +65,32 @@ def test_compute_all_keys_and_finite() -> None:
                      "max_drawdown", "win_rate", "n_days"}
     assert set(result) == expected_keys, f"keys mismatch: {set(result)}"
     assert all(np.isfinite(v) for v in result.values()), "non-finite metric"
+
+
+def test_effective_n_positions_uniform() -> None:
+    w = np.zeros((5, 10))
+    w[:, :] = 0.1  # uniform: 10 tickers × 0.1 each
+    assert approx(effective_n_positions(w), 10.0, tol=1e-3), "uniform weights over 10 should give effective_n≈10"
+
+
+def test_effective_n_positions_concentrated() -> None:
+    w = np.zeros((5, 10))
+    w[:, 0] = 1.0  # all mass on one ticker
+    assert approx(effective_n_positions(w), 1.0, tol=1e-9), "single position should give effective_n=1"
+
+
+def test_effective_n_positions_half_half() -> None:
+    w = np.zeros((5, 10))
+    w[:, 0] = 0.5
+    w[:, 1] = 0.5  # two equal positions
+    assert approx(effective_n_positions(w), 2.0, tol=1e-9), "two equal positions should give effective_n=2"
+
+
+def test_effective_n_positions_edge_cases() -> None:
+    assert effective_n_positions(np.array([])) == 0.0
+    # Single ticker with all mass → HHI = 1.0, effective_n = 1
+    w_single = np.ones((5, 1))  # each row: [1.0] (100% in one ticker)
+    assert approx(effective_n_positions(w_single), 1.0, tol=1e-9)
 
 
 def test_edge_cases_empty_and_single() -> None:

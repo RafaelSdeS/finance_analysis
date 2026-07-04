@@ -53,21 +53,20 @@ Prereq: `pip install torch stable-baselines3 gymnasium scikit-learn`. Deep-dive:
 python src/agent/feature_engineering.py
 python -m src.agent.data_pipeline
 
-# Train PPO (smoke: --timesteps 12288)
+# Train PPO — always anchored rolling windows (8 windows by default, train anchored 2000, ~2y test each);
+# one PPO model per window, 1M timesteps/window by default (smoke: --timesteps 12288)
 python -m src.agent.trainer
 python -m src.agent.trainer --timesteps 500000 --learning-rate 1e-4 --device cuda
+python -m src.agent.trainer --train-years 2 --test-years 1 --timesteps 2048  # fast smoke: many small windows
 
-# Backtest vs equal-weight / market-cap / inv-vol baselines
+# Backtest vs equal-weight / market-cap / inv-vol baselines (uses the most recent window's test split)
 python -m src.agent.evaluate --model data/models/agent_best.zip
 
 # Daily inference
 python -m src.agent.run_allocation --date 2026-06-29 --format csv
-
-# Robustness: anchored rolling-window eval (8 windows, train anchored 2000, ~2y test each)
-python -m src.agent.rolling_eval
 ```
 
-**Outputs:** models `data/models/agent_{best,final}.zip` + checkpoints; scaler `data/models/feature_scaler.pkl`; env tensors `data/processed/agent_tensors.npz` ([6565 dates × 279 tickers × 23 features] + mask); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
+**Outputs:** production model (most recent window) `data/models/agent_{best,final}.zip` + checkpoints; earlier windows namespaced `data/models/window_{id}_{best,final}.zip`; scaler `data/models/feature_scaler.pkl`; env tensors `data/processed/agent_tensors.npz` ([6565 dates × 279 tickers × 23 features] + mask); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; stitched multi-window walk-forward `data/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
 
 ### Utilities
 
@@ -149,26 +148,26 @@ data/backtest/results.parquet, data/allocations/*.csv
 
 | File | Purpose |
 |------|---------|
-| `config.py` | Frozen `AgentConfig`: hyperparams, 23-feature list, verified split dates, paths |
+| `config.py` | Frozen `AgentConfig`: hyperparams, 23-feature list, paths, `generate_windows()`/`window_to_config()`; `DEFAULT_CONFIG` = most recent rolling window |
 | `feature_engineering.py` | Returns from `adj_close` (split-safe), corrupt-observation cleaning |
-| `data_pipeline.py` | Pivot to dense tensors [dates×tickers×features] + activity mask; train-only scaler |
-| `env.py` | PortfolioEnv: masked time-varying universe, masked-softmax action, log-return reward |
+| `data_pipeline.py` | Pivot to dense tensors [dates×tickers×features] + activity mask; train-only scaler (fit on the earliest window's train_end — conservative, no lookahead into any window's test) |
+| `env.py` | PortfolioEnv: masked time-varying universe, masked-softmax action, transaction-cost reward |
 | `metrics.py` | Sharpe, Sortino, max drawdown, win rate (shared by trainer + evaluator) |
-| `trainer.py` | SB3 PPO, val-Sharpe eval callback, JSONL logging, checkpoints, early stopping |
+| `trainer.py` | SB3 PPO per window, val-Sharpe eval callback, JSONL logging, checkpoints, early stopping; `main()` = sole rolling-window training CLI |
 | `evaluate.py` | Backtest vs 3 baselines, metrics.json, Plotly plots |
 | `infer.py` | `predict_weights(date)` reusing env obs pipeline; equal-weight fallback |
 | `run_allocation.py` | Daily CLI: weights + sector → CSV/JSON |
-| `rolling_eval.py` | Anchored rolling-window backtest; reuses `evaluate.py` policies |
+| `rolling_eval.py` | Window training/eval orchestration (called by `trainer.py`); walk-forward stitching; reuses `evaluate.py` policies |
 
 No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progress_bar=True`.
 
 ### Key Design Decisions (Stage 3)
 
-- **Temporal splits, never random:** train 60% (oldest) / val 20% / test 20% (most recent), by date range not row count. Prevents lookahead + respects regime shifts.
-- **Train-only scaler:** fit StandardScaler on train, apply to val/test; save to `feature_scaler.pkl` for inference (no leakage).
-- **State:** all tickers' 23 normalized features + per-ticker activity mask concatenated → 279×23 + 279 = **6,696-dim**. Runtime NaN → 0 (mean imputation); dataset on disk keeps honest NaNs.
-- **Action:** masked softmax over full 279-ticker universe (every ticker with ≥252 rows → no survivorship bias). Inactive tickers → −∞ → weight 0; active weights sum to 1. No shorting.
-- **Reward:** daily log return `log(V_t / V_{t-1})`. No transaction costs / risk penalties in v1 (switch to Sharpe-based if convergence poor).
+- **Anchored rolling windows, never a fixed split:** training always partitions the dataset into anchored windows (`config.generate_windows()`; default 8 windows, train_years=10, test_years=2, train always starts at `dataset_start`, test slides forward). Each window's train span is tail-carved (`window_val_fraction`, default 15%) into train/val for early stopping; its test span is untouched. The MOST RECENT window is the production model (`agent_best.zip`) and `DEFAULT_CONFIG`'s split; earlier windows are namespaced (`window_{id}_best.zip`) and exist for robustness reporting (`data/backtest/walkforward_*`). There is no flag to opt back into a single fixed split — `python -m src.agent.trainer` always trains this way.
+- **Train-only scaler:** fit StandardScaler on the FIRST window's train span only (earliest of all windows' train_end, so it can never leak future data into any window's test), apply to val/test/inference; save to `feature_scaler.pkl` (no leakage).
+- **State:** all tickers' 23 normalized features + per-ticker activity mask + previous weights (for turnover calculation) concatenated → 280×23 + 280 + 280 = **7,000-dim**. Runtime NaN → 0 (mean imputation); dataset on disk keeps honest NaNs.
+- **Action:** masked softmax over full 280-ticker universe (279 stocks + CASH; every ticker with ≥252 rows → no survivorship bias). Inactive tickers → −∞ → weight 0; active weights sum to 1. No shorting.
+- **Reward:** daily log return minus transaction cost. Cost = `transaction_cost_bps / 10000 × one-way-turnover` (excluding CASH leg which trades free). Turnover computed on non-CASH tickers only; CASH weight change absorbed by the equity side.
 - **Algorithm:** PPO via stable-baselines3 (lr=3e-4, gamma=0.99, gae_lambda=0.95).
 
 ## Dataset Verification (before Stage 3 training)

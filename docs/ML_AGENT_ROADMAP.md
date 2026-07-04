@@ -10,7 +10,7 @@ Building the RL agent for portfolio allocation (Stage 3).
 
 This roadmap implements the following architectural decisions; **read CLAUDE.md for full rationale:**
 
-1. **Temporal Data Splits (60/20/20 by date):** Train on oldest dates, validate on mid-period, test on most recent. Prevents lookahead bias and respects market regime shifts.
+1. **Anchored Rolling Windows (never a fixed split):** Training partitions the dataset into anchored windows (train always starts at the dataset's earliest date, test slides forward ~2 years per window); each window's train span is tail-carved into train/val for early stopping. The most recent window is the production model/default split. Prevents lookahead bias, respects market regime shifts, and produces multiple out-of-sample evaluations instead of one.
 2. **Train-Only Scaler:** Fit StandardScaler on training data only; reuse for validation/test/inference. Stored as `data/models/feature_scaler.pkl`.
 3. **State Space:** Concatenated normalized features `[n_tickers * feature_dim]`. Simple, learnable end-to-end.
 4. **Action Space:** Continuous weights via softmax output (guarantees simplex: Σw_i=1, w_i≥0). No-shorting constraint built-in.
@@ -82,7 +82,7 @@ Encourages risk-adjusted returns; adds complexity.
 **Task List:** See `TODO.md` → "Phase 3b: Training Infrastructure" for detailed checkboxes and sub-tasks.
 
 ### 2a. Data Pipeline
-- [ ] Split timeline into train (60%) / val (20%) / test (20%) by date (preserve temporal order)
+- [ ] Generate anchored rolling windows (train always from dataset start, test slides forward); tail-carve each window's train span into train/val by date (preserve temporal order)
 - [ ] Normalize training features on *train set only* (prevent lookahead bias)
 - [ ] Create train/val environments from respective date ranges
 - [ ] Cache normalized datasets as parquets in `data/processed/agent_train.parquet` etc.

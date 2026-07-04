@@ -289,43 +289,10 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
     all_pass = all(checks.values())
     results['pass'] = all_pass
 
-    # ===== RECOMMENDATIONS =====
-    print("\n" + "=" * 70)
-    print("RECOMMENDED TRAIN/VAL/TEST SPLITS")
-    print("=" * 70)
-
-    if results['pass_v1']:
-        total_span = results['span_years']
-        train_years = 0.60 * total_span
-        val_years = 0.20 * total_span
-        test_years = 0.20 * total_span
-
-        # Calculate dates
-        from datetime import timedelta
-        train_end = results['date_min'] + timedelta(days=train_years * 365.25)
-        val_end = train_end + timedelta(days=val_years * 365.25)
-        test_end = val_end + timedelta(days=test_years * 365.25)
-
-        print(f"Total data span: {total_span:.2f} years")
-        print(f"\nProposed split (by date):")
-        print(f"  Train (60%): {results['date_min'].date()} → {train_end.date()} ({train_years:.2f} years)")
-        print(f"  Val   (20%): {train_end.date()} → {val_end.date()} ({val_years:.2f} years)")
-        print(f"  Test  (20%): {val_end.date()} → {results['date_max'].date()} ({test_years:.2f} years)")
-
-        print(f"\nUpdate config.py:")
-        print(f"  train_end: '{train_end.strftime('%Y-%m-%d')}'")
-        print(f"  val_end:   '{val_end.strftime('%Y-%m-%d')}'")
-        print(f"  test_end:  '{results['date_max'].strftime('%Y-%m-%d')}'")
-
-        # Verify each split has enough data
-        print(f"\nData points per split:")
-        train_rows = len(df[df[date_col] <= train_end])
-        val_rows = len(df[(df[date_col] > train_end) & (df[date_col] <= val_end)])
-        test_rows = len(df[df[date_col] > val_end])
-
-        print(f"  Train: {train_rows:,} rows (~{train_rows/252:.0f} ticker-years)")
-        print(f"  Val:   {val_rows:,} rows (~{val_rows/252:.0f} ticker-years)")
-        print(f"  Test:  {test_rows:,} rows (~{test_rows/252:.0f} ticker-years)")
+    # Train/val/test splits are derived from anchored rolling windows, not a
+    # fixed recommendation — see `python src/agent/config.py` (DEFAULT_CONFIG
+    # .log_summary()) for the current split, or `generate_windows()` in
+    # config.py for the full window schedule.
 
     # ===== FINAL VERDICT =====
     print("\n" + "=" * 70)

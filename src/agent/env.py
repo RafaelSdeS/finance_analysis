@@ -74,12 +74,15 @@ class PortfolioEnv(gym.Env):
         if self.n_steps < 2:
             raise ValueError(f"Date range '{date_range}' has too few days: {len(self.dates)}")
 
-        obs_dim = n_tickers * n_features + n_tickers
+        self._is_cash_mask = self.tickers == "CASH"  # precomputed, avoid per-step string compare
+
+        obs_dim = n_tickers * n_features + 2 * n_tickers  # features + mask + prev_weights
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
         self.action_space = spaces.Box(-10.0, 10.0, shape=(n_tickers,), dtype=np.float32)
 
         self._t = 0
         self.portfolio_value = config.initial_capital
+        self._prev_weights = np.zeros(n_tickers, dtype=np.float32)  # zero-init at start; updated after each step
         logger.info(
             "PortfolioEnv[%s]: %d days (%s → %s), %d tickers, obs_dim=%d",
             date_range, len(self.dates), self.dates[0].date(), self.dates[-1].date(),
@@ -92,26 +95,28 @@ class PortfolioEnv(gym.Env):
         super().reset(seed=seed)
         self._t = 0
         self.portfolio_value = self.config.initial_capital
+        self._prev_weights[:] = 0.0  # fresh start; first allocation incurs full deployment cost
         return self._obs(), {"date": self.dates[0], "portfolio_value": self.portfolio_value}
 
     def step(self, action: np.ndarray):
         weights = self._masked_softmax(action, self.mask[self._t])
 
+        # Transaction cost: cost per unit of traded notional, excluding CASH leg (which trades free)
+        # ponytail: prev weights not drift-adjusted for returns; model sees absolute weight deltas,
+        # acceptable since agent plans daily rebalance anyway (one-step horizon)
+        traded = np.abs(weights - self._prev_weights)[~self._is_cash_mask].sum()
+        transaction_cost = traded * (self.config.transaction_cost_bps / 10_000)
+
         # Next-day log returns; inactive-tomorrow or missing → 0 (position carried flat)
         next_returns = np.nan_to_num(self.returns[self._t + 1], nan=0.0)
         next_returns = np.where(self.mask[self._t + 1], next_returns, 0.0)
 
-        simple_return = float(np.dot(weights, np.expm1(next_returns)))
+        simple_return = float(np.dot(weights, np.expm1(next_returns))) - transaction_cost
         # Clip at -99.99% to keep log finite even on catastrophic days
         reward = float(np.log1p(max(simple_return, -0.9999)))
 
-        # Risk-adjusted reward: maximize return while penalizing volatility
-        # penytail: reward = r - lambda*r^2 penalizes extreme moves as high-risk
-        # Tunable: higher risk_aversion → more conservative allocations
-        risk_aversion = 0.1
-        reward = reward - risk_aversion * (reward ** 2)
-
         self.portfolio_value *= 1.0 + max(simple_return, -0.9999)
+        self._prev_weights = weights.copy()
 
         self._t += 1
         terminated = self._t >= self.n_steps
@@ -120,6 +125,7 @@ class PortfolioEnv(gym.Env):
             "portfolio_value": self.portfolio_value,
             "weights": weights,
             "n_active": int(self.mask[self._t].sum()),
+            "turnover": float(traded),
         }
         return self._obs(), reward, terminated, False, info
 
@@ -128,7 +134,7 @@ class PortfolioEnv(gym.Env):
     def _obs(self) -> np.ndarray:
         t = min(self._t, self.n_steps)
         return np.concatenate(
-            [self.features[t].ravel(), self.mask[t].astype(np.float32)]
+            [self.features[t].ravel(), self.mask[t].astype(np.float32), self._prev_weights]
         )
 
     @staticmethod

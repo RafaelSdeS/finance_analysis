@@ -186,7 +186,7 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
     results = {name: rollout(env, fn) for name, fn in policies.items()}
 
     # Metrics table
-    metrics = {name: compute_all(res["rewards"], res["values"]) for name, res in results.items()}
+    metrics = {name: compute_all(res["rewards"], res["values"], res["weights"]) for name, res in results.items()}
     table = pd.DataFrame(metrics).T
     print("\n" + "=" * 78)
     print("BACKTEST RESULTS (test set: "

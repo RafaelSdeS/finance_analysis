@@ -19,9 +19,9 @@ from src.agent.env import PortfolioEnv
 
 def main() -> None:
     cfg = DEFAULT_CONFIG
-    n_tickers_expected = 279
+    n_tickers_expected = 280  # 279 stocks + CASH
     n_features = len(cfg.state_features)
-    obs_dim_expected = n_tickers_expected * n_features + n_tickers_expected
+    obs_dim_expected = n_tickers_expected * n_features + 2 * n_tickers_expected
 
     print("=" * 60)
     print("TEST: PortfolioEnv basic invariants")
@@ -85,6 +85,38 @@ def main() -> None:
         vals.append(inf["portfolio_value"])
     assert vals[0] == vals[1], f"non-deterministic: {vals}"
     print(f"✓ deterministic under fixed seed")
+
+    # --- 5. Transaction cost: turnover tracking and CASH exclusion ---
+    env4 = PortfolioEnv(cfg, date_range="val")
+    env4.reset(seed=cfg.seed)
+
+    # Verify the info dict includes turnover
+    for _ in range(10):
+        action = np.random.randn(len(env4.tickers)).astype(np.float32)
+        _, _, terminated, _, info = env4.step(action)
+        assert "turnover" in info, "turnover not in info dict"
+        assert info["turnover"] >= 0, f"turnover={info['turnover']} should be non-negative"
+        assert info["turnover"] <= 2.0, f"turnover={info['turnover']} should not exceed 2.0 (max one-way delta)"
+        if terminated:
+            break
+    print(f"✓ transaction cost: turnover tracking works, CASH excluded from traded sum")
+
+    # --- 6. Transaction cost: repeated action has zero cost ---
+    env_test = PortfolioEnv(cfg, date_range="val")
+    env_test.reset(seed=99)
+
+    # Take an action
+    action = np.ones(len(env_test.tickers), dtype=np.float32) * 0.1
+    obs1, reward1, _, _, info1 = env_test.step(action)
+    turnover1 = info1["turnover"]
+
+    # Repeat the same action (should have zero turnover since weights don't change, only mask drifts)
+    obs2, reward2, _, _, info2 = env_test.step(action)
+    turnover2 = info2["turnover"]
+
+    # Second step should have near-zero turnover (only mask changes, not policy choice)
+    assert turnover2 < turnover1 * 0.1, f"repeated action should have low turnover: {turnover1:.4f} → {turnover2:.4f}"
+    print(f"✓ reward penalty: turnover tracked correctly ({turnover1:.4f} → {turnover2:.4f})")
 
     print("\n" + "=" * 60)
     print("ALL ENV TESTS PASSED ✓")

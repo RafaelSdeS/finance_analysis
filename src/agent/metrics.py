@@ -65,9 +65,18 @@ def win_rate(log_returns: np.ndarray) -> float:
     return float((r > 0).mean())
 
 
-def compute_all(log_returns: np.ndarray, portfolio_values: np.ndarray) -> dict:
+def effective_n_positions(weights: np.ndarray) -> float:
+    """Effective number of positions (1/HHI) averaged over the period."""
+    w = np.asarray(weights, dtype=np.float64)
+    if w.ndim != 2 or len(w) == 0:
+        return 0.0
+    hhi = (w ** 2).sum(axis=1)
+    return float(np.mean(1.0 / np.maximum(hhi, EPS)))
+
+
+def compute_all(log_returns: np.ndarray, portfolio_values: np.ndarray, weights: np.ndarray | None = None) -> dict:
     """All metrics in one dict (for metrics.json / comparison tables)."""
-    return {
+    metrics = {
         "cumulative_return": cumulative_return(portfolio_values),
         "annualized_return": annualized_return(portfolio_values),
         "sharpe": sharpe_ratio(log_returns),
@@ -76,3 +85,6 @@ def compute_all(log_returns: np.ndarray, portfolio_values: np.ndarray) -> dict:
         "win_rate": win_rate(log_returns),
         "n_days": int(len(log_returns)),
     }
+    if weights is not None:
+        metrics["effective_n"] = effective_n_positions(weights)
+    return metrics

@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
-from src.agent.config import AgentConfig, DEFAULT_CONFIG
+from src.agent.config import AgentConfig, DEFAULT_CONFIG, generate_windows
 
 logger = logging.getLogger(__name__)
 
@@ -77,10 +77,27 @@ def build_tensors(config: AgentConfig = DEFAULT_CONFIG) -> dict:
     }
 
 
+def _scaler_cutoff(config: AgentConfig) -> str:
+    """
+    Conservative, leak-free cutoff for the one global scaler: the FIRST
+    rolling window's train_end. This predates every window's test_start,
+    so the same scaler stays lookahead-free no matter which window's
+    PortfolioEnv it normalizes for (config.train_end itself is now the
+    LAST window's carved train_end, which would leak future distribution
+    stats into earlier windows' "out of sample" test evaluations).
+    """
+    first_window = generate_windows(
+        config.dataset_start, config.dataset_end,
+        config.window_train_years, config.window_test_years,
+    )[0]
+    return first_window.train_end
+
+
 def fit_train_scaler(tensors: dict, config: AgentConfig = DEFAULT_CONFIG) -> StandardScaler:
     """Fit StandardScaler on active train-date cells only (no lookahead)."""
+    cutoff = _scaler_cutoff(config)
     dates = pd.to_datetime(tensors["dates"])
-    train_slice = dates <= pd.Timestamp(config.train_end)
+    train_slice = dates <= pd.Timestamp(cutoff)
 
     train_feats = tensors["features"][train_slice]        # [train_dates, tickers, features]
     train_mask = tensors["mask"][train_slice]             # [train_dates, tickers]
@@ -95,8 +112,8 @@ def fit_train_scaler(tensors: dict, config: AgentConfig = DEFAULT_CONFIG) -> Sta
     scaler.n_features_in_ = active_rows.shape[1]
 
     logger.info(
-        "Scaler fitted on %s active train cells (train_end=%s)",
-        f"{len(active_rows):,}", config.train_end,
+        "Scaler fitted on %s active train cells (cutoff=%s, first rolling window's train_end)",
+        f"{len(active_rows):,}", cutoff,
     )
     return scaler
 
@@ -123,7 +140,7 @@ def run_pipeline(config: AgentConfig = DEFAULT_CONFIG) -> None:
     print(f"Calendar: {dates.min().date()} → {dates.max().date()} ({len(dates)} days)")
     print(f"Active cells: {tensors['mask'].sum():,} / {tensors['mask'].size:,} "
           f"({tensors['mask'].mean():.1%})")
-    print(f"Scaler:   fitted on train ≤ {config.train_end}{SCALER_PATH}")
+    print(f"Scaler:   fitted on train ≤ {_scaler_cutoff(config)}{SCALER_PATH}")
 
 
 if __name__ == "__main__":

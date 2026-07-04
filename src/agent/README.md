@@ -22,13 +22,11 @@ Check agent config (paths, dates, features):
 python src/agent/config.py
 ```
 
-Output:
+Output (splits shown are for the most recent anchored rolling window — see "Anchored Rolling Windows" below):
 ```
-AGENT CONFIGURATION
-  Dataset: data/processed/ml_dataset_training.parquet
-  Temporal Splits: Train (2000-2015), Val (2015-2021), Test (2021-2026)
-  State Features: 23 (price, fundamental, macro)
-  Hyperparams: LR=3e-4, γ=0.99
+AgentConfig | ml_dataset_training.parquet | 23 features (6p+14f+3m)
+  splits: train 2000-01-03→2020-06-03 | val 2020-06-04→2024-01-09 | test 2024-01-10→2026-01-10
+  ppo: lr=0.0003 γ=0.99 λ=0.95 steps=1,000,000 batch=64 epochs=10
 ```
 
 ### 3. Build Env Tensors (One-Time)
@@ -41,12 +39,17 @@ Output: `data/processed/agent_tensors.npz` + `data/models/feature_scaler.pkl`
 
 ### 4. Train, Evaluate, Allocate
 
+Training is always via anchored rolling windows — one PPO model per window, sequentially, in a single command:
+
 ```bash
-python -m src.agent.trainer --timesteps 12288     # smoke run (~1 min, GPU)
-python -m src.agent.trainer                       # full run (1M timesteps)
-python -m src.agent.evaluate                      # backtest agent_best.zip vs baselines
+python -m src.agent.trainer --timesteps 12288                # smoke run (per window, ~1 min/window, GPU)
+python -m src.agent.trainer                                   # full run: 8 windows x 1M timesteps each
+python -m src.agent.trainer --train-years 2 --test-years 1    # fast smoke: many small windows
+python -m src.agent.evaluate                                  # backtest agent_best.zip (latest window) vs baselines
 python -m src.agent.run_allocation --date 2026-06-29 --format csv
 ```
+
+The most recent window's model is saved as `agent_best.zip`/`agent_final.zip` (the production model); earlier windows are namespaced `window_{id}_best.zip`/`window_{id}_final.zip`. The stitched out-of-sample curve across all windows is written to `data/backtest/walkforward_results.parquet` + `walkforward_metrics.json`.
 
 ### 5. Tests
 
@@ -68,7 +71,8 @@ python tests/agent/test_inference_output.py
 | `data_pipeline.py` | Dense tensors [dates×tickers×features] + mask + train-only scaler | ✓ Complete |
 | `env.py` | PortfolioEnv: masked time-varying universe, masked softmax | ✓ Complete |
 | `metrics.py` | Sharpe, Sortino, max DD, win rate (shared) | ✓ Complete |
-| `trainer.py` | PPO training loop, val-Sharpe early stopping, checkpoints | ✓ Complete |
+| `trainer.py` | PPO training loop per window, val-Sharpe early stopping, checkpoints; `main()` = sole rolling-window training CLI | ✓ Complete |
+| `rolling_eval.py` | Window generation/training/eval orchestration (called by `trainer.py`); walk-forward stitching | ✓ Complete |
 | `evaluate.py` | Backtest vs 3 baselines, metrics.json, Plotly plots | ✓ Complete |
 | `infer.py` | `predict_weights(date)` + equal-weight fallback | ✓ Complete |
 | `run_allocation.py` | Daily entry point (CSV/JSON) | ✓ Complete |
@@ -84,13 +88,13 @@ feature_engineering.py (compute returns if missing)
          ↓
 ml_dataset_training.parquet
          ↓
-config.py (defines train/val/test date ranges)
+config.py (generate_windows() → anchored rolling windows; DEFAULT_CONFIG = most recent window)
          ↓
 env.py (PortfolioEnv loads and normalizes data per date range)
          ↓
-trainer.py (PPO training on train set, early stopping on val set)
+trainer.py + rolling_eval.py (PPO training per window, early stopping on each window's val tail)
          ↓
-evaluate.py (backtest on test set)
+evaluate.py (backtest on the most recent window's test set)
 ```
 
 ## Key Design Decisions
@@ -119,15 +123,32 @@ returns_t = log(close_t / close_{t-1})
 
 **NaN Strategy:** Model handles missing values. Fundamental data is sparse (quarterly, forward-filled). This is realistic — production inference will also have missing data.
 
-### 3. Temporal Splits (By Date, Not Rows)
+### 3. Anchored Rolling Windows (By Date, Not Rows, Never a Fixed Split)
+
+Training is never a single fixed train/val/test split — it always partitions
+the dataset into anchored windows via `config.generate_windows()`:
 
 ```
-Train (60%): 2000-01-03 → 2015-11-25 (15.9 years, 326K rows)
-Val   (20%): 2015-11-26 → 2021-03-13 (5.3 years, 198K rows)
-Test  (20%): 2021-03-14 → 2026-06-30 (5.3 years, 324K rows)
+Window 0: train 2000-01-03→2010-01-02 | test 2010-01-03→2012-01-03
+Window 1: train 2000-01-03→2012-01-03 | test 2012-01-04→2014-01-04
+...
+Window 7: train 2000-01-03→2024-01-09 | test 2024-01-10→2026-01-10   ← most recent
 ```
 
-**Why:** Prevents lookahead bias. Agent trains on history, validates on intermediate period, tests on most recent (realistic deployment scenario).
+Controlled by `AgentConfig` fields: `dataset_start`/`dataset_end` (2000-01-03 →
+2026-06-30), `window_train_years` (10), `window_test_years` (2). Each window's
+train span is further tail-carved by `window_val_fraction` (0.15) into
+train/val for early stopping — e.g. window 7 becomes
+`train 2000-01-03→2020-06-03 | val 2020-06-04→2024-01-09 | test 2024-01-10→2026-01-10`.
+`DEFAULT_CONFIG` is always the **most recent** window's config, so
+`evaluate.py`/`infer.py`/`run_allocation.py` automatically target the newest
+held-out period.
+
+**Why:** Prevents lookahead bias (test always follows train chronologically)
+and produces 8+ independent out-of-sample evaluations across different market
+regimes (2008 crash, COVID, rate hikes, ...) instead of one. The most recent
+window doubles as the production model — trained on nearly all available
+history, tested on the newest unseen period (realistic deployment scenario).
 
 ### 4. Configuration as Code (Not YAML)
 
