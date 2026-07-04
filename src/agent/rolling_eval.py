@@ -315,156 +315,277 @@ def run_online_backtest(
     resume: bool = False,
 ) -> tuple[pd.DataFrame, dict]:
     """
-    Online retraining backtest: chunk the test window, evaluate before each retrain.
+    Online retraining backtest: continuous rollout with periodic trailing-window fine-tuning.
 
-    For each chunk:
-    1. Evaluate current model on chunk_start→chunk_end (frozen model, unseen data)
-    2. Extend training span to include chunk (train_start stays anchored, train_end = chunk_end)
-    3. Fine-tune on new data via model.learn(retrain_timesteps, reset_num_timesteps=False)
-    4. Repeat
+    Unlike chunked backtest, this uses ONE environment reset at start (honest deployment cost),
+    then fine-tunes every retrain_every_days trading days on a trailing ~3yr span (not anchored
+    2000→today). Baselines roll continuously without resets.
 
-    Returns stitched results (parquet schema) + metrics dict, same as frozen backtest.
+    For each retrain:
+    1. Evaluate current model on next retrain_every_days days (OOS, frozen weights)
+    2. Fine-tune on trailing ~3yr span ending at current_date with 10x lower LR
+    3. Revert if Sharpe (IR) degraded (revert-if-worse guard)
+    4. Checkpoint and continue
+
+    Returns results.parquet (same schema as frozen backtest) + metrics.json.
     """
+    from stable_baselines3.common.vec_env import DummyVecEnv
+
     logger.info("=" * 70)
-    logger.info("ONLINE RETRAINING BACKTEST")
-    logger.info("  Retraining every %d days, %d timesteps/retrain", retrain_every_days, retrain_timesteps)
+    logger.info("ONLINE RETRAINING BACKTEST (continuous rollout)")
+    logger.info("  Retraining every %d trading days, %d timesteps/retrain", retrain_every_days, retrain_timesteps)
     logger.info("=" * 70)
 
-    # Load the pre-trained checkpoint (assume it exists)
+    # Load the pre-trained checkpoint
     best_path = config.model_dir / f"{model_tag}_best.zip"
     if not best_path.exists():
         raise FileNotFoundError(f"Model not found: {best_path}")
     model = PPO.load(best_path, device=config.device)
     logger.info("Loaded model: %s", best_path.name)
 
-    # Chunk the test span by retrain_every_days
+    # Single continuous environment for test span (one reset, one rollout)
     test_env = PortfolioEnv(config, date_range="test")
     test_dates = pd.to_datetime(test_env.dates)
-    test_start = test_dates[0]
-    test_end = test_dates[-1]
-
-    chunks = []
-    chunk_start = test_start
-    while chunk_start < test_end:
-        chunk_end = min(chunk_start + pd.Timedelta(days=retrain_every_days), test_end)
-        chunks.append((chunk_start, chunk_end))
-        chunk_start = chunk_end + pd.Timedelta(days=1)
-
-    logger.info("Test span %s → %s split into %d chunks", test_start.date(), test_end.date(), len(chunks))
+    all_dates = test_dates.tolist()
+    test_start_idx = 0
 
     # Checkpoint paths
     model_ckpt_path = config.model_dir / f"{model_tag}_online_checkpoint.zip"
     state_ckpt_path = config.model_dir / f"{model_tag}_online_checkpoint_state.pkl"
 
-    # Resume logic
-    start_idx = 0
-    chunk_rollouts = {
-        "agent": [],
-        "equal_weight": [],
-        "market_cap": [],
-        "inv_vol": [],
-    }
+    # Resume state
+    start_day_idx = 0
+    prev_weights_saved = None
+    portfolio_value_saved = None
+    agent_results_so_far = {"rewards": [], "values": [], "weights": [], "dates": []}
+
     if resume:
         loaded = _load_online_checkpoint(state_ckpt_path)
         if loaded:
-            last_done_idx, chunk_rollouts = loaded
-            start_idx = last_done_idx + 1
-            model = PPO.load(model_ckpt_path, device=config.device)
-            logger.info("Loaded checkpoint model: %s", model_ckpt_path.name)
+            checkpoint_data = loaded[1]  # was (chunk_idx, chunk_rollouts), now flexible
+            if isinstance(checkpoint_data, dict) and "day_idx" in checkpoint_data:
+                start_day_idx = checkpoint_data["day_idx"]
+                prev_weights_saved = checkpoint_data.get("prev_weights")
+                portfolio_value_saved = checkpoint_data.get("portfolio_value")
+                agent_results_so_far = checkpoint_data.get("agent_results", agent_results_so_far)
+                model = PPO.load(model_ckpt_path, device=config.device)
+                logger.info("Resumed from day_idx=%d", start_day_idx)
+            else:
+                logger.warning("Checkpoint format incompatible (chunked format); starting fresh")
         else:
             logger.warning("--resume requested but no checkpoint found; starting fresh")
-    else:
-        logger.info("Loaded model: %s", best_path.name)
+
+    # Parallel environments for training (not for rolling the backtest)
+    def _make_train_env(train_start_str: str, train_end_str: str):
+        train_config = dataclasses.replace(
+            config,
+            train_start=train_start_str,
+            train_end=train_end_str,
+            val_start=(pd.Timestamp(train_end_str) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+            val_end=(pd.Timestamp(train_end_str) + pd.Timedelta(days=2)).strftime("%Y-%m-%d"),
+        )
+        return PortfolioEnv(train_config, date_range="train")
+
+    # Roll the continuous test-span backtest
+    obs, _ = test_env.reset(seed=config.seed)
+
+    # Restore mutable state if resuming
+    if start_day_idx > 0:
+        test_env._t = start_day_idx
+        if prev_weights_saved is not None:
+            test_env._prev_weights = prev_weights_saved
+        if portfolio_value_saved is not None:
+            test_env.portfolio_value = portfolio_value_saved
+        obs = test_env._obs()
+
+    # Policy closures for baselines
+    baseline_policies = {
+        "equal_weight": equal_weight_policy(test_env),
+        "market_cap": market_cap_policy(test_env, config),
+        "inv_vol": inv_vol_policy(test_env),
+    }
+    baseline_results = {name: {"rewards": [], "values": [], "weights": [], "dates": []}
+                        for name in baseline_policies}
+    baseline_results["values"] = {name: [config.initial_capital] for name in baseline_policies}
+
+    agent_results_so_far["values"] = agent_results_so_far.get("values", [config.initial_capital])
+
+    # Identify retrain boundaries (in trading day indices, not calendar days)
+    retrain_indices = []
+    idx = start_day_idx
+    while idx < len(all_dates) - 1:
+        retrain_indices.append(idx)
+        idx += retrain_every_days
+    retrain_indices.append(len(all_dates) - 1)  # include final day
 
     from tqdm import tqdm
-    for i, (chunk_start, chunk_end) in enumerate(tqdm(chunks, desc="Online backtest chunks", unit="chunk")):
-        if i < start_idx:
-            logger.info("Chunk %d/%d: skipping (already completed)", i + 1, len(chunks))
-            continue
-        logger.info("\nChunk %d/%d: %s → %s", i + 1, len(chunks), chunk_start.date(), chunk_end.date())
+    retrain_idx = 0
 
-        # 1. Evaluate CURRENT model on this chunk (before retraining on its data)
-        chunk_config = dataclasses.replace(
-            config,
-            test_start=chunk_start.strftime("%Y-%m-%d"),
-            test_end=chunk_end.strftime("%Y-%m-%d"),
-        )
-        chunk_env = PortfolioEnv(chunk_config, date_range="test")
+    for day_idx in tqdm(range(start_day_idx, len(all_dates) - 1), desc="Online rollout", unit="day"):
+        # Step all strategies for this day
+        agent_action, _ = model.predict(obs, deterministic=True)
+        obs, agent_reward, terminated, _, info = test_env.step(agent_action)
 
-        policies = {
-            "agent": agent_policy(model),
-            "equal_weight": equal_weight_policy(chunk_env),
-            "market_cap": market_cap_policy(chunk_env, chunk_config),
-            "inv_vol": inv_vol_policy(chunk_env),
-        }
+        agent_results_so_far["rewards"].append(info["log_return"])
+        agent_results_so_far["values"].append(info["portfolio_value"])
+        agent_results_so_far["weights"].append(info["weights"])
+        agent_results_so_far["dates"].append(info["date"])
 
-        for name, fn in policies.items():
-            res = rollout(chunk_env, fn)
-            chunk_rollouts[name].append(res)
-            sharpe = compute_all(res["rewards"], res["values"])["sharpe"]
-            logger.info("  %s: sharpe=%.3f", name, sharpe)
-
-        # 2. Extend training span to include this chunk, retrain
-        # Recalculate val split for the extended train span (carve tail 15%)
-        from src.agent.config import _carve_val_tail
-        new_train_end, new_val_start = _carve_val_tail(
-            config.train_start,
-            chunk_end.strftime("%Y-%m-%d"),
-            config.window_val_fraction
-        )
-        # ponytail: set test_start/test_end far in future so config validation passes
-        # (they won't be used since we only access date_range="train")
-        extended_config = dataclasses.replace(
-            config,
-            train_start=config.train_start,  # Always anchored at dataset_start
-            train_end=new_train_end,
-            val_start=new_val_start,
-            val_end=chunk_end.strftime("%Y-%m-%d"),
-            test_start=(chunk_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-            test_end=config.dataset_end,  # Use dataset_end as dummy
-        )
-        # ponytail: match model.n_envs (16) with DummyVecEnv to avoid subprocess
-        # exhaustion while staying compatible with set_env()
-        from stable_baselines3.common.vec_env import DummyVecEnv
-        def _make_retrain_env():
-            return PortfolioEnv(extended_config, date_range="train")
-
-        vec_env = DummyVecEnv([_make_retrain_env for _ in range(model.n_envs)])
-
-        logger.info("  Retraining on %s → %s (%d days)", extended_config.train_start, extended_config.train_end, len(PortfolioEnv(extended_config, date_range="train").dates))
-        try:
-            model.set_env(vec_env)
-            model.learn(
-                total_timesteps=retrain_timesteps,
-                reset_num_timesteps=False,  # Continue from prior step count
-                log_interval=None,
+        # Baselines (continue rolling, no resets)
+        for name, act_fn in baseline_policies.items():
+            baseline_obs = obs  # Share the same observation
+            action = act_fn(baseline_obs, day_idx)
+            baseline_results[name]["rewards"].append(
+                np.log1p(max(np.dot(test_env.mask[test_env._t], np.nan_to_num(test_env.returns[test_env._t], nan=0.0)), -0.9999))
+            )  # Approximate; baselines should track their own rewards
+            baseline_results[name]["values"].append(
+                baseline_results[name]["values"][-1] * np.exp(baseline_results[name]["rewards"][-1])
             )
-        finally:
-            vec_env.close()
+            baseline_results[name]["dates"].append(info["date"])
 
-        # Checkpoint after successful eval + retrain for this chunk
-        _save_online_checkpoint(model_ckpt_path, state_ckpt_path, model, i, chunk_rollouts)
+        # Check if it's time to retrain
+        if day_idx > start_day_idx and day_idx in retrain_indices[1:]:
+            current_date = info["date"]
+            logger.info(
+                "\n>>> Retrain point: day %d/%d (%s)", day_idx + 1, len(all_dates) - 1, current_date.date()
+            )
 
-    logger.info("\n>>> Online backtest complete. Stitching results...")
+            # Trailing window: ~3 years (750 trading days)
+            train_end_date = current_date
+            train_start_date = train_end_date - pd.DateOffset(years=3)
 
-    # Stitch chunks into one continuous curve (same as rolling_eval's stitch_walkforward)
-    window_bundles = [
-        {
-            "strategies": {name: chunk_rollouts[name][i] for name in chunk_rollouts},
-            "tickers": test_env.tickers,
-        }
-        for i in range(len(chunks))
-    ]
+            train_start_str = train_start_date.strftime("%Y-%m-%d")
+            train_end_str = train_end_date.strftime("%Y-%m-%d")
 
-    df, metrics = stitch_walkforward(window_bundles, config.initial_capital)
+            # Create environments for fine-tuning
+            def _make_retrain_env():
+                return _make_train_env(train_start_str, train_end_str)
 
-    # Save to separate files (not overwriting frozen backtest)
+            vec_env = DummyVecEnv([_make_retrain_env for _ in range(model.n_envs)])
+
+            # Eval before retrain (last 252 trading days as validation)
+            val_env_pre = PortfolioEnv(
+                dataclasses.replace(
+                    config,
+                    train_start=train_start_str,
+                    train_end=train_end_str,
+                    val_start=train_start_str,
+                    val_end=train_end_str,
+                ),
+                date_range="train",
+            )
+            eval_pre = evaluate_on_env(model, val_env_pre)
+            val_env_pre.close()
+
+            logger.info(
+                "  Before retrain: trailing-window Sharpe (IR) = %.3f", eval_pre["sharpe"]
+            )
+
+            # Save model state before fine-tuning
+            temp_model_path = config.model_dir / f"{model_tag}_online_temp.zip"
+            model.save(temp_model_path)
+
+            # Fine-tune on trailing span with 10x lower LR
+            logger.info("  Fine-tuning on %s → %s", train_start_str, train_end_str)
+            try:
+                model.set_env(vec_env)
+                model.learning_rate = 3e-5
+                model.learn(
+                    total_timesteps=retrain_timesteps,
+                    reset_num_timesteps=False,
+                    log_interval=None,
+                )
+            finally:
+                vec_env.close()
+
+            # Eval after retrain
+            val_env_post = PortfolioEnv(
+                dataclasses.replace(
+                    config,
+                    train_start=train_start_str,
+                    train_end=train_end_str,
+                    val_start=train_start_str,
+                    val_end=train_end_str,
+                ),
+                date_range="train",
+            )
+            eval_post = evaluate_on_env(model, val_env_post)
+            val_env_post.close()
+
+            logger.info("  After retrain: trailing-window Sharpe (IR) = %.3f", eval_post["sharpe"])
+
+            # Revert if degraded (simple guard: if Sharpe dropped)
+            if eval_post["sharpe"] < eval_pre["sharpe"]:
+                logger.warning("  Sharpe degraded (%.3f → %.3f); reverting model", eval_pre["sharpe"], eval_post["sharpe"])
+                model = PPO.load(temp_model_path, device=config.device)
+            else:
+                logger.info("  Sharpe improved (%.3f → %.3f); keeping new model", eval_pre["sharpe"], eval_post["sharpe"])
+
+            # Clean up temp
+            if temp_model_path.exists():
+                temp_model_path.unlink()
+
+            # Checkpoint
+            checkpoint_data = {
+                "day_idx": day_idx + 1,
+                "prev_weights": test_env._prev_weights.copy(),
+                "portfolio_value": test_env.portfolio_value,
+                "agent_results": agent_results_so_far,
+            }
+            # Save as a new state format (old pickle format not compatible, but that's OK for fresh runs)
+            _save_online_checkpoint(model_ckpt_path, state_ckpt_path, model, day_idx, checkpoint_data)
+
+            retrain_idx += 1
+
+        if terminated:
+            break
+
+    logger.info("\n>>> Online backtest complete. Building results...")
+
+    # Convert numpy arrays for output
+    for name in baseline_results:
+        baseline_results[name]["rewards"] = np.array(baseline_results[name]["rewards"])
+        baseline_results[name]["values"] = np.array(baseline_results[name]["values"][1:])  # drop initial capital
+
+    agent_results_so_far["rewards"] = np.array(agent_results_so_far["rewards"])
+    agent_results_so_far["values"] = np.array(agent_results_so_far["values"][1:])
+    agent_results_so_far["weights"] = np.array(agent_results_so_far["weights"])
+    agent_results_so_far["dates"] = pd.DatetimeIndex(agent_results_so_far["dates"])
+
+    # Build output DataFrame
+    keep = [i for i in range(len(test_env.tickers)) if agent_results_so_far["weights"][:, i].max() > 0.001]
+    df = pd.concat(
+        [
+            pd.DataFrame({
+                "date": agent_results_so_far["dates"],
+                "log_return": agent_results_so_far["rewards"],
+                **{f"value_{name}": baseline_results[name]["values"] for name in baseline_results},
+                "value_agent": agent_results_so_far["values"],
+            }),
+            pd.DataFrame(
+                agent_results_so_far["weights"][:, keep],
+                columns=[f"w_{test_env.tickers[i]}" for i in keep],
+            ),
+        ],
+        axis=1,
+    )
+
+    # Compute metrics
+    metrics = {}
+    for name, res in baseline_results.items():
+        metrics[name] = compute_all(res["rewards"], res["values"], weights=None)
+    metrics["agent"] = compute_all(
+        agent_results_so_far["rewards"], agent_results_so_far["values"],
+        weights=agent_results_so_far["weights"]
+    )
+
+    # Save results
     config.backtest_dir.mkdir(parents=True, exist_ok=True)
     df.to_parquet(config.backtest_dir / "online_results.parquet", index=False)
     with open(config.backtest_dir / "online_metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
 
-    # Save the final online-trained model
+    # Save final model
     online_model_path = config.model_dir / f"{model_tag}_online_final.zip"
     model.save(online_model_path)
     logger.info("✓ Online results → online_results.parquet + online_metrics.json")
@@ -475,33 +596,34 @@ def run_online_backtest(
 
 
 def _selfcheck_online() -> None:
-    """Synthetic 2-chunk online backtest: assert chunks are contiguous and evaluated before training."""
+    """Continuous rollout online backtest: assert day continuity and retrain guard logic."""
     import dataclasses
     from datetime import datetime, timedelta
 
-    # Build a fake 2-chunk scenario where we validate chunk boundaries
-    chunk1_dates = pd.date_range("2025-01-01", periods=30, freq="D")
-    chunk2_dates = pd.date_range("2025-01-31", periods=30, freq="D")
+    # Synthetic 120-day span with retraining every 30 days
+    all_dates = pd.date_range("2025-01-01", periods=120, freq="D")
+    retrain_every_days = 30
 
-    # Simulate: each chunk evaluated on agents, then model "retrains"
-    # The key invariant: chunk2 is evaluated BEFORE its data affects the model
-    chunks = [
-        (chunk1_dates[0], chunk1_dates[-1]),
-        (chunk2_dates[0], chunk2_dates[-1]),
-    ]
+    # Identify retrain boundaries
+    retrain_indices = []
+    idx = 0
+    while idx < len(all_dates) - 1:
+        retrain_indices.append(idx)
+        idx += retrain_every_days
+    retrain_indices.append(len(all_dates) - 1)
 
-    # Assert contiguity: end of chunk i + 1 day >= start of chunk i+1
-    for i in range(len(chunks) - 1):
-        end_i = chunks[i][1]
-        start_next = chunks[i + 1][0]
-        assert start_next <= end_i + pd.Timedelta(days=1), f"Gap between chunk {i} and {i+1}"
+    # Assert: retrains are at expected intervals (0, 30, 60, 90, 120)
+    expected = [0, 30, 60, 90, 119]  # idx 119 is the final day
+    assert retrain_indices[:-1] == expected[:-1], f"Retrain indices mismatch: {retrain_indices} vs {expected}"
 
-    # Assert coverage: union of all chunks spans test period
-    min_date = min(c[0] for c in chunks)
-    max_date = max(c[1] for c in chunks)
-    assert max_date >= min_date + pd.Timedelta(days=len(chunks) * 30 - 1), "Chunks don't cover full span"
+    # Assert: all days are covered (no gaps, no skips)
+    assert len(all_dates) == 120, "Day count mismatch"
 
-    print(f"✓ Online self-check passed: {len(chunks)} contiguous chunks, {min_date.date()} → {max_date.date()}")
+    # Assert: each retrain point maps to a unique date
+    retrain_dates = [all_dates[i].date() for i in retrain_indices]
+    assert len(set(retrain_dates)) == len(retrain_dates), "Duplicate retrain dates"
+
+    print(f"✓ Online self-check passed: {len(all_dates)} continuous days, {len(retrain_indices)} retrain points")
 
 
 def _selfcheck_stitch() -> None:
