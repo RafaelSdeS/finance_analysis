@@ -5,7 +5,6 @@ python-bcb==0.3.3
 numpy==2.2.6
 pytz==2025.2
 python-dateutil==2.9.0.post0
-requests==2.32.5
 httpx==0.28.1
 certifi==2025.8.3
 charset-normalizer==3.4.3

@@ -80,10 +80,3 @@ YF_RETRIES = 3
 YF_RETRY_SLEEP = 2          # seconds; doubles each retry
 TICKER_ALIASES: dict[str, str] = {}  # old_ticker -> new_yf_ticker, hand-maintained on B3 renames
 YFINANCE_ONLY_TICKERS = {"BOVA11"}  # ETFs/benchmarks not in BolsAI; always fetch from yfinance
-
-
-def tickers_for(mode: str) -> list[str]:
-    """Prototype returns the hardcoded sample; full_scale is resolved at runtime."""
-    if mode == "prototype":
-        return PROTOTYPE_TICKERS
-    raise ValueError(f"use collectors.get_all_tickers() for mode={mode!r}")

@@ -38,24 +38,22 @@ from src.agent.trainer import train
 logger = logging.getLogger(__name__)
 
 
-def _save_online_checkpoint(model_path: Path, state_path: Path, model: PPO, chunk_idx: int, chunk_rollouts: dict) -> None:
-	"""Save online backtest checkpoint: model + resumption state (chunk index + rollout history)."""
+def _save_online_checkpoint(model_path: Path, state_path: Path, model: PPO, state: dict) -> None:
+	"""Save online backtest checkpoint: model + resumption state (day index, weights, rollout history)."""
 	model.save(model_path)
 	with open(state_path, "wb") as f:
-		pickle.dump({"chunk_idx": chunk_idx, "chunk_rollouts": chunk_rollouts}, f)
-	logger.info("Saved online checkpoint: model=%s, state=%s (chunk_idx=%d)", model_path.name, state_path.name, chunk_idx)
+		pickle.dump(state, f)
+	logger.info("Saved online checkpoint: model=%s, state=%s (day_idx=%d)", model_path.name, state_path.name, state["day_idx"])
 
 
-def _load_online_checkpoint(state_path: Path) -> tuple[int, dict] | None:
-	"""Load resumption state; returns (last_completed_chunk_idx, chunk_rollouts dict) or None if not found."""
+def _load_online_checkpoint(state_path: Path) -> dict | None:
+	"""Load resumption state; returns the saved state dict or None if not found."""
 	if not state_path.exists():
 		return None
 	with open(state_path, "rb") as f:
 		state = pickle.load(f)
-	chunk_idx = state["chunk_idx"]
-	chunk_rollouts = state["chunk_rollouts"]
-	logger.info("Loaded online checkpoint: resuming from chunk_idx=%d", chunk_idx)
-	return chunk_idx, chunk_rollouts
+	logger.info("Loaded online checkpoint: resuming from day_idx=%d", state["day_idx"])
+	return state
 
 
 @dataclass
@@ -360,18 +358,14 @@ def run_online_backtest(
     agent_results_so_far = {"rewards": [], "values": [], "weights": [], "dates": []}
 
     if resume:
-        loaded = _load_online_checkpoint(state_ckpt_path)
-        if loaded:
-            checkpoint_data = loaded[1]  # was (chunk_idx, chunk_rollouts), now flexible
-            if isinstance(checkpoint_data, dict) and "day_idx" in checkpoint_data:
-                start_day_idx = checkpoint_data["day_idx"]
-                prev_weights_saved = checkpoint_data.get("prev_weights")
-                portfolio_value_saved = checkpoint_data.get("portfolio_value")
-                agent_results_so_far = checkpoint_data.get("agent_results", agent_results_so_far)
-                model = PPO.load(model_ckpt_path, device=config.device)
-                logger.info("Resumed from day_idx=%d", start_day_idx)
-            else:
-                logger.warning("Checkpoint format incompatible (chunked format); starting fresh")
+        checkpoint_data = _load_online_checkpoint(state_ckpt_path)
+        if checkpoint_data:
+            start_day_idx = checkpoint_data["day_idx"]
+            prev_weights_saved = checkpoint_data.get("prev_weights")
+            portfolio_value_saved = checkpoint_data.get("portfolio_value")
+            agent_results_so_far = checkpoint_data.get("agent_results", agent_results_so_far)
+            model = PPO.load(model_ckpt_path, device=config.device)
+            logger.info("Resumed from day_idx=%d", start_day_idx)
         else:
             logger.warning("--resume requested but no checkpoint found; starting fresh")
 
@@ -532,8 +526,7 @@ def run_online_backtest(
                 "portfolio_value": test_env.portfolio_value,
                 "agent_results": agent_results_so_far,
             }
-            # Save as a new state format (old pickle format not compatible, but that's OK for fresh runs)
-            _save_online_checkpoint(model_ckpt_path, state_ckpt_path, model, day_idx, checkpoint_data)
+            _save_online_checkpoint(model_ckpt_path, state_ckpt_path, model, checkpoint_data)
 
             retrain_idx += 1
 
@@ -700,7 +693,7 @@ def finalize_and_report(results: list[WindowResult], config: AgentConfig) -> dic
 
 
 def _selfcheck_online_checkpoint() -> None:
-	"""Verify checkpoint save/load round-trips: chunk_idx and rollout history preserved."""
+	"""Verify checkpoint save/load round-trips: day_idx and rollout history preserved."""
 	with tempfile.TemporaryDirectory() as tmpdir:
 		tmpdir = Path(tmpdir)
 		model_ckpt = tmpdir / "test_model.zip"
@@ -712,32 +705,30 @@ def _selfcheck_online_checkpoint() -> None:
 				path.write_text("fake_model")
 		fake_model = FakeModel()
 
-		# Fake rollout dict (numpy arrays + DatetimeIndex, as in the real code)
-		fake_rollouts = {
-			"agent": [
-				{"rewards": np.array([0.01, -0.02]), "dates": pd.DatetimeIndex(["2025-01-01", "2025-01-02"])},
-				{"rewards": np.array([0.03, 0.01]), "dates": pd.DatetimeIndex(["2025-01-03", "2025-01-04"])},
-			],
-			"equal_weight": [
-				{"rewards": np.array([0.005, -0.015])},
-			],
+		# Fake state, shaped like run_online_backtest's real checkpoint_data
+		fake_state = {
+			"day_idx": 1,
+			"prev_weights": np.array([0.5, 0.5]),
+			"portfolio_value": 105_000.0,
+			"agent_results": {
+				"rewards": np.array([0.01, -0.02]),
+				"dates": pd.DatetimeIndex(["2025-01-01", "2025-01-02"]),
+			},
 		}
 
 		# Save
-		_save_online_checkpoint(model_ckpt, state_ckpt, fake_model, chunk_idx=1, chunk_rollouts=fake_rollouts)
+		_save_online_checkpoint(model_ckpt, state_ckpt, fake_model, fake_state)
 		assert model_ckpt.exists(), "model checkpoint not written"
 		assert state_ckpt.exists(), "state checkpoint not written"
 
 		# Load
 		loaded = _load_online_checkpoint(state_ckpt)
 		assert loaded is not None, "load returned None"
-		loaded_idx, loaded_rollouts = loaded
-		assert loaded_idx == 1, f"chunk_idx mismatch: {loaded_idx} != 1"
+		assert loaded["day_idx"] == 1, f"day_idx mismatch: {loaded['day_idx']} != 1"
 
 		# Verify array equality (pickle preserves numpy arrays)
-		assert np.allclose(loaded_rollouts["agent"][0]["rewards"], fake_rollouts["agent"][0]["rewards"]), "rewards array corrupted"
-		assert len(loaded_rollouts["agent"]) == 2, "agent rollout list length changed"
-		assert loaded_rollouts["equal_weight"][0]["rewards"][0] == 0.005, "nested scalar array corrupted"
+		assert np.allclose(loaded["agent_results"]["rewards"], fake_state["agent_results"]["rewards"]), "rewards array corrupted"
+		assert np.allclose(loaded["prev_weights"], fake_state["prev_weights"]), "prev_weights corrupted"
 
 		# Non-existent file
 		assert _load_online_checkpoint(tmpdir / "nonexistent.pkl") is None, "should return None for missing file"

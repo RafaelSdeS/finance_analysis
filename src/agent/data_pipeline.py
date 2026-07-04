@@ -137,8 +137,7 @@ def run_pipeline(config: AgentConfig = DEFAULT_CONFIG) -> None:
           f"({tensors['mask'].mean():.1%})")
     print(f"Scalers:  {len(scalers)} (one per rolling window) → {SCALER_PATH}")
 
-    # Self-check: verify monotonic window_ids and cutoffs
-    cutoffs = [scalers[w.window_id] for w in windows]
+    # Self-check: verify every window got a scaler
     assert all(scalers[w.window_id] is not None for w in windows), "Missing scaler for some window"
     print(f"✓ Verified: all {len(windows)} windows have scalers")
 
