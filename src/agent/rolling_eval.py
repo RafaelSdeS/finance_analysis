@@ -33,7 +33,7 @@ from src.agent.evaluate import (
     rollout
 )
 from src.agent.metrics import compute_all
-from src.agent.trainer import train
+from src.agent.trainer import train, evaluate_on_env
 
 logger = logging.getLogger(__name__)
 
@@ -371,12 +371,18 @@ def run_online_backtest(
 
     # Parallel environments for training (not for rolling the backtest)
     def _make_train_env(train_start_str: str, train_end_str: str):
+        # val/test dates here are synthetic ordering-only placeholders (only the
+        # "train" slice is ever loaded); test_start must sit past val_end or
+        # AgentConfig.__post_init__ rejects the config mid-test-span.
+        te = pd.Timestamp(train_end_str)
         train_config = dataclasses.replace(
             config,
             train_start=train_start_str,
             train_end=train_end_str,
-            val_start=(pd.Timestamp(train_end_str) + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
-            val_end=(pd.Timestamp(train_end_str) + pd.Timedelta(days=2)).strftime("%Y-%m-%d"),
+            val_start=(te + pd.Timedelta(days=1)).strftime("%Y-%m-%d"),
+            val_end=(te + pd.Timedelta(days=2)).strftime("%Y-%m-%d"),
+            test_start=(te + pd.Timedelta(days=3)).strftime("%Y-%m-%d"),
+            test_end=(te + pd.Timedelta(days=4)).strftime("%Y-%m-%d"),
         )
         return PortfolioEnv(train_config, date_range="train")
 
@@ -392,17 +398,32 @@ def run_online_backtest(
             test_env.portfolio_value = portfolio_value_saved
         obs = test_env._obs()
 
-    # Policy closures for baselines
+    # Baselines: each rolls through its OWN env, so portfolio math (masking,
+    # softmax, transaction costs) lives in env.step — same as the frozen backtest.
+    baseline_envs = {name: PortfolioEnv(config, date_range="test")
+                     for name in ("equal_weight", "market_cap", "inv_vol")}
     baseline_policies = {
-        "equal_weight": equal_weight_policy(test_env),
-        "market_cap": market_cap_policy(test_env, config),
-        "inv_vol": inv_vol_policy(test_env),
+        "equal_weight": equal_weight_policy(baseline_envs["equal_weight"]),
+        "market_cap": market_cap_policy(baseline_envs["market_cap"], config),
+        "inv_vol": inv_vol_policy(baseline_envs["inv_vol"]),
     }
-    baseline_results = {name: {"rewards": [], "values": [], "weights": [], "dates": []}
+    baseline_results = {name: {"rewards": [], "values": [config.initial_capital], "dates": []}
                         for name in baseline_policies}
-    baseline_results["values"] = {name: [config.initial_capital] for name in baseline_policies}
+    for env_b in baseline_envs.values():
+        env_b.reset(seed=config.seed)
 
-    agent_results_so_far["values"] = agent_results_so_far.get("values", [config.initial_capital])
+    # Baselines are deterministic in the day index: on resume, replay them from
+    # day 0 (cheap) instead of adding their state to the checkpoint format.
+    for day_idx in range(start_day_idx):
+        for name, act_fn in baseline_policies.items():
+            _, _, _, _, b_info = baseline_envs[name].step(act_fn(None, day_idx))
+            baseline_results[name]["rewards"].append(b_info["log_return"])
+            baseline_results[name]["values"].append(b_info["portfolio_value"])
+            baseline_results[name]["dates"].append(b_info["date"])
+
+    # Seed with initial capital on fresh start ([] is falsy; .get() default would
+    # never fire because the key always exists). Resume keeps the checkpointed list.
+    agent_results_so_far["values"] = agent_results_so_far["values"] or [config.initial_capital]
 
     # Identify retrain boundaries (in trading day indices, not calendar days)
     retrain_indices = []
@@ -425,17 +446,12 @@ def run_online_backtest(
         agent_results_so_far["weights"].append(info["weights"])
         agent_results_so_far["dates"].append(info["date"])
 
-        # Baselines (continue rolling, no resets)
+        # Baselines (continue rolling through their own envs, no resets)
         for name, act_fn in baseline_policies.items():
-            baseline_obs = obs  # Share the same observation
-            action = act_fn(baseline_obs, day_idx)
-            baseline_results[name]["rewards"].append(
-                np.log1p(max(np.dot(test_env.mask[test_env._t], np.nan_to_num(test_env.returns[test_env._t], nan=0.0)), -0.9999))
-            )  # Approximate; baselines should track their own rewards
-            baseline_results[name]["values"].append(
-                baseline_results[name]["values"][-1] * np.exp(baseline_results[name]["rewards"][-1])
-            )
-            baseline_results[name]["dates"].append(info["date"])
+            _, _, _, _, b_info = baseline_envs[name].step(act_fn(None, day_idx))
+            baseline_results[name]["rewards"].append(b_info["log_return"])
+            baseline_results[name]["values"].append(b_info["portfolio_value"])
+            baseline_results[name]["dates"].append(b_info["date"])
 
         # Check if it's time to retrain
         if day_idx > start_day_idx and day_idx in retrain_indices[1:]:
@@ -457,17 +473,8 @@ def run_online_backtest(
 
             vec_env = DummyVecEnv([_make_retrain_env for _ in range(model.n_envs)])
 
-            # Eval before retrain (last 252 trading days as validation)
-            val_env_pre = PortfolioEnv(
-                dataclasses.replace(
-                    config,
-                    train_start=train_start_str,
-                    train_end=train_end_str,
-                    val_start=train_start_str,
-                    val_end=train_end_str,
-                ),
-                date_range="train",
-            )
+            # Eval before retrain on the trailing span (same env as fine-tuning)
+            val_env_pre = _make_train_env(train_start_str, train_end_str)
             eval_pre = evaluate_on_env(model, val_env_pre)
             val_env_pre.close()
 
@@ -493,16 +500,7 @@ def run_online_backtest(
                 vec_env.close()
 
             # Eval after retrain
-            val_env_post = PortfolioEnv(
-                dataclasses.replace(
-                    config,
-                    train_start=train_start_str,
-                    train_end=train_end_str,
-                    val_start=train_start_str,
-                    val_end=train_end_str,
-                ),
-                date_range="train",
-            )
+            val_env_post = _make_train_env(train_start_str, train_end_str)
             eval_post = evaluate_on_env(model, val_env_post)
             val_env_post.close()
 
@@ -535,13 +533,14 @@ def run_online_backtest(
 
     logger.info("\n>>> Online backtest complete. Building results...")
 
-    # Convert numpy arrays for output
+    # Convert numpy arrays for output; value series keep the initial-capital
+    # seed at index 0 for metrics (same convention as evaluate.py's rollout).
     for name in baseline_results:
         baseline_results[name]["rewards"] = np.array(baseline_results[name]["rewards"])
-        baseline_results[name]["values"] = np.array(baseline_results[name]["values"][1:])  # drop initial capital
+        baseline_results[name]["values"] = np.array(baseline_results[name]["values"])
 
     agent_results_so_far["rewards"] = np.array(agent_results_so_far["rewards"])
-    agent_results_so_far["values"] = np.array(agent_results_so_far["values"][1:])
+    agent_results_so_far["values"] = np.array(agent_results_so_far["values"])
     agent_results_so_far["weights"] = np.array(agent_results_so_far["weights"])
     agent_results_so_far["dates"] = pd.DatetimeIndex(agent_results_so_far["dates"])
 
@@ -552,8 +551,8 @@ def run_online_backtest(
             pd.DataFrame({
                 "date": agent_results_so_far["dates"],
                 "log_return": agent_results_so_far["rewards"],
-                **{f"value_{name}": baseline_results[name]["values"] for name in baseline_results},
-                "value_agent": agent_results_so_far["values"],
+                **{f"value_{name}": baseline_results[name]["values"][1:] for name in baseline_results},
+                "value_agent": agent_results_so_far["values"][1:],
             }),
             pd.DataFrame(
                 agent_results_so_far["weights"][:, keep],
@@ -585,6 +584,8 @@ def run_online_backtest(
     logger.info("✓ Final model → %s", online_model_path.name)
 
     test_env.close()
+    for env_b in baseline_envs.values():
+        env_b.close()
     return df, metrics
 
 
