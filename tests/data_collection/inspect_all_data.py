@@ -128,7 +128,7 @@ def inspect_file(path: Path, rows: int, show_stats: bool):
                 f"{dates.min().date()} → {dates.max().date()}"
             )
 
-        except:
+        except (ValueError, TypeError):
             pass
 
     # -------------------------------------------------------------------------

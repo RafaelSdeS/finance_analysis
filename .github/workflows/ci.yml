@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Fast tests (pure code, synthetic data)
+        run: python tests/run_all.py --group fast
+
+      - name: Build Stage 2 dataset from git-tracked raw data
+        run: python -m src.build_dataset.build_ml_dataset
+
+      - name: Validate built dataset
+        run: python tests/build_dataset/test_final_dataset.py

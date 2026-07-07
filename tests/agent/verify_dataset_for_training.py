@@ -8,10 +8,10 @@ Determines actual train/val/test split dates based on data availability.
 Run: python tests/agent/verify_dataset_for_training.py
 """
 
+import sys
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from datetime import datetime
 
 
 def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.parquet") -> dict:
@@ -348,3 +348,4 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
 
 if __name__ == '__main__':
     results = verify_dataset_for_training()
+    sys.exit(0 if results.get('pass') else 1)

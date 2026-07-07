@@ -141,7 +141,7 @@ def eval_window(window: RollingWindow, model: PPO, window_config: AgentConfig) -
             rollouts={"strategies": rollouts, "tickers": env.tickers},
         )
 
-    except Exception as e:
+    except Exception:
         logger.error("Window %d: ✗ EVALUATION FAILED", window.window_id, exc_info=True)
         raise
 
@@ -201,7 +201,7 @@ def run_rolling_eval(
             results.append(result)
             logger.info(f">>> WINDOW {i}/{len(windows)} COMPLETE\n")
 
-        except Exception as e:
+        except Exception:
             logger.error(f"Window {window.window_id}: Failed, skipping", exc_info=True)
             continue
 
@@ -345,7 +345,6 @@ def run_online_backtest(
     test_env = PortfolioEnv(config, date_range="test")
     test_dates = pd.to_datetime(test_env.dates)
     all_dates = test_dates.tolist()
-    test_start_idx = 0
 
     # Checkpoint paths
     model_ckpt_path = config.model_dir / f"{model_tag}_online_checkpoint.zip"
@@ -591,9 +590,6 @@ def run_online_backtest(
 
 def _selfcheck_online() -> None:
     """Continuous rollout online backtest: assert day continuity and retrain guard logic."""
-    import dataclasses
-    from datetime import datetime, timedelta
-
     # Synthetic 120-day span with retraining every 30 days
     all_dates = pd.date_range("2025-01-01", periods=120, freq="D")
     retrain_every_days = 30

@@ -1,0 +1,9 @@
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+# Pyflakes (undefined names, unused imports/vars) + bare-except: the bug-class
+# rules. Style rules (line length, import order, f-strings) are noise here.
+select = ["F", "E722"]
+ignore = ["F541"]  # f-string without placeholder: cosmetic, not a bug

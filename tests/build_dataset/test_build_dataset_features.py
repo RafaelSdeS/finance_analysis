@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.build_dataset.build_ml_dataset import (
     compute_price_features,
     compute_fundamental_features,
+    recompute_valuation_daily,
 )
 
 
@@ -304,6 +305,56 @@ def test_fundamental_features_ratios() -> None:
 
     # working_capital_ratio = (current_assets - current_liabilities) / total_assets = (1200 - 400) / 2000 = 0.4
     assert approx(result.iloc[0]["working_capital_ratio"], 0.4)
+
+
+def test_recompute_valuation_daily_rescales_by_price_factor() -> None:
+    """pl/pvp/market_cap scale by close/close_price; book_to_market by its inverse."""
+    df = pd.DataFrame({
+        "ticker": ["A"],
+        "trade_date": pd.to_datetime(["2026-01-01"]),
+        "reference_date": pd.to_datetime(["2026-01-01"]),
+        "close": [110.0],
+        "close_price": [100.0],
+        "pl": [10.0],
+        "pvp": [2.0],
+        "market_cap": [1000.0],
+        "net_debt": [200.0],
+        "ev_ebit": [12.0],
+        "book_to_market": [0.55],
+    })
+    result = recompute_valuation_daily(df)
+
+    factor = 110.0 / 100.0
+    assert approx(result.iloc[0]["pl"], 10.0 * factor)
+    assert approx(result.iloc[0]["pvp"], 2.0 * factor)
+    assert approx(result.iloc[0]["market_cap"], 1000.0 * factor)
+    assert approx(result.iloc[0]["book_to_market"], 0.55 / factor)
+
+    # ev_ebit rebuilt algebraically from the API's own EV, not scaled directly
+    ev_api = 1000.0 + 200.0
+    denom = ev_api / 12.0
+    expected_ev_ebit = (1000.0 * factor + 200.0) / denom
+    assert approx(result.iloc[0]["ev_ebit"], expected_ev_ebit)
+
+    assert result.iloc[0]["has_fundamentals"] == 1.0
+    assert "close_price" not in result.columns
+
+
+def test_recompute_valuation_daily_no_fundamentals_flag() -> None:
+    """Rows with no filing (reference_date NaT) get has_fundamentals=0."""
+    df = pd.DataFrame({
+        "ticker": ["A"],
+        "trade_date": pd.to_datetime(["2026-01-01"]),
+        "reference_date": pd.to_datetime([None]),
+        "close": [110.0],
+        "close_price": [np.nan],
+        "pl": [np.nan],
+        "market_cap": [np.nan],
+        "net_debt": [np.nan],
+    })
+    result = recompute_valuation_daily(df)
+
+    assert result.iloc[0]["has_fundamentals"] == 0.0
 
 
 if __name__ == "__main__":
