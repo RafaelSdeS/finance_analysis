@@ -19,9 +19,7 @@ from src.agent.env import PortfolioEnv
 
 def main() -> None:
     cfg = DEFAULT_CONFIG
-    n_tickers_expected = 280  # 279 stocks + CASH
     n_features = len(cfg.state_features)
-    obs_dim_expected = n_tickers_expected * n_features + 2 * n_tickers_expected
 
     print("=" * 60)
     print("TEST: PortfolioEnv basic invariants")
@@ -30,6 +28,8 @@ def main() -> None:
     # --- 1. Construction & reset (all three splits) ---
     for split in ("train", "val", "test"):
         env = PortfolioEnv(cfg, date_range=split)
+        n_tickers = len(env.tickers)  # data-derived (universe size drifts as raw data grows)
+        obs_dim_expected = n_tickers * n_features + 2 * n_tickers
         obs, info = env.reset(seed=cfg.seed)
         assert obs.shape == (obs_dim_expected,), f"{split}: obs shape {obs.shape}"
         assert np.isfinite(obs).all(), f"{split}: obs has non-finite values"

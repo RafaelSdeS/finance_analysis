@@ -16,7 +16,6 @@ Final CAGR filling strategy:
 Usage:
     python test_cagr_calculation.py
     python test_cagr_calculation.py --ticker VALE3
-    python test_cagr_calculation.py --ticker PETR4 --validate
 """
 
 import argparse
@@ -26,12 +25,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-# Add src/build_dataset to path
-sys.path.insert(0, str(Path(__file__).parent.parent / "src" / "build_dataset"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "build_dataset"))
 
-# Import our modules
 from cagr_handler import fill_cagr_columns, get_cagr_statistics
-from validate_cagr import validate_fundamentals, print_validation_report
 
 FUND_DIR = "data/raw/fundamentals"
 
@@ -93,8 +89,6 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--ticker", default="PETR4")
-    parser.add_argument("--validate", action="store_true",
-                        help="Run validation checks against real-world ranges")
     args = parser.parse_args()
 
     path = Path(FUND_DIR) / f"{args.ticker}.parquet"
@@ -187,19 +181,6 @@ def main():
     display["reference_date"] = display["reference_date"].dt.date
     print(display.to_string(index=False))
 
-    # ── Validation checks (optional) ───────────────────────────────────────
-    if args.validate:
-        print()
-        print("=" * 70)
-        print("REAL-WORLD VALIDATION")
-        print("=" * 70)
-        validation_result = validate_fundamentals(df, args.ticker)
-        print_validation_report(validation_result)
-        
-        if validation_result.overall_quality != "pass":
-            print(f"\n⚠ Quality check: {validation_result.overall_quality.upper()}")
-            return 1
-    
     return 0
 
 

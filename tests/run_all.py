@@ -24,13 +24,12 @@ FAST = [
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
-# Excludes tests/data_collection/test_cagr_calculation.py: imports a validate_cagr
-# module that no longer exists in the repo (pre-existing breakage, not test-runner scope).
 DATA = [
     "tests/build_dataset/test_final_dataset.py",
     "tests/agent/verify_dataset_for_training.py",
     "tests/agent/test_env_basic.py",
     "tests/agent/test_inference_output.py",
+    "tests/data_collection/test_cagr_calculation.py",
 ]
 
 
