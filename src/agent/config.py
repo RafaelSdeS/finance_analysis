@@ -100,6 +100,10 @@ class AgentConfig:
             "current_ratio", "cash_ratio",
             # Growth features (YoY, not CAGR to avoid synthetic data)
             "earnings_growth_yoy", "revenue_growth_yoy", "ebitda_growth_yoy",
+            # 1.0 once the ticker's first filing exists, else 0.0 — lets the
+            # model tell "no data yet" apart from "average company" after
+            # the env's NaN→0 (post-scaling mean) imputation
+            "has_fundamentals",
         ]
     )
 

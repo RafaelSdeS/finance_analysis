@@ -569,6 +569,65 @@ def compute_macro_features(df):
 
 
 # =============================================================================
+# DAILY VALUATION RE-ANCHORING
+# =============================================================================
+
+def recompute_valuation_daily(df):
+    """Re-anchor BolsAI valuation ratios to the daily close.
+
+    The API computes pl/pvp/market_cap/etc. with the price on the filing date
+    (close_price) and they stay frozen until the next quarter. Rescaling by
+    close/close_price is exact for any ratio with price in the numerator,
+    whatever denominator definition the API used (TTM vs quarterly).
+    """
+
+    print()
+    print("=" * 80)
+    print("RE-ANCHORING VALUATION RATIOS TO DAILY CLOSE")
+    print("=" * 80)
+
+    factor = (df["close"] / df["close_price"]).where(df["close_price"] > 0)
+
+    # Split guard: right after a filing the factor should be ~1; a big jump
+    # means the share count changed between close_price and today's close
+    # (split/grouping) and rescaled ratios are off until the next filing.
+    # ponytail: warning only; a per-ticker split-factor correction if it fires often
+    near_filing = (df["trade_date"] - df["reference_date"]).dt.days.between(0, 7)
+    suspicious = near_filing & ((factor > 1.5) | (factor < 1 / 1.5))
+    if suspicious.any():
+        bad = sorted(df.loc[suspicious, "ticker"].unique())
+        print(f"WARNING: close/close_price jump >50% at filing date for "
+              f"{len(bad)} tickers (possible split): {bad[:20]}")
+
+    # EV ratios first: only the market-cap leg of EV moves with price, so
+    # recover the API's denominator from its own numbers before market_cap changes.
+    ev_api = df["market_cap"] + df["net_debt"]
+    for col in ("ev_ebit", "ev_ebitda"):
+        if col in df.columns:
+            denom = ev_api / df[col].where(df[col].abs() > 1e-12)
+            df[col] = (df["market_cap"] * factor + df["net_debt"]) / denom
+
+    # Ratios linear in price: scale by the price factor
+    for col in ("pl", "pvp", "market_cap", "p_sr", "p_ebit", "p_ebitda", "p_assets"):
+        if col in df.columns:
+            df[col] = df[col] * factor
+
+    # Inverse ratio (price in the denominator)
+    if "book_to_market" in df.columns:
+        df["book_to_market"] = df["book_to_market"] / factor
+
+    # Availability flag: lets the model tell "no filing yet" (pre-2011 / pre-IPO)
+    # apart from "average company" after the env's NaN→0 imputation
+    df["has_fundamentals"] = df["reference_date"].notna().astype(float)
+
+    # close_price (price at filing date) is now redundant and misleading
+    df = df.drop(columns=["close_price"])
+
+    print(f"Valuation ratios re-anchored for {len(df)} rows")
+    return df
+
+
+# =============================================================================
 # ADVANCED CONTEXTUAL FEATURES (for conservative long-term allocation)
 # =============================================================================
 
@@ -765,6 +824,7 @@ def main():
     dataset = compute_price_features(dataset)
     dataset = compute_dividend_features(dataset, dividends)
     dataset = compute_macro_features(dataset)
+    dataset = recompute_valuation_daily(dataset)
     dataset = compute_advanced_features(dataset)
     dataset = clean_dataset(dataset)
 

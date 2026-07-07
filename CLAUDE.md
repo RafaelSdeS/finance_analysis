@@ -40,7 +40,7 @@ python tests/data_collection/validate_vs_yfinance.py
 Prereq: Stage 1 complete (raw data in `data/raw/`). Merges prices + fundamentals + company info via `merge_asof` backward (no lookahead).
 
 ```bash
-python src/build_dataset/build_ml_dataset.py            # → data/processed/ml_dataset.parquet
+python -m src.build_dataset.build_ml_dataset            # → data/processed/ml_dataset.parquet
 python tests/build_dataset/test_final_dataset.py        # schema, shape, lookahead, NaN, returns
 ```
 
@@ -72,7 +72,7 @@ python -m src.agent.run_allocation --date 2026-06-29 --format csv
 
 **Note on recent changes (July 2026):** Agent reward function changed from absolute portfolio return to excess-return signal (excess of market mean) to improve conviction. All models trained under old reward are stale; retraining required. See "Agent conviction improvements" in `STAGE3_ML_AGENT.md`.
 
-**Outputs:** production model (most recent window) `data/models/agent_{best,final}.zip` + checkpoints; earlier windows namespaced `data/models/window_{id}_{best,final}.zip`; scaler `data/models/feature_scaler.pkl`; env tensors `data/processed/agent_tensors.npz` ([6565 dates × 279 tickers × 23 features] + mask); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; stitched multi-window walk-forward `data/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
+**Outputs:** production model (most recent window) `data/models/agent_{best,final}.zip` + checkpoints; earlier windows namespaced `data/models/window_{id}_{best,final}.zip`; scaler `data/models/feature_scaler.pkl`; env tensors `data/processed/agent_tensors.npz` ([6565 dates × 279 tickers × 24 features] + mask); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; stitched multi-window walk-forward `data/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
 
 ### Utilities
 
@@ -155,7 +155,7 @@ data/backtest/results.parquet, data/allocations/*.csv
 
 | File | Purpose |
 |------|---------|
-| `config.py` | Frozen `AgentConfig`: hyperparams, 23-feature list, paths, `generate_windows()`/`window_to_config()`; `DEFAULT_CONFIG` = most recent rolling window |
+| `config.py` | Frozen `AgentConfig`: hyperparams, 24-feature list, paths, `generate_windows()`/`window_to_config()`; `DEFAULT_CONFIG` = most recent rolling window |
 | `feature_engineering.py` | Returns from `adj_close` (split-safe), corrupt-observation cleaning |
 | `data_pipeline.py` | Pivot to dense tensors [dates×tickers×features] + activity mask; train-only scaler (fit on the earliest window's train_end — conservative, no lookahead into any window's test) |
 | `env.py` | PortfolioEnv: masked time-varying universe, masked-softmax action, excess-return reward (net of market mean), transaction-cost term; cached load+normalization for online training |
@@ -172,7 +172,7 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 
 - **Anchored rolling windows, never a fixed split:** training always partitions the dataset into anchored windows (`config.generate_windows()`; default 8 windows, train_years=10, test_years=2, train always starts at `dataset_start`, test slides forward). Each window's train span is tail-carved (`window_val_fraction`, default 15%) into train/val for early stopping; its test span is untouched. The MOST RECENT window is the production model (`agent_best.zip`) and `DEFAULT_CONFIG`'s split; earlier windows are namespaced (`window_{id}_best.zip`) and exist for robustness reporting (`data/backtest/walkforward_*`). There is no flag to opt back into a single fixed split — `python -m src.agent.trainer` always trains this way.
 - **Train-only scaler:** fit StandardScaler on the FIRST window's train span only (earliest of all windows' train_end, so it can never leak future data into any window's test), apply to val/test/inference; save to `feature_scaler.pkl` (no leakage).
-- **State:** all tickers' 23 normalized features + per-ticker activity mask + previous weights (for turnover calculation) concatenated → 280×23 + 280 + 280 = **7,000-dim**. Runtime NaN → 0 (mean imputation); dataset on disk keeps honest NaNs.
+- **State:** all tickers' 24 normalized features (incl. `has_fundamentals` flag so the agent can tell "no filing yet" from "average company") + per-ticker activity mask + previous weights (for turnover calculation) concatenated → 280×24 + 280 + 280 = **7,280-dim**. Runtime NaN → 0 (mean imputation); dataset on disk keeps honest NaNs.
 - **Action:** masked softmax over full 280-ticker universe (279 stocks + CASH; every ticker with ≥252 rows → no survivorship bias). Inactive tickers → −∞ → weight 0; active weights sum to 1. No shorting.
 - **Reward (July 2026 update):** excess-return signal = (portfolio log return) − (market-mean log return) − transaction_cost. Cost = `transaction_cost_bps / 10000 × one-way-turnover` (excluding CASH leg which trades free). The excess signal amplifies per-ticker alpha (~0.1%/day) and reduces market noise (±1–2%/day), making gradient credit assignment tractable. Episodes start/reset at 100% CASH (new investor), so the first allocation pays full deployment cost.
 - **Algorithm:** PPO via stable-baselines3 with reduced exploration: lr=3e-4 (3e-5 for online fine-tuning), gamma=0.99, gae_lambda=0.95, ent_coef=0.0 (entropy disabled), log_std_init=-2.0 (σ ≈ 0.135, down from default 1.0). Lower exploration noise allows the agent to develop conviction (concentrated positions) instead of spreading equally.
@@ -183,16 +183,17 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 `tests/agent/verify_dataset_for_training.py` runs gates V1–V7. Fail conditions:
 - **V1 Date coverage:** span < 2 years.
 - **V2 Ticker coverage:** < 20 tickers with full history (≥252 rows).
-- **V3 Feature completeness:** any required column missing (`ticker, date, close, volume, returns, pe_ratio, roe, selic, sector`).
-- **V4 NaN rates:** > 10% overall, or any NaN in critical cols (`ticker, date, close, volume, sector`).
-- **V5 Distributions:** duplicate (ticker,date) pairs, or `|return_mean|` ≥ 0.05, or extreme outliers.
-- **V6 Lookahead:** any `fundamental_date > price_date`.
+- **V3 Feature completeness:** any required column missing (`ticker, trade_date, close, volume, returns, pl, pvp, roe, selic, sector` — Brazilian names: `pl`=P/E, `pvp`=P/B).
+- **V4 NaN rates:** any NaN in critical cols (`ticker, trade_date, close, volume, sector`), or > 10% fundamental-feature NaN on rows at/after each ticker's first filing (NaN before the first filing is structural — CVM digital filings start ~2011 — and not gated).
+- **V5 Distributions:** duplicate (ticker,trade_date) pairs, or `|return_mean|` ≥ 0.05, or ≥1% of ticker-quarters with frozen P/L (stale-valuation regression guard).
+- **V6 Lookahead:** any `reference_date > trade_date`.
 - **V7 Sectors:** < 3 sectors represented.
 
 ## Critical Caveats
 
 - **CAGR backfill is ON:** `fill_missing_cagr()` (which calls `fill_cagr_columns()` per ticker) runs unconditionally in `build_ml_dataset.py`'s main pipeline → dataset has `cagr_{earnings,revenue}_5y_final` populated.
-- **No lookahead (Stage 2):** `merge_asof(..., direction='backward')` — a price never sees a future fundamental. Verify `fundamental_date <= price_date` after merge.
+- **No lookahead (Stage 2):** `merge_asof(..., direction='backward')` — a price never sees a future fundamental. Verify `reference_date <= trade_date` after merge.
+- **Valuation ratios are re-anchored daily (July 2026):** BolsAI computes `pl/pvp/market_cap/p_*/ev_*` with the price at the filing date (`close_price`) and they'd stay frozen all quarter; `recompute_valuation_daily()` rescales them by `close/close_price` (exact for price-linear ratios; EV ratios rebuilt algebraically). `close_price` is dropped from the processed dataset; a `has_fundamentals` 0/1 column is added. Known ceiling: mid-quarter splits skew ratios until the next filing (build prints a warning).
 - **All feature engineering is in Stage 2**, not deferred to the agent (technicals, fundamental ratios, macro-adjusted, CAGR backfill).
 - **FIIs deferred:** stocks only (prices/fundamentals/dividends). FIIs are a separate asset class; add if agent scope expands to mixed-asset.
 - **BolsAI:** key in `.env`, loaded by `config.load_env()` (stdlib parser). Backfill only — paid ~€0.10/1K calls. Caps: prices `limit<=5000` (date-window paginated), fundamentals `limit<=88` (use 80).

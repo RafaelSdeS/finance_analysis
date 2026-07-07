@@ -105,11 +105,13 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
     print("=" * 70)
 
     required_features = {
-        'price': ['close', 'volume', 'returns', 'open', 'high', 'low'],
+        # 'returns' is a Stage-3 feature_engineering.py column (from adj_close);
+        # this script verifies the Stage-2 dataset, which has 'log_return' instead
+        'price': ['close', 'volume', 'log_return', 'open', 'high', 'low'],
         'technical': ['volatility_20d', 'volatility_60d', 'rsi_14'],
-        'fundamental': ['pe_ratio', 'pb_ratio', 'roe', 'debt_equity'],
+        'fundamental': ['pl', 'pvp', 'roe', 'debt_equity'],  # Brazilian names: pl=P/E, pvp=P/B
         'macro': ['selic', 'ipca', 'cdi'],
-        'meta': ['ticker', 'date', 'sector'],
+        'meta': ['ticker', date_col, 'sector'],
     }
 
     print("Expected features by category:")
@@ -145,11 +147,13 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
     print(f"Overall NaN rate: {results['nan_rate_overall']:.2%} ({null_cells:,} / {total_cells:,} cells)")
 
     # Per-column (critical columns)
-    critical_cols = ['ticker', 'date', 'close', 'volume', 'sector']
+    critical_cols = ['ticker', date_col, 'close', 'volume', 'sector']
+    critical_ok = True
     print(f"\nCritical columns (should be 0% NaN):")
     for col in critical_cols:
         if col in df.columns:
             nan_rate = df[col].isnull().sum() / len(df)
+            critical_ok = critical_ok and nan_rate == 0
             status = "✓" if nan_rate == 0 else "✗"
             print(f"  {status} {col:15} {nan_rate:6.2%}")
 
@@ -169,11 +173,31 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
         for ticker, rate in high_nan_tickers.head(5).items():
             print(f"  {ticker:8} {rate:6.2%}")
 
-    results['pass_v4'] = results['nan_rate_overall'] < 0.05
-    if results['pass_v4']:
-        print(f"\n✓ PASS: Overall NaN rate <5%")
+    # Structural missingness: fundamentals only exist from a ticker's first
+    # filing (CVM digital filings start ~2011); before that NaN is legitimate.
+    # Gate on NaN where data could exist, not on the overall rate.
+    fund_cols = [c for c in ['pl', 'pvp', 'roe', 'debt_equity', 'roic', 'roa',
+                             'net_margin', 'gross_margin', 'ebitda_margin',
+                             'current_ratio', 'cash_ratio', 'earnings_growth_yoy',
+                             'revenue_growth_yoy', 'ebitda_growth_yoy']
+                 if c in df.columns]
+    if 'reference_date' in df.columns and fund_cols:
+        first_filing = df.loc[df['reference_date'].notna()].groupby('ticker')[date_col].min()
+        covered = df[date_col] >= df['ticker'].map(first_filing)
+        results['nan_rate_fund_covered'] = float(df.loc[covered, fund_cols].isnull().to_numpy().mean())
+        print(f"\nRows before ticker's first filing (structural NaN, expected): {(~covered).mean():.2%}")
+        print(f"Fundamental-feature NaN rate after first filing: {results['nan_rate_fund_covered']:.2%}")
+        results['pass_v4'] = critical_ok and results['nan_rate_fund_covered'] < 0.10
+        if results['pass_v4']:
+            print(f"\n✓ PASS: critical columns clean, post-filing fundamental NaN <10%")
+        else:
+            print(f"\n✗ FAIL: critical-column NaN, or post-filing fundamental NaN ≥10%")
     else:
-        print(f"\n✗ FAIL: Overall NaN rate ≥5% (imputation needed)")
+        results['pass_v4'] = critical_ok and results['nan_rate_overall'] < 0.05
+        if results['pass_v4']:
+            print(f"\n✓ PASS: Overall NaN rate <5%")
+        else:
+            print(f"\n✗ FAIL: Overall NaN rate ≥5% (imputation needed)")
 
     # ===== V5: Feature Distributions & Outliers =====
     print("\n" + "=" * 70)
@@ -214,22 +238,37 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
             if extreme > 0:
                 outlier_count += extreme
 
-    results['pass_v5'] = results['n_duplicates'] == 0 and abs(results.get('return_mean', 0)) < 0.1
+    # Valuation freshness: daily-recomputed P/L must vary within a quarter.
+    # Frozen ticker-quarters mean the stale filing-date API ratio regressed in.
+    results['pl_frozen_share'] = None
+    if {'pl', 'reference_date'}.issubset(df.columns):
+        grp = df[df['pl'].notna()].groupby(['ticker', 'reference_date'])['pl']
+        sizes, nun = grp.size(), grp.nunique()
+        eligible = sizes >= 5  # a quarter spanning <5 trading days may legitimately be constant
+        n_eligible = int(eligible.sum())
+        frozen_share = float(((nun == 1) & eligible).sum() / max(n_eligible, 1))
+        results['pl_frozen_share'] = frozen_share
+        print(f"\nP/L frozen within quarter (stale valuation, expect ~0%): {frozen_share:.1%} of {n_eligible} ticker-quarters")
+
+    results['pass_v5'] = (results['n_duplicates'] == 0
+                          and abs(results.get('return_mean', 0)) < 0.1
+                          and (results['pl_frozen_share'] is None or results['pl_frozen_share'] < 0.01))
     if results['pass_v5']:
-        print(f"\n✓ PASS: No duplicates, reasonable distributions")
+        print(f"\n✓ PASS: No duplicates, reasonable distributions, valuation moves daily")
     else:
-        print(f"\n✗ WARNING: Check distributions (duplicates={results['n_duplicates']}, return_mean={results.get('return_mean', 'N/A')})")
+        print(f"\n✗ WARNING: Check distributions (duplicates={results['n_duplicates']}, return_mean={results.get('return_mean', 'N/A')}, pl_frozen={results['pl_frozen_share']})")
 
     # ===== V6: Temporal Alignment (No Lookahead Bias) =====
     print("\n" + "=" * 70)
     print("V6: TEMPORAL ALIGNMENT (NO LOOKAHEAD BIAS)")
     print("=" * 70)
 
-    if 'fundamental_date' in df.columns:
-        lookahead_violations = (df['fundamental_date'] > df['date']).sum()
+    fund_date_col = 'reference_date' if 'reference_date' in df.columns else 'fundamental_date'
+    if fund_date_col in df.columns:
+        lookahead_violations = (df[fund_date_col] > df[date_col]).sum()
         results['lookahead_bias'] = lookahead_violations
 
-        print(f"Rows where fundamental_date > price_date: {lookahead_violations}")
+        print(f"Rows where {fund_date_col} > {date_col}: {lookahead_violations}")
 
         if lookahead_violations > 0:
             print(f"✗ FAIL: Lookahead bias detected! {lookahead_violations} violations")
@@ -238,7 +277,7 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
             print(f"✓ PASS: No lookahead bias")
             results['pass_v6'] = True
     else:
-        print(f"⚠ 'fundamental_date' column not found, skipping check")
+        print(f"⚠ no fundamental date column found, skipping check")
         results['pass_v6'] = True
 
     # ===== V7: Sector Coverage =====
@@ -257,7 +296,7 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
             print(f"  {sector:20} {count:6} rows ({pct:5.1f}%)")
 
         max_sector_pct = sector_dist.iloc[0] / len(df) * 100
-        results['pass_v7'] = results['n_sectors'] >= 3 and max_sector_pct < 0.4
+        results['pass_v7'] = results['n_sectors'] >= 3 and max_sector_pct < 40
 
         if results['pass_v7']:
             print(f"\n✓ PASS: ≥3 sectors, max sector <40%")

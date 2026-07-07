@@ -53,9 +53,27 @@ def validate(df):
         present = col in df.columns and df[col].notna().any()
         checks.append((f"macro {col} merged", present))
 
-    # Every ticker has >= 252 rows (1 trading year)
-    min_rows = df.groupby("ticker").size().min()
-    checks.append((f"all tickers >= 252 rows [min {min_rows}]", min_rows >= 252))
+    # Stage 2 keeps sparse tickers (MIN_PRICE_ROWS=10 in build_ml_dataset.py);
+    # the 252-row (1 trading year) full-history bar is a Stage 3 concern,
+    # enforced by MIN_ROWS_PER_TICKER in src/agent/data_pipeline.py.
+    row_counts = df.groupby("ticker").size()
+    min_rows = row_counts.min()
+    n_short = (row_counts < 252).sum()
+    checks.append((f"all tickers >= 10 rows [min {min_rows}] "
+                    f"({n_short} tickers < 252 rows, dropped later by data_pipeline.py)",
+                   min_rows >= 10))
+
+    # Valuation staleness regression guard: P/L must be re-anchored to the
+    # daily close (recompute_valuation_daily), not frozen at the filing price
+    if {"pl", "reference_date"}.issubset(df.columns):
+        grp = df[df["pl"].notna()].groupby(["ticker", "reference_date"])["pl"]
+        sizes, nun = grp.size(), grp.nunique()
+        eligible = (sizes >= 5).sum()
+        frozen = ((sizes >= 5) & (nun == 1)).sum()
+        checks.append((f"P/L varies daily within quarter [{frozen}/{eligible} frozen]",
+                       eligible > 0 and frozen / eligible < 0.01))
+    checks.append(("stale close_price column dropped", "close_price" not in df.columns))
+    checks.append(("has_fundamentals flag present", "has_fundamentals" in df.columns))
 
     failed = 0
     for label, ok in checks:
