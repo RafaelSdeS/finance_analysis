@@ -7,11 +7,25 @@ Handles missing feature computation and data preparation.
 import pandas as pd
 import numpy as np
 
-from src.agent.config import AgentConfig
-
-
 MAX_ABS_LOG_RETURN = 1.0  # |log r| > 1.0 (±172%/day) on B3 = data error or untradeable event
 CASH_ANNUALIZED_RANGE = (0.01, 0.30)  # sane historical SELIC bounds (~2%-26% seen 2000-2026)
+FUNDAMENTAL_FEATURES = [
+    "pl",
+    "pvp",
+    "roe",
+    "debt_equity",
+    "roic",
+    "roa",
+    "net_margin",
+    "gross_margin",
+    "ebitda_margin",
+    "current_ratio",
+    "cash_ratio",
+    "earnings_growth_yoy",
+    "revenue_growth_yoy",
+    "ebitda_growth_yoy",
+    "has_fundamentals",
+]
 
 
 def synthesize_cash_asset(df: pd.DataFrame) -> pd.DataFrame:
@@ -35,7 +49,6 @@ def synthesize_cash_asset(df: pd.DataFrame) -> pd.DataFrame:
     price = 100.0 * (1.0 + macro["selic"] / 100.0).cumprod()
 
     # Build CASH rows: one per date, all 23 state features set
-    config = AgentConfig()
     cash = pd.DataFrame({
         "ticker": "CASH",
         "trade_date": macro["trade_date"],
@@ -49,7 +62,7 @@ def synthesize_cash_asset(df: pd.DataFrame) -> pd.DataFrame:
 
     # Fundamentals are not applicable to risk-free cash; set to 0
     # (StandardScaler treats zero-variance columns as scale_=1.0 in fit_train_scaler)
-    for col in config.fundamental_features:
+    for col in FUNDAMENTAL_FEATURES:
         cash[col] = 0.0
 
     return cash
