@@ -85,20 +85,26 @@ streamlit run tools/explorer/app.py                 # interactive explorer: Data
 
 ### Tests
 
-Plain Python scripts, no pytest. Run from project root.
+Plain Python scripts, no pytest. Unified test runner:
 
 ```bash
-# Stages 1–2
-python tests/build_dataset/test_final_dataset.py
-python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY   # full 9-check suite
-python tests/api/bolsai_api_validator.py --api-key YOUR_API_KEY --path /dividends/PETR4 --param years=5
-python tests/data_collection/{test_cagr_calculation,test_ticker_data,inspect_all_data,inspect_company_info}.py
+# Fast group (pure-code unit tests, no data files needed — used by CI)
+python tests/run_all.py --group fast
 
-# Stage 3
-python tests/agent/verify_dataset_for_training.py   # dataset quality gates V1–V7 (see below)
-python tests/agent/test_env_basic.py                # env invariants: masking, weights, determinism, speed
-python tests/agent/test_backtest_metrics.py         # metric functions vs hand-computed
-python tests/agent/test_inference_output.py         # inference invariants + equal-weight fallback
+# Data group (needs git-tracked data/raw/* and built data/processed/ml_dataset.parquet)
+python tests/run_all.py --group data
+
+# All tests
+python tests/run_all.py --group all
+```
+
+**Individual test scripts** (also runnable standalone):
+- **Stages 1–2:** `test_final_dataset.py`, `test_cagr_calculation.py`, `bolsai_api_validator.py`, `inspect_all_data.py`
+- **Stage 3:** `verify_dataset_for_training.py` (dataset gates V1–V7), `test_env_basic.py` (env invariants), `test_backtest_metrics.py` (metrics), `test_feature_engineering.py`, `test_build_dataset_features.py`, `test_inference_output.py`
+
+**Linting:**
+```bash
+ruff check .          # reports undefined names, unused imports/variables, bare-except
 ```
 
 ## Branches
