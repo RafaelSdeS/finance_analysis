@@ -18,14 +18,14 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # Pure-code tests: synthetic data only, run anywhere (used by CI).
 FAST = [
-    "tests/agent/test_backtest_metrics.py",
-    "tests/agent/test_feature_engineering.py",
     "tests/build_dataset/test_build_dataset_features.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
 DATA = [
     "tests/build_dataset/test_final_dataset.py",
+    "tests/agent/test_backtest_metrics.py",
+    "tests/agent/test_feature_engineering.py",
     "tests/agent/verify_dataset_for_training.py",
     "tests/agent/test_env_basic.py",
     "tests/agent/test_inference_output.py",

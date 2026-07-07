@@ -98,9 +98,9 @@ python tests/run_all.py --group data
 python tests/run_all.py --group all
 ```
 
-**Individual test scripts** (also runnable standalone):
-- **Stages 1–2:** `test_final_dataset.py`, `test_cagr_calculation.py`, `bolsai_api_validator.py`, `inspect_all_data.py`
-- **Stage 3:** `verify_dataset_for_training.py` (dataset gates V1–V7), `test_env_basic.py` (env invariants), `test_backtest_metrics.py` (metrics), `test_feature_engineering.py`, `test_build_dataset_features.py`, `test_inference_output.py`
+**Test groups:**
+- **Fast:** `test_build_dataset_features.py` (unit tests for Stage 2 feature functions)
+- **Data:** `test_final_dataset.py`, `test_cagr_calculation.py`, `test_backtest_metrics.py`, `test_feature_engineering.py`, `verify_dataset_for_training.py` (gates V1–V7), `test_env_basic.py` (env invariants), `test_inference_output.py`
 
 **Linting:**
 ```bash
