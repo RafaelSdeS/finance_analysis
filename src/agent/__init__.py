@@ -11,9 +11,17 @@ Submodules:
   - run_allocation: Daily entry point
 """
 
-from .feature_engineering import compute_returns, prepare_training_dataset
-
 __all__ = [
     "compute_returns",
     "prepare_training_dataset",
 ]
+
+
+def __getattr__(name: str):
+    if name in __all__:
+        from .feature_engineering import compute_returns, prepare_training_dataset
+        return {
+            "compute_returns": compute_returns,
+            "prepare_training_dataset": prepare_training_dataset,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
