@@ -12,6 +12,7 @@ period without any special-casing.
 """
 
 import dataclasses
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import NamedTuple
@@ -20,6 +21,32 @@ import pandas as pd
 
 # Absolute project root
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+logger = logging.getLogger(__name__)
+
+
+def configure_logging(log_dir: Path, run_id: str, tag: str = "session") -> Path:
+    """Set up root logger once: console (as before) + a persisted per-session file.
+
+    Safe to call from multiple entry points in the same process — a second
+    call is a no-op and just returns the (deterministic) path again.
+    """
+    log_path = log_dir / f"{tag}_{run_id}.log"
+    root = logging.getLogger()
+    if root.handlers:
+        return log_path
+
+    root.setLevel(logging.INFO)
+
+    console = logging.StreamHandler()
+    console.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    root.addHandler(console)
+
+    file_handler = logging.FileHandler(log_path)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root.addHandler(file_handler)
+
+    return log_path
 
 
 @dataclass(frozen=True)
@@ -94,7 +121,7 @@ class AgentConfig:
     gamma: float = 0.99  # Discount factor
     gae_lambda: float = 0.95  # GAE smoothing
     entropy_coef: float = 0.0  # No entropy bonus; excess reward removes market noise (variance reduction)
-    log_std_init: float = -2.0  # Initial exploration noise: σ ≈ 0.135 so per-ticker credit assignment is learnable
+    log_std_init: float = -3.0  # Initial exploration noise: σ ≈ 0.05 (more conservative to avoid NaN from extreme actions during early training)
 
     # ===== Training Configuration =====
     total_timesteps: int = 1_000_000
@@ -141,14 +168,14 @@ class AgentConfig:
             raise ValueError(f"val_end ({self.val_end}) >= test_start ({self.test_start})")
 
     def log_summary(self) -> None:
-        """Print configuration summary."""
-        print(
+        """Log configuration summary."""
+        logger.info(
             f"AgentConfig | {self.dataset_path.name} | "
             f"{len(self.state_features)} features "
-            f"({len(self.price_features)}p+{len(self.fundamental_features)}f+{len(self.macro_features)}m)\n"
-            f"  splits: train {self.train_start}→{self.train_end} | "
-            f"val {self.val_start}→{self.val_end} | test {self.test_start}→{self.test_end}\n"
-            f"  ppo: lr={self.learning_rate} γ={self.gamma} λ={self.gae_lambda} "
+            f"({len(self.price_features)}p+{len(self.fundamental_features)}f+{len(self.macro_features)}m) | "
+            f"splits: train {self.train_start}→{self.train_end} | "
+            f"val {self.val_start}→{self.val_end} | test {self.test_start}→{self.test_end} | "
+            f"ppo: lr={self.learning_rate} γ={self.gamma} λ={self.gae_lambda} "
             f"steps={self.total_timesteps:,} batch={self.batch_size} epochs={self.n_epochs}"
         )
 
@@ -229,5 +256,35 @@ _windows = generate_windows(
 DEFAULT_CONFIG = window_to_config(_windows[-1], _template)
 
 
+def _selfcheck_logging() -> None:
+    """Verify configure_logging: idempotence and file persistence."""
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        log_dir = Path(tmpdir)
+        run_id = "test_run"
+
+        handler_count_before = len(logging.getLogger().handlers)
+        path1 = configure_logging(log_dir, run_id, tag="test")
+        handler_count_after_1 = len(logging.getLogger().handlers)
+
+        path2 = configure_logging(log_dir, run_id, tag="test")
+        handler_count_after_2 = len(logging.getLogger().handlers)
+
+        assert handler_count_after_1 > handler_count_before, "no handlers added on first call"
+        assert handler_count_after_2 == handler_count_after_1, "handlers added on second call (not idempotent)"
+
+        assert path1 == path2, "paths differ on second call"
+        assert path1.exists(), "log file not created"
+
+        logger.info("test_sentinel_message_12345")
+        with open(path1) as f:
+            content = f.read()
+        assert "test_sentinel_message_12345" in content, "message not persisted to file"
+
+        print("✓ configure_logging self-check passed")
+
+
 if __name__ == "__main__":
+    _selfcheck_logging()
     DEFAULT_CONFIG.log_summary()

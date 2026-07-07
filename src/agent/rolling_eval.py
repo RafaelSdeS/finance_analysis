@@ -646,7 +646,7 @@ def _selfcheck_stitch() -> None:
 
 
 def finalize_and_report(results: list[WindowResult], config: AgentConfig) -> dict:
-    """Stitch the walk-forward curve, summarize, print, and persist rolling_eval_results.json.
+    """Stitch the walk-forward curve, summarize, log, and persist rolling_eval_results.json.
 
     Called by trainer.py's main() after run_rolling_eval() completes.
     """
@@ -656,15 +656,15 @@ def finalize_and_report(results: list[WindowResult], config: AgentConfig) -> dic
 
     summary = summarize_rolling_results(results)
 
-    print("\n" + "=" * 70)
-    print("ROLLING WINDOW SUMMARY")
-    print("=" * 70)
+    logger.info("=" * 70)
+    logger.info("ROLLING WINDOW SUMMARY")
+    logger.info("=" * 70)
 
     for strategy in sorted(summary.keys()):
-        print(f"\n{strategy.upper()}")
-        print("-" * 70)
+        logger.info(f"\n{strategy.upper()}")
+        logger.info("-" * 70)
         for metric, stats in summary[strategy].items():
-            print(
+            logger.info(
                 f"  {metric:25s}: "
                 f"mean={stats['mean']:+.3f}, std={stats['std']:+.3f}, "
                 f"min={stats['min']:+.3f}, max={stats['max']:+.3f}"

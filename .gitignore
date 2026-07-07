@@ -47,3 +47,6 @@ data/logs/
 
 # Build artifact (regenerable from data/raw via build_ml_dataset.py)
 data/processed/
+
+data/models/
+./data/models/*

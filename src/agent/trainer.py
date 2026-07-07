@@ -35,11 +35,26 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from src.agent.config import AgentConfig, DEFAULT_CONFIG
+from src.agent.config import AgentConfig, DEFAULT_CONFIG, configure_logging
 from src.agent.env import PortfolioEnv
 from src.agent.metrics import max_drawdown, sharpe_ratio
 
 logger = logging.getLogger(__name__)
+
+
+def _to_native_python(obj):
+    """Recursively convert numpy/torch scalars to native Python types for JSON serialization."""
+    if obj is None:
+        return None
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.floating, np.integer)):
+        return obj.item()
+    if isinstance(obj, (list, tuple)):
+        return [_to_native_python(x) for x in obj]
+    if isinstance(obj, dict):
+        return {k: _to_native_python(v) for k, v in obj.items()}
+    return obj
 
 
 def evaluate_on_env(model: PPO, env: PortfolioEnv) -> dict:
@@ -79,28 +94,70 @@ class ValSharpeCallback(BaseCallback):
         self.improvement_threshold = 0.15  # ponytail: noise floor; only reset degrade counter on meaningful improvement
         self.pbar = tqdm(total=total_timesteps, unit="step", unit_scale=True, desc=f"Training [{model_tag}]")
 
+    def _on_rollout_start(self) -> None:
+        # Defense-in-depth against log_std collapse/explosion: SB3's log_std is an unconstrained
+        # nn.Parameter (no built-in bounds), so even with target_kl capping *how far* a rollout's
+        # epochs can push it, a single accepted update could still drift outside a numerically safe
+        # range. Clamping here (once per rollout, right after train() returns control) keeps
+        # exp(log_std) bounded to roughly [0.0067, 7.4] without fighting the conviction objective
+        # (log_std_init=-3.0 sits well inside this range).
+        if self.model is not None and hasattr(self.model.policy, "log_std"):
+            self.model.policy.log_std.data.clamp_(-5.0, 2.0)
+
     def _on_step(self) -> bool:
         self.pbar.update(self.num_timesteps - self.pbar.n)
+
+        # Scan every step (cheap tensor check) so the first occurrence of NaN weights is caught as
+        # early as possible on the codepaths that do return control to the callback (evaluate_on_env,
+        # action prediction). Note: a crash *inside* model.train() (e.g. Normal() rejecting NaN loc)
+        # propagates before this callback runs again — see train()'s try/except for that case.
+        for name, param in self.model.policy.named_parameters():
+            if param.data.isnan().any():
+                log_std = self.model.policy.log_std.data
+                logger.error(
+                    "NaN detected in policy parameter '%s' at timestep %d. log_std stats: "
+                    "mean=%.4f min=%.4f max=%.4f (init=%.2f). learning_rate=%.2e.",
+                    name, self.num_timesteps,
+                    float(log_std.mean()), float(log_std.min()), float(log_std.max()),
+                    self.config.log_std_init, float(self.model.learning_rate),
+                )
+                return False
 
         if self.num_timesteps < self._next_eval:
             return True
         self._next_eval += self.eval_every_steps
 
         val = evaluate_on_env(self.model, self.val_env)
+        log_std = self.model.policy.log_std.data
+        # SB3's name_to_value is populated by each train() call; values are None before first rollout/train completes
         record = {
             "timesteps": self.num_timesteps,
             "val_sharpe": val["sharpe"],
             "val_max_drawdown": val["max_drawdown"],
             "val_final_value": val["final_value"],
             "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "train_entropy_loss": self.model.logger.name_to_value.get("train/entropy_loss"),
+            "train_approx_kl": self.model.logger.name_to_value.get("train/approx_kl"),
+            "train_clip_fraction": self.model.logger.name_to_value.get("train/clip_fraction"),
+            "train_value_loss": self.model.logger.name_to_value.get("train/value_loss"),
+            "train_policy_gradient_loss": self.model.logger.name_to_value.get("train/policy_gradient_loss"),
+            "train_explained_variance": self.model.logger.name_to_value.get("train/explained_variance"),
+            "learning_rate": self.model.logger.name_to_value.get("train/learning_rate"),
+            "fps": self.model.logger.name_to_value.get("time/fps"),
+            "policy_log_std_mean": float(log_std.mean()),
+            "policy_log_std_max": float(log_std.max()),
         }
+        # Convert numpy/torch scalars to native Python types for JSON serialization
+        record = _to_native_python(record)
         with open(self.log_path, "a") as f:
             f.write(json.dumps(record) + "\n")
 
-        # One-line summary
+        # One-line summary; include KL for instability detection
+        approx_kl = self.model.logger.name_to_value.get("train/approx_kl")
         self.pbar.set_postfix({
             "sharpe": f"{val['sharpe']:.3f}",
             "dd%": f"{val['max_drawdown']*100:.1f}",
+            "kl": f"{approx_kl:.3f}" if approx_kl is not None else "n/a",
             "value": f"{val['final_value']:,.0f}"
         })
 
@@ -177,6 +234,15 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
                 batch_size=config.batch_size,
                 n_epochs=config.n_epochs,
                 seed=config.seed,
+                # target_kl caps how far a single rollout's n_epochs of minibatch updates can push the
+                # policy (SB3 aborts remaining epochs once approx_kl > 1.5*target_kl). With ent_coef=0.0
+                # (no entropy pressure) and log_std as an unconstrained nn.Parameter, a volatile rollout
+                # (e.g. a crash-era window) can otherwise grind through all n_epochs on an already-large
+                # update, collapsing/exploding log_std until Normal()'s log-prob produces NaN gradients —
+                # this is the actual root cause of the training-divergence crashes, not gradient magnitude
+                # (max_grad_norm=0.5 below is already SB3's default; it clips size, not update *count*).
+                target_kl=0.03,
+                max_grad_norm=0.5,
                 policy_kwargs=dict(net_arch=[256, 256], log_std_init=config.log_std_init),
                 device=config.device,
                 verbose=config.verbose,
@@ -185,7 +251,27 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
 
         t0 = time.time()
         callback = ValSharpeCallback(config, val_env, log_path, config.total_timesteps, model_tag=model_tag)
-        model.learn(total_timesteps=config.total_timesteps, callback=callback)
+        try:
+            model.learn(total_timesteps=config.total_timesteps, callback=callback)
+        except ValueError as e:
+            if "invalid values" not in str(e):
+                raise
+            # A NaN/Inf policy output crashes inside SB3's train() (Normal() rejects it) before this
+            # callback regains control, so the periodic diagnostics above never get a chance to log the
+            # failing point. Surface what we can reconstruct here instead.
+            log_std = model.policy.log_std.data
+            logger.error(
+                "Training diverged at timestep %d (window=%s): policy produced NaN/Inf action "
+                "distribution params. log_std at failure: mean=%.4f min=%.4f max=%.4f (init=%.2f, "
+                "clamped to [-5, 2] between rollouts). Last logged val_sharpe=%.3f at timesteps=%d. "
+                "Likely cause: an unusually large policy update within one train() call pushed log_std "
+                "out of a numerically stable range (target_kl=%.3f should bound this — consider "
+                "lowering it, or lowering learning_rate=%.2e, if this recurs).",
+                model.num_timesteps, model_tag,
+                float(log_std.mean()), float(log_std.min()), float(log_std.max()), config.log_std_init,
+                callback.best_sharpe, model.num_timesteps, model.target_kl, float(model.learning_rate),
+            )
+            raise
         logger.info("Training finished in %.1f min", (time.time() - t0) / 60)
 
         final_path = config.model_dir / f"{model_tag}_final.zip"
@@ -199,7 +285,7 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
         val_env.close()
 
 
-def main() -> None:
+def main(session_id: str | None = None) -> None:
     parser = argparse.ArgumentParser(description="Train PPO portfolio agent via anchored rolling windows")
     parser.add_argument("--timesteps", type=int, default=None, help="PPO timesteps PER WINDOW (default: 1,000,000)")
     parser.add_argument("--train-years", type=int, default=None, help="Years of history per window's train span (default: 10)")
@@ -211,7 +297,21 @@ def main() -> None:
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
     parser.add_argument("--n-envs", type=int, default=None, help="In-process envs batched through the policy (default: 8)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
+    parser.add_argument("--detect-anomaly", action="store_true",
+                         help="Enable torch.autograd anomaly detection to pinpoint the exact backward op "
+                              "that first produces NaN/Inf (debugging only — significant slowdown)")
     args = parser.parse_args()
+
+    if session_id is None:
+        session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+    log_path = configure_logging(DEFAULT_CONFIG.log_dir, session_id, tag="train")
+    logger.info("Session log → %s", log_path)
+
+    if args.detect_anomaly:
+        import torch
+        torch.autograd.set_detect_anomaly(True)
+        logger.warning("torch.autograd anomaly detection enabled — training will be significantly slower")
 
     overrides = {}
     if args.timesteps is not None:
@@ -248,5 +348,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     main()

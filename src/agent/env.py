@@ -22,7 +22,7 @@ import pandas as pd
 from gymnasium import spaces
 
 from src.agent.config import AgentConfig, DEFAULT_CONFIG
-from src.agent.data_pipeline import SCALER_PATH, TENSORS_PATH
+from src.agent.data_pipeline import SCALER_PATH, TENSORS_PATH, fit_train_scaler
 
 logger = logging.getLogger(__name__)
 
@@ -32,8 +32,9 @@ def _load_raw_tensors():
     """Load raw tensors and per-window scalers once per process.
 
     TENSORS_PATH contains raw (unscaled) features. SCALER_PATH contains a dict
-    of scalers indexed by window_id, allowing each window to normalize using
-    its own distribution (fitted on that window's train span, no lookahead).
+    of scalers indexed by train_end cutoff date, allowing each window to
+    normalize using its own distribution (fitted on that window's train span,
+    no lookahead).
     """
     data = np.load(TENSORS_PATH, allow_pickle=True)
     with open(SCALER_PATH, "rb") as f:
@@ -47,16 +48,29 @@ def _load_raw_tensors():
 
 
 @lru_cache(maxsize=1)  # windows train sequentially; unbounded cache leaked ~170MB per window
-def _load_normalized_tensors(window_id: int):
+def _load_normalized_tensors(train_end_cutoff: str):
     """Load, normalize, and clip features for a specific window.
 
-    Each window has its own scaler (fitted on that window's train span).
+    Each window has its own scaler (fitted on that window's train span), keyed
+    by its train_end cutoff date — stable regardless of how many windows a
+    given (window_train_years, window_test_years) choice produces. If a config
+    uses a window layout that `data_pipeline.py` never precomputed a scaler
+    for (e.g. an ad-hoc --train-years/--test-years smoke run), fit one now
+    from the shared raw tensors: same fit_train_scaler() used to build
+    SCALER_PATH, so results are identical to a precomputed run, just paid at
+    call time instead of upfront.
     Clipping at ±10 std devs provides defense-in-depth against outliers.
     """
     dates, tickers, mask, returns, feats, scalers = _load_raw_tensors()
-    if window_id not in scalers:
-        raise KeyError(f"window_id={window_id} not in scalers. Available: {sorted(scalers.keys())}")
-    scaler = scalers[window_id]
+    scaler = scalers.get(train_end_cutoff)
+    if scaler is None:
+        logger.warning(
+            "No precomputed scaler for cutoff=%s (available: %s) — fitting on demand. "
+            "Run `python -m src.agent.data_pipeline` with matching --train-years/--test-years "
+            "to precompute this once and avoid refitting on every process start.",
+            train_end_cutoff, sorted(scalers.keys()),
+        )
+        scaler = fit_train_scaler({"dates": dates, "features": feats, "mask": mask}, train_end_cutoff)
     feats = (feats - scaler.mean_) / scaler.scale_
     feats = np.nan_to_num(feats, nan=0.0, posinf=0.0, neginf=0.0)
     feats = np.clip(feats, -10.0, 10.0)  # ponytail: outlier defense-in-depth; ±10 std is generous
@@ -64,8 +78,8 @@ def _load_normalized_tensors(window_id: int):
 
 
 @lru_cache(maxsize=4)
-def _load_slice(start: str, end: str, window_id: int):
-    """Slice + mask the shared tensors once per (start, end, window_id) and cache the result.
+def _load_slice(start: str, end: str, train_end_cutoff: str):
+    """Slice + mask the shared tensors once per (start, end, train_end_cutoff) and cache the result.
 
     All PortfolioEnv instances with the same bounds (e.g. the N envs of a
     DummyVecEnv) share these arrays by reference — safe since PortfolioEnv
@@ -79,7 +93,7 @@ def _load_slice(start: str, end: str, window_id: int):
       mask_f32       [D,N] mask as float32 for the observation vector
       n_active       [D]   active-ticker count per day
     """
-    dates, tickers, mask, returns, feats_all = _load_normalized_tensors(window_id)
+    dates, tickers, mask, returns, feats_all = _load_normalized_tensors(train_end_cutoff)
     sel = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
     sliced_mask = mask[sel]
     feats = feats_all[sel].copy()
@@ -112,7 +126,7 @@ class PortfolioEnv(gym.Env):
     def __init__(self, config: AgentConfig = DEFAULT_CONFIG, date_range: str = "train"):
         """
         Args:
-            config: AgentConfig with paths, split dates, and window_id for per-window scaling.
+            config: AgentConfig with paths, split dates, and train_end (per-window scaler key).
             date_range: "train", "val", or "test" (selects date slice).
         """
         super().__init__()
@@ -127,7 +141,7 @@ class PortfolioEnv(gym.Env):
         if date_range not in bounds:
             raise ValueError(f"date_range must be one of {list(bounds)}, got '{date_range}'")
         start, end = bounds[date_range]
-        self.dates, self.tickers, self.mask, self.returns, self.features, derived = _load_slice(start, end, config.window_id)
+        self.dates, self.tickers, self.mask, self.returns, self.features, derived = _load_slice(start, end, config.train_end)
         self._simple_rets = derived["simple_rets"]       # [D,N] next-day simple returns, 0 if inactive
         self._ew_log_returns = derived["ew_log_returns"] # [D] equal-weight log return per day
         self._mask_f32 = derived["mask_f32"]             # [D,N] mask as float32 for obs
@@ -181,6 +195,18 @@ class PortfolioEnv(gym.Env):
         # Reward: excess log return (agent vs equal-weight) for credit assignment
         reward = portfolio_log_return - float(self._ew_log_returns[self._t + 1])
 
+        # Detect reward anomalies early (should be roughly ±0.02 daily, anything >±0.5 is extreme)
+        if np.isnan(reward) or np.isinf(reward):
+            logger.error(
+                "Invalid reward at t=%d (date=%s): reward=%.6f, portfolio_return=%.6f, ew_return=%.6f, "
+                "portfolio_value=%.2f, weights_sum=%.4f",
+                self._t, self.dates[self._t], reward, portfolio_log_return,
+                float(self._ew_log_returns[self._t + 1]), self.portfolio_value, float(np.sum(weights))
+            )
+            raise ValueError(f"Invalid reward at timestep {self._t}: {reward}")
+        if abs(reward) > 1.0:
+            logger.warning("Extreme reward at t=%d: %.6f (normal range ~±0.02)", self._t, reward)
+
         self.portfolio_value *= 1.0 + max(simple_return, -0.9999)
         self._prev_weights = weights.copy()
 
@@ -200,9 +226,31 @@ class PortfolioEnv(gym.Env):
 
     def _obs(self) -> np.ndarray:
         t = min(self._t, self.n_steps)
-        return np.concatenate(
+        obs = np.concatenate(
             [self.features[t].ravel(), self._mask_f32[t], self._prev_weights]
         )
+        # Detect NaNs early before they propagate into the network
+        if np.isnan(obs).any():
+            nan_count = np.isnan(obs).sum()
+            features_t = self.features[t].ravel()
+            logger.error(
+                "NaN detected in observation at t=%d: %d NaN values total. "
+                "features_nan=%d mask_nan=%d weights_nan=%d. "
+                "features_range=[%.2e, %.2e], max_abs=%.2e. "
+                "prev_weights_sum=%.4f",
+                t, nan_count,
+                np.isnan(features_t).sum(), np.isnan(self._mask_f32[t]).sum(), np.isnan(self._prev_weights).sum(),
+                np.nanmin(features_t) if not np.all(np.isnan(features_t)) else np.nan,
+                np.nanmax(features_t) if not np.all(np.isnan(features_t)) else np.nan,
+                np.nanmax(np.abs(features_t)) if not np.all(np.isnan(features_t)) else np.nan,
+                float(np.sum(self._prev_weights)),
+            )
+            raise ValueError(f"NaN in observation at timestep {t} (date={self.dates[t]})")
+
+        # Clip extreme values to prevent numerical instability in the network
+        # Features should be normalized around [-3, 3] from StandardScaler; clip at [-5, 5] to prevent gradient explosion
+        obs = np.clip(obs, -5.0, 5.0, dtype=np.float32)
+        return obs
 
     @staticmethod
     def _masked_softmax(logits: np.ndarray, active: np.ndarray) -> np.ndarray:

@@ -110,12 +110,17 @@ def run_pipeline(config: AgentConfig = DEFAULT_CONFIG) -> None:
         config.dataset_start, config.dataset_end,
         config.window_train_years, config.window_test_years,
     )
+    # Keyed by the actual train_end cutoff (not window.window_id): window_id is a positional index
+    # that depends on (window_train_years, window_test_years), so it's unstable across different CLI
+    # overrides (e.g. --train-years 2 --test-years 1 for a smoke run generates a different window_id
+    # → date mapping than the default config used here). The cutoff date is what the scaler actually
+    # was fit on, so it's a stable, self-describing key regardless of which window scheme produced it.
     scalers = {}
     for window in windows:
         window_config = window_to_config(window, config)
         cutoff = window_config.train_end  # train_end after val carving: the actual train boundary for this window
         scaler = fit_train_scaler(tensors, cutoff)
-        scalers[window.window_id] = scaler
+        scalers[cutoff] = scaler
         logger.info("  Window %d: scaler fitted (cutoff=%s)", window.window_id, cutoff)
 
     np.savez_compressed(TENSORS_PATH, **tensors)
@@ -138,7 +143,7 @@ def run_pipeline(config: AgentConfig = DEFAULT_CONFIG) -> None:
     print(f"Scalers:  {len(scalers)} (one per rolling window) → {SCALER_PATH}")
 
     # Self-check: verify every window got a scaler
-    assert all(scalers[w.window_id] is not None for w in windows), "Missing scaler for some window"
+    assert all(window_to_config(w, config).train_end in scalers for w in windows), "Missing scaler for some window"
     print(f"✓ Verified: all {len(windows)} windows have scalers")
 
 

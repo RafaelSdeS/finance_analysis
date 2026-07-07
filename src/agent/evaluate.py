@@ -19,6 +19,7 @@ Usage:
 import argparse
 import json
 import logging
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable
@@ -27,7 +28,7 @@ import numpy as np
 import pandas as pd
 from stable_baselines3 import PPO
 
-from src.agent.config import AgentConfig, DEFAULT_CONFIG
+from src.agent.config import AgentConfig, DEFAULT_CONFIG, configure_logging
 from src.agent.env import PortfolioEnv
 from src.agent.metrics import compute_all
 
@@ -195,11 +196,10 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
     # Metrics table
     metrics = {name: compute_all(res["rewards"], res["values"], res["weights"]) for name, res in results.items()}
     table = pd.DataFrame(metrics).T
-    print("\n" + "=" * 78)
-    print("BACKTEST RESULTS (test set: "
-          f"{config.test_start}{config.test_end})")
-    print("=" * 78)
-    print(table.round(4).to_string())
+    logger.info("=" * 78)
+    logger.info("BACKTEST RESULTS (test set: %s → %s)", config.test_start, config.test_end)
+    logger.info("=" * 78)
+    logger.info("\n%s", table.round(4).to_string())
 
     # Persist: metrics.json + results.parquet + plots
     config.backtest_dir.mkdir(parents=True, exist_ok=True)
@@ -239,6 +239,10 @@ def main() -> None:
     parser.add_argument("--resume", action="store_true", help="Resume the online backtest from its last checkpointed chunk")
     args = parser.parse_args()
 
+    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = configure_logging(DEFAULT_CONFIG.log_dir, run_id, tag="evaluate")
+    logger.info("Session log → %s", log_path)
+
     if args.online:
         # Deferred import to avoid circular dependency (rolling_eval imports from evaluate)
         from src.agent.rolling_eval import run_online_backtest
@@ -248,16 +252,15 @@ def main() -> None:
             retrain_timesteps=args.retrain_timesteps,
             resume=args.resume,
         )
-        # Print summary
-        print("\n" + "=" * 78)
-        print("ONLINE RETRAINING BACKTEST RESULTS")
-        print("=" * 78)
+        # Log summary
+        logger.info("=" * 78)
+        logger.info("ONLINE RETRAINING BACKTEST RESULTS")
+        logger.info("=" * 78)
         table = pd.DataFrame(metrics).T
-        print(table.round(4).to_string())
+        logger.info("\n%s", table.round(4).to_string())
     else:
         backtest(args.model)
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     main()

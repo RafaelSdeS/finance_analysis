@@ -80,6 +80,7 @@ python -m src.agent.run_allocation --date 2026-06-29 --format csv
 python src/build_dataset/cagr_handler.py --ticker PETR4  # CAGR calculator
 python src/visualizations/financial_view.py         # BBAS3 nominal vs inflation-adjusted vs SELIC (live yfinance)
 jupyter notebook src/visualizations/exploration.ipynb   # full dataset validation + insights
+streamlit run tools/explorer/app.py                 # interactive explorer: Data Explorer / Data Quality / Model Explorer / Training Analysis pages
 ```
 
 ### Tests
