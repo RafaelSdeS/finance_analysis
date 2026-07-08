@@ -159,6 +159,19 @@ class PortfolioEnv(gym.Env):
         n_tickers = len(self.tickers)
         n_features = self.features.shape[2]
 
+        # Guard: universe filtering happens at tensor-build time (data_pipeline
+        # --universe-size), not here. If the config asks for a universe the
+        # tensors weren't built with, fail loudly instead of silently training
+        # on the wrong ticker set.
+        if config.universe_size is not None:
+            expected_n = config.universe_size + int("CASH" in self.tickers)
+            if n_tickers != expected_n:
+                raise RuntimeError(
+                    f"agent_tensors.npz has {n_tickers} tickers but config.universe_size="
+                    f"{config.universe_size} (expected {expected_n} incl. CASH). "
+                    f"Rebuild with: python -m src.agent.data_pipeline --universe-size {config.universe_size}"
+                )
+
         self.n_steps = len(self.dates) - 1  # last date has no next-day return
         if self.n_steps < 2:
             raise ValueError(f"Date range '{date_range}' has too few days: {len(self.dates)}")
