@@ -188,6 +188,31 @@ class ValSharpeCallback(BaseCallback):
         self.pbar.close()
 
 
+class CostAnnealCallback(BaseCallback):
+    """Ramp env cost_scale 0→1 over training to unstrangle early exploration."""
+
+    def __init__(self, total_timesteps: int, anneal_frac: float = 0.5):
+        """Ramp cost_scale from 0 to 1 over the first anneal_frac of training.
+
+        Args:
+            total_timesteps: Total PPO timesteps for the full run
+            anneal_frac: Fraction of training over which to ramp (default: 50%)
+        """
+        super().__init__()
+        self.total_timesteps = total_timesteps
+        self.anneal_frac = anneal_frac
+        self.anneal_until = int(anneal_frac * total_timesteps)
+
+    def _on_rollout_start(self) -> None:
+        if self.num_timesteps < self.anneal_until and self.training_env is not None:
+            frac = self.num_timesteps / self.anneal_until
+            # Set cost_scale uniformly across all parallel envs
+            self.training_env.set_attr("cost_scale", min(1.0, frac))
+
+    def _on_step(self) -> bool:
+        return True  # Never block
+
+
 def _find_latest_checkpoint(config: AgentConfig, model_tag: str = "agent") -> Path | None:
     """Find the latest checkpoint by timestep number."""
     checkpoints = list(config.model_dir.glob(f"{model_tag}_checkpoint_*.zip"))
@@ -249,8 +274,9 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
 
         t0 = time.time()
         callback = ValSharpeCallback(config, val_env, log_path, config.total_timesteps, model_tag=model_tag)
+        cost_anneal_callback = CostAnnealCallback(config.total_timesteps, anneal_frac=0.5)
         try:
-            model.learn(total_timesteps=config.total_timesteps, callback=callback)
+            model.learn(total_timesteps=config.total_timesteps, callback=[callback, cost_anneal_callback])
         except ValueError as e:
             if "invalid values" not in str(e):
                 raise
