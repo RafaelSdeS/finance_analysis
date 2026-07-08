@@ -24,16 +24,17 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 from stable_baselines3 import PPO
 
 from src.agent.config import AgentConfig, DEFAULT_CONFIG, RollingWindow, generate_windows, window_to_config
 from src.agent.env import PortfolioEnv
 from src.agent.evaluate import (
-    agent_policy, equal_weight_policy, market_cap_policy, inv_vol_policy,
+    agent_policy, agent_vs_equal_weight, equal_weight_policy, market_cap_policy, inv_vol_policy,
     rollout
 )
 from src.agent.metrics import compute_all
-from src.agent.trainer import train, evaluate_on_env
+from src.agent.trainer import train
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,12 @@ def eval_window(window: RollingWindow, model: PPO, window_config: AgentConfig) -
             logger.info("  Window %d: Rolling out %s...", window.window_id, name)
             res = rollout(env, fn)
             rollouts[name] = res
-            metrics[name] = compute_all(res["rewards"], res["values"])
+            # Pass costs for gross/net decomposition
+            if "costs" in res:
+                metrics[name] = compute_all(res["rewards"], res["values"], res.get("weights"),
+                                           daily_costs=res["costs"], cost_bps=window_config.transaction_cost_bps)
+            else:
+                metrics[name] = compute_all(res["rewards"], res["values"], res.get("weights"))
             logger.info("  Window %d:   ✓ %s sharpe=%.3f, max_dd=%.1f%%",
                        window.window_id, name, metrics[name]['sharpe'], metrics[name]['max_drawdown'] * 100)
 
@@ -242,6 +248,7 @@ def summarize_rolling_results(results: list[WindowResult]) -> dict:
 def stitch_walkforward(
     window_rollouts: list[dict],   # each: {"strategies": {name: rollout}, "tickers": ndarray}
     initial_capital: float,
+    cost_bps: float = 10.0,
 ) -> tuple[pd.DataFrame, dict]:
     """Concatenate per-window OOS rollouts into one continuous walk-forward curve.
 
@@ -265,10 +272,19 @@ def stitch_walkforward(
     )
     weights = np.concatenate([w["strategies"]["agent"]["weights"] for w in window_rollouts])  # [T, N]
 
+    # Concatenate costs (for gross/net decomposition)
+    costs = {
+        s: np.concatenate([w["strategies"][s].get("costs", np.zeros(len(w["strategies"][s]["rewards"])))
+                          for w in window_rollouts])
+        for s in strategies
+    }
+
     # continuous value = compound stitched returns; metrics need the initial-capital seed
     values = {s: initial_capital * np.exp(np.cumsum(log_returns[s])) for s in strategies}
     metrics = {
-        s: compute_all(log_returns[s], np.concatenate([[initial_capital], values[s]]))
+        s: compute_all(log_returns[s], np.concatenate([[initial_capital], values[s]]),
+                      daily_costs=costs[s] if "costs" in window_rollouts[0]["strategies"][s] else None,
+                      cost_bps=cost_bps)
         for s in strategies
     }
 
@@ -294,7 +310,7 @@ def save_walkforward(results: list[WindowResult], config: AgentConfig) -> None:
         logger.warning("No rollouts to stitch — skipping walk-forward output")
         return
 
-    df, metrics = stitch_walkforward(bundles, config.initial_capital)
+    df, metrics = stitch_walkforward(bundles, config.initial_capital, cost_bps=config.transaction_cost_bps)
     config.backtest_dir.mkdir(parents=True, exist_ok=True)
     df.to_parquet(config.backtest_dir / "walkforward_results.parquet", index=False)
     with open(config.backtest_dir / "walkforward_metrics.json", "w") as f:
@@ -474,11 +490,11 @@ def run_online_backtest(
 
             # Eval before retrain on the trailing span (same env as fine-tuning)
             val_env_pre = _make_train_env(train_start_str, train_end_str)
-            eval_pre = evaluate_on_env(model, val_env_pre)
+            eval_pre = agent_vs_equal_weight(val_env_pre, model)
             val_env_pre.close()
 
             logger.info(
-                "  Before retrain: trailing-window Sharpe (IR) = %.3f", eval_pre["sharpe"]
+                "  Before retrain: trailing-window excess Sharpe (vs EW) = %.3f", eval_pre["excess_sharpe"]
             )
 
             # Save model state before fine-tuning
@@ -500,17 +516,17 @@ def run_online_backtest(
 
             # Eval after retrain
             val_env_post = _make_train_env(train_start_str, train_end_str)
-            eval_post = evaluate_on_env(model, val_env_post)
+            eval_post = agent_vs_equal_weight(val_env_post, model)
             val_env_post.close()
 
-            logger.info("  After retrain: trailing-window Sharpe (IR) = %.3f", eval_post["sharpe"])
+            logger.info("  After retrain: trailing-window excess Sharpe (vs EW) = %.3f", eval_post["excess_sharpe"])
 
-            # Revert if degraded (simple guard: if Sharpe dropped)
-            if eval_post["sharpe"] < eval_pre["sharpe"]:
-                logger.warning("  Sharpe degraded (%.3f → %.3f); reverting model", eval_pre["sharpe"], eval_post["sharpe"])
+            # Revert if degraded (simple guard: if excess Sharpe vs equal-weight dropped)
+            if eval_post["excess_sharpe"] < eval_pre["excess_sharpe"]:
+                logger.warning("  Excess Sharpe degraded (%.3f → %.3f); reverting model", eval_pre["excess_sharpe"], eval_post["excess_sharpe"])
                 model = PPO.load(temp_model_path, device=config.device)
             else:
-                logger.info("  Sharpe improved (%.3f → %.3f); keeping new model", eval_pre["sharpe"], eval_post["sharpe"])
+                logger.info("  Excess Sharpe improved (%.3f → %.3f); keeping new model", eval_pre["excess_sharpe"], eval_post["excess_sharpe"])
 
             # Clean up temp
             if temp_model_path.exists():
@@ -659,12 +675,47 @@ def finalize_and_report(results: list[WindowResult], config: AgentConfig) -> dic
     for strategy in sorted(summary.keys()):
         logger.info(f"\n{strategy.upper()}")
         logger.info("-" * 70)
-        for metric, stats in summary[strategy].items():
+        for metric, agg in summary[strategy].items():
             logger.info(
                 f"  {metric:25s}: "
-                f"mean={stats['mean']:+.3f}, std={stats['std']:+.3f}, "
-                f"min={stats['min']:+.3f}, max={stats['max']:+.3f}"
+                f"mean={agg['mean']:+.3f}, std={agg['std']:+.3f}, "
+                f"min={agg['min']:+.3f}, max={agg['max']:+.3f}"
             )
+
+    # Per-window agent vs equal-weight comparison + regime-neutral t-test
+    logger.info("\n" + "=" * 70)
+    logger.info("PER-WINDOW AGENT vs EQUAL-WEIGHT")
+    logger.info("=" * 70)
+    agent_wins = 0
+    daily_excess_all = []
+    for r in results:
+        a_sharpe = r.metrics["agent"]["sharpe"]
+        e_sharpe = r.metrics["equal_weight"]["sharpe"]
+        win = a_sharpe > e_sharpe
+        agent_wins += win
+        logger.info(
+            f"w{r.window_id}: {r.test_start[:10]}→{r.test_end[:10]}  "
+            f"agent={a_sharpe:+.3f}  ew={e_sharpe:+.3f}  diff={a_sharpe-e_sharpe:+.3f}  "
+            f"{'WIN' if win else 'loss'}"
+        )
+        # Accumulate daily excess returns for t-test (agent reward - equal-weight reward)
+        if r.rollouts and "strategies" in r.rollouts:
+            agent_ret = r.rollouts["strategies"]["agent"]["rewards"]
+            ew_ret = r.rollouts["strategies"]["equal_weight"]["rewards"]
+            if len(agent_ret) == len(ew_ret):
+                daily_excess_all.extend(agent_ret - ew_ret)
+
+    logger.info(f"\nAgent beats equal-weight: {agent_wins}/{len(results)} windows")
+
+    # t-test on concatenated daily excess returns (agent − equal-weight)
+    if daily_excess_all:
+        daily_excess = np.array(daily_excess_all)
+        t_stat, p_value = stats.ttest_1samp(daily_excess, popmean=0.0)
+        logger.info(f"\nRegime-neutral t-test (daily agent − equal-weight):")
+        logger.info(f"  mean excess return: {daily_excess.mean():+.6f}")
+        logger.info(f"  std excess return:  {daily_excess.std():+.6f}")
+        logger.info(f"  t-stat={t_stat:+.3f}, p-value={p_value:.4f} (H0: mean=0)")
+        logger.info(f"  {'Statistically significant' if p_value < 0.05 else 'NOT significant'} at α=0.05")
 
     results_file = config.model_dir / "rolling_eval_results.json"
     with open(results_file, "w") as f:
