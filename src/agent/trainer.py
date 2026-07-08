@@ -322,6 +322,7 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size (default: 64)")
     parser.add_argument("--eval-freq", type=int, default=None, help="Evaluate on val set every N episodes (default: 20)")
     parser.add_argument("--rebalance-days", type=int, default=None, help="Rebalance interval in trading days (default: 21)")
+    parser.add_argument("--universe-size", type=int, default=None, help="Filter to top N tickers by market cap (default: None = all)")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
     parser.add_argument("--n-envs", type=int, default=None, help="In-process envs batched through the policy (default: 8)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
@@ -364,6 +365,8 @@ def main(session_id: str | None = None) -> None:
         overrides["eval_freq"] = args.eval_freq
     if args.rebalance_days is not None:
         overrides["rebalance_interval_days"] = args.rebalance_days
+    if args.universe_size is not None:
+        overrides["universe_size"] = args.universe_size
     if args.device is not None:
         overrides["device"] = args.device
     if args.n_envs is not None:
