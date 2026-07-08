@@ -25,6 +25,7 @@ from src.agent.config import AgentConfig, DEFAULT_CONFIG
 from src.agent.data_pipeline import SCALER_PATH, TENSORS_PATH, fit_train_scaler
 
 logger = logging.getLogger(__name__)
+_logged_configs: set[tuple] = set()  # dedupe identical PortfolioEnv init logs (see __init__)
 
 
 @lru_cache(maxsize=1)
@@ -186,11 +187,15 @@ class PortfolioEnv(gym.Env):
         self.portfolio_value = config.initial_capital
         self._prev_weights = self._is_cash_mask.astype(np.float32)  # start 100% CASH (new investor)
         self.cost_scale = 1.0  # cost annealing: 0→1 during training (item 4)
-        logger.info(
-            "PortfolioEnv[%s]: %d days (%s → %s), %d tickers, obs_dim=%d, rebalance_interval=%d",
-            date_range, len(self.dates), self.dates[0].date(), self.dates[-1].date(),
-            n_tickers, obs_dim, config.rebalance_interval_days,
-        )
+        # ponytail: dedupe by config, DummyVecEnv builds n_envs identical train copies
+        log_key = (date_range, len(self.dates), n_tickers, obs_dim)
+        if log_key not in _logged_configs:
+            _logged_configs.add(log_key)
+            logger.info(
+                "PortfolioEnv[%s]: %d days (%s → %s), %d tickers, obs_dim=%d, rebalance_interval=%d",
+                date_range, len(self.dates), self.dates[0].date(), self.dates[-1].date(),
+                n_tickers, obs_dim, config.rebalance_interval_days,
+            )
 
     # ------------------------------------------------------------------ API
 

@@ -153,8 +153,8 @@ class ValSharpeCallback(BaseCallback):
         approx_kl = self.model.logger.name_to_value.get("train/approx_kl")
         self.pbar.set_postfix({
             "sharpe": f"{val['sharpe']:.3f}",
-            "xs": f"{val['excess_sharpe']:.3f}",
-            "dd%": f"{val['max_drawdown']*100:.1f}",
+            "excess_sharpe": f"{val['excess_sharpe']:.3f}",
+            "max_dd%": f"{val['max_drawdown']*100:.1f}",
             "kl": f"{approx_kl:.3f}" if approx_kl is not None else "n/a",
             "value": f"{val['final_value']:,.0f}"
         })

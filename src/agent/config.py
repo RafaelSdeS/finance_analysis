@@ -40,7 +40,7 @@ def configure_logging(log_dir: Path, run_id: str, tag: str = "session") -> Path:
     root.setLevel(logging.INFO)
 
     console = logging.StreamHandler()
-    console.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
     root.addHandler(console)
 
     file_handler = logging.FileHandler(log_path)
