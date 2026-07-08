@@ -157,7 +157,7 @@ def main():
                         help="Output JSON path")
     args = parser.parse_args()
 
-    logger.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     # Load data
     features, fwd_rets = load_panel(args.dataset, args.horizons)
@@ -171,13 +171,14 @@ def main():
         fwd_mat = fwd_rets[horizon]
 
         for feat_name, feat_mat in sorted(features.items()):
-            # Align to same dates
+            # Align to same dates and tickers
             shared_dates = fwd_mat.index.intersection(feat_mat.index)
-            if len(shared_dates) < 20:
+            shared_tickers = fwd_mat.columns.intersection(feat_mat.columns)
+            if len(shared_dates) < 20 or len(shared_tickers) < 10:
                 continue
 
-            feat_aligned = feat_mat.loc[shared_dates]
-            fwd_aligned = fwd_mat.loc[shared_dates]
+            feat_aligned = feat_mat.loc[shared_dates, shared_tickers]
+            fwd_aligned = fwd_mat.loc[shared_dates, shared_tickers]
 
             ic = daily_rank_ic(feat_aligned, fwd_aligned, args.min_names)
             summary = summarize(ic, horizon, feat_name)

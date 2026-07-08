@@ -164,7 +164,7 @@ def main():
     parser.add_argument("--out", type=Path, default=_PROJECT_ROOT / "data/backtest/ranker_metrics.json")
     args = parser.parse_args()
 
-    logger.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     df = load_dataset(args.dataset)
 
