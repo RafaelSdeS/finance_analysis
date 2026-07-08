@@ -30,7 +30,7 @@ from stable_baselines3 import PPO
 
 from src.agent.config import AgentConfig, DEFAULT_CONFIG, configure_logging
 from src.agent.env import PortfolioEnv
-from src.agent.metrics import compute_all
+from src.agent.metrics import compute_all, sharpe_ratio, max_drawdown
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +39,13 @@ VOL_WINDOW = 60  # trailing days for inverse-volatility baseline
 
 # --------------------------------------------------------------- rollouts
 
-def _weights_to_logits(weights: np.ndarray) -> np.ndarray:
-    """Logits whose masked softmax reproduces the given weights."""
-    return np.log(np.maximum(weights, 1e-12)).astype(np.float32)
+def _weights_to_logits(weights: np.ndarray, logit_scale: float) -> np.ndarray:
+    """Logits whose temperature-scaled masked softmax reproduces the given weights.
+
+    The env computes softmax(action * logit_scale), so pre-divide by the scale
+    to make baseline weights come out exactly as intended.
+    """
+    return (np.log(np.maximum(weights, 1e-12)) / logit_scale).astype(np.float32)
 
 
 def _exclude_cash_from_weights(w: np.ndarray, env: PortfolioEnv) -> np.ndarray:
@@ -57,24 +61,45 @@ def _exclude_cash_from_weights(w: np.ndarray, env: PortfolioEnv) -> np.ndarray:
 
 
 def rollout(env: PortfolioEnv, act_fn: Callable[[np.ndarray, int], np.ndarray]) -> dict:
-    """Roll a policy through an env split. act_fn(obs, t) → action logits."""
+    """Roll a policy through an env split. act_fn(obs, env._t) → action logits.
+
+    With N-day steps, one env.step() spans N days. Unpacks daily arrays from info["daily_*"]
+    to maintain daily-frequency rewards/dates/weights for backward-compatible backtesting.
+    """
     obs, _ = env.reset()
-    rewards, values, weights_log, dates = [], [env.config.initial_capital], [], []
-    t, terminated = 0, False
+    rewards, values, weights_log, dates, costs = [], [env.config.initial_capital], [], [], []
+    terminated = False
     while not terminated:
-        action = act_fn(obs, t)
+        t_dec = env._t  # Day index at decision time (passed to act_fn)
+        action = act_fn(obs, t_dec)
         obs, reward, terminated, _, info = env.step(action)
-        # Use absolute log return for backtest metrics (ignore training reward which is excess)
-        rewards.append(info["log_return"])
-        values.append(info["portfolio_value"])
-        weights_log.append(info["weights"])
-        dates.append(info["date"])
-        t += 1
+
+        # Unpack daily arrays from this N-day step
+        daily_rets = info["daily_log_returns"]  # [n_days]
+        daily_dates = info["daily_dates"]        # [n_days]
+        daily_weights = info["daily_weights"]    # [n_days, n_tickers]
+        cost = info["transaction_cost"]          # Scalar (applied on day 1)
+
+        # Extend daily-frequency lists
+        rewards.extend(daily_rets)
+        dates.extend(daily_dates)
+        weights_log.extend(daily_weights)
+
+        # Costs: cost on first day, 0 on rest
+        costs.append(cost)
+        for _ in range(len(daily_rets) - 1):
+            costs.append(0.0)
+
+        # Reconstruct daily values by compounding daily returns
+        for d_ret in daily_rets:
+            values.append(values[-1] * np.exp(d_ret))
+
     return {
-        "rewards": np.array(rewards),
-        "values": np.array(values),
-        "weights": np.array(weights_log),   # [T, n_tickers]
+        "rewards": np.array(rewards, dtype=np.float32),
+        "values": np.array(values, dtype=np.float32),
+        "weights": np.array(weights_log, dtype=np.float32),   # [T, n_tickers]
         "dates": pd.DatetimeIndex(dates),
+        "costs": np.array(costs, dtype=np.float32),            # [T] — cost on rebalance day, 0 else
     }
 
 
@@ -91,8 +116,25 @@ def equal_weight_policy(env: PortfolioEnv) -> Callable:
         active = _exclude_cash_from_weights(active, env)
         if active.sum() == 0:  # shouldn't happen, but be safe
             active = env.mask[t].astype(float)
-        return _weights_to_logits(active / active.sum())
+        return _weights_to_logits(active / active.sum(), env.config.logit_scale)
     return act
+
+
+def agent_vs_equal_weight(env: PortfolioEnv, model: PPO) -> dict:
+    """Agent rollout vs equal-weight rollout on the same env split; excess = day-by-day diff.
+
+    excess_sharpe is the Sharpe of (agent absolute log return − EW absolute log return) per
+    day — NOT a difference of two independently-computed Sharpes.
+    """
+    agent_res = rollout(env, agent_policy(model))
+    ew_res = rollout(env, equal_weight_policy(env))
+    excess = agent_res["rewards"] - ew_res["rewards"]
+    return {
+        "sharpe": sharpe_ratio(agent_res["rewards"]),
+        "excess_sharpe": sharpe_ratio(excess),
+        "max_drawdown": max_drawdown(agent_res["values"]),
+        "final_value": agent_res["values"][-1],
+    }
 
 
 @lru_cache(maxsize=1)
@@ -117,7 +159,7 @@ def market_cap_policy(env: PortfolioEnv, config: AgentConfig) -> Callable:
         if w.sum() == 0:  # no caps known yet → fall back to equal weight
             w = env.mask[t].astype(float)
             w = _exclude_cash_from_weights(w, env)
-        return _weights_to_logits(w / w.sum())
+        return _weights_to_logits(w / w.sum(), env.config.logit_scale)
     return act
 
 
@@ -133,8 +175,48 @@ def inv_vol_policy(env: PortfolioEnv) -> Callable:
         if w.sum() == 0:  # first day / degenerate → equal weight
             w = env.mask[t].astype(float)
             w = _exclude_cash_from_weights(w, env)
-        return _weights_to_logits(w / w.sum())
+        return _weights_to_logits(w / w.sum(), env.config.logit_scale)
     return act
+
+
+def selic_policy(env: PortfolioEnv, config: AgentConfig) -> Callable:
+    """100% CASH held at daily SELIC rates (synthetic asset already in dataset)."""
+    def act(obs: np.ndarray, t: int) -> np.ndarray:
+        # 100% CASH: all weight on CASH ticker
+        w = np.zeros(len(env.tickers))
+        if "CASH" in env.tickers:
+            cash_idx = np.where(env.tickers == "CASH")[0][0]
+            w[cash_idx] = 1.0
+        return _weights_to_logits(w, env.config.logit_scale)
+    return act
+
+
+def bova11_result(dates: pd.DatetimeIndex, config: AgentConfig) -> dict | None:
+    """
+    Buy-and-hold BOVA11 from raw ETF prices (BOVA11 is not in the stocks-only
+    env universe, so this bypasses the env instead of faking it with logits).
+    Returns a rollout-shaped dict aligned to the agent's backtest dates.
+    """
+    bova_path = config.model_dir.parent.parent / "data" / "raw" / "prices" / "BOVA11.parquet"
+    if not bova_path.exists():
+        logger.warning("BOVA11.parquet not found at %s — skipping bova11 baseline", bova_path)
+        return None
+
+    px = (
+        pd.read_parquet(bova_path, columns=["trade_date", "adj_close"])
+        .set_index("trade_date")["adj_close"]
+        .sort_index()
+    )
+    px = px.reindex(px.index.union(dates)).ffill().reindex(dates)
+    rewards = np.log(px).diff().fillna(0.0).to_numpy()
+    values = config.initial_capital * np.exp(np.concatenate([[0.0], np.cumsum(rewards)]))
+    return {
+        "rewards": rewards,
+        "values": values,
+        "weights": np.ones((len(dates), 1)),  # 100% in the ETF, zero turnover
+        "dates": dates,
+        "costs": np.zeros_like(rewards),  # Buy-and-hold: no costs
+    }
 
 
 # --------------------------------------------------------------- plotting
@@ -190,11 +272,31 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
         "equal_weight": equal_weight_policy(env),
         "market_cap": market_cap_policy(env, config),
         "inv_vol": inv_vol_policy(env),
+        "selic": selic_policy(env, config),
     }
     results = {name: rollout(env, fn) for name, fn in policies.items()}
+    bova = bova11_result(results["agent"]["dates"], config)
+    if bova is not None:
+        results["bova11"] = bova
 
-    # Metrics table
-    metrics = {name: compute_all(res["rewards"], res["values"], res["weights"]) for name, res in results.items()}
+    # Metrics table (with cost breakdown for equity baselines)
+    metrics = {}
+    for name, res in results.items():
+        if "costs" in res:
+            # Equity strategies: pass costs for gross/net decomposition
+            metrics[name] = compute_all(res["rewards"], res["values"], res["weights"],
+                                       daily_costs=res["costs"], cost_bps=config.transaction_cost_bps)
+        else:
+            # bova11: buy-and-hold, no costs
+            metrics[name] = compute_all(res["rewards"], res["values"], res["weights"])
+
+    if config.rebalance_interval_days > 1:
+        logger.warning(
+            "⚠ Models trained before rebalance_interval_days=%d are STALE "
+            "(obs unchanged but step semantics differ). Retrain to use this config.",
+            config.rebalance_interval_days
+        )
+
     table = pd.DataFrame(metrics).T
     logger.info("=" * 78)
     logger.info("BACKTEST RESULTS (test set: %s → %s)", config.test_start, config.test_end)
