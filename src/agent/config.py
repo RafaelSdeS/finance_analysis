@@ -106,9 +106,9 @@ class AgentConfig:
             "momentum_vs_sector_3m",  # RF rank 1
             "momentum_vs_sector_12m",  # RF rank 14
             "real_return",  # RF rank 4
-            "excess_return",  # RF rank 7
-            "ma_20",  # RF rank 10
-            "ma_60",  # RF rank 5
+            # "excess_return",  # RF rank 7 — REMOVED: this is regime (market return), not alpha
+            # "ma_20",  # RF rank 10 — REMOVED: negative IC in ranker (mean reversion noise)
+            # "ma_60",  # RF rank 5 — REMOVED: negative IC in ranker (mean reversion noise)
             "price_percentile_5y",  # RF rank 6
             "drawdown_percentile",  # RF rank 8
             "return_6m",  # RF rank 12
@@ -123,7 +123,7 @@ class AgentConfig:
             # "roe",
             # "debt_equity",
             # "roic",
-            # "roa",
+            "roa",  # Return on Assets — HIGH IC in ranker (0.0968 at 21d!)
             # "net_margin",
             # "gross_margin",
             # "ebitda_margin",
@@ -134,12 +134,12 @@ class AgentConfig:
             # "revenue_growth_yoy",
             # "ebitda_growth_yoy",
             # Sector-relative valuation & quality
-            # "pl_zscore_sector",
+            "pl_zscore_sector",  # Valuation relative to sector — helps identify cheap/expensive
             # "pvp_zscore_sector",
             # "roe_zscore_sector",
             # "debt_equity_zscore_sector",
             # Quality trends & signals
-            # "f_score",
+            "f_score",  # Piotroski F-Score — quality metric, high IC in ranker baseline
             # "roe_trend_4q",
             # "margin_trend_4q",
             # "earnings_yield_vs_selic",
