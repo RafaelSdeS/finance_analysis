@@ -206,14 +206,13 @@ def load_rolling_eval() -> dict | None:
 def load_training_logs() -> pd.DataFrame:
     """All trainer JSONL eval records, one row per checkpoint, tagged by run.
 
-    Filenames: agent_training_{tag}_{run_id}.jsonl, tag = 'agent' or 'window_N'.
+    Layout: data/logs/agent/runs/<run_id>/{tag}.jsonl, tag = 'agent' or 'window_N'.
     Records: {timesteps, val_sharpe, val_max_drawdown, val_final_value, timestamp}.
     """
     rows = []
-    for f in sorted(LOGS_DIR.glob("agent_training_*.jsonl")):
-        stem = f.stem.removeprefix("agent_training_")
-        run_id = stem.rsplit("_", 1)[-1]
-        tag = stem[: -(len(run_id) + 1)]
+    for f in sorted((LOGS_DIR / "agent" / "runs").glob("*/*.jsonl")):
+        run_id = f.parent.name
+        tag = f.stem
         for line in f.read_text().splitlines():
             line = line.strip()
             if not line:

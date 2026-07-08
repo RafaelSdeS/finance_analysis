@@ -41,7 +41,7 @@ span is further tail-carved by `window_val_fraction` (default 0.15) via
 - ✅ **Expanding history**: each model sees more years than the last (realistic for learning)
 - ✅ **Multiple regimes**: windows span 2008 crash, COVID, rate hikes, etc.
 - ✅ **Independent backtest**: each window is a separate evaluation
-- ✅ **One production model**: the most recent window's model is saved as `agent_best.zip`/`agent_final.zip` — the same filenames `evaluate.py`/`infer.py`/`run_allocation.py` already default to
+- ✅ **One production model**: the most recent window's model is trained as `agent_best.zip`/`agent_final.zip` inside the run's scratch dir, then promoted to the stable top-level `data/models/agent_{best,final}.zip` — the same filenames `evaluate.py`/`infer.py`/`run_allocation.py` already default to
 
 ## Usage
 
@@ -52,21 +52,22 @@ python -m src.agent.trainer --train-years 2 --test-years 1 --timesteps 2048
 
 ### Full training (8 windows, 1M timesteps/window — the default):
 ```bash
-python -m src.agent.trainer 2>&1 | tee data/logs/rolling_training.log
+python -m src.agent.trainer
 ```
-(Takes several hours on GPU — 8x a single 1M-timestep run, since every window trains independently.)
+(Takes several hours on GPU — 8x a single 1M-timestep run, since every window trains independently.) Each invocation gets its own `data/models/runs/<session_id>/` + `data/logs/agent/runs/<session_id>/` — a fresh run never collides with a previous one, no manual cleanup needed.
 
 ### Resume an interrupted run:
 ```bash
 python -m src.agent.trainer --resume
 ```
-Resumes whichever window is currently incomplete (no `_final.zip` yet) from
-its latest checkpoint; already-finished windows are skipped automatically.
+Resumes the most-recently-modified `runs/<session_id>/` directory: whichever
+window in it is currently incomplete (no `_final.zip` yet) picks up from its
+latest checkpoint; already-finished windows are skipped automatically.
 
 ## Output
 
-- `data/models/agent_{best,final,checkpoint_*}.zip` — the most recent window's model (production)
-- `data/models/window_{id}_{best,final,checkpoint_*}.zip` — earlier windows
+- `data/models/runs/<session_id>/{window_{id},agent}_{best,final}.zip` — all windows' models for this run (checkpoints removed once each window finishes)
+- `data/models/agent_{best,final}.zip` — the most recent window's model, promoted to the stable production path
 - `data/models/rolling_eval_results.json` — per-window metrics + aggregated summary (mean/std/min/max per strategy)
 - `data/backtest/walkforward_results.parquet` + `walkforward_metrics.json` — all windows' out-of-sample rollouts stitched into one continuous curve
 

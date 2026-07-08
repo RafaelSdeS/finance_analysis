@@ -229,15 +229,18 @@ window's test span, where the model has observations it was never trained on.
     test_end = pd.Timestamp(DEFAULT_CONFIG.test_end).date()
     infer_date = st.date_input("Date", test_end, min_value=test_start, max_value=test_end)
 
-    models = sorted((ROOT / "data/models").glob("*.zip"))
+    models_dir = ROOT / "data/models"
+    models = sorted(models_dir.glob("**/*.zip"))
     if not models:
         st.error("No trained models in data/models/. Train first: `python -m src.agent.trainer`")
         model_path = None
     else:
-        # agent_best.zip is the production model when it exists; otherwise pick manually
-        default_ix = next((i for i, p in enumerate(models) if p.name == "agent_best.zip"), 0)
-        model_path = models[st.selectbox("Model", range(len(models)),
-                                         index=default_ix, format_func=lambda i: models[i].name)]
+        # Top-level agent_best.zip is the production model when it exists; otherwise pick
+        # manually. Runs under runs/<session_id>/ also produce an "agent_best.zip" (same
+        # basename), so match on the top-level path, not just the name.
+        default_ix = next((i for i, p in enumerate(models) if p == models_dir / "agent_best.zip"), 0)
+        model_path = models[st.selectbox("Model", range(len(models)), index=default_ix,
+                                         format_func=lambda i: str(models[i].relative_to(models_dir)))]
 
     if model_path is not None and st.button("Predict weights"):
         with st.spinner("Loading model and building observation..."):

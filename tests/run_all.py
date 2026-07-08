@@ -32,6 +32,7 @@ DATA = [
     "tests/agent/test_env_basic.py",
     "tests/agent/test_excess_sharpe.py",
     "tests/agent/test_inference_output.py",
+    "tests/agent/test_session_dirs.py",
     "tests/data_collection/test_cagr_calculation.py",
 ]
 

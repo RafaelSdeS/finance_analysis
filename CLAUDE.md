@@ -72,7 +72,7 @@ python -m src.agent.run_allocation --date 2026-06-29 --format csv
 
 **Note on recent changes (July 2026):** (a) Agent reward changed from absolute portfolio return to excess-return signal (excess of market mean). (b) Feature set upgraded 24 → 40 (raw OHLC dropped; sector-relative z-scores, momentum, quality trends, dividend signals added). (c) Actions are now temperature-scaled (`logit_scale=10` in env's masked softmax) so PPO can escape the uniform/equal-weight initialization — without it the policy provably freezes at equal-weight (trust-region math in `AgentConfig.logit_scale` comment). All models trained before any of these changes are stale; retraining required. See "Agent conviction improvements" in `STAGE3_ML_AGENT.md`.
 
-**Outputs:** production model (most recent window) `data/models/agent_{best,final}.zip` + checkpoints; earlier windows namespaced `data/models/window_{id}_{best,final}.zip`; scaler `data/models/feature_scaler.pkl`; env tensors `data/processed/agent_tensors.npz` ([6565 dates × 280 tickers × 40 features] + mask); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; stitched multi-window walk-forward `data/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
+**Outputs:** each `trainer.py` invocation trains all windows under its own scratch dir `data/models/runs/<session_id>/{window_{id},agent}_{best,final}.zip` (checkpoints deleted once a window finishes); the most recent window's model is then promoted to the stable, unmoving production path `data/models/agent_{best,final}.zip` (what `evaluate.py`/`infer.py`/`run_allocation.py` default to); scaler `data/models/feature_scaler.pkl`; online-retraining artifacts `data/models/online/agent_online_*.{zip,pkl}`; env tensors `data/processed/agent_tensors.npz` ([6565 dates × 280 tickers × 40 features] + mask); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; stitched multi-window walk-forward `data/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
 
 ### Utilities
 
@@ -207,7 +207,7 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 - **BCB series:** selic=11 (daily), cdi=12, ipca=433 — **NOT 432** (that's the annual meta target).
 - **Benchmark:** BOVA11 (IBOV proxy ETF) collected automatically; prices only.
 - **Company info:** BolsAI-only (CVM metadata, rarely changes); refresh via `--mode full_scale` when new IPOs appear.
-- **Checkpoints/logs** (not git-tracked): `data/checkpoints/{mode}/`, `data/logs/collection-*.log`.
+- **Checkpoints/logs** (not git-tracked): Stage 1 `data/checkpoints/{mode}/`, `data/logs/collection/collection-*.log`; Stage 3 training sessions `data/logs/agent/runs/<session_id>/{train.log,{tag}.jsonl}`; standalone `evaluate.py` runs `data/logs/agent/evaluate/evaluate_<run_id>.log`.
 - **Paths:** absolute via `Path(__file__).resolve().parents[N]`; always run from project root.
 
 ## Data on Disk

@@ -342,7 +342,7 @@ def main() -> None:
     args = parser.parse_args()
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = configure_logging(DEFAULT_CONFIG.log_dir, run_id, tag="evaluate")
+    log_path = configure_logging(DEFAULT_CONFIG.log_dir / "agent" / "evaluate", run_id, tag="evaluate")
     logger.info("Session log → %s", log_path)
 
     if args.online:

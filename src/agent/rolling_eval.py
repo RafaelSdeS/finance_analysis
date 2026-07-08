@@ -18,8 +18,10 @@ import dataclasses
 import json
 import logging
 import pickle
+import shutil
 import tempfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -152,10 +154,21 @@ def eval_window(window: RollingWindow, model: PPO, window_config: AgentConfig) -
         raise
 
 
+def _promote_to_production(window_config: AgentConfig, config: AgentConfig) -> None:
+    """Copy the most-recent window's agent_{best,final}.zip up to the stable
+    top-level data/models/ path that evaluate.py/infer.py/run_allocation.py default to."""
+    for suffix in ("best", "final"):
+        src = window_config.model_dir / f"agent_{suffix}.zip"
+        if src.exists():
+            shutil.copy2(src, config.model_dir / f"agent_{suffix}.zip")
+    logger.info("Promoted agent_{best,final}.zip → %s", config.model_dir)
+
+
 def run_rolling_eval(
     config: AgentConfig = DEFAULT_CONFIG,
     resume: bool = False,
     skip_training: bool = False,
+    session_id: str | None = None,
 ) -> list[WindowResult]:
     """
     Train (or load) + evaluate one model per anchored rolling window.
@@ -166,6 +179,10 @@ def run_rolling_eval(
             model is tagged "agent" — the production model)
         resume: Resume the currently in-progress window from its latest checkpoint
         skip_training: If True, load pre-trained models (for eval-only)
+        session_id: Scopes all windows' model/log paths under
+            data/models/runs/<session_id>/ and data/logs/agent/runs/<session_id>/
+            so a fresh invocation never collides with a previous one. Defaults
+            to a fresh timestamp.
 
     Returns:
         List of WindowResult, one per window
@@ -173,6 +190,14 @@ def run_rolling_eval(
     logger.info("=" * 70)
     logger.info("ANCHORED ROLLING WINDOW TRAINING + EVALUATION")
     logger.info("=" * 70)
+
+    if session_id is None:
+        session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    run_dir_config = dataclasses.replace(
+        config,
+        model_dir=config.model_dir / "runs" / session_id,
+        log_dir=config.log_dir / "agent" / "runs" / session_id,
+    )
 
     windows = generate_windows(
         config.dataset_start, config.dataset_end,
@@ -190,17 +215,19 @@ def run_rolling_eval(
     for i, window in enumerate(windows, 1):
         logger.info(f"\n>>> WINDOW {i}/{len(windows)}")
         model_tag = "agent" if window.window_id == last_id else f"window_{window.window_id}"
-        window_config = window_to_config(window, config)
+        window_config = window_to_config(window, run_dir_config)
 
         try:
             if skip_training:
-                best_path = config.model_dir / f"{model_tag}_best.zip"
+                best_path = window_config.model_dir / f"{model_tag}_best.zip"
                 if not best_path.exists():
                     logger.warning(f"Window {window.window_id}: {best_path.name} not found, skipping")
                     continue
                 logger.info(f"Window {window.window_id}: Loading pre-trained model from {best_path}")
             else:
                 best_path = train_window(window_config, model_tag, resume=resume)
+                if model_tag == "agent":
+                    _promote_to_production(window_config, config)
             model = PPO.load(best_path, device=config.device)
 
             result = eval_window(window, model, window_config)
@@ -350,7 +377,7 @@ def run_online_backtest(
     logger.info("  Retraining every %d trading days, %d timesteps/retrain", retrain_every_days, retrain_timesteps)
     logger.info("=" * 70)
 
-    # Load the pre-trained checkpoint
+    # Load the pre-trained checkpoint (production model — unmodified top-level model_dir)
     best_path = config.model_dir / f"{model_tag}_best.zip"
     if not best_path.exists():
         raise FileNotFoundError(f"Model not found: {best_path}")
@@ -362,9 +389,13 @@ def run_online_backtest(
     test_dates = pd.to_datetime(test_env.dates)
     all_dates = test_dates.tolist()
 
+    # Online artifacts get their own subfolder — separate lifecycle from windowed training runs
+    online_dir = config.model_dir / "online"
+    online_dir.mkdir(parents=True, exist_ok=True)
+
     # Checkpoint paths
-    model_ckpt_path = config.model_dir / f"{model_tag}_online_checkpoint.zip"
-    state_ckpt_path = config.model_dir / f"{model_tag}_online_checkpoint_state.pkl"
+    model_ckpt_path = online_dir / f"{model_tag}_online_checkpoint.zip"
+    state_ckpt_path = online_dir / f"{model_tag}_online_checkpoint_state.pkl"
 
     # Resume state
     start_day_idx = 0
@@ -498,7 +529,7 @@ def run_online_backtest(
             )
 
             # Save model state before fine-tuning
-            temp_model_path = config.model_dir / f"{model_tag}_online_temp.zip"
+            temp_model_path = online_dir / f"{model_tag}_online_temp.zip"
             model.save(temp_model_path)
 
             # Fine-tune on trailing span with 10x lower LR
@@ -593,7 +624,7 @@ def run_online_backtest(
         json.dump(metrics, f, indent=2)
 
     # Save final model
-    online_model_path = config.model_dir / f"{model_tag}_online_final.zip"
+    online_model_path = online_dir / f"{model_tag}_online_final.zip"
     model.save(online_model_path)
     logger.info("✓ Online results → online_results.parquet + online_metrics.json")
     logger.info("✓ Final model → %s", online_model_path.name)
@@ -784,7 +815,28 @@ def _selfcheck_online_checkpoint() -> None:
 		print("✓ Online checkpoint self-check passed: save/load round-trip OK, arrays preserved")
 
 
+def _selfcheck_promote_to_production() -> None:
+    """Verify _promote_to_production copies agent_{best,final}.zip up to the parent model_dir."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir = Path(tmpdir)
+        run_dir = tmpdir / "runs" / "test_session"
+        run_dir.mkdir(parents=True)
+        (run_dir / "agent_best.zip").write_text("fake_best")
+        (run_dir / "agent_final.zip").write_text("fake_final")
+
+        window_config = dataclasses.replace(DEFAULT_CONFIG, model_dir=run_dir)
+        config = dataclasses.replace(DEFAULT_CONFIG, model_dir=tmpdir)
+
+        _promote_to_production(window_config, config)
+
+        assert (tmpdir / "agent_best.zip").read_text() == "fake_best", "best not promoted"
+        assert (tmpdir / "agent_final.zip").read_text() == "fake_final", "final not promoted"
+
+        print("✓ promote_to_production self-check passed")
+
+
 if __name__ == "__main__":
 	_selfcheck_online()
 	_selfcheck_stitch()
 	_selfcheck_online_checkpoint()
+	_selfcheck_promote_to_production()

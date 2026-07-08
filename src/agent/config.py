@@ -31,6 +31,7 @@ def configure_logging(log_dir: Path, run_id: str, tag: str = "session") -> Path:
     Safe to call from multiple entry points in the same process — a second
     call is a no-op and just returns the (deterministic) path again.
     """
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / f"{tag}_{run_id}.log"
     root = logging.getLogger()
     if root.handlers:
@@ -207,9 +208,6 @@ class AgentConfig:
     eval_freq: int = 20  # Evaluate on val set every N episodes (20 * n_steps = 40,960 timesteps)
     early_stopping_patience: int = 8  # Stop if val Sharpe degrades 8x in a row; generous because concentration initially costs turnover before alpha shows (the "paying to learn" valley)
 
-    # ===== Logging =====
-    log_file_prefix: str = "agent_training"
-
     # ===== Portfolio Constraints =====
     initial_capital: float = 100_000.0  # R$ (Brazilian Real)
 
@@ -342,7 +340,7 @@ def _selfcheck_logging() -> None:
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        log_dir = Path(tmpdir)
+        log_dir = Path(tmpdir) / "nested" / "run_dir"  # does not exist yet — exercises the mkdir fix
         run_id = "test_run"
 
         handler_count_before = len(logging.getLogger().handlers)

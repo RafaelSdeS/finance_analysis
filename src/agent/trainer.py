@@ -10,10 +10,12 @@ test span is left untouched, and window orchestration/reporting lives in
 Per window: trains on the train split, periodically evaluates on the val
 split (deterministic rollout → Sharpe of excess return over equal-weight),
 checkpoints, logs JSONL, and stops early when that excess-over-equal-weight
-Sharpe degrades for `early_stopping_patience` consecutive evaluations. The
-most recent window's model is saved as
-`agent_best.zip`/`agent_final.zip` (the production model); earlier windows
-are namespaced `window_{id}_best.zip`/`window_{id}_final.zip`.
+Sharpe degrades for `early_stopping_patience` consecutive evaluations. Each
+invocation trains all windows under its own `data/models/runs/<session_id>/`
+scratch directory (see `rolling_eval.run_rolling_eval()`); the most recent
+window's model (`agent_best.zip`/`agent_final.zip`) is then promoted to the
+stable top-level `data/models/` (the production model); earlier windows stay
+namespaced `window_{id}_best.zip`/`window_{id}_final.zip` inside the run dir.
 
 Usage:
     python -m src.agent.trainer                                 # full run: all windows, 1M timesteps each
@@ -221,10 +223,24 @@ def _find_latest_checkpoint(config: AgentConfig, model_tag: str = "agent") -> Pa
     return max(checkpoints, key=lambda p: int(p.stem.split("_")[-1]))
 
 
+def _resolve_session_id(config: AgentConfig, resume: bool) -> str:
+    """Fresh timestamped session_id per invocation — except --resume, which reuses
+    the most-recently-modified existing runs/ dir (a brand-new dir would have
+    nothing to resume from)."""
+    if resume:
+        runs_root = config.model_dir / "runs"
+        existing = sorted(runs_root.glob("*/"), key=lambda p: p.stat().st_mtime) if runs_root.exists() else []
+        if existing:
+            return existing[-1].name
+        logger.warning("--resume requested but no existing run found in %s; starting a fresh run", runs_root)
+    return datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
 def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -> Path:
     """Run PPO training for one window; returns path to its final model."""
-    run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = config.log_dir / f"{config.log_file_prefix}_{model_tag}_{run_id}.jsonl"
+    # config.log_dir is already run-scoped (see rolling_eval.run_rolling_eval), so the
+    # filename doesn't need its own timestamp — the directory disambiguates the run.
+    log_path = config.log_dir / f"{model_tag}.jsonl"
 
     # Parallel rollout collection: N envs batched N-wide through the policy.
     # DummyVecEnv (in-process) on purpose: env.step is cheap numpy, so the
@@ -301,6 +317,11 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
         final_path = config.model_dir / f"{model_tag}_final.zip"
         model.save(final_path)
         logger.info("Saved final model → %s (best-val model → %s_best.zip)", final_path, model_tag)
+
+        # Checkpoints are resume-only scratch; once the window is done, drop the leftover.
+        for ckpt in config.model_dir.glob(f"{model_tag}_checkpoint_*.zip"):
+            ckpt.unlink(missing_ok=True)
+
         return final_path
     finally:
         # main() calls train() once per rolling window in the same process;
@@ -332,9 +353,10 @@ def main(session_id: str | None = None) -> None:
     args = parser.parse_args()
 
     if session_id is None:
-        session_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+        session_id = _resolve_session_id(DEFAULT_CONFIG, resume=args.resume)
 
-    log_path = configure_logging(DEFAULT_CONFIG.log_dir, session_id, tag="train")
+    run_log_dir = DEFAULT_CONFIG.log_dir / "agent" / "runs" / session_id
+    log_path = configure_logging(run_log_dir, session_id, tag="train")
     logger.info("Session log → %s", log_path)
 
     if args.detect_anomaly:
@@ -382,7 +404,7 @@ def main(session_id: str | None = None) -> None:
     # module at its top level, so this side of the dependency stays lazy to
     # avoid a circular import.
     from src.agent.rolling_eval import run_rolling_eval, finalize_and_report
-    results = run_rolling_eval(base_config, resume=args.resume)
+    results = run_rolling_eval(base_config, resume=args.resume, session_id=session_id)
     finalize_and_report(results, base_config)
 
 

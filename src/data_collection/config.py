@@ -67,7 +67,7 @@ MACRO_DIR = RAW_DIR / "macro"
 COMPANY_DIR = RAW_DIR / "company_info"
 DIVIDENDS_DIR = RAW_DIR / "dividends"
 CHECKPOINT_ROOT = PROJECT / "data/checkpoints"
-LOG_DIR = PROJECT / "data/logs"
+LOG_DIR = PROJECT / "data/logs/collection"
 
 # --- Collection limits ---
 DIVIDENDS_YEARS = 20  # API max; covers full history
