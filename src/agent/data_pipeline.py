@@ -134,6 +134,9 @@ def run_pipeline(config: AgentConfig = DEFAULT_CONFIG) -> None:
         scalers[cutoff] = scaler
         logger.info("  Window %d: scaler fitted (cutoff=%s)", window.window_id, cutoff)
 
+    # Stamp the feature list so env.py can fail loudly on a stale tensor file
+    # (a feature-list change that keeps the same count is otherwise silent).
+    tensors["feature_names"] = np.array(config.state_features)
     np.savez_compressed(TENSORS_PATH, **tensors)
     with open(SCALER_PATH, "wb") as f:
         pickle.dump(scalers, f)

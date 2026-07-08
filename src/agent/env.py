@@ -37,6 +37,16 @@ def _load_raw_tensors():
     no lookahead).
     """
     data = np.load(TENSORS_PATH, allow_pickle=True)
+    # Guard against stale tensors: a feature-list change with the same count trains
+    # silently on old data (fixed seed → byte-identical results, easy to miss).
+    expected = list(DEFAULT_CONFIG.state_features)
+    stored = list(data["feature_names"]) if "feature_names" in data else None
+    if stored != expected:
+        raise RuntimeError(
+            f"agent_tensors.npz is stale: built with features {stored}, "
+            f"but config.state_features is {expected}. "
+            f"Rebuild with: python -m src.agent.data_pipeline"
+        )
     with open(SCALER_PATH, "rb") as f:
         scalers = pickle.load(f)
     dates = pd.to_datetime(data["dates"])
