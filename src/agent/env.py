@@ -162,10 +162,11 @@ class PortfolioEnv(gym.Env):
         self._t = 0
         self.portfolio_value = config.initial_capital
         self._prev_weights = self._is_cash_mask.astype(np.float32)  # start 100% CASH (new investor)
+        self.cost_scale = 1.0  # cost annealing: 0→1 during training (item 4)
         logger.info(
-            "PortfolioEnv[%s]: %d days (%s → %s), %d tickers, obs_dim=%d",
+            "PortfolioEnv[%s]: %d days (%s → %s), %d tickers, obs_dim=%d, rebalance_interval=%d",
             date_range, len(self.dates), self.dates[0].date(), self.dates[-1].date(),
-            n_tickers, obs_dim,
+            n_tickers, obs_dim, config.rebalance_interval_days,
         )
 
     # ------------------------------------------------------------------ API
@@ -177,50 +178,102 @@ class PortfolioEnv(gym.Env):
         self._prev_weights[:] = self._is_cash_mask  # fresh start: 100% CASH; first allocation incurs full deployment cost
         return self._obs(), {"date": self.dates[0], "portfolio_value": self.portfolio_value}
 
+    def action_to_weights(self, action: np.ndarray, active: np.ndarray) -> np.ndarray:
+        """Policy action → portfolio weights: temperature-scaled masked softmax.
+
+        logit_scale amplifies weight-space movement per unit of PPO trust region
+        (see AgentConfig.logit_scale). Shared by step() and infer.py so the
+        action semantics live in exactly one place.
+        """
+        return self._masked_softmax(np.asarray(action, dtype=np.float64) * self.config.logit_scale, active)
+
     def step(self, action: np.ndarray):
-        weights = self._masked_softmax(action, self.mask[self._t])
+        """One step = one decision spanning N days (rebalance_interval_days).
 
-        # Transaction cost: cost per unit of traded notional, excluding CASH leg (which trades free)
-        # ponytail: prev weights not drift-adjusted for returns; model sees absolute weight deltas,
-        # acceptable since agent plans daily rebalance anyway (one-step horizon)
+        Accumulates daily returns, drifts weights, costs applied once on day 1.
+        Returns daily-granularity arrays in info for backward-compatible backtesting.
+        """
+        N = self.config.rebalance_interval_days
+        n_days = min(N, self.n_steps - self._t)  # partial final window
+        weights = self.action_to_weights(action, self.mask[self._t])
+
+        # One-shot rebalance cost (vs drifted prev_weights, day 1 only)
         traded = np.abs(weights - self._prev_weights)[~self._is_cash_mask].sum()
-        transaction_cost = traded * (self.config.transaction_cost_bps / 10_000)
+        transaction_cost = traded * (self.config.transaction_cost_bps / 10_000) * self.cost_scale
 
-        # Next-day simple returns and equal-weight baseline are precomputed per
-        # day in _load_slice (they depend only on t, not the action).
-        simple_return = float(np.dot(weights, self._simple_rets[self._t + 1])) - transaction_cost
-        # Clip at -99.99% to keep log finite even on catastrophic days
-        portfolio_log_return = float(np.log1p(max(simple_return, -0.9999)))
+        # Accumulate daily returns over the N-day window
+        w = weights.copy()
+        daily_log_rets = []
+        daily_drifted_weights = []
+        cumulative_reward = 0.0
 
-        # Reward: excess log return (agent vs equal-weight) for credit assignment
-        reward = portfolio_log_return - float(self._ew_log_returns[self._t + 1])
+        for day_offset in range(1, n_days + 1):
+            day_idx = self._t + day_offset
+            r_vec = self._simple_rets[day_idx]
+            r_p_pre_cost = float(np.dot(w, r_vec))
 
-        # Detect reward anomalies early (should be roughly ±0.02 daily, anything >±0.5 is extreme)
-        if np.isnan(reward) or np.isinf(reward):
-            logger.error(
-                "Invalid reward at t=%d (date=%s): reward=%.6f, portfolio_return=%.6f, ew_return=%.6f, "
-                "portfolio_value=%.2f, weights_sum=%.4f",
-                self._t, self.dates[self._t], reward, portfolio_log_return,
-                float(self._ew_log_returns[self._t + 1]), self.portfolio_value, float(np.sum(weights))
-            )
-            raise ValueError(f"Invalid reward at timestep {self._t}: {reward}")
-        if abs(reward) > 1.0:
-            logger.warning("Extreme reward at t=%d: %.6f (normal range ~±0.02)", self._t, reward)
+            # Apply cost on first day only
+            if day_offset == 1:
+                r_p = r_p_pre_cost - transaction_cost
+            else:
+                r_p = r_p_pre_cost
 
-        self.portfolio_value *= 1.0 + max(simple_return, -0.9999)
-        self._prev_weights = weights.copy()
+            r_p = max(r_p, -0.9999)  # Clip catastrophic
+            log_r = float(np.log1p(r_p))
+            daily_log_rets.append(log_r)
 
-        self._t += 1
+            # Reward: excess log return
+            excess = log_r - float(self._ew_log_returns[day_idx])
+            cumulative_reward += excess
+
+            # Update portfolio value
+            self.portfolio_value *= 1.0 + r_p
+
+            # Drift: w_i ← w_i * (1 + r_i) / (1 + r_p_pre_cost)
+            if r_p_pre_cost > -0.9999:
+                w_new = w * (1.0 + r_vec) / (1.0 + r_p_pre_cost)
+                # Renormalize in degenerate cases
+                if w_new.sum() <= 0:
+                    w_new = (w * (1.0 + r_vec)).copy()
+                    w_new[w_new < 0] = 0
+                    if w_new.sum() > 0:
+                        w_new /= w_new.sum()
+                    else:
+                        w_new = w.copy()
+                w = w_new / w_new.sum()  # Ensure sum = 1
+
+            daily_drifted_weights.append(w.copy())
+
+        # _prev_weights for next step (end-of-window drifted weights)
+        self._prev_weights = w.copy()
+        self._t += n_days
         terminated = self._t >= self.n_steps
+
+        # Detect reward anomalies (should be small, ~±0.02 per day * N)
+        if np.isnan(cumulative_reward) or np.isinf(cumulative_reward):
+            logger.error(
+                "Invalid reward at t=%d (date=%s): cumulative_reward=%.6f, "
+                "portfolio_value=%.2f, n_days=%d",
+                self._t - n_days, self.dates[self._t - n_days], cumulative_reward,
+                self.portfolio_value, n_days
+            )
+            raise ValueError(f"Invalid reward at step starting t={self._t - n_days}: {cumulative_reward}")
+
+        # Return daily-granularity info for backward compatibility
         info = {
             "date": self.dates[self._t],
             "portfolio_value": self.portfolio_value,
-            "weights": weights,
-            "log_return": portfolio_log_return,  # absolute return for backtest metrics
+            "weights": weights,  # TARGET weights at the rebalance
+            "log_return": float(np.sum(daily_log_rets)),  # Window total (non-essential, prefer daily)
             "n_active": int(self._n_active[self._t]),
             "turnover": float(traded),
+            "transaction_cost": float(transaction_cost),
+            # Daily-granularity arrays (critical for results.parquet schema)
+            "daily_log_returns": np.array(daily_log_rets, dtype=np.float32),
+            "daily_dates": self.dates[self._t - n_days + 1 : self._t + 1],
+            "daily_weights": np.array(daily_drifted_weights, dtype=np.float32),
         }
-        return self._obs(), reward, terminated, False, info
+        return self._obs(), cumulative_reward, terminated, False, info
 
     # -------------------------------------------------------------- helpers
 
