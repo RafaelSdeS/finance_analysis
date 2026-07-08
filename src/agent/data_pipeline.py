@@ -15,6 +15,8 @@ Run once (or whenever the dataset changes):
     python src/agent/data_pipeline.py
 """
 
+import argparse
+import dataclasses
 import logging
 import pickle
 
@@ -46,6 +48,15 @@ def build_tensors(config: AgentConfig = DEFAULT_CONFIG) -> dict:
         "Universe: %d tickers (dropped %d with <%d rows: %s)",
         len(universe), len(dropped), MIN_ROWS_PER_TICKER, list(dropped.index),
     )
+    if config.universe_size is not None:
+        caps = pd.read_parquet(config.dataset_path, columns=["ticker", "market_cap"])
+        top = caps[caps["ticker"].isin(universe)].groupby("ticker")["market_cap"].mean()
+        selected = set(top.nlargest(config.universe_size).index)
+        if "CASH" in universe:
+            selected.add("CASH")  # synthetic asset has no market_cap; exempt from ranking, always kept
+        universe = sorted(selected)
+        logger.info("Universe filtered to top %d tickers by mean market cap (+CASH)", config.universe_size)
+
     df = df[df["ticker"].isin(universe)]
 
     # Trading calendar: union of all dates in the filtered data
@@ -147,6 +158,27 @@ def run_pipeline(config: AgentConfig = DEFAULT_CONFIG) -> None:
     print(f"✓ Verified: all {len(windows)} windows have scalers")
 
 
+def _selfcheck_universe_filter() -> None:
+    """Verify universe_size caps the ticker count and stays a subset of the unfiltered universe."""
+    config = dataclasses.replace(DEFAULT_CONFIG, universe_size=5)
+    tensors = build_tensors(config)
+    full_universe = set(build_tensors(DEFAULT_CONFIG)["tickers"])
+
+    assert len(tensors["tickers"]) <= 5, f"expected <=5 tickers, got {len(tensors['tickers'])}"
+    assert set(tensors["tickers"]) <= full_universe, "filtered universe must be a subset of the unfiltered one"
+    print(f"✓ Universe filter self-check passed: {len(tensors['tickers'])} tickers (requested <=5)")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    run_pipeline()
+
+    parser = argparse.ArgumentParser(description="Build agent tensors + fit rolling-window scalers")
+    parser.add_argument("--universe-size", type=int, default=None,
+                         help="Filter to top-N tickers by mean market cap (default: no filtering)")
+    args = parser.parse_args()
+
+    config = DEFAULT_CONFIG
+    if args.universe_size is not None:
+        config = dataclasses.replace(DEFAULT_CONFIG, universe_size=args.universe_size)
+
+    run_pipeline(config)

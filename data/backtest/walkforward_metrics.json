@@ -1,38 +1,38 @@
 {
   "agent": {
-    "cumulative_return": 1368.615910200004,
-    "annualized_return": 0.3583855049331126,
-    "sharpe": 1.5008571366147359,
-    "sortino": 1.8631040775248897,
-    "max_drawdown": 0.5447846441555263,
-    "win_rate": 0.5646247054863682,
-    "n_days": 5942
+    "cumulative_return": 5.416492982472478,
+    "annualized_return": 0.1254046565341207,
+    "sharpe": 0.5661622368635377,
+    "sortino": 0.7401839071538742,
+    "max_drawdown": 0.38634281484255106,
+    "win_rate": 0.5220680958385876,
+    "n_days": 3965
   },
   "equal_weight": {
-    "cumulative_return": 1700.3251481187262,
-    "annualized_return": 0.37093723043146754,
-    "sharpe": 1.5163857264162408,
-    "sortino": 1.8975543898305378,
-    "max_drawdown": 0.5487507161041406,
-    "win_rate": 0.5632783574554022,
-    "n_days": 5942
+    "cumulative_return": 7.01754940275347,
+    "annualized_return": 0.1414512700252526,
+    "sharpe": 0.6285414905103687,
+    "sortino": 0.8131335425881226,
+    "max_drawdown": 0.4335682548782368,
+    "win_rate": 0.526607818411097,
+    "n_days": 3965
   },
   "market_cap": {
-    "cumulative_return": 633.5206308798307,
-    "annualized_return": 0.31477555358787135,
-    "sharpe": 1.249769542175085,
-    "sortino": 1.6492724129014602,
-    "max_drawdown": 0.5487507161041406,
-    "win_rate": 0.5484685291147762,
-    "n_days": 5942
+    "cumulative_return": 6.875844740268796,
+    "annualized_return": 0.14015833222323004,
+    "sharpe": 0.613580168201494,
+    "sortino": 0.8074904728211941,
+    "max_drawdown": 0.4054124742687385,
+    "win_rate": 0.5225725094577554,
+    "n_days": 3965
   },
   "inv_vol": {
-    "cumulative_return": 83.94428669285692,
-    "annualized_return": 0.20729807700392233,
-    "sharpe": 1.0196877842901744,
-    "sortino": 1.1891444644238618,
-    "max_drawdown": 0.5557962342752039,
-    "win_rate": 0.5577246718276675,
-    "n_days": 5942
+    "cumulative_return": 5.878778088931791,
+    "annualized_return": 0.13039171377108372,
+    "sharpe": 0.6356267356943743,
+    "sortino": 0.8184888835162812,
+    "max_drawdown": 0.4123394736200708,
+    "win_rate": 0.5283732660781841,
+    "n_days": 3965
   }
 }

@@ -52,7 +52,7 @@ def predict_weights(
         model = PPO.load(model_path, device=config.device)
         env._t = t
         action, _ = model.predict(env._obs(), deterministic=True)
-        weights = env._masked_softmax(action, active)
+        weights = env.action_to_weights(action, active)
         source = f"model ({model_path.name})"
     except Exception:
         logger.exception("Inference failed — falling back to equal weight")

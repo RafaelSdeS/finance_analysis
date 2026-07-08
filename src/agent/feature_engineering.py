@@ -25,6 +25,7 @@ FUNDAMENTAL_FEATURES = [
     "revenue_growth_yoy",
     "ebitda_growth_yoy",
     "has_fundamentals",
+    "days_since_fundamental",
 ]
 
 
@@ -63,6 +64,21 @@ def synthesize_cash_asset(df: pd.DataFrame) -> pd.DataFrame:
     # Fundamentals are not applicable to risk-free cash; set to 0
     # (StandardScaler treats zero-variance columns as scale_=1.0 in fit_train_scaler)
     for col in FUNDAMENTAL_FEATURES:
+        cash[col] = 0.0
+
+    # Technical/momentum features also 0 for CASH (no price action, no market-relative metrics)
+    # ponytail: CASH row values reflect no data; NaN→0 imputation handles the rest.
+    tech_features = [
+        "rsi_14", "volatility_20d", "volatility_60d", "drawdown",
+        "momentum_vs_market_1m", "momentum_vs_market_3m", "momentum_vs_market_12m",
+        "momentum_vs_sector_1m", "momentum_vs_sector_3m", "momentum_vs_sector_12m",
+        "pl_zscore_sector", "pvp_zscore_sector", "roe_zscore_sector", "debt_equity_zscore_sector",
+        "f_score", "roe_trend_4q", "margin_trend_4q", "earnings_yield_vs_selic",
+        "div_yield_12m", "payout_ratio", "selic_trend_20d",
+        "real_return", "excess_return", "ma_20", "ma_60",
+        "price_percentile_5y", "drawdown_percentile", "return_6m", "debt_trend_4q",
+    ]
+    for col in tech_features:
         cash[col] = 0.0
 
     return cash

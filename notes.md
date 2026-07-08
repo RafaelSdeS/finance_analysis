@@ -160,5 +160,5 @@ Tickers with >20% NaN (may want to exclude):
 * The goal is for the agent to decisively outperform these benchmarks over the long term.
 
 
-- Use pl, pvp and other metrics directly from Bolsai API
+- Use pl, pvp and other metrics directly from Bolsai API (maybe)
 - Fix the imports/python execution bugs
