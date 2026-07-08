@@ -8,9 +8,10 @@ test span is left untouched, and window orchestration/reporting lives in
 `rolling_eval.py` (`run_rolling_eval`, `finalize_and_report`).
 
 Per window: trains on the train split, periodically evaluates on the val
-split (deterministic rollout → Sharpe), checkpoints, logs JSONL, and stops
-early when validation Sharpe degrades for `early_stopping_patience`
-consecutive evaluations. The most recent window's model is saved as
+split (deterministic rollout → Sharpe of excess return over equal-weight),
+checkpoints, logs JSONL, and stops early when that excess-over-equal-weight
+Sharpe degrades for `early_stopping_patience` consecutive evaluations. The
+most recent window's model is saved as
 `agent_best.zip`/`agent_final.zip` (the production model); earlier windows
 are namespaced `window_{id}_best.zip`/`window_{id}_final.zip`.
 
@@ -38,6 +39,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 from src.agent.config import AgentConfig, DEFAULT_CONFIG, configure_logging
 from src.agent.env import PortfolioEnv
 from src.agent.metrics import max_drawdown, sharpe_ratio
+from src.agent.evaluate import rollout, agent_policy, equal_weight_policy
 
 logger = logging.getLogger(__name__)
 
@@ -57,23 +59,6 @@ def _to_native_python(obj):
     return obj
 
 
-def evaluate_on_env(model: PPO, env: PortfolioEnv) -> dict:
-    """Deterministic rollout over an entire env split; returns metrics."""
-    obs, _ = env.reset()
-    rewards, values = [], [env.config.initial_capital]
-    terminated = False
-    while not terminated:
-        action, _ = model.predict(obs, deterministic=True)
-        obs, reward, terminated, _, info = env.step(action)
-        rewards.append(reward)
-        values.append(info["portfolio_value"])
-    return {
-        "sharpe": sharpe_ratio(np.array(rewards)),
-        "max_drawdown": max_drawdown(np.array(values)),
-        "final_value": values[-1],
-    }
-
-
 class ValSharpeCallback(BaseCallback):
     """Periodic val evaluation + JSONL logging + checkpoints + early stopping."""
 
@@ -89,10 +74,12 @@ class ValSharpeCallback(BaseCallback):
         self.model_tag = model_tag
         self.eval_every_steps = config.eval_freq * config.n_steps
         self._next_eval = self.eval_every_steps  # threshold, not modulo: robust to vec-env timestep jumps
-        self.best_sharpe = -np.inf
+        self.best_excess_sharpe = -np.inf
         self.degrade_count = 0
-        self.improvement_threshold = 0.15  # ponytail: noise floor; only reset degrade counter on meaningful improvement
+        self.improvement_threshold = 0.05  # ponytail: noise floor; only reset degrade counter on meaningful improvement
         self.pbar = tqdm(total=total_timesteps, unit="step", unit_scale=True, desc=f"Training [{model_tag}]")
+        # Cache the equal-weight rollout's absolute-return series once (env is deterministic, reused ~eval_freq times)
+        self.ew_returns = rollout(self.val_env, equal_weight_policy(self.val_env))["rewards"]
 
     def _on_rollout_start(self) -> None:
         # Defense-in-depth against log_std collapse/explosion: SB3's log_std is an unconstrained
@@ -108,7 +95,7 @@ class ValSharpeCallback(BaseCallback):
         self.pbar.update(self.num_timesteps - self.pbar.n)
 
         # Scan every step (cheap tensor check) so the first occurrence of NaN weights is caught as
-        # early as possible on the codepaths that do return control to the callback (evaluate_on_env,
+        # early as possible on the codepaths that do return control to the callback (rollout,
         # action prediction). Note: a crash *inside* model.train() (e.g. Normal() rejecting NaN loc)
         # propagates before this callback runs again — see train()'s try/except for that case.
         for name, param in self.model.policy.named_parameters():
@@ -127,12 +114,20 @@ class ValSharpeCallback(BaseCallback):
             return True
         self._next_eval += self.eval_every_steps
 
-        val = evaluate_on_env(self.model, self.val_env)
+        agent_res = rollout(self.val_env, agent_policy(self.model))
+        excess_returns = agent_res["rewards"] - self.ew_returns
+        val = {
+            "sharpe": sharpe_ratio(agent_res["rewards"]),
+            "excess_sharpe": sharpe_ratio(excess_returns),
+            "max_drawdown": max_drawdown(agent_res["values"]),
+            "final_value": agent_res["values"][-1],
+        }
         log_std = self.model.policy.log_std.data
         # SB3's name_to_value is populated by each train() call; values are None before first rollout/train completes
         record = {
             "timesteps": self.num_timesteps,
             "val_sharpe": val["sharpe"],
+            "val_sharpe_excess": val["excess_sharpe"],  # Sharpe of the agent's day-by-day excess return over equal-weight
             "val_max_drawdown": val["max_drawdown"],
             "val_final_value": val["final_value"],
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -156,6 +151,7 @@ class ValSharpeCallback(BaseCallback):
         approx_kl = self.model.logger.name_to_value.get("train/approx_kl")
         self.pbar.set_postfix({
             "sharpe": f"{val['sharpe']:.3f}",
+            "xs": f"{val['excess_sharpe']:.3f}",
             "dd%": f"{val['max_drawdown']*100:.1f}",
             "kl": f"{approx_kl:.3f}" if approx_kl is not None else "n/a",
             "value": f"{val['final_value']:,.0f}"
@@ -170,9 +166,11 @@ class ValSharpeCallback(BaseCallback):
                 old.unlink(missing_ok=True)
 
         # Early stopping: degrade counter resets only on meaningful improvement (>= threshold)
-        # to avoid noise-driven early stops from small sample validation splits.
-        if val["sharpe"] > self.best_sharpe + self.improvement_threshold:
-            self.best_sharpe = val["sharpe"]
+        # to avoid noise-driven early stops from small sample validation splits. Keyed on
+        # excess-over-equal-weight Sharpe, not absolute Sharpe: keep training as long as the
+        # agent is still pulling ahead of the equal-weight baseline.
+        if val["excess_sharpe"] > self.best_excess_sharpe + self.improvement_threshold:
+            self.best_excess_sharpe = val["excess_sharpe"]
             self.degrade_count = 0
             self.model.save(self.config.model_dir / f"{self.model_tag}_best.zip")
         else:
@@ -180,8 +178,8 @@ class ValSharpeCallback(BaseCallback):
             if self.degrade_count >= self.config.early_stopping_patience:
                 self.pbar.close()
                 logger.warning(
-                    "Early stopping: val Sharpe degraded %d consecutive evals "
-                    "(best=%.3f)", self.degrade_count, self.best_sharpe,
+                    "Early stopping: val excess Sharpe (vs equal-weight) degraded %d consecutive "
+                    "evals (best=%.3f)", self.degrade_count, self.best_excess_sharpe,
                 )
                 return False
         return True
@@ -227,7 +225,7 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
                 "MlpPolicy",
                 train_env,
                 learning_rate=config.learning_rate,
-                gamma=config.gamma,
+                gamma=config.effective_gamma,
                 gae_lambda=config.gae_lambda,
                 ent_coef=config.entropy_coef,
                 n_steps=config.n_steps,
@@ -263,13 +261,13 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
             logger.error(
                 "Training diverged at timestep %d (window=%s): policy produced NaN/Inf action "
                 "distribution params. log_std at failure: mean=%.4f min=%.4f max=%.4f (init=%.2f, "
-                "clamped to [-5, 2] between rollouts). Last logged val_sharpe=%.3f at timesteps=%d. "
+                "clamped to [-5, 2] between rollouts). Last logged val_excess_sharpe=%.3f at timesteps=%d. "
                 "Likely cause: an unusually large policy update within one train() call pushed log_std "
                 "out of a numerically stable range (target_kl=%.3f should bound this — consider "
                 "lowering it, or lowering learning_rate=%.2e, if this recurs).",
                 model.num_timesteps, model_tag,
                 float(log_std.mean()), float(log_std.min()), float(log_std.max()), config.log_std_init,
-                callback.best_sharpe, model.num_timesteps, model.target_kl, float(model.learning_rate),
+                callback.best_excess_sharpe, model.num_timesteps, model.target_kl, float(model.learning_rate),
             )
             raise
         logger.info("Training finished in %.1f min", (time.time() - t0) / 60)
@@ -292,8 +290,12 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--test-years", type=int, default=None, help="Years per window's held-out test span (default: 2)")
     parser.add_argument("--val-fraction", type=float, default=None, help="Fraction of each window's train span carved out for early-stopping val (default: 0.15)")
     parser.add_argument("--learning-rate", type=float, default=None, help="Override learning rate (default: 3e-4)")
+    parser.add_argument("--gamma", type=float, default=None, help="Discount factor (default: 0.997)")
+    parser.add_argument("--ent-coef", type=float, default=None, help="Entropy coefficient (default: 0.001)")
+    parser.add_argument("--log-std-init", type=float, default=None, help="Initial policy log_std (default: -3.0)")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size (default: 64)")
     parser.add_argument("--eval-freq", type=int, default=None, help="Evaluate on val set every N episodes (default: 20)")
+    parser.add_argument("--rebalance-days", type=int, default=None, help="Rebalance interval in trading days (default: 21)")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
     parser.add_argument("--n-envs", type=int, default=None, help="In-process envs batched through the policy (default: 8)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
@@ -324,10 +326,18 @@ def main(session_id: str | None = None) -> None:
         overrides["window_val_fraction"] = args.val_fraction
     if args.learning_rate is not None:
         overrides["learning_rate"] = args.learning_rate
+    if args.gamma is not None:
+        overrides["gamma"] = args.gamma
+    if args.ent_coef is not None:
+        overrides["entropy_coef"] = args.ent_coef
+    if args.log_std_init is not None:
+        overrides["log_std_init"] = args.log_std_init
     if args.batch_size is not None:
         overrides["batch_size"] = args.batch_size
     if args.eval_freq is not None:
         overrides["eval_freq"] = args.eval_freq
+    if args.rebalance_days is not None:
+        overrides["rebalance_interval_days"] = args.rebalance_days
     if args.device is not None:
         overrides["device"] = args.device
     if args.n_envs is not None:

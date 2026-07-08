@@ -81,36 +81,90 @@ class AgentConfig:
     window_val_fraction: float = 0.15  # tail fraction of a window's train span carved out for early-stopping val
     window_id: int = -1  # stamped by window_to_config(); -1 = template default, never used directly
 
+    # ===== Universe Filter (optional) =====
+    universe_size: int | None = None  # top-N tickers by mean market cap; None = no filtering (all tickers with >=252 rows)
+
     # ===== Feature Configuration =====
-    # Price & technical features
+    # 2026-07: pruned to the top-15 by Random Forest importance (R²=0.233 on
+    # cleaned data; linear-regression ranking was discarded as unreliable —
+    # R²≈0 there, so its "top" picks were scale artifacts, not signal).
+    # Lower-ranked features are commented out, not deleted — uncomment to
+    # bring any of them back into state_features with no other code changes.
+    # Price & technical features (stationary, relative; raw OHLC dropped)
     price_features: list[str] = field(
         default_factory=lambda: [
-            "open", "high", "low", "close", "volume",
-            "returns",  # Computed from prices
+            "returns",  # Computed from prices; stationary. Hard dependency: data_pipeline.py needs this exact name to build the returns tensor — never remove.
+            # "volume",
+            # "rsi_14",
+            # "volatility_20d",
+            # "volatility_60d",
+            # "drawdown",
+            # "momentum_vs_market_1m",
+            "momentum_vs_market_3m",  # RF rank 3
+            # "momentum_vs_market_12m",
+            # "momentum_vs_sector_1m",
+            "momentum_vs_sector_3m",  # RF rank 1
+            "momentum_vs_sector_12m",  # RF rank 14
+            "real_return",  # RF rank 4
+            "excess_return",  # RF rank 7
+            "ma_20",  # RF rank 10
+            "ma_60",  # RF rank 5
+            "price_percentile_5y",  # RF rank 6
+            "drawdown_percentile",  # RF rank 8
+            "return_6m",  # RF rank 12
         ]
     )
 
-    # Fundamental features (quarterly, forward-filled)
+    # Fundamental features (quarterly, forward-filled + sector-relative + quality trends)
     fundamental_features: list[str] = field(
         default_factory=lambda: [
-            "pl",  # Price-to-Earnings (P/L in Portuguese)
-            "pvp",  # Price-to-Book (P/VP in Portuguese)
-            "roe", "debt_equity", "roic", "roa",
-            "net_margin", "gross_margin", "ebitda_margin",
-            "current_ratio", "cash_ratio",
+            # "pl",  # Price-to-Earnings (P/L in Portuguese)
+            # "pvp",  # Price-to-Book (P/VP in Portuguese)
+            # "roe",
+            # "debt_equity",
+            # "roic",
+            # "roa",
+            # "net_margin",
+            # "gross_margin",
+            # "ebitda_margin",
+            # "current_ratio",
+            # "cash_ratio",
             # Growth features (YoY, not CAGR to avoid synthetic data)
-            "earnings_growth_yoy", "revenue_growth_yoy", "ebitda_growth_yoy",
+            # "earnings_growth_yoy",
+            # "revenue_growth_yoy",
+            # "ebitda_growth_yoy",
+            # Sector-relative valuation & quality
+            # "pl_zscore_sector",
+            # "pvp_zscore_sector",
+            # "roe_zscore_sector",
+            # "debt_equity_zscore_sector",
+            # Quality trends & signals
+            # "f_score",
+            # "roe_trend_4q",
+            # "margin_trend_4q",
+            # "earnings_yield_vs_selic",
+            # Dividend signals
+            "div_yield_12m",  # RF rank 2
+            # "payout_ratio",
             # 1.0 once the ticker's first filing exists, else 0.0 — lets the
             # model tell "no data yet" apart from "average company" after
-            # the env's NaN→0 (post-scaling mean) imputation
-            "has_fundamentals",
+            # the env's NaN→0 (post-scaling mean) imputation. Not individually
+            # RF-ranked (it's a flag, not a continuous signal) — commented out
+            # under the "top-15 only" rule; uncomment if this distinction
+            # turns out to matter for young/newly-listed tickers.
+            # "has_fundamentals",
+            "days_since_fundamental",  # RF rank 11
+            "debt_trend_4q",  # RF rank 15
         ]
     )
 
     # Macro features (daily, from BCB SGS)
     macro_features: list[str] = field(
         default_factory=lambda: [
-            "selic", "cdi", "ipca",  # Interest rates, inflation
+            # "selic",
+            # "cdi",
+            "ipca",  # RF rank 13
+            # "selic_trend_20d",
         ]
     )
 
@@ -120,12 +174,27 @@ class AgentConfig:
         """All features that go into agent state (normalized)."""
         return self.price_features + self.fundamental_features + self.macro_features
 
+    @property
+    def effective_gamma(self) -> float:
+        """Per-decision discount factor, accounting for N-day aggregation.
+
+        gamma is per-day (0.997); with rebalance_interval_days=N, one env.step()
+        spans N days, so the effective discount per step is gamma^N.
+        """
+        return self.gamma ** self.rebalance_interval_days
+
     # ===== Agent Hyperparameters =====
     learning_rate: float = 3e-4
-    gamma: float = 0.99  # Discount factor
+    gamma: float = 0.997  # Discount factor; effective horizon ~333 trading days (~1.3y)
     gae_lambda: float = 0.95  # GAE smoothing
-    entropy_coef: float = 0.0  # No entropy bonus; excess reward removes market noise (variance reduction)
-    log_std_init: float = -3.0  # Initial exploration noise: σ ≈ 0.05 (more conservative to avoid NaN from extreme actions during early training)
+    entropy_coef: float = 0.001  # Small entropy bonus to encourage exploration
+    log_std_init: float = -2.0  # Exploration noise σ ≈ 0.135; combined with logit_scale → effective logit noise ~1.35
+    # Softmax temperature applied to actions inside the env (weights = softmax(action * logit_scale)).
+    # Why: PPO's trust region (target_kl) bounds movement in *Gaussian* action space; at scale 1 the
+    # softmax over 280 assets needs O(1) logit spreads to concentrate, which takes millions of steps
+    # of ~0.007-logit updates (empirically the policy stays frozen at uniform = equal-weight).
+    # Scaling by 10 gives 10x weight-space movement and exploration per unit of trust region.
+    logit_scale: float = 10.0
 
     # ===== Training Configuration =====
     total_timesteps: int = 1_000_000
@@ -136,13 +205,16 @@ class AgentConfig:
 
     # ===== Checkpointing & Early Stopping =====
     eval_freq: int = 20  # Evaluate on val set every N episodes (20 * n_steps = 40,960 timesteps)
-    early_stopping_patience: int = 5  # Stop if val Sharpe degrades 5x in a row (with 0.15 Sharpe threshold for meaningful improvement)
+    early_stopping_patience: int = 8  # Stop if val Sharpe degrades 8x in a row; generous because concentration initially costs turnover before alpha shows (the "paying to learn" valley)
 
     # ===== Logging =====
     log_file_prefix: str = "agent_training"
 
     # ===== Portfolio Constraints =====
     initial_capital: float = 100_000.0  # R$ (Brazilian Real)
+
+    # ===== Rebalancing Interval =====
+    rebalance_interval_days: int = 21  # N-day aggregate steps (1 = legacy daily, 21 = monthly); one step = N days
 
     # ===== Transaction Costs =====
     transaction_cost_bps: float = 10.0  # cost per unit of traded notional (B3 fees ~3bps + slippage margin)
@@ -165,6 +237,10 @@ class AgentConfig:
                 f"Run: python src/agent/feature_engineering.py"
             )
 
+        # Validate rebalance interval
+        if self.rebalance_interval_days < 1:
+            raise ValueError(f"rebalance_interval_days must be >= 1, got {self.rebalance_interval_days}")
+
         # Validate date ranges
         if self.train_end >= self.val_start:
             raise ValueError(f"train_end ({self.train_end}) >= val_start ({self.val_start})")
@@ -179,7 +255,8 @@ class AgentConfig:
             f"({len(self.price_features)}p+{len(self.fundamental_features)}f+{len(self.macro_features)}m) | "
             f"splits: train {self.train_start}→{self.train_end} | "
             f"val {self.val_start}→{self.val_end} | test {self.test_start}→{self.test_end} | "
-            f"ppo: lr={self.learning_rate} γ={self.gamma} λ={self.gae_lambda} "
+            f"ppo: lr={self.learning_rate} γ={self.gamma:.4f} (eff={self.effective_gamma:.4f} per {self.rebalance_interval_days}d step) "
+            f"λ={self.gae_lambda} "
             f"steps={self.total_timesteps:,} batch={self.batch_size} epochs={self.n_epochs}"
         )
 
