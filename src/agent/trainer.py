@@ -36,7 +36,7 @@ import numpy as np
 from tqdm import tqdm
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 from src.agent.config import AgentConfig, DEFAULT_CONFIG, configure_logging
 from src.agent.env import PortfolioEnv
@@ -236,21 +236,27 @@ def _resolve_session_id(config: AgentConfig, resume: bool) -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", bc_pretrain: bool = False) -> Path:
+def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", bc_pretrain: bool = False, use_subprocess: bool = False) -> Path:
     """Run PPO training for one window; returns path to its final model."""
     # config.log_dir is already run-scoped (see rolling_eval.run_rolling_eval), so the
     # filename doesn't need its own timestamp — the directory disambiguates the run.
     log_path = config.log_dir / f"{model_tag}.jsonl"
 
     # Parallel rollout collection: N envs batched N-wide through the policy.
-    # DummyVecEnv (in-process) on purpose: env.step is cheap numpy, so the
-    # N-wide policy forward is the real speedup, and all N envs share the
-    # lru_cache'd tensors by reference. SubprocVecEnv would fork N workers
-    # that each load+normalize the full tensor set (~0.5GB each → OOM).
+    # DummyVecEnv (in-process, default): env.step is cheap numpy, so the N-wide policy
+    # forward is the real speedup, and all N envs share the lru_cache'd tensors by
+    # reference. GIL-bound after ~16 workers on systems with plenty of cores.
+    # SubprocVecEnv (--subprocess): forks N separate Python processes, avoids GIL,
+    # but each subprocess copies tensors (~200MB each), risking OOM on small GPUs.
     def _make_train_env():
         return PortfolioEnv(config, date_range="train")
 
-    train_env = DummyVecEnv([_make_train_env for _ in range(config.n_envs)])
+    if use_subprocess:
+        logger.info("Using SubprocVecEnv (%d workers) — parallel, but higher memory", config.n_envs)
+        train_env = SubprocVecEnv([_make_train_env for _ in range(config.n_envs)])
+    else:
+        logger.info("Using DummyVecEnv (%d workers) — shared tensors, lower memory", config.n_envs)
+        train_env = DummyVecEnv([_make_train_env for _ in range(config.n_envs)])
     val_env = PortfolioEnv(config, date_range="val")  # single deterministic pass, no need to parallelize
 
     try:
@@ -374,6 +380,9 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
     parser.add_argument("--bc-pretrain", action="store_true",
                          help="Warm-start the policy via behavior cloning from a supervised ranker before PPO fine-tuning")
+    parser.add_argument("--subprocess", action="store_true",
+                         help="Use SubprocessVecEnv (parallel worker processes) instead of DummyVecEnv (single-process, GIL-bound). "
+                              "Faster for high --n-envs but uses more memory (each subprocess copies tensors)")
     parser.add_argument("--detect-anomaly", action="store_true",
                          help="Enable torch.autograd anomaly detection to pinpoint the exact backward op "
                               "that first produces NaN/Inf (debugging only — significant slowdown)")
@@ -431,7 +440,7 @@ def main(session_id: str | None = None) -> None:
     # module at its top level, so this side of the dependency stays lazy to
     # avoid a circular import.
     from src.agent.rolling_eval import run_rolling_eval, finalize_and_report
-    results = run_rolling_eval(base_config, resume=args.resume, session_id=session_id, bc_pretrain=args.bc_pretrain)
+    results = run_rolling_eval(base_config, resume=args.resume, session_id=session_id, bc_pretrain=args.bc_pretrain, use_subprocess=args.subprocess)
     finalize_and_report(results, base_config)
 
 
