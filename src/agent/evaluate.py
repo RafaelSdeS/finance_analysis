@@ -30,7 +30,10 @@ from stable_baselines3 import PPO
 
 from src.agent.config import AgentConfig, DEFAULT_CONFIG, configure_logging
 from src.agent.env import PortfolioEnv
-from src.agent.metrics import compute_all, sharpe_ratio, max_drawdown
+from src.agent.metrics import (
+    compute_all, sharpe_ratio, max_drawdown, TRADING_DAYS,
+    probabilistic_sharpe_ratio, deflated_sharpe_ratio,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +194,31 @@ def selic_policy(env: PortfolioEnv, config: AgentConfig) -> Callable:
     return act
 
 
+def random_policy(env: PortfolioEnv, rng: np.random.Generator) -> Callable:
+    """i.i.d. random logits each day — masking/softmax/costs still handled by
+    env.step, same as every other policy here. A null baseline: the agent
+    should clear this by a wide margin, not just beat the deterministic ones.
+    """
+    def act(obs: np.ndarray, t: int) -> np.ndarray:
+        return rng.normal(size=len(env.tickers)).astype(np.float32)
+    return act
+
+
+def random_baseline_stats(env: PortfolioEnv, n_samples: int = 20, seed: int = 42) -> dict:
+    """Roll n_samples random-logit policies through the SAME env to get a null
+    distribution of Sharpes, for judging whether the agent's edge is noise."""
+    sharpes = [sharpe_ratio(rollout(env, random_policy(env, np.random.default_rng(seed + i)))["rewards"])
+               for i in range(n_samples)]
+    return {
+        "mean": float(np.mean(sharpes)),
+        "std": float(np.std(sharpes)),
+        "min": float(np.min(sharpes)),
+        "max": float(np.max(sharpes)),
+        "n_samples": n_samples,
+        "sharpes": sharpes,
+    }
+
+
 def bova11_result(dates: pd.DatetimeIndex, config: AgentConfig) -> dict | None:
     """
     Buy-and-hold BOVA11 from raw ETF prices (BOVA11 is not in the stocks-only
@@ -249,6 +277,28 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
         else:
             # bova11: buy-and-hold, no costs
             metrics[name] = compute_all(res["rewards"], res["values"], res["weights"])
+
+    # Luck-vs-skill checks on the agent's Sharpe: PSR always; DSR only if a real
+    # multi-window trial record exists (no fabricated trial count); random-policy
+    # null distribution through the same env/costs/mask.
+    metrics["agent"]["probabilistic_sharpe_ratio"] = probabilistic_sharpe_ratio(results["agent"]["rewards"])
+
+    rolling_results_path = config.model_dir / "rolling_eval_results.json"
+    if rolling_results_path.exists():
+        with open(rolling_results_path) as f:
+            rolling_results = json.load(f)
+        trial_sharpes = np.array([w["metrics"]["agent"]["sharpe"] for w in rolling_results["windows"]]) / np.sqrt(TRADING_DAYS)
+        if len(trial_sharpes) >= 2:
+            metrics["agent"]["deflated_sharpe_ratio"] = deflated_sharpe_ratio(results["agent"]["rewards"], trial_sharpes)
+    else:
+        logger.info("No rolling_eval_results.json found — skipping deflated Sharpe (needs multi-window trial record)")
+
+    random_stats = random_baseline_stats(env)
+    metrics["agent"]["random_baseline_sharpe_mean"] = random_stats["mean"]
+    metrics["agent"]["random_baseline_sharpe_std"] = random_stats["std"]
+    metrics["agent"]["agent_percentile_vs_random"] = float(
+        (np.array(random_stats["sharpes"]) < metrics["agent"]["sharpe"]).mean() * 100
+    )
 
     if config.rebalance_interval_days > 1:
         logger.warning(

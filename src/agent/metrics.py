@@ -7,6 +7,7 @@ daily log returns unless stated otherwise.
 """
 
 import numpy as np
+from scipy import stats as scipy_stats
 
 TRADING_DAYS = 252
 EPS = 1e-12
@@ -63,6 +64,47 @@ def win_rate(log_returns: np.ndarray) -> float:
     if len(r) == 0:
         return 0.0
     return float((r > 0).mean())
+
+
+def probabilistic_sharpe_ratio(log_returns: np.ndarray, benchmark_sr: float = 0.0) -> float:
+    """P(true per-period Sharpe > benchmark_sr), correcting for skew/kurtosis and
+    finite sample size (Bailey & Lopez de Prado, 2012). Operates on per-period
+    (non-annualized) Sharpe internally — annualization would need a rescaled SE.
+    """
+    r = np.asarray(log_returns, dtype=np.float64)
+    n = len(r)
+    if n < 3:
+        return 0.5
+    sr = r.mean() / (r.std() + EPS)
+    skew = scipy_stats.skew(r)
+    kurt = scipy_stats.kurtosis(r, fisher=False)  # normal distribution = 3
+    denom = np.sqrt(max(1 - skew * sr + (kurt - 1) / 4 * sr ** 2, EPS))
+    z = (sr - benchmark_sr) * np.sqrt(n - 1) / denom
+    return float(scipy_stats.norm.cdf(z))
+
+
+def expected_max_sharpe(n_trials: int, sharpe_std: float) -> float:
+    """Expected maximum per-period Sharpe across n_trials independent trials whose
+    Sharpe estimates are ~ N(0, sharpe_std^2) (Bailey & Lopez de Prado, 2014)."""
+    if n_trials < 2 or sharpe_std <= 0:
+        return 0.0
+    euler_mascheroni = 0.5772156649
+    z1 = scipy_stats.norm.ppf(1 - 1.0 / n_trials)
+    z2 = scipy_stats.norm.ppf(1 - 1.0 / (n_trials * np.e))
+    return float(sharpe_std * ((1 - euler_mascheroni) * z1 + euler_mascheroni * z2))
+
+
+def deflated_sharpe_ratio(log_returns: np.ndarray, trial_sharpes: np.ndarray) -> float:
+    """Probabilistic Sharpe ratio vs. the expected-max-Sharpe benchmark implied by
+    trial_sharpes (per-period Sharpes of all N candidate trials, e.g. rolling
+    windows) — answers whether the deployed model still looks good after
+    correcting for having picked the best of N.
+    """
+    trial_sharpes = np.asarray(trial_sharpes, dtype=np.float64)
+    if len(trial_sharpes) < 2:
+        return probabilistic_sharpe_ratio(log_returns, benchmark_sr=0.0)
+    benchmark = expected_max_sharpe(len(trial_sharpes), float(trial_sharpes.std()))
+    return probabilistic_sharpe_ratio(log_returns, benchmark_sr=benchmark)
 
 
 def effective_n_positions(weights: np.ndarray) -> float:

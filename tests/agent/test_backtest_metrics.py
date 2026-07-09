@@ -17,8 +17,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.agent.metrics import (
     compute_all,
     cumulative_return,
+    deflated_sharpe_ratio,
     effective_n_positions,
+    expected_max_sharpe,
     max_drawdown,
+    probabilistic_sharpe_ratio,
     sharpe_ratio,
     sortino_ratio,
     win_rate,
@@ -96,6 +99,32 @@ def test_effective_n_positions_edge_cases() -> None:
 def test_edge_cases_empty_and_single() -> None:
     assert sharpe_ratio(np.array([])) == 0.0
     assert max_drawdown(np.array([100.0])) == 0.0
+
+
+def test_psr_high_sharpe_near_one() -> None:
+    rng = np.random.default_rng(0)
+    r = 0.01 + 0.001 * rng.standard_normal(500)  # strong, low-noise positive drift
+    assert probabilistic_sharpe_ratio(r) > 0.99, "high, low-noise Sharpe should give PSR near 1"
+
+
+def test_psr_zero_sharpe_near_half() -> None:
+    r = np.array([0.01, -0.01] * 100)  # exactly zero-mean
+    assert approx(probabilistic_sharpe_ratio(r, benchmark_sr=0.0), 0.5, tol=1e-6)
+
+
+def test_expected_max_sharpe_increases_with_trials() -> None:
+    assert expected_max_sharpe(50, 0.5) > expected_max_sharpe(5, 0.5)
+    assert expected_max_sharpe(1, 0.5) == 0.0, "single trial has no 'max of N' effect"
+    assert expected_max_sharpe(10, 0.0) == 0.0, "zero cross-trial variance has no effect"
+
+
+def test_deflated_sharpe_ratio_penalizes_more_trials() -> None:
+    rng = np.random.default_rng(1)
+    r = 0.005 + 0.01 * rng.standard_normal(300)
+    few_trials = np.array([0.01, 0.02, 0.015])
+    many_trials = np.concatenate([few_trials, rng.normal(0.015, 0.01, size=50)])
+    assert deflated_sharpe_ratio(r, many_trials) < deflated_sharpe_ratio(r, few_trials), \
+        "more trials with the same spread should deflate the Sharpe further"
 
 
 if __name__ == "__main__":
