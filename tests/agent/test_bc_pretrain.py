@@ -87,6 +87,33 @@ def main() -> None:
         assert torch.equal(before, after), "value_net should not be modified by pretrain_policy"
     print("✓ value_net untouched by BC pretraining")
 
+    print("\n✓ Test 2b: log_std recalibrated to match the BC target spread")
+    # Regression test for the "PPO applies zero gradient updates after BC-pretrain" bug:
+    # leaving log_std at its generic init (unrelated to how differentiated the newly-fit
+    # mean-network's outputs are) made the very first post-BC-pretrain minibatch's KL
+    # divergence explode (observed empirically: 7.69, ~171x the target_kl=0.03 break
+    # threshold), so PPO's trust-region safety valve aborted before ever applying a
+    # gradient step -- across 21 consecutive rollouts (69% of a 1M-timestep budget) in a
+    # smoke test. Fix: recalibrate log_std to np.log(std of the masked target logits).
+    env2 = _DummyPortfolioEnv()
+    model2 = PPO("MlpPolicy", env2, policy_kwargs=dict(net_arch=[64, 64]), device="cpu", seed=42)
+    log_std_before = float(model2.policy.log_std.data.mean().item())
+
+    # action_arr targets are Uniform(-1, 1) -> std ≈ 1/sqrt(3) ≈ 0.577
+    expected_log_std = float(np.log(action_arr[mask_arr.astype(bool)].std()))
+    pretrain_policy(model2, obs_arr, action_arr, mask_arr, epochs=1, lr=1e-3, batch_size=64, seed=1)
+    log_std_after = float(model2.policy.log_std.data.mean().item())
+
+    print(f"  log_std before: {log_std_before:.4f} (sigma={np.exp(log_std_before):.4f})")
+    print(f"  log_std after:  {log_std_after:.4f} (sigma={np.exp(log_std_after):.4f}), "
+          f"expected ≈ {expected_log_std:.4f}")
+    assert abs(log_std_after - expected_log_std) < 0.05, (
+        f"log_std should be recalibrated to ≈log(target_std)={expected_log_std:.4f}, "
+        f"got {log_std_after:.4f}"
+    )
+    assert log_std_after != log_std_before, "log_std should change from its generic init value"
+    print("✓ pretrain_policy recalibrates log_std to match the actor's newly-learned output spread")
+
     print("\n✓ Test 3: discounted_returns computes correct return-to-go")
     rewards = np.array([1.0, 1.0, 1.0], dtype=np.float32)
     returns = discounted_returns(rewards, gamma=0.5)

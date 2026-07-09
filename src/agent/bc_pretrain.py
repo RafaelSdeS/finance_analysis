@@ -188,6 +188,33 @@ def pretrain_policy(
 
     logger.info("BC pretrain: %d epochs, final masked-MSE loss=%.5f", epochs, final_loss)
 
+    # Recalibrate log_std to match the actual spread of what the actor was just fit to
+    # reproduce, instead of leaving it at config.log_std_init's generic, much tighter value.
+    # Root cause this fixes: log_std is untouched by the masked-MSE fit above (it only
+    # updates mlp_extractor.policy_net + action_net), so it stays at whatever it was
+    # initialized to -- typically calibrated for a fresh, undifferentiated network. But
+    # BC-pretrain deliberately teaches the mean-network large, differentiated outputs (to
+    # reproduce confident top-quintile teacher picks via logit_scale), so pairing that with
+    # a leftover tight sigma makes the Gaussian log-probability hypersensitive: even a tiny
+    # subsequent PPO gradient step, summed across the full action's dimensions, produces
+    # enormous approx_kl and PPO's target_kl safety valve aborts before applying a single
+    # optimizer step -- observed empirically: with the untouched sigma, approx_kl on the
+    # very first post-BC minibatch hit 7.69 (171x the 1.5*target_kl=0.045 break threshold),
+    # so ZERO gradient updates were applied across 21 consecutive rollouts (69% of a 1M-
+    # timestep window's budget) in a smoke test. Recalibrating sigma to match the target
+    # spread brought that first-minibatch KL down to ~0.03-0.07, in line with a healthy,
+    # non-BC-pretrained run, and confirmed real gradient steps resume.
+    old_log_std = float(model.policy.log_std.data.mean().item())
+    target_std = float(target_t[mask_t.bool()].std().item())
+    new_log_std = float(np.log(np.clip(target_std, 1e-3, 10.0)))
+    with torch.no_grad():
+        model.policy.log_std.data.fill_(new_log_std)
+    logger.info(
+        "BC pretrain: recalibrated log_std %.4f -> %.4f (sigma %.4f -> %.4f) to match "
+        "the actor's newly-learned output spread",
+        old_log_std, new_log_std, np.exp(old_log_std), np.exp(new_log_std),
+    )
+
 
 def pretrain_value(
     model: PPO,
