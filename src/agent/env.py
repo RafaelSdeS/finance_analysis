@@ -356,42 +356,45 @@ class PortfolioEnv(gym.Env):
         return e / total
 
     def _cap_weights(self, weights: np.ndarray, active: np.ndarray) -> np.ndarray:
-        """Project weights onto the max-position simplex via iterative clipping.
+        """Project weights onto the max-position simplex via iterative redistribution.
 
         Ensures no active stock (excl. CASH) exceeds max_position_weight while sum(weights)==1.
+        Overflow from capped stocks is redistributed proportionally to uncapped active stocks.
         Inactive tickers remain exactly 0 (enforced by active mask).
-        CASH is exempt from the cap. Converges in ≤n_active iterations, typically 2–3.
-        ponytail: iterative clip is simpler than closed-form KL projection.
+        CASH weight is whatever softmax computed (not forced to 1 − stocks).
+        ponytail: iterative redistribution until no stock exceeds cap; CASH keeps its softmax share.
         """
         cap = self.config.max_position_weight
         w = weights.copy()
         # Stocks = all non-CASH tickers; CASH is exempt from cap
         stocks_mask = ~self._is_cash_mask
-        active_stocks = active & stocks_mask
 
-        for _ in range(active_stocks.sum() + 1):  # safety: converges fast
-            # Check for violations among stocks only
+        for _ in range(stocks_mask.sum() + 1):  # safety: max iterations = n_stocks
             stock_weights = w[stocks_mask]
-            excess = stock_weights - cap
-            excess_sum = excess[excess > 1e-9].sum()
-            if excess_sum <= 1e-9:
-                break
-            # Clip stock violators; redistribute to active, uncapped stocks
-            w[stocks_mask] = np.minimum(stock_weights, cap)
-            stock_sum = w[stocks_mask].sum()
-            if stock_sum > 1.0:
-                # Stocks exceed 1.0 (with CASH); need to redistribute
-                available = stock_sum - 1.0
-                uncapped_mask = stocks_mask & (w < (cap - 1e-9)) & active
-                if uncapped_mask.sum() > 0:
-                    per_stock = available / uncapped_mask.sum()
-                    w[uncapped_mask] += per_stock
-                w[stocks_mask] = np.minimum(w[stocks_mask], cap)
+            violations = stock_weights > cap
+            if not violations.any():
+                break  # Converged: no stock exceeds cap
 
-        # Final clamp: enforce inactive=0, active stocks ≤ cap, CASH ≤ 1
+            # Redistribute: cap violators, offer overflow to uncapped active stocks
+            capped_amount = np.where(violations, stock_weights - cap, 0.0)  # overflow per violator
+            w[stocks_mask] = np.where(violations, cap, stock_weights)
+
+            total_overflow = capped_amount.sum()
+            if total_overflow > 1e-9:
+                # Find uncapped active stocks to receive the overflow
+                active_stocks_mask = active[stocks_mask]  # apply active mask to the stock subset
+                uncapped_active = active_stocks_mask & (w[stocks_mask] < (cap - 1e-9))
+                n_uncapped = uncapped_active.sum()
+                if n_uncapped > 0:
+                    # Distribute overflow equally among uncapped active stocks
+                    per_stock = total_overflow / n_uncapped
+                    w[stocks_mask] = np.where(uncapped_active, w[stocks_mask] + per_stock, w[stocks_mask])
+
+        # Final enforcement: ensure everything is in bounds
         w[~active] = 0.0
-        w[stocks_mask] = np.clip(w[stocks_mask], 0, cap)
-        # Set CASH to balance; CASH must be ≥ 0
-        cash_idx = np.where(self._is_cash_mask)[0][0]
-        w[cash_idx] = max(0.0, 1.0 - w[stocks_mask].sum())
+        w[stocks_mask] = np.clip(w[stocks_mask], 0.0, cap)
+        # CASH and inactive stocks keep their weight; renormalize to sum=1 to account for any rounding
+        current_sum = w.sum()
+        if current_sum > 1e-9:
+            w /= current_sum
         return w

@@ -147,12 +147,12 @@ def main() -> None:
     assert env_b._prev_weights[0] != 999.0, "per-env mutable state leaked across shared-cache instances"
     print("✓ identical-bounds envs share cached tensors without leaking mutable state")
 
-    # --- 9. Max position weight cap enforced ---
+    # --- 9. Max position weight cap + redistribution (not forced to CASH) ---
     env_cap = PortfolioEnv(cfg, date_range="val")
     env_cap.reset(seed=42)
     cap = cfg.max_position_weight
 
-    # Create an extreme one-hot action (should become capped)
+    # Create an extreme one-hot action (should be capped and overflow redistributed to other stocks)
     extreme_action = np.ones(len(env_cap.tickers), dtype=np.float32) * 100.0
     extreme_action[0] = 1000.0  # make first stock massively attractive
     obs, _, _, _, info = env_cap.step(extreme_action)
@@ -161,11 +161,16 @@ def main() -> None:
     stock_mask = ~env_cap._is_cash_mask
     stock_weights = w[stock_mask]  # exclude CASH
     max_weight = stock_weights.max()
-    nonzero_stocks = stock_weights[stock_weights > 1e-12]
+    nonzero_stocks = (stock_weights > 1e-12).sum()
+    cash_weight = w[-1]
 
     assert max_weight <= cap + 1e-9, f"max_weight {max_weight} exceeds cap {cap}"
     assert abs(w.sum() - 1.0) < 1e-9, f"weights don't sum to 1: {w.sum()}"
-    print(f"✓ max position cap: extreme one-hot → max_weight={max_weight:.4f} (cap={cap}), {len(nonzero_stocks)} stocks, rest to CASH")
+    # Key fix: extreme one-hot should diversify to many stocks, NOT force 90% into CASH
+    # If this fails, the old (buggy) behavior forced overflow into CASH
+    assert nonzero_stocks > 10, f"overflow should redistribute to {nonzero_stocks} stocks, not CASH"
+    assert cash_weight < 0.5, f"CASH weight {cash_weight:.2%} should not absorb the capped overflow"
+    print(f"✓ max position cap + redistribution: one-hot → {nonzero_stocks} stocks, CASH={cash_weight:.1%} (was 90% before fix)")
 
     print("\n" + "=" * 60)
     print("ALL ENV TESTS PASSED ✓")
