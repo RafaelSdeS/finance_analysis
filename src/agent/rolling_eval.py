@@ -33,7 +33,7 @@ from src.agent.config import AgentConfig, DEFAULT_CONFIG, RollingWindow, generat
 from src.agent.env import PortfolioEnv
 from src.agent.evaluate import (
     agent_policy, agent_vs_equal_weight, equal_weight_policy, market_cap_policy, inv_vol_policy,
-    rollout
+    selic_policy, rollout
 )
 from src.agent.metrics import compute_all
 from src.agent.trainer import train
@@ -112,27 +112,33 @@ def eval_window(window: RollingWindow, model: PPO, window_config: AgentConfig) -
                    window.window_id, len(env.tickers), len(env.dates))
 
         # Roll out all strategies
-        logger.info("Window %d: Rolling out 4 strategies (agent, equal_weight, market_cap, inv_vol)...",
+        logger.info("Window %d: Rolling out 5 strategies (agent, equal_weight, market_cap, inv_vol, selic)...",
                    window.window_id)
         policies = {
             "agent": agent_policy(model),
             "equal_weight": equal_weight_policy(env),
             "market_cap": market_cap_policy(env, window_config),
             "inv_vol": inv_vol_policy(env),
+            "selic": selic_policy(env, window_config),
         }
 
         metrics = {}
         rollouts = {}
+        selic_log_rets = None
         for name, fn in policies.items():
             logger.info("  Window %d: Rolling out %s...", window.window_id, name)
             res = rollout(env, fn)
             rollouts[name] = res
+            if name == "selic":
+                selic_log_rets = res["rewards"]
             # Pass costs for gross/net decomposition
             if "costs" in res:
                 metrics[name] = compute_all(res["rewards"], res["values"], res.get("weights"),
-                                           daily_costs=res["costs"], cost_bps=window_config.transaction_cost_bps)
+                                           daily_costs=res["costs"], cost_bps=window_config.transaction_cost_bps,
+                                           selic_log_returns=selic_log_rets)
             else:
-                metrics[name] = compute_all(res["rewards"], res["values"], res.get("weights"))
+                metrics[name] = compute_all(res["rewards"], res["values"], res.get("weights"),
+                                           selic_log_returns=selic_log_rets)
             logger.info("  Window %d:   ✓ %s sharpe=%.3f, max_dd=%.1f%%",
                        window.window_id, name, metrics[name]['sharpe'], metrics[name]['max_drawdown'] * 100)
 
@@ -310,10 +316,12 @@ def stitch_walkforward(
 
     # continuous value = compound stitched returns; metrics need the initial-capital seed
     values = {s: initial_capital * np.exp(np.cumsum(log_returns[s])) for s in strategies}
+    selic_log_rets = log_returns.get("selic")
     metrics = {
         s: compute_all(log_returns[s], np.concatenate([[initial_capital], values[s]]),
                       daily_costs=costs[s] if "costs" in window_rollouts[0]["strategies"][s] else None,
-                      cost_bps=cost_bps)
+                      cost_bps=cost_bps,
+                      selic_log_returns=selic_log_rets)
         for s in strategies
     }
 
@@ -449,11 +457,12 @@ def run_online_backtest(
     # Baselines: each rolls through its OWN env, so portfolio math (masking,
     # softmax, transaction costs) lives in env.step — same as the frozen backtest.
     baseline_envs = {name: PortfolioEnv(config, date_range="test")
-                     for name in ("equal_weight", "market_cap", "inv_vol")}
+                     for name in ("equal_weight", "market_cap", "inv_vol", "selic")}
     baseline_policies = {
         "equal_weight": equal_weight_policy(baseline_envs["equal_weight"]),
         "market_cap": market_cap_policy(baseline_envs["market_cap"], config),
         "inv_vol": inv_vol_policy(baseline_envs["inv_vol"]),
+        "selic": selic_policy(baseline_envs["selic"], config),
     }
     baseline_results = {name: {"rewards": [], "values": [config.initial_capital], "dates": []}
                         for name in baseline_policies}
@@ -610,13 +619,16 @@ def run_online_backtest(
         axis=1,
     )
 
-    # Compute metrics
+    # Compute metrics (with excess-of-SELIC)
+    selic_log_rets = baseline_results.get("selic", {}).get("rewards")
     metrics = {}
     for name, res in baseline_results.items():
-        metrics[name] = compute_all(res["rewards"], res["values"], weights=None)
+        metrics[name] = compute_all(res["rewards"], res["values"], weights=None,
+                                   selic_log_returns=selic_log_rets)
     metrics["agent"] = compute_all(
         agent_results_so_far["rewards"], agent_results_so_far["values"],
-        weights=agent_results_so_far["weights"]
+        weights=agent_results_so_far["weights"],
+        selic_log_returns=selic_log_rets
     )
 
     # Save results
@@ -717,13 +729,14 @@ def finalize_and_report(results: list[WindowResult], config: AgentConfig) -> dic
 
     # Per-window agent vs equal-weight comparison + regime-neutral t-test
     logger.info("\n" + "=" * 70)
-    logger.info("PER-WINDOW AGENT vs EQUAL-WEIGHT")
+    logger.info("PER-WINDOW AGENT vs EQUAL-WEIGHT (excess-of-SELIC)")
     logger.info("=" * 70)
     agent_wins = 0
     daily_excess_all = []
     for r in results:
-        a_sharpe = r.metrics["agent"]["sharpe"]
-        e_sharpe = r.metrics["equal_weight"]["sharpe"]
+        # Use excess-of-SELIC Sharpe for WIN/loss (honest comparison; raw Sharpe biased by SELIC carry)
+        a_sharpe = r.metrics["agent"].get("excess_sharpe", r.metrics["agent"]["sharpe"])
+        e_sharpe = r.metrics["equal_weight"].get("excess_sharpe", r.metrics["equal_weight"]["sharpe"])
         win = a_sharpe > e_sharpe
         agent_wins += win
         logger.info(
