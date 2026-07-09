@@ -202,7 +202,7 @@ class AgentConfig:
     total_timesteps: int = 1_000_000
     n_envs: int = 16  # In-process envs (DummyVecEnv) batched N-wide through the policy
     n_steps: int = 2048  # Trajectory length per update, PER env
-    batch_size: int = 1024
+    batch_size: int = 512
     n_epochs: int = 20  # Gradient updates per rollout
 
     # ===== Checkpointing & Early Stopping =====
