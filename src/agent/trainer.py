@@ -77,9 +77,15 @@ class ValSharpeCallback(BaseCallback):
         self.model_tag = model_tag
         self.eval_every_steps = config.eval_freq * config.n_steps
         self._next_eval = self.eval_every_steps  # threshold, not modulo: robust to vec-env timestep jumps
-        self.best_excess_sharpe = -np.inf
+        self.best_excess_sharpe = -np.inf   # gates the patience-reset below (needs a MEANINGFUL jump)
+        self.best_saved_sharpe = -np.inf    # gates checkpoint saving (ANY improvement saves)
         self.degrade_count = 0
-        self.improvement_threshold = 0.05  # ponytail: noise floor; only reset degrade counter on meaningful improvement
+        # Noise floor for resetting the patience counter -- lowered from 0.05 (2026-07-09):
+        # window_3 of the 132721 run improved monotonically every single eval (0.283 -> 0.315
+        # over 8 evals, ~0.004-0.017/eval) but never once cleared a 0.05 jump in a single step,
+        # so degrade_count incremented every eval as if it were regressing, and patience
+        # exhausted mid-climb. 0.02 is calibrated to that observed real-improvement magnitude.
+        self.improvement_threshold = 0.02
         self.pbar = tqdm(total=total_timesteps, unit="step", unit_scale=True, desc=f"Training [{model_tag}]")
         # Cache the equal-weight rollout's absolute-return series once (env is deterministic, reused ~eval_freq times)
         self.ew_returns = rollout(self.val_env, equal_weight_policy(self.val_env))["rewards"]
@@ -169,6 +175,15 @@ class ValSharpeCallback(BaseCallback):
             if old != ckpt:
                 old.unlink(missing_ok=True)
 
+        # Checkpoint on ANY new best (decoupled from the patience-reset threshold below): a real
+        # but small improvement that never clears improvement_threshold in a single eval would
+        # otherwise never get saved at all, silently discarding it even if training runs longer.
+        if val["excess_sharpe"] > self.best_saved_sharpe:
+            self.best_saved_sharpe = val["excess_sharpe"]
+            best_path = self.config.model_dir / f"{self.model_tag}_best.zip"
+            self.model.save(best_path)
+            write_sidecar(best_path, self.config, timesteps=self.num_timesteps)
+
         # Early stopping: degrade counter resets only on meaningful improvement (>= threshold)
         # to avoid noise-driven early stops from small sample validation splits. Keyed on
         # excess-over-equal-weight Sharpe, not absolute Sharpe: keep training as long as the
@@ -176,9 +191,6 @@ class ValSharpeCallback(BaseCallback):
         if val["excess_sharpe"] > self.best_excess_sharpe + self.improvement_threshold:
             self.best_excess_sharpe = val["excess_sharpe"]
             self.degrade_count = 0
-            best_path = self.config.model_dir / f"{self.model_tag}_best.zip"
-            self.model.save(best_path)
-            write_sidecar(best_path, self.config, timesteps=self.num_timesteps)
         else:
             self.degrade_count += 1
             if self.degrade_count >= self.config.early_stopping_patience:

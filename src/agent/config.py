@@ -199,7 +199,11 @@ class AgentConfig:
     logit_scale: float = 10.0
 
     # ===== Training Configuration =====
-    total_timesteps: int = 1_000_000
+    total_timesteps: int = 5_000_000  # raised from 1M (2026-07-09): window_1 of the 132721 run
+    # hit the 1M ceiling still monotonically improving (val excess Sharpe -0.73 -> -0.14, no sign
+    # of plateauing) -- it was budget-capped, not patience-capped. See ValSharpeCallback below for
+    # the other half of this fix (early-stopping was ALSO cutting off a different window's real,
+    # slow improvement via a miscalibrated threshold, independent of this ceiling).
     n_envs: int = 16  # In-process envs (DummyVecEnv) batched N-wide through the policy
     n_steps: int = 2048  # Trajectory length per update, PER env
     batch_size: int = 512
