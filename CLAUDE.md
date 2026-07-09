@@ -51,15 +51,14 @@ Prereq: `pip install torch stable-baselines3 gymnasium scikit-learn`. Deep-dive:
 ```bash
 # One-time data prep: returns from adj_close + env tensors + train-only scaler
 python src/agent/feature_engineering.py
-python -m src.agent.data_pipeline
-python -m src.agent.data_pipeline --universe-size 50   # optional: restrict tensors to top-50 tickers
+python -m src.agent.data_pipeline --universe-size 50   # Top-50 by market cap (liquid names, tractable RL problem)
 
 # Train PPO — always anchored rolling windows (8 windows by default, train anchored 2000, ~2y test each);
 # one PPO model per window, 1M timesteps/window by default (smoke: --timesteps 12288)
-python -m src.agent.trainer
-python -m src.agent.trainer --timesteps 500000 --learning-rate 1e-4 --device cuda
-python -m src.agent.trainer --train-years 2 --test-years 1 --timesteps 2048  # fast smoke: many small windows
-python -m src.agent.trainer --universe-size 50 --bc-pretrain  # must match data_pipeline's --universe-size, or env.py raises RuntimeError
+# RECOMMENDED: use --bc-pretrain + --universe-size 50 to warm-start from ranker teacher
+python -m src.agent.trainer --universe-size 50 --bc-pretrain  # Standard: BC warm-start on top-50 universe
+python -m src.agent.trainer --timesteps 500000 --learning-rate 1e-4 --device cuda --universe-size 50 --bc-pretrain
+python -m src.agent.trainer --train-years 2 --test-years 1 --timesteps 2048 --universe-size 50 --bc-pretrain  # fast smoke
 
 # Sanity-check the feature set has exploitable signal before trusting the agent to find it
 python -m src.agent.ranker_baseline   # supervised HistGradientBoosting, daily rank-IC on held-out tickers
@@ -75,9 +74,9 @@ python -m src.agent.rolling_eval --mode online_backtest --resume  # resume from 
 python -m src.agent.run_allocation --date 2026-06-29 --format csv
 ```
 
-**Note on recent changes (July 2026):** (a) Agent reward changed from absolute portfolio return to excess-return signal (excess of market mean). (b) Feature set upgraded 24 → 40 (raw OHLC dropped; sector-relative z-scores, momentum, quality trends, dividend signals added). (c) Actions are now temperature-scaled (`logit_scale=10` in env's masked softmax) so PPO can escape the uniform/equal-weight initialization — without it the policy provably freezes at equal-weight (trust-region math in `AgentConfig.logit_scale` comment). All models trained before any of these changes are stale; retraining required. See "Agent conviction improvements" in `STAGE3_ML_AGENT.md`.
+**Note on concentration fixes (July 9, 2026):** (a) **Hard max-position cap** = 0.10 enforced in env's action_to_weights() to prevent collapse to single-stock allocations; guarantees effective_n ≥ 10. (b) **Top-IC features restored**: roe, roic, net_margin, ebitda_margin, ebit_margin added back (IC 0.07–0.097 at 21d); total features 15→19. (c) **Universe shrink to top-50 by market cap** (from 280 illiquid names) for easier RL credit assignment. (d) **BC pretrain on by default** (`--bc-pretrain` flag): warm-starts actor+critic from ranker teacher whose rank-IC is proven (t=24). Earlier changes (reward, feature set, logit_scale) already live in code; retraining with these fixes required.
 
-**Outputs:** each `trainer.py` invocation trains all windows under its own scratch dir `data/models/runs/<session_id>/{window_{id},agent}_{best,final}.zip` (checkpoints deleted once a window finishes); the most recent window's model is then promoted to the stable, unmoving production path `data/models/agent_{best,final}.zip` (what `evaluate.py`/`infer.py`/`run_allocation.py` default to); scaler `data/models/feature_scaler.pkl`; online-retraining artifacts `data/models/online/agent_online_*.{zip,pkl}`; env tensors `data/processed/agent_tensors.npz` ([6565 dates × 280 tickers × 40 features] + mask); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; stitched multi-window walk-forward `data/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
+**Outputs:** each `trainer.py` invocation trains all windows under its own scratch dir `data/models/runs/<session_id>/{window_{id},agent}_{best,final}.zip` (checkpoints deleted once a window finishes); the most recent window's model is then promoted to the stable, unmoving production path `data/models/agent_{best,final}.zip` (what `evaluate.py`/`infer.py`/`run_allocation.py` default to); scaler `data/models/feature_scaler.pkl` (one per rolling window); online-retraining artifacts `data/models/online/agent_online_*.{zip,pkl}`; env tensors `data/processed/agent_tensors.npz` ([6568 dates × 51 tickers × 19 features] + mask, when using `--universe-size 50`); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; stitched multi-window walk-forward `data/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
 
 ### Utilities
 
