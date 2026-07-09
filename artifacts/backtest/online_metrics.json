@@ -1,41 +1,60 @@
 {
   "equal_weight": {
-    "cumulative_return": 0.2016636004553798,
-    "annualized_return": 5.882092647315405,
-    "sharpe": 2.365622437896324,
-    "sortino": 4.889041382460604,
-    "max_drawdown": 0.14594687843069087,
-    "win_rate": 0.5833333333333334,
-    "n_days": 24
+    "cumulative_return": 0.20397703125,
+    "annualized_return": 0.09807391197078275,
+    "sharpe": 0.5486391699043317,
+    "sortino": 0.8373586987157596,
+    "max_drawdown": 0.16228481399867306,
+    "win_rate": 0.532,
+    "n_days": 500,
+    "excess_sharpe": -0.14694207946224008,
+    "excess_sortino": -0.22201280414250443
   },
   "market_cap": {
-    "cumulative_return": 0.36151702800285945,
-    "annualized_return": 24.541259608076682,
-    "sharpe": 5.16492692549044,
-    "sortino": 10.443940582211333,
-    "max_drawdown": 0.09511617176906523,
-    "win_rate": 0.5833333333333334,
-    "n_days": 24
+    "cumulative_return": 0.41848640625,
+    "annualized_return": 0.19266888642046998,
+    "sharpe": 1.2761245047395557,
+    "sortino": 1.9962749137051032,
+    "max_drawdown": 0.10598483179546321,
+    "win_rate": 0.536,
+    "n_days": 500,
+    "excess_sharpe": 0.4171233914953932,
+    "excess_sortino": 0.6475048852565312
   },
   "inv_vol": {
-    "cumulative_return": 0.4831599350447322,
-    "annualized_return": 61.72979166847437,
-    "sharpe": 4.574467516746939,
-    "sortino": 12.495395798796535,
-    "max_drawdown": 0.12425458312871336,
-    "win_rate": 0.5833333333333334,
-    "n_days": 24
+    "cumulative_return": 0.2529007031249999,
+    "annualized_return": 0.12034038961891014,
+    "sharpe": 0.7527767562504114,
+    "sortino": 1.1303021639525312,
+    "max_drawdown": 0.1489496720501472,
+    "win_rate": 0.54,
+    "n_days": 500,
+    "excess_sharpe": -0.03300837316239119,
+    "excess_sortino": -0.049346141984234496
+  },
+  "selic": {
+    "cumulative_return": 0.26533937499999993,
+    "annualized_return": 0.1259324591019373,
+    "sharpe": 111.5334583731433,
+    "sortino": 3735969653.78178,
+    "max_drawdown": 0.0,
+    "win_rate": 1.0,
+    "n_days": 500,
+    "excess_sharpe": 0.0,
+    "excess_sortino": 0.0
   },
   "agent": {
-    "cumulative_return": 0.18864593132069185,
-    "annualized_return": 5.138345586240137,
-    "sharpe": 6.301248634923454,
-    "sortino": 16.789510123309782,
-    "max_drawdown": 0.019655874215838077,
-    "win_rate": 0.6666666666666666,
-    "n_days": 24,
-    "effective_n": 1.721378424060596,
-    "max_weight": 0.7536449362704983,
-    "avg_daily_turnover": 0.019839595543203394
+    "cumulative_return": 0.13645804687500007,
+    "annualized_return": 0.06659346311371772,
+    "sharpe": 0.3703738914832574,
+    "sortino": 0.5749901461934834,
+    "max_drawdown": 0.16856560101937568,
+    "win_rate": 0.518,
+    "n_days": 500,
+    "excess_sharpe": -0.31107188169405675,
+    "excess_sortino": -0.47837989276793746,
+    "effective_n": 34.17568816419267,
+    "max_weight": 0.09936864426732063,
+    "avg_daily_turnover": 0.01676727677527479
   }
 }

@@ -476,12 +476,23 @@ def run_online_backtest(
 
     # Baselines are deterministic in the day index: on resume, replay them from
     # day 0 (cheap) instead of adding their state to the checkpoint format.
-    for day_idx in range(start_day_idx):
-        for name, act_fn in baseline_policies.items():
-            _, _, _, _, b_info = baseline_envs[name].step(act_fn(None, day_idx))
-            baseline_results[name]["rewards"].append(b_info["log_return"])
-            baseline_results[name]["values"].append(b_info["portfolio_value"])
-            baseline_results[name]["dates"].append(b_info["date"])
+    # Uses each baseline env's OWN _t (not a manually-incremented counter) and unpacks
+    # daily-granularity arrays from info, matching evaluate.py's rollout() convention --
+    # env.step() advances _t by rebalance_interval_days (21) per call, not by 1, so a
+    # counter that assumes "one day per step() call" silently desyncs from the env's
+    # real day position (this was the root cause of the online-backtest day-count bug
+    # fixed 2026-07-09: baselines were being queried with the wrong date index, and the
+    # loop terminated after ~500/21 iterations while believing only that many days had
+    # elapsed).
+    for name, act_fn in baseline_policies.items():
+        env_b = baseline_envs[name]
+        while env_b._t < start_day_idx:
+            t_dec = env_b._t
+            _, _, _, _, b_info = env_b.step(act_fn(None, t_dec))
+            baseline_results[name]["rewards"].extend(b_info["daily_log_returns"].tolist())
+            for d_ret in b_info["daily_log_returns"]:
+                baseline_results[name]["values"].append(baseline_results[name]["values"][-1] * np.exp(d_ret))
+            baseline_results[name]["dates"].extend(b_info["daily_dates"])
 
     # Seed with initial capital on fresh start ([] is falsy; .get() default would
     # never fire because the key always exists). Resume keeps the checkpointed list.
@@ -494,32 +505,51 @@ def run_online_backtest(
         retrain_indices.append(idx)
         idx += retrain_every_days
     retrain_indices.append(len(all_dates) - 1)  # include final day
+    next_retrain_ptr = 0
+    while next_retrain_ptr < len(retrain_indices) and retrain_indices[next_retrain_ptr] <= start_day_idx:
+        next_retrain_ptr += 1  # skip boundaries already passed (resume case)
 
     from tqdm import tqdm
     retrain_idx = 0
+    pbar = tqdm(total=len(all_dates) - 1, initial=start_day_idx, desc="Online rollout", unit="day")
 
-    for day_idx in tqdm(range(start_day_idx, len(all_dates) - 1), desc="Online rollout", unit="day"):
-        # Step all strategies for this day
+    while test_env._t < len(all_dates) - 1:
+        # Step all strategies over this decision's window (env.step() advances by
+        # rebalance_interval_days at once, not 1 day -- unpack daily-granularity arrays
+        # from info, matching evaluate.py's rollout() convention, instead of treating
+        # info["log_return"] (the WINDOW-TOTAL summed return) as a single day's return.
         agent_action, _ = model.predict(obs, deterministic=True)
         obs, agent_reward, terminated, _, info = test_env.step(agent_action)
 
-        agent_results_so_far["rewards"].append(info["log_return"])
-        agent_results_so_far["values"].append(info["portfolio_value"])
-        agent_results_so_far["weights"].append(info["weights"])
-        agent_results_so_far["dates"].append(info["date"])
+        agent_results_so_far["rewards"].extend(info["daily_log_returns"].tolist())
+        for d_ret in info["daily_log_returns"]:
+            agent_results_so_far["values"].append(agent_results_so_far["values"][-1] * np.exp(d_ret))
+        agent_results_so_far["weights"].extend(info["daily_weights"].tolist())
+        agent_results_so_far["dates"].extend(info["daily_dates"])
+        pbar.update(len(info["daily_log_returns"]))
 
-        # Baselines (continue rolling through their own envs, no resets)
+        # Baselines (continue rolling through their own envs, no resets). Each baseline
+        # env advances in lockstep with test_env (same rebalance_interval_days), so its
+        # OWN _t (captured before its step) is the correct date index -- NOT the outer
+        # loop's day_idx, which no longer exists as a per-day counter.
         for name, act_fn in baseline_policies.items():
-            _, _, _, _, b_info = baseline_envs[name].step(act_fn(None, day_idx))
-            baseline_results[name]["rewards"].append(b_info["log_return"])
-            baseline_results[name]["values"].append(b_info["portfolio_value"])
-            baseline_results[name]["dates"].append(b_info["date"])
+            env_b = baseline_envs[name]
+            t_dec = env_b._t
+            _, _, _, _, b_info = env_b.step(act_fn(None, t_dec))
+            baseline_results[name]["rewards"].extend(b_info["daily_log_returns"].tolist())
+            for d_ret in b_info["daily_log_returns"]:
+                baseline_results[name]["values"].append(baseline_results[name]["values"][-1] * np.exp(d_ret))
+            baseline_results[name]["dates"].extend(b_info["daily_dates"])
 
-        # Check if it's time to retrain
-        if day_idx > start_day_idx and day_idx in retrain_indices[1:]:
+        # Check if it's time to retrain: advance past every boundary <= the current
+        # real day index (>=  comparison, not exact equality, so this can't silently
+        # skip a boundary if rebalance_interval_days doesn't evenly divide retrain_every_days)
+        current_day_idx = test_env._t
+        while (next_retrain_ptr < len(retrain_indices) - 1
+               and retrain_indices[next_retrain_ptr] <= current_day_idx):
             current_date = info["date"]
             logger.info(
-                "\n>>> Retrain point: day %d/%d (%s)", day_idx + 1, len(all_dates) - 1, current_date.date()
+                "\n>>> Retrain point: day %d/%d (%s)", current_day_idx, len(all_dates) - 1, current_date.date()
             )
 
             # Trailing window: ~3 years (750 trading days)
@@ -581,7 +611,7 @@ def run_online_backtest(
 
             # Checkpoint
             checkpoint_data = {
-                "day_idx": day_idx + 1,
+                "day_idx": current_day_idx,
                 "prev_weights": test_env._prev_weights.copy(),
                 "portfolio_value": test_env.portfolio_value,
                 "agent_results": agent_results_so_far,
@@ -589,10 +619,12 @@ def run_online_backtest(
             _save_online_checkpoint(model_ckpt_path, state_ckpt_path, model, checkpoint_data)
 
             retrain_idx += 1
+            next_retrain_ptr += 1
 
         if terminated:
             break
 
+    pbar.close()
     logger.info("\n>>> Online backtest complete. Building results...")
 
     # Convert numpy arrays for output; value series keep the initial-capital
@@ -656,7 +688,11 @@ def run_online_backtest(
 
 
 def _selfcheck_online() -> None:
-    """Continuous rollout online backtest: assert day continuity and retrain guard logic."""
+    """Retrain-boundary arithmetic only (synthetic, no env/model needed) -- does NOT exercise
+    the main rollout loop, which is where the real 2026-07-09 day-indexing bug lived (env.step()
+    advances by rebalance_interval_days per call, not 1; this check's synthetic date range never
+    called anything resembling env.step()). See tests/agent/test_online_backtest_daily_granularity.py
+    for the regression test against the actual bug, using the real production path."""
     # Synthetic 120-day span with retraining every 30 days
     all_dates = pd.date_range("2025-01-01", periods=120, freq="D")
     retrain_every_days = 30
