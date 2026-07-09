@@ -259,9 +259,9 @@ class PortfolioEnv(gym.Env):
             log_r = float(np.log1p(r_p))
             daily_log_rets[day_offset] = log_r
 
-            # Reward: excess log return
+            # Reward: excess log return with mean-variance risk penalty
             excess = log_r - float(ew_rets[day_offset])
-            cumulative_reward += excess
+            cumulative_reward += excess - self.config.risk_aversion * excess * excess
 
             # Update portfolio value
             self.portfolio_value *= 1.0 + r_p
@@ -281,12 +281,14 @@ class PortfolioEnv(gym.Env):
 
             daily_drifted_weights[day_offset] = w
 
+        cumulative_reward *= self.config.reward_scale
+
         # _prev_weights for next step (end-of-window drifted weights)
         self._prev_weights = w
         self._t += n_days
         terminated = self._t >= self.n_steps
 
-        # Detect reward anomalies (should be small, ~±0.02 per day * N)
+        # Detect reward anomalies (should be ~±0.02 per day * N * reward_scale, i.e. ~±2/step at scale 100)
         if np.isnan(cumulative_reward) or np.isinf(cumulative_reward):
             logger.error(
                 "Invalid reward at t=%d (date=%s): cumulative_reward=%.6f, "

@@ -33,6 +33,7 @@ from src.agent.env import PortfolioEnv
 from src.agent.metrics import (
     compute_all, sharpe_ratio, max_drawdown, TRADING_DAYS,
     probabilistic_sharpe_ratio, deflated_sharpe_ratio,
+    excess_sharpe_ratio, excess_sortino_ratio,
 )
 
 logger = logging.getLogger(__name__)
@@ -204,12 +205,19 @@ def random_policy(env: PortfolioEnv, rng: np.random.Generator) -> Callable:
     return act
 
 
-def random_baseline_stats(env: PortfolioEnv, n_samples: int = 20, seed: int = 42) -> dict:
+def random_baseline_stats(env: PortfolioEnv, selic_log_rets: np.ndarray | None = None,
+                          n_samples: int = 20, seed: int = 42) -> dict:
     """Roll n_samples random-logit policies through the SAME env to get a null
     distribution of Sharpes, for judging whether the agent's edge is noise."""
-    sharpes = [sharpe_ratio(rollout(env, random_policy(env, np.random.default_rng(seed + i)))["rewards"])
-               for i in range(n_samples)]
-    return {
+    sharpes = []
+    excess_sharpes = []
+    for i in range(n_samples):
+        res = rollout(env, random_policy(env, np.random.default_rng(seed + i)))
+        sharpes.append(sharpe_ratio(res["rewards"]))
+        if selic_log_rets is not None:
+            excess_sharpes.append(excess_sharpe_ratio(res["rewards"], selic_log_rets))
+
+    result = {
         "mean": float(np.mean(sharpes)),
         "std": float(np.std(sharpes)),
         "min": float(np.min(sharpes)),
@@ -217,6 +225,15 @@ def random_baseline_stats(env: PortfolioEnv, n_samples: int = 20, seed: int = 42
         "n_samples": n_samples,
         "sharpes": sharpes,
     }
+    if excess_sharpes:
+        result.update({
+            "excess_mean": float(np.mean(excess_sharpes)),
+            "excess_std": float(np.std(excess_sharpes)),
+            "excess_min": float(np.min(excess_sharpes)),
+            "excess_max": float(np.max(excess_sharpes)),
+            "excess_sharpes": excess_sharpes,
+        })
+    return result
 
 
 def bova11_result(dates: pd.DatetimeIndex, config: AgentConfig) -> dict | None:
@@ -268,15 +285,20 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
         results["bova11"] = bova
 
     # Metrics table (with cost breakdown for equity baselines)
+    # Extract SELIC returns for excess-of-SELIC metrics (if available)
+    selic_log_rets = results.get("selic", {}).get("rewards")
+
     metrics = {}
     for name, res in results.items():
         if "costs" in res:
             # Equity strategies: pass costs for gross/net decomposition
             metrics[name] = compute_all(res["rewards"], res["values"], res["weights"],
-                                       daily_costs=res["costs"], cost_bps=config.transaction_cost_bps)
+                                       daily_costs=res["costs"], cost_bps=config.transaction_cost_bps,
+                                       selic_log_returns=selic_log_rets)
         else:
             # bova11: buy-and-hold, no costs
-            metrics[name] = compute_all(res["rewards"], res["values"], res["weights"])
+            metrics[name] = compute_all(res["rewards"], res["values"], res["weights"],
+                                       selic_log_returns=selic_log_rets)
 
     # Luck-vs-skill checks on the agent's Sharpe: PSR always; DSR only if a real
     # multi-window trial record exists (no fabricated trial count); random-policy
@@ -293,12 +315,20 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
     else:
         logger.info("No rolling_eval_results.json found — skipping deflated Sharpe (needs multi-window trial record)")
 
-    random_stats = random_baseline_stats(env)
+    random_stats = random_baseline_stats(env, selic_log_rets=selic_log_rets, n_samples=20)
     metrics["agent"]["random_baseline_sharpe_mean"] = random_stats["mean"]
     metrics["agent"]["random_baseline_sharpe_std"] = random_stats["std"]
     metrics["agent"]["agent_percentile_vs_random"] = float(
         (np.array(random_stats["sharpes"]) < metrics["agent"]["sharpe"]).mean() * 100
     )
+
+    # Excess-of-SELIC percentile if available
+    if "excess_sharpes" in random_stats and "excess_sharpe" in metrics["agent"]:
+        metrics["agent"]["random_baseline_excess_sharpe_mean"] = random_stats["excess_mean"]
+        metrics["agent"]["random_baseline_excess_sharpe_std"] = random_stats["excess_std"]
+        metrics["agent"]["agent_percentile_vs_random_excess"] = float(
+            (np.array(random_stats["excess_sharpes"]) < metrics["agent"]["excess_sharpe"]).mean() * 100
+        )
 
     if config.rebalance_interval_days > 1:
         logger.warning(

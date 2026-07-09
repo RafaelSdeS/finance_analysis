@@ -219,6 +219,10 @@ class AgentConfig:
     # ===== Transaction Costs =====
     transaction_cost_bps: float = 10.0  # cost per unit of traded notional (B3 fees ~3bps + slippage margin)
 
+    # ===== Reward Shaping =====
+    reward_scale: float = 100.0  # multiply shaped reward; raw excess is ~±0.02/step, which conditions PPO's value loss poorly
+    risk_aversion: float = 5.0  # λ in daily reward = excess − λ·excess²; daily excess² ~1e-4 → ~5-10% drag, prefers smooth alpha
+
     # ===== Misc =====
     seed: int = 42
     device: str = "cuda"  # or "cpu"

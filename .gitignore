@@ -49,3 +49,7 @@ artifacts/logs/
 data/processed/
 
 artifacts/models/
+
+# Local engineering roadmap (never track)
+TODO.md
+TODO.local.md

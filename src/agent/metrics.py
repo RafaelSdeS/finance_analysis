@@ -21,6 +21,19 @@ def sharpe_ratio(log_returns: np.ndarray) -> float:
     return float(r.mean() / (r.std() + EPS) * np.sqrt(TRADING_DAYS))
 
 
+def excess_sharpe_ratio(strategy_log_returns: np.ndarray, selic_log_returns: np.ndarray) -> float:
+    """Annualized Sharpe ratio of excess returns (strategy − SELIC risk-free rate).
+
+    Excess returns remove the carry from the risk-free rate, leaving only alpha.
+    """
+    s = np.asarray(strategy_log_returns, dtype=np.float64)
+    rf = np.asarray(selic_log_returns, dtype=np.float64)
+    if len(s) < 2 or len(rf) != len(s):
+        return 0.0
+    excess = s - rf
+    return float(excess.mean() / (excess.std() + EPS) * np.sqrt(TRADING_DAYS))
+
+
 def sortino_ratio(log_returns: np.ndarray) -> float:
     """Annualized Sortino ratio: penalizes downside deviation only."""
     r = np.asarray(log_returns, dtype=np.float64)
@@ -29,6 +42,21 @@ def sortino_ratio(log_returns: np.ndarray) -> float:
     downside = r[r < 0]
     downside_std = downside.std() if len(downside) > 0 else EPS
     return float(r.mean() / (downside_std + EPS) * np.sqrt(TRADING_DAYS))
+
+
+def excess_sortino_ratio(strategy_log_returns: np.ndarray, selic_log_returns: np.ndarray) -> float:
+    """Annualized Sortino ratio of excess returns (strategy − SELIC).
+
+    Penalizes downside deviation only, on the excess (alpha) stream.
+    """
+    s = np.asarray(strategy_log_returns, dtype=np.float64)
+    rf = np.asarray(selic_log_returns, dtype=np.float64)
+    if len(s) < 2 or len(rf) != len(s):
+        return 0.0
+    excess = s - rf
+    downside = excess[excess < 0]
+    downside_std = downside.std() if len(downside) > 0 else EPS
+    return float(excess.mean() / (downside_std + EPS) * np.sqrt(TRADING_DAYS))
 
 
 def max_drawdown(portfolio_values: np.ndarray) -> float:
@@ -117,7 +145,8 @@ def effective_n_positions(weights: np.ndarray) -> float:
 
 
 def compute_all(log_returns: np.ndarray, portfolio_values: np.ndarray, weights: np.ndarray | None = None,
-                daily_costs: np.ndarray | None = None, cost_bps: float | None = None) -> dict:
+                daily_costs: np.ndarray | None = None, cost_bps: float | None = None,
+                selic_log_returns: np.ndarray | None = None) -> dict:
     """All metrics in one dict (for metrics.json / comparison tables).
 
     Args:
@@ -126,6 +155,7 @@ def compute_all(log_returns: np.ndarray, portfolio_values: np.ndarray, weights: 
         weights: optional [days, assets] weight matrix
         daily_costs: optional [days] transaction cost per day (cost on rebalance day, 0 elsewhere)
         cost_bps: optional cost basis points; if given with weights, override turnover calculation
+        selic_log_returns: optional daily SELIC returns for excess-of-SELIC metrics
     """
     metrics = {
         "cumulative_return": cumulative_return(portfolio_values),
@@ -136,6 +166,11 @@ def compute_all(log_returns: np.ndarray, portfolio_values: np.ndarray, weights: 
         "win_rate": win_rate(log_returns),
         "n_days": int(len(log_returns)),
     }
+
+    # Excess-of-SELIC metrics (if SELIC returns provided)
+    if selic_log_returns is not None:
+        metrics["excess_sharpe"] = excess_sharpe_ratio(log_returns, selic_log_returns)
+        metrics["excess_sortino"] = excess_sortino_ratio(log_returns, selic_log_returns)
 
     # Gross Sharpe and cost drag (if daily_costs provided)
     if daily_costs is not None:

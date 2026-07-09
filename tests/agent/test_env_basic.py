@@ -132,7 +132,8 @@ def main() -> None:
     obs, rew, _, _, info = env_ew.step(ew_action)
 
     # excess reward should be ≈ 0 (agent return ≈ equal-weight return), maybe slightly negative due to cost
-    assert rew < 0.01, f"equal-weight action should yield ~0 excess reward, got {rew:.4f}"
+    # (risk penalty ≈ 0 since excess ≈ 0; threshold scales with reward_scale)
+    assert rew < 0.01 * cfg.reward_scale, f"equal-weight action should yield ~0 excess reward, got {rew:.4f}"
     assert np.isfinite(info["log_return"]), "log_return must be finite"
     print(f"✓ excess reward model: equal-weight action → reward={rew:.5f} (cost drag only)")
 
