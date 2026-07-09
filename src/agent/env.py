@@ -5,7 +5,10 @@ State:  normalized features for all tickers + activity mask + prev weights
         obs = [n_tickers * n_features + 2*n_tickers]  (flattened, float32)
 Action: raw logits [n_tickers]; env applies masked softmax so that
         inactive tickers get exactly 0 weight and active weights sum to 1.
-Reward: daily excess log return vs equal-weight (variance-reduced training signal).
+Reward: daily excess log return vs a CASH-AWARE benchmark that holds the same
+        cash fraction the agent currently holds (rest equal-weight equity), so
+        holding cash is reward-neutral and only equity-sleeve stock selection
+        earns reward (see step()'s benchmark_simple for the exact formula).
         info["log_return"] carries absolute portfolio log return for backtest metrics.
 
 Prerequisite: run `python -m src.agent.data_pipeline` once to build
@@ -239,7 +242,8 @@ class PortfolioEnv(gym.Env):
         # Pre-load all return vectors for this window (1 slice instead of 21 indexing ops)
         day_indices = np.arange(self._t + 1, self._t + n_days + 1)
         ret_vecs = self._simple_rets[day_indices]  # shape: (n_days, n_assets)
-        ew_rets = self._ew_log_returns[day_indices]  # shape: (n_days,)
+        ew_rets = self._ew_log_returns[day_indices]  # shape: (n_days,) — equity-only EW, log
+        cash_idx = int(np.where(self._is_cash_mask)[0][0])
 
         # Batch compute all portfolio returns at once: (n_days,) = (n_days, n_assets) @ (n_assets,)
         # but w drifts each day, so we need sequential iteration for the drift.
@@ -259,8 +263,21 @@ class PortfolioEnv(gym.Env):
             log_r = float(np.log1p(r_p))
             daily_log_rets[day_offset] = log_r
 
-            # Reward: excess log return with mean-variance risk penalty
-            excess = log_r - float(ew_rets[day_offset])
+            # Reward: excess return over a CASH-AWARE benchmark that holds the same
+            # cash fraction the agent currently holds (w[cash_idx], the weight going
+            # INTO this day, before today's return). This makes cash timing
+            # reward-neutral by construction: a policy that goes 100% cash gets
+            # benchmark == its own return (excess ≈ 0), and a policy that simply
+            # blends cash with equal-weight equity also nets ≈ 0. Reward only
+            # appears from deviating the EQUITY SLEEVE away from equal-weight —
+            # i.e. genuine cross-sectional stock selection, not carry or timing.
+            w_cash_t = float(w[cash_idx])
+            ew_simple_t = float(np.expm1(ew_rets[day_offset]))  # equity-only EW, simple return
+            selic_simple_t = float(r_vec[cash_idx])
+            benchmark_simple = w_cash_t * selic_simple_t + (1.0 - w_cash_t) * ew_simple_t
+            benchmark_log = float(np.log1p(max(benchmark_simple, -0.9999)))
+
+            excess = log_r - benchmark_log
             cumulative_reward += excess - self.config.risk_aversion * excess * excess
 
             # Update portfolio value

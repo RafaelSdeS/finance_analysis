@@ -123,19 +123,38 @@ def main() -> None:
     assert turnover2 < turnover1 * 0.1, f"repeated action should have low turnover: {turnover1:.4f} → {turnover2:.4f}"
     print(f"✓ reward penalty: turnover tracked correctly ({turnover1:.4f} → {turnover2:.4f})")
 
-    # --- 7. Equal-weight action yields zero excess reward (reward = log_return - ew_log_return) ---
+    # --- 7. Uniform action (incl. CASH) yields zero excess reward against the
+    #        cash-aware benchmark: uniform weight w=1/n on every active ticker is
+    #        exactly a (1/n)-cash / (1-1/n)-EW-of-stocks blend, which matches its
+    #        own benchmark exactly (reward = log_return - ew_log_return, no longer
+    #        the whole story now that the benchmark is cash-aware -- see test 7b). ---
     env_ew = PortfolioEnv(cfg, date_range="val")
     env_ew.reset(seed=99)
 
-    # Equal-weight action: all tickers get the same logit (softmax is uniform)
+    # Uniform action: all tickers (including CASH) get the same logit (softmax is uniform)
     ew_action = np.zeros(len(env_ew.tickers), dtype=np.float32)
     obs, rew, _, _, info = env_ew.step(ew_action)
 
-    # excess reward should be ≈ 0 (agent return ≈ equal-weight return), maybe slightly negative due to cost
-    # (risk penalty ≈ 0 since excess ≈ 0; threshold scales with reward_scale)
-    assert rew < 0.01 * cfg.reward_scale, f"equal-weight action should yield ~0 excess reward, got {rew:.4f}"
+    # excess reward should be ≈ 0 (agent return ≈ its own cash-aware benchmark), maybe
+    # slightly negative due to cost (risk penalty ≈ 0 since excess ≈ 0)
+    assert rew < 0.01 * cfg.reward_scale, f"uniform action should yield ~0 excess reward, got {rew:.4f}"
     assert np.isfinite(info["log_return"]), "log_return must be finite"
-    print(f"✓ excess reward model: equal-weight action → reward={rew:.5f} (cost drag only)")
+    print(f"✓ excess reward model: uniform action → reward={rew:.5f} (cost drag only)")
+
+    # --- 7b. Cash-aware reward (M3.1): 100% CASH must ALSO yield ~0 reward now --
+    #         under the OLD equity-only-EW benchmark this would have been LARGE
+    #         POSITIVE reward during any market downturn (the "hiding pays" bug). ---
+    env_cash = PortfolioEnv(cfg, date_range="val")
+    env_cash.reset(seed=99)
+    cash_idx = np.where(env_cash._is_cash_mask)[0][0]
+    cash_action = np.full(len(env_cash.tickers), -100.0, dtype=np.float32)
+    cash_action[cash_idx] = 100.0  # near-argmax on CASH
+    _, rew_cash, _, _, info_cash = env_cash.step(cash_action)
+    assert abs(rew_cash) < 0.02 * cfg.reward_scale, (
+        f"100% CASH should yield ~0 reward under the cash-aware benchmark, got {rew_cash:.4f} "
+        "(if large and positive, the benchmark regressed to equity-only EW)"
+    )
+    print(f"✓ cash-aware reward: 100% CASH → reward={rew_cash:.5f} (was rewarded under the old equity-only benchmark)")
 
     # --- 8. Identical-bounds envs share cached tensors (online-backtest memory fix) ---
     env_a = PortfolioEnv(cfg, date_range="train")
