@@ -52,12 +52,17 @@ Prereq: `pip install torch stable-baselines3 gymnasium scikit-learn`. Deep-dive:
 # One-time data prep: returns from adj_close + env tensors + train-only scaler
 python src/agent/feature_engineering.py
 python -m src.agent.data_pipeline
+python -m src.agent.data_pipeline --universe-size 50   # optional: restrict tensors to top-50 tickers
 
 # Train PPO — always anchored rolling windows (8 windows by default, train anchored 2000, ~2y test each);
 # one PPO model per window, 1M timesteps/window by default (smoke: --timesteps 12288)
 python -m src.agent.trainer
 python -m src.agent.trainer --timesteps 500000 --learning-rate 1e-4 --device cuda
 python -m src.agent.trainer --train-years 2 --test-years 1 --timesteps 2048  # fast smoke: many small windows
+python -m src.agent.trainer --universe-size 50 --bc-pretrain  # must match data_pipeline's --universe-size, or env.py raises RuntimeError
+
+# Sanity-check the feature set has exploitable signal before trusting the agent to find it
+python -m src.agent.ranker_baseline   # supervised HistGradientBoosting, daily rank-IC on held-out tickers
 
 # Backtest vs equal-weight / market-cap / inv-vol baselines (uses the most recent window's test split)
 python -m src.agent.evaluate --model data/models/agent_best.zip

@@ -73,7 +73,7 @@ class WindowResult:
     rollouts: dict | None = None
 
 
-def train_window(window_config: AgentConfig, model_tag: str, resume: bool = False) -> Path:
+def train_window(window_config: AgentConfig, model_tag: str, resume: bool = False, bc_pretrain: bool = False) -> Path:
     """
     Train one window by delegating into trainer.train() — reuses the same
     PPO construction, val-based early stopping, checkpointing, and resume
@@ -91,7 +91,7 @@ def train_window(window_config: AgentConfig, model_tag: str, resume: bool = Fals
     if final_path.exists():
         logger.info("%s exists — window already trained, skipping", final_path.name)
     else:
-        train(window_config, resume=resume, model_tag=model_tag)
+        train(window_config, resume=resume, model_tag=model_tag, bc_pretrain=bc_pretrain)
     return best_path if best_path.exists() else final_path
 
 
@@ -169,6 +169,7 @@ def run_rolling_eval(
     resume: bool = False,
     skip_training: bool = False,
     session_id: str | None = None,
+    bc_pretrain: bool = False,
 ) -> list[WindowResult]:
     """
     Train (or load) + evaluate one model per anchored rolling window.
@@ -225,7 +226,7 @@ def run_rolling_eval(
                     continue
                 logger.info(f"Window {window.window_id}: Loading pre-trained model from {best_path}")
             else:
-                best_path = train_window(window_config, model_tag, resume=resume)
+                best_path = train_window(window_config, model_tag, resume=resume, bc_pretrain=bc_pretrain)
                 if model_tag == "agent":
                     _promote_to_production(window_config, config)
             model = PPO.load(best_path, device=config.device)

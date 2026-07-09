@@ -46,15 +46,17 @@ def main() -> None:
     t0 = time.time()
     for _ in range(1000):
         action = rng.normal(size=env.action_space.shape).astype(np.float32)
+        # Capture mask BEFORE step (when decision is made)
+        mask_at_decision = env.mask[env._t].copy()
         obs, reward, terminated, truncated, info = env.step(action)
 
         w = info["weights"]
-        active = env.mask[env._t - 1]  # mask at decision time
+        # Weights should be valid against the mask at decision time, not current mask
         assert np.isfinite(reward), f"non-finite reward at step {n_checked}"
         assert np.isfinite(info["log_return"]), f"non-finite log_return at step {n_checked}"
         assert abs(w.sum() - 1.0) < 1e-9, f"weights sum {w.sum()} != 1"
         assert (w >= 0).all(), "negative weight found"
-        assert (w[~active] == 0).all(), "INACTIVE TICKER GOT NONZERO WEIGHT"
+        assert (w[~mask_at_decision] == 0).all(), "INACTIVE TICKER GOT NONZERO WEIGHT"
         assert info["portfolio_value"] > 0, "portfolio value went non-positive"
         assert np.isfinite(obs).all(), "obs has non-finite values"
 
@@ -143,6 +145,28 @@ def main() -> None:
     env_a._prev_weights[0] = 999.0  # mutate one instance's private state
     assert env_b._prev_weights[0] != 999.0, "per-env mutable state leaked across shared-cache instances"
     print("✓ identical-bounds envs share cached tensors without leaking mutable state")
+
+    # --- 9. Max position weight cap enforced ---
+    env_cap = PortfolioEnv(cfg, date_range="val")
+    env_cap.reset(seed=42)
+    cap = cfg.max_position_weight
+
+    # Create an extreme one-hot action (should become capped)
+    extreme_action = np.ones(len(env_cap.tickers), dtype=np.float32) * 100.0
+    extreme_action[0] = 1000.0  # make first stock massively attractive
+    obs, _, _, _, info = env_cap.step(extreme_action)
+
+    w = info["weights"]
+    stock_mask = ~env_cap._is_cash_mask
+    stock_weights = w[stock_mask]  # exclude CASH
+    max_weight = stock_weights.max()
+    # Effective n = 1 / sum(w^2); only count non-negligible stocks
+    nonzero_stocks = stock_weights[stock_weights > 1e-12]
+    effective_n = 1.0 / (nonzero_stocks ** 2).sum() if len(nonzero_stocks) > 0 else 0
+
+    assert max_weight <= cap + 1e-9, f"max_weight {max_weight} exceeds cap {cap}"
+    assert abs(w.sum() - 1.0) < 1e-9, f"weights don't sum to 1: {w.sum()}"
+    print(f"✓ max position cap: extreme one-hot → max_weight={max_weight:.4f} (cap={cap}), {len(nonzero_stocks)} stocks, rest to CASH")
 
     print("\n" + "=" * 60)
     print("ALL ENV TESTS PASSED ✓")

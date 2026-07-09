@@ -207,13 +207,15 @@ class PortfolioEnv(gym.Env):
         return self._obs(), {"date": self.dates[0], "portfolio_value": self.portfolio_value}
 
     def action_to_weights(self, action: np.ndarray, active: np.ndarray) -> np.ndarray:
-        """Policy action → portfolio weights: temperature-scaled masked softmax.
+        """Policy action → portfolio weights: temperature-scaled masked softmax + concentration cap.
 
         logit_scale amplifies weight-space movement per unit of PPO trust region
-        (see AgentConfig.logit_scale). Shared by step() and infer.py so the
+        (see AgentConfig.logit_scale). Max position weight enforced via iterative clipping.
+        CASH (last element) is exempt from cap. Shared by step() and infer.py so the
         action semantics live in exactly one place.
         """
-        return self._masked_softmax(np.asarray(action, dtype=np.float64) * self.config.logit_scale, active)
+        weights = self._masked_softmax(np.asarray(action, dtype=np.float64) * self.config.logit_scale, active)
+        return self._cap_weights(weights, active)
 
     def step(self, action: np.ndarray):
         """One step = one decision spanning N days (rebalance_interval_days).
@@ -343,3 +345,44 @@ class PortfolioEnv(gym.Env):
         if total == 0 or not np.isfinite(total):  # no active tickers (shouldn't happen)
             return active.astype(np.float64) / max(active.sum(), 1)
         return e / total
+
+    def _cap_weights(self, weights: np.ndarray, active: np.ndarray) -> np.ndarray:
+        """Project weights onto the max-position simplex via iterative clipping.
+
+        Ensures no active stock (excl. CASH) exceeds max_position_weight while sum(weights)==1.
+        Inactive tickers remain exactly 0 (enforced by active mask).
+        CASH is exempt from the cap. Converges in ≤n_active iterations, typically 2–3.
+        ponytail: iterative clip is simpler than closed-form KL projection.
+        """
+        cap = self.config.max_position_weight
+        w = weights.copy()
+        # Stocks = all non-CASH tickers; CASH is exempt from cap
+        stocks_mask = ~self._is_cash_mask
+        active_stocks = active & stocks_mask
+
+        for _ in range(active_stocks.sum() + 1):  # safety: converges fast
+            # Check for violations among stocks only
+            stock_weights = w[stocks_mask]
+            excess = stock_weights - cap
+            excess_sum = excess[excess > 1e-9].sum()
+            if excess_sum <= 1e-9:
+                break
+            # Clip stock violators; redistribute to active, uncapped stocks
+            w[stocks_mask] = np.minimum(stock_weights, cap)
+            stock_sum = w[stocks_mask].sum()
+            if stock_sum > 1.0:
+                # Stocks exceed 1.0 (with CASH); need to redistribute
+                available = stock_sum - 1.0
+                uncapped_mask = stocks_mask & (w < (cap - 1e-9)) & active
+                if uncapped_mask.sum() > 0:
+                    per_stock = available / uncapped_mask.sum()
+                    w[uncapped_mask] += per_stock
+                w[stocks_mask] = np.minimum(w[stocks_mask], cap)
+
+        # Final clamp: enforce inactive=0, active stocks ≤ cap, CASH ≤ 1
+        w[~active] = 0.0
+        w[stocks_mask] = np.clip(w[stocks_mask], 0, cap)
+        # Set CASH to balance; CASH must be ≥ 0
+        cash_idx = np.where(self._is_cash_mask)[0][0]
+        w[cash_idx] = max(0.0, 1.0 - w[stocks_mask].sum())
+        return w

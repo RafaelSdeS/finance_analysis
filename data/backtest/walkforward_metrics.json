@@ -1,14 +1,14 @@
 {
   "agent": {
-    "cumulative_return": 7.00690625,
-    "annualized_return": 0.14135490632647585,
-    "sharpe": 0.6500741776621759,
-    "sortino": 0.846607610511421,
-    "max_drawdown": 0.4253543893926233,
-    "win_rate": 0.5283732660781841,
+    "cumulative_return": 5.166170625,
+    "annualized_return": 0.12256195454707242,
+    "sharpe": 0.28764384095827367,
+    "sortino": 0.4305822138686605,
+    "max_drawdown": 0.7053811593819236,
+    "win_rate": 0.5031525851197982,
     "n_days": 3965,
-    "gross_sharpe": 0.6629172084325076,
-    "annualized_cost_drag": 0.002592772969545639
+    "gross_sharpe": 0.29402020709853166,
+    "annualized_cost_drag": 0.0025579821524491183
   },
   "equal_weight": {
     "cumulative_return": 6.9638575,

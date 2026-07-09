@@ -210,6 +210,7 @@ class AgentConfig:
 
     # ===== Portfolio Constraints =====
     initial_capital: float = 100_000.0  # R$ (Brazilian Real)
+    max_position_weight: float = 0.10  # Max weight per stock (ensures effective_n ≥ 10); CASH exempt
 
     # ===== Rebalancing Interval =====
     rebalance_interval_days: int = 21  # N-day aggregate steps (1 = legacy daily, 21 = monthly); one step = N days

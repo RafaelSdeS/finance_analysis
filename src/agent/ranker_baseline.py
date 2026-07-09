@@ -63,6 +63,9 @@ def compute_ranker_ic(df: pd.DataFrame, horizon: int = 21):
     df_valid = df.loc[df["fwd_ret"].notna()].copy()
 
     logger.info(f"Valid rows with targets: {len(df_valid)}")
+    if len(df_valid) == 0:
+        logger.warning("No rows with a valid %d-day forward return (need > %d dates per ticker)", horizon, horizon)
+        return None
 
     X = df_valid[candidates].values
     y = df_valid["fwd_ret"].values

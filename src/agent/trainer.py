@@ -236,7 +236,7 @@ def _resolve_session_id(config: AgentConfig, resume: bool) -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -> Path:
+def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", bc_pretrain: bool = False) -> Path:
     """Run PPO training for one window; returns path to its final model."""
     # config.log_dir is already run-scoped (see rolling_eval.run_rolling_eval), so the
     # filename doesn't need its own timestamp — the directory disambiguates the run.
@@ -286,6 +286,31 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent") -
                 device=config.device,
                 verbose=config.verbose,
             )
+            if bc_pretrain:
+                from src.agent.bc_pretrain import (
+                    collect_bc_dataset,
+                    discounted_returns,
+                    pretrain_policy,
+                    pretrain_value,
+                    teacher_policy,
+                    train_teacher,
+                )
+
+                teacher_env = PortfolioEnv(config, date_range="train")  # separate single env; tensors are lru_cached/shared
+                logger.info("BC pretrain [%s]: fitting ranker teacher on window train span...", model_tag)
+                teacher_model = train_teacher(teacher_env, seed=config.seed)
+                obs_arr, action_arr, mask_arr, reward_arr = collect_bc_dataset(
+                    teacher_env, teacher_policy(teacher_env, teacher_model)
+                )
+                logger.info("BC pretrain [%s]: collected %d decisions, training policy...", model_tag, len(obs_arr))
+                pretrain_policy(model, obs_arr, action_arr, mask_arr, seed=config.seed)
+                returns_arr = discounted_returns(reward_arr, config.effective_gamma)
+                pretrain_value(model, obs_arr, returns_arr, seed=config.seed)
+                bc_res = rollout(val_env, agent_policy(model))
+                logger.info(
+                    "BC pretrain [%s]: val Sharpe after imitation = %.3f (pre-PPO)",
+                    model_tag, sharpe_ratio(bc_res["rewards"]),
+                )
         logger.info("Training PPO [%s] (device=%s), log → %s", model_tag, model.device, log_path)
 
         t0 = time.time()
@@ -347,6 +372,8 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
     parser.add_argument("--n-envs", type=int, default=None, help="In-process envs batched through the policy (default: 8)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
+    parser.add_argument("--bc-pretrain", action="store_true",
+                         help="Warm-start the policy via behavior cloning from a supervised ranker before PPO fine-tuning")
     parser.add_argument("--detect-anomaly", action="store_true",
                          help="Enable torch.autograd anomaly detection to pinpoint the exact backward op "
                               "that first produces NaN/Inf (debugging only — significant slowdown)")
@@ -404,7 +431,7 @@ def main(session_id: str | None = None) -> None:
     # module at its top level, so this side of the dependency stays lazy to
     # avoid a circular import.
     from src.agent.rolling_eval import run_rolling_eval, finalize_and_report
-    results = run_rolling_eval(base_config, resume=args.resume, session_id=session_id)
+    results = run_rolling_eval(base_config, resume=args.resume, session_id=session_id, bc_pretrain=args.bc_pretrain)
     finalize_and_report(results, base_config)
 
 
