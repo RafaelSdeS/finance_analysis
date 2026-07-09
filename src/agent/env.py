@@ -244,8 +244,8 @@ class PortfolioEnv(gym.Env):
         # Batch compute all portfolio returns at once: (n_days,) = (n_days, n_assets) @ (n_assets,)
         # but w drifts each day, so we need sequential iteration for the drift.
         # Compromise: keep the drift loop but vectorize weight operations within it.
-        daily_log_rets = []
-        daily_drifted_weights = []
+        daily_log_rets = np.empty(n_days, dtype=np.float64)
+        daily_drifted_weights = np.empty((n_days, len(w)), dtype=np.float32)
         cumulative_reward = 0.0
 
         for day_offset in range(n_days):
@@ -257,7 +257,7 @@ class PortfolioEnv(gym.Env):
 
             r_p = max(r_p, -0.9999)  # Clip catastrophic
             log_r = float(np.log1p(r_p))
-            daily_log_rets.append(log_r)
+            daily_log_rets[day_offset] = log_r
 
             # Reward: excess log return
             excess = log_r - float(ew_rets[day_offset])
@@ -279,10 +279,10 @@ class PortfolioEnv(gym.Env):
                         w_new = w.copy()
                 w = w_new / w_new.sum()  # Ensure sum = 1
 
-            daily_drifted_weights.append(w.copy())
+            daily_drifted_weights[day_offset] = w
 
         # _prev_weights for next step (end-of-window drifted weights)
-        self._prev_weights = w.copy()
+        self._prev_weights = w
         self._t += n_days
         terminated = self._t >= self.n_steps
 
@@ -306,9 +306,9 @@ class PortfolioEnv(gym.Env):
             "turnover": float(traded),
             "transaction_cost": float(transaction_cost),
             # Daily-granularity arrays (critical for results.parquet schema)
-            "daily_log_returns": np.array(daily_log_rets, dtype=np.float32),
+            "daily_log_returns": daily_log_rets.astype(np.float32),
             "daily_dates": self.dates[self._t - n_days + 1 : self._t + 1],
-            "daily_weights": np.array(daily_drifted_weights, dtype=np.float32),
+            "daily_weights": daily_drifted_weights,
         }
         return self._obs(), cumulative_reward, terminated, False, info
 
@@ -339,7 +339,7 @@ class PortfolioEnv(gym.Env):
 
         # Clip extreme values to prevent numerical instability in the network
         # Features should be normalized around [-3, 3] from StandardScaler; clip at [-5, 5] to prevent gradient explosion
-        obs = np.clip(obs, -5.0, 5.0, dtype=np.float32)
+        obs = np.clip(obs, -5.0, 5.0, out=obs)
         return obs
 
     @staticmethod

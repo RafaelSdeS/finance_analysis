@@ -162,3 +162,34 @@ Tickers with >20% NaN (may want to exclude):
 
 - Use pl, pvp and other metrics directly from Bolsai API (maybe)
 - Fix the imports/python execution bugs
+
+
+Je les classerais ainsi:
+
+    Momentum/rendement récent: rendements sur 1, 5, 20, 60 jours, car ils résument la tendance et les retournements.
+
+    Volatilité: volatilité historique, ATR, variance réalisée, drawdown récent, car le RL doit apprendre à réduire le risque dans les phases instables.
+
+    Corrélation et dispersion cross-asset: utiles pour l’allocation multi-actifs, car les poids dépendent aussi des dépendances entre actifs.
+
+    Volume/liquidité: important pour la faisabilité réelle, surtout si tu trades des actifs moins liquides.
+
+    Variables macro: SELIC, inflation, change, courbe des taux, stress de marché, car Lewin montre l’importance du régime au Brésil.
+
+    Coûts de transaction et turnover: indispensables si tu veux éviter qu’un modèle trop nerveux surtrade.
+Si tu veux une version vraiment efficace, je recommanderais de commencer avec un noyau de features simple mais solide:
+
+    returns multi-horizons,
+
+    volatilité glissante,
+
+    drawdown,
+
+    momentum,
+
+    volume/liquidité,
+
+    taux/régime macro,
+
+    corrélation moyenne du portefeuille.
+

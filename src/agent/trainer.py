@@ -96,21 +96,22 @@ class ValSharpeCallback(BaseCallback):
     def _on_step(self) -> bool:
         self.pbar.update(self.num_timesteps - self.pbar.n)
 
-        # Scan every step (cheap tensor check) so the first occurrence of NaN weights is caught as
-        # early as possible on the codepaths that do return control to the callback (rollout,
-        # action prediction). Note: a crash *inside* model.train() (e.g. Normal() rejecting NaN loc)
-        # propagates before this callback runs again — see train()'s try/except for that case.
-        for name, param in self.model.policy.named_parameters():
-            if param.data.isnan().any():
-                log_std = self.model.policy.log_std.data
-                logger.error(
-                    "NaN detected in policy parameter '%s' at timestep %d. log_std stats: "
-                    "mean=%.4f min=%.4f max=%.4f (init=%.2f). learning_rate=%.2e.",
-                    name, self.num_timesteps,
-                    float(log_std.mean()), float(log_std.min()), float(log_std.max()),
-                    self.config.log_std_init, float(self.model.learning_rate),
-                )
-                return False
+        # Scan every 100 steps (each .isnan().any() forces a GPU sync, so scanning every
+        # step dominated rollout time). 100-step detection latency is fine — a crash
+        # *inside* model.train() (e.g. Normal() rejecting NaN loc) propagates before this
+        # callback runs again anyway — see train()'s try/except for that case.
+        if self.n_calls % 100 == 0:
+            for name, param in self.model.policy.named_parameters():
+                if param.data.isnan().any():
+                    log_std = self.model.policy.log_std.data
+                    logger.error(
+                        "NaN detected in policy parameter '%s' at timestep %d. log_std stats: "
+                        "mean=%.4f min=%.4f max=%.4f (init=%.2f). learning_rate=%.2e.",
+                        name, self.num_timesteps,
+                        float(log_std.mean()), float(log_std.min()), float(log_std.max()),
+                        self.config.log_std_init, float(self.model.learning_rate),
+                    )
+                    return False
 
         if self.num_timesteps < self._next_eval:
             return True
