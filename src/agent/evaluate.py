@@ -33,8 +33,9 @@ from src.agent.env import PortfolioEnv
 from src.agent.metrics import (
     compute_all, sharpe_ratio, max_drawdown, TRADING_DAYS,
     probabilistic_sharpe_ratio, deflated_sharpe_ratio,
-    excess_sharpe_ratio, excess_sortino_ratio,
+    excess_sharpe_ratio,
 )
+from src.agent.model_provenance import check_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +273,28 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
     model = PPO.load(model_path, device=config.device)
     logger.info("Backtesting %s on test split (%d days)", model_path, len(env.dates))
 
+    # Real staleness/provenance check (replaces the old unconditional warning):
+    # compares the model's saved training semantics against the current config.
+    sidecar = check_sidecar(model_path, config)
+
+    # Verify this is actually the newest trained model, not a stale promotion.
+    rolling_results_path = config.model_dir / "rolling_eval_results.json"
+    if sidecar is not None and rolling_results_path.exists():
+        with open(rolling_results_path) as f:
+            rolling_results = json.load(f)
+        window_ids = [w["window_id"] for w in rolling_results.get("windows", [])]
+        if window_ids:
+            latest_window_id = max(window_ids)
+            if sidecar.get("window_id") != latest_window_id:
+                logger.warning(
+                    "⚠ Loaded model is window_id=%s but the latest trained window "
+                    "in rolling_eval_results.json is window_id=%s — this may not be "
+                    "the newest model.",
+                    sidecar.get("window_id"), latest_window_id,
+                )
+            else:
+                logger.info("Confirmed: evaluating the newest trained window (window_id=%s)", latest_window_id)
+
     policies = {
         "agent": agent_policy(model),
         "equal_weight": equal_weight_policy(env),
@@ -330,12 +353,6 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
             (np.array(random_stats["excess_sharpes"]) < metrics["agent"]["excess_sharpe"]).mean() * 100
         )
 
-    if config.rebalance_interval_days > 1:
-        logger.warning(
-            "⚠ Models trained before rebalance_interval_days=%d are STALE "
-            "(obs unchanged but step semantics differ). Retrain to use this config.",
-            config.rebalance_interval_days
-        )
 
     table = pd.DataFrame(metrics).T
     logger.info("=" * 78)

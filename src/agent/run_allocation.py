@@ -31,10 +31,12 @@ def main() -> None:
     parser.add_argument("--date", type=str, default=None, help="Target date (default: latest)")
     parser.add_argument("--format", choices=["csv", "json"], default="csv")
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH)
+    parser.add_argument("--strict", action="store_true",
+                         help="Fail instead of warning if --date is beyond the dataset's coverage")
     args = parser.parse_args()
 
     config = DEFAULT_CONFIG
-    weights = predict_weights(date=args.date, model_path=args.model, config=config)
+    weights = predict_weights(date=args.date, model_path=args.model, config=config, strict=args.strict)
 
     # Enrich with sector (latest known per ticker)
     sectors = (
@@ -61,6 +63,10 @@ def main() -> None:
         with open(out_path, "w") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
 
+    stale_days = weights.attrs.get("stale_days", 0)
+    if stale_days > 0:
+        print(f"\n⚠ WARNING: allocation is {stale_days} days stale (requested {args.date}, "
+              f"data only covers through {date_str}). Rebuild the dataset for a current allocation.")
     print(f"\nAllocation for {date_str} ({weights.attrs['source']}):")
     print(weights.head(15).to_string(index=False))
     if len(weights) > 15:

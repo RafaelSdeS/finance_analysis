@@ -36,6 +36,7 @@ from src.agent.evaluate import (
     selic_policy, rollout
 )
 from src.agent.metrics import compute_all
+from src.agent.model_provenance import write_sidecar
 from src.agent.trainer import train
 
 logger = logging.getLogger(__name__)
@@ -161,13 +162,17 @@ def eval_window(window: RollingWindow, model: PPO, window_config: AgentConfig) -
 
 
 def _promote_to_production(window_config: AgentConfig, config: AgentConfig) -> None:
-    """Copy the most-recent window's agent_{best,final}.zip up to the stable
-    top-level artifacts/models/ path that evaluate.py/infer.py/run_allocation.py default to."""
+    """Copy the most-recent window's agent_{best,final}.zip (+ provenance sidecar)
+    up to the stable top-level artifacts/models/ path that evaluate.py/infer.py/
+    run_allocation.py default to."""
     for suffix in ("best", "final"):
         src = window_config.model_dir / f"agent_{suffix}.zip"
         if src.exists():
             shutil.copy2(src, config.model_dir / f"agent_{suffix}.zip")
-    logger.info("Promoted agent_{best,final}.zip → %s", config.model_dir)
+        src_sidecar = src.with_suffix(".json")
+        if src_sidecar.exists():
+            shutil.copy2(src_sidecar, (config.model_dir / f"agent_{suffix}.zip").with_suffix(".json"))
+    logger.info("Promoted agent_{best,final}.zip (+ provenance) → %s", config.model_dir)
 
 
 def run_rolling_eval(
@@ -640,6 +645,7 @@ def run_online_backtest(
     # Save final model
     online_model_path = online_dir / f"{model_tag}_online_final.zip"
     model.save(online_model_path)
+    write_sidecar(online_model_path, config, timesteps=model.num_timesteps)
     logger.info("✓ Online results → online_results.parquet + online_metrics.json")
     logger.info("✓ Final model → %s", online_model_path.name)
 

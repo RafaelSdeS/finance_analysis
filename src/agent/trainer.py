@@ -42,6 +42,7 @@ from src.agent.config import AgentConfig, DEFAULT_CONFIG, configure_logging
 from src.agent.env import PortfolioEnv
 from src.agent.metrics import max_drawdown, sharpe_ratio
 from src.agent.evaluate import rollout, agent_policy, equal_weight_policy
+from src.agent.model_provenance import write_sidecar
 
 logger = logging.getLogger(__name__)
 
@@ -175,7 +176,9 @@ class ValSharpeCallback(BaseCallback):
         if val["excess_sharpe"] > self.best_excess_sharpe + self.improvement_threshold:
             self.best_excess_sharpe = val["excess_sharpe"]
             self.degrade_count = 0
-            self.model.save(self.config.model_dir / f"{self.model_tag}_best.zip")
+            best_path = self.config.model_dir / f"{self.model_tag}_best.zip"
+            self.model.save(best_path)
+            write_sidecar(best_path, self.config, timesteps=self.num_timesteps)
         else:
             self.degrade_count += 1
             if self.degrade_count >= self.config.early_stopping_patience:
@@ -348,6 +351,7 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", b
 
         final_path = config.model_dir / f"{model_tag}_final.zip"
         model.save(final_path)
+        write_sidecar(final_path, config, timesteps=model.num_timesteps)
         logger.info("Saved final model → %s (best-val model → %s_best.zip)", final_path, model_tag)
 
         # Checkpoints are resume-only scratch; once the window is done, drop the leftover.
