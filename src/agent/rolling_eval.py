@@ -156,7 +156,7 @@ def eval_window(window: RollingWindow, model: PPO, window_config: AgentConfig) -
 
 def _promote_to_production(window_config: AgentConfig, config: AgentConfig) -> None:
     """Copy the most-recent window's agent_{best,final}.zip up to the stable
-    top-level data/models/ path that evaluate.py/infer.py/run_allocation.py default to."""
+    top-level artifacts/models/ path that evaluate.py/infer.py/run_allocation.py default to."""
     for suffix in ("best", "final"):
         src = window_config.model_dir / f"agent_{suffix}.zip"
         if src.exists():
@@ -182,7 +182,7 @@ def run_rolling_eval(
         resume: Resume the currently in-progress window from its latest checkpoint
         skip_training: If True, load pre-trained models (for eval-only)
         session_id: Scopes all windows' model/log paths under
-            data/models/runs/<session_id>/ and data/logs/agent/runs/<session_id>/
+            artifacts/models/runs/<session_id>/ and artifacts/logs/agent/runs/<session_id>/
             so a fresh invocation never collides with a previous one. Defaults
             to a fresh timestamp.
 
@@ -838,7 +838,30 @@ def _selfcheck_promote_to_production() -> None:
 
 
 if __name__ == "__main__":
-	_selfcheck_online()
-	_selfcheck_stitch()
-	_selfcheck_online_checkpoint()
-	_selfcheck_promote_to_production()
+	import argparse
+
+	parser = argparse.ArgumentParser(description="Rolling-window evaluation: online backtest or self-checks.")
+	parser.add_argument("--mode", choices=["online_backtest", "selfcheck"], default="selfcheck",
+	                    help="Mode: online_backtest runs continuous rollout with retraining; selfcheck runs validation tests.")
+	parser.add_argument("--resume", action="store_true", help="Resume online backtest from checkpoint (if --mode online_backtest).")
+	parser.add_argument("--retrain-every-days", type=int, default=63, help="Retrain every N trading days (default 63).")
+	parser.add_argument("--retrain-timesteps", type=int, default=20_000, help="Timesteps per retrain (default 20000).")
+	args = parser.parse_args()
+
+	if args.mode == "online_backtest":
+		from src.agent.config import configure_logging
+		log_path = configure_logging(DEFAULT_CONFIG.log_dir / "agent", f"online_{datetime.now().strftime('%Y%m%d_%H%M%S')}", tag="online")
+		logger.info(f"Online backtest starting. Logs → {log_path}")
+		results_df, metrics = run_online_backtest(
+			DEFAULT_CONFIG,
+			retrain_every_days=args.retrain_every_days,
+			retrain_timesteps=args.retrain_timesteps,
+			resume=args.resume,
+		)
+		logger.info("Online backtest complete. Results → %s", DEFAULT_CONFIG.backtest_dir / "online_results.parquet")
+	else:
+		# Selfcheck mode
+		_selfcheck_online()
+		_selfcheck_stitch()
+		_selfcheck_online_checkpoint()
+		_selfcheck_promote_to_production()

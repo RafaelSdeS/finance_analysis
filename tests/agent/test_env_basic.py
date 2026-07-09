@@ -160,9 +160,7 @@ def main() -> None:
     stock_mask = ~env_cap._is_cash_mask
     stock_weights = w[stock_mask]  # exclude CASH
     max_weight = stock_weights.max()
-    # Effective n = 1 / sum(w^2); only count non-negligible stocks
     nonzero_stocks = stock_weights[stock_weights > 1e-12]
-    effective_n = 1.0 / (nonzero_stocks ** 2).sum() if len(nonzero_stocks) > 0 else 0
 
     assert max_weight <= cap + 1e-9, f"max_weight {max_weight} exceeds cap {cap}"
     assert abs(w.sum() - 1.0) < 1e-9, f"weights don't sum to 1: {w.sum()}"

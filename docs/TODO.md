@@ -94,7 +94,7 @@ Once Phase 1 validation passes:
   - [x] Pivot long-format dataset → [6565 dates × 279 tickers × 23 features] numpy tensor
   - [x] Activity mask [dates × tickers] (46.2% cells active — universe grows 30 → 245 tickers)
   - [x] Universe: all tickers ≥252 rows (279; drops 9 stubs) — **full universe with masking, no survivorship bias**
-  - [x] StandardScaler fit on train dates only → `data/models/feature_scaler.pkl`
+  - [x] StandardScaler fit on train dates only → `artifacts/models/feature_scaler.pkl`
   - [x] Output: `data/processed/agent_tensors.npz`
 - [x] **env.py:** `PortfolioEnv(gymnasium.Env)` with time-varying universe
   - [x] State: normalized features (NaN→0 after z-score) + activity mask = 6,696-dim obs
@@ -109,7 +109,7 @@ Once Phase 1 validation passes:
 
 - [x] **trainer.py:** SB3 PPO ("MlpPolicy", CUDA), all hyperparams from `AgentConfig`
   - [x] `ValSharpeCallback`: deterministic val rollout every `eval_freq` rollouts
-  - [x] JSONL logging → `data/logs/agent_training_YYYYMMDD-HHMMSS.jsonl`
+  - [x] JSONL logging → `artifacts/logs/agent_training_YYYYMMDD-HHMMSS.jsonl`
   - [x] Checkpoints per eval + `agent_best.zip` (best val Sharpe) + `agent_final.zip`
   - [x] Early stopping: val Sharpe degrades `early_stopping_patience` (3) consecutive evals
   - [x] CLI: `--timesteps`, `--learning-rate`, `--device`
@@ -128,7 +128,7 @@ Once Phase 1 validation passes:
 - [x] **metrics.py:** Sharpe, Sortino, max drawdown, cumulative/annualized return, win rate (unit-tested vs hand-computed values)
 - [x] **evaluate.py:** All strategies rolled through the same env (portfolio math in one place)
   - [x] Baselines: equal-weight, market-cap (ffill, no lookahead), 1/vol (trailing 60d)
-  - [x] Comparison table + `data/backtest/metrics.json` + `results.parquet`
+  - [x] Comparison table + `artifacts/backtest/metrics.json` + `results.parquet`
   - [x] Plotly plots: cumulative value (log scale), drawdown, return distribution, top-10 weights timeline
 - [x] **Found & fixed real data bug:** returns were computed from raw `close` → stock-split artifacts (±4.7 log returns, spurious 84%/yr equal-weight). Now from `adj_close` with corrupt-observation cleaning (|log r| > 1.0 → NaN, 332 rows / 0.04%). Post-fix equal-weight: 14.8%/yr, Sharpe 0.71 — realistic.
 
@@ -136,7 +136,7 @@ Once Phase 1 validation passes:
 
 - [x] **infer.py:** `predict_weights(date)` reuses env obs pipeline (state identical to training)
   - [x] Equal-weight fallback on load failure or invalid weights (never crashes)
-- [x] **run_allocation.py:** CLI `--date --format csv|json --model`; sector-enriched output → `data/allocations/allocation_YYYY-MM-DD.{csv,json}`
+- [x] **run_allocation.py:** CLI `--date --format csv|json --model`; sector-enriched output → `artifacts/allocations/allocation_YYYY-MM-DD.{csv,json}`
 - [x] **test_inference_output.py:** sum=1, sorted, no dupes, fallback path, pre-range date error
 
 ### Phase 3 Quality Gates (Before Merge)

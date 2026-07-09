@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Session-dir resolution: --resume must reuse the most-recently-modified run
-directory (data/models/runs/<session_id>/), and a fresh run must never
+directory (artifacts/models/runs/<session_id>/), and a fresh run must never
 collide with a previous one.
 
 Run from project root: python tests/agent/test_session_dirs.py

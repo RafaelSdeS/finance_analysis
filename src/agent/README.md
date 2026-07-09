@@ -35,7 +35,7 @@ AgentConfig | ml_dataset_training.parquet | 23 features (6p+14f+3m)
 python -m src.agent.data_pipeline
 ```
 
-Output: `data/processed/agent_tensors.npz` + `data/models/feature_scaler.pkl`
+Output: `data/processed/agent_tensors.npz` + `artifacts/models/feature_scaler.pkl`
 
 ### 4. Train, Evaluate, Allocate
 
@@ -49,7 +49,7 @@ python -m src.agent.evaluate                                  # backtest agent_b
 python -m src.agent.run_allocation --date 2026-06-29 --format csv
 ```
 
-The most recent window's model is saved as `agent_best.zip`/`agent_final.zip` (the production model); earlier windows are namespaced `window_{id}_best.zip`/`window_{id}_final.zip`. The stitched out-of-sample curve across all windows is written to `data/backtest/walkforward_results.parquet` + `walkforward_metrics.json`.
+The most recent window's model is saved as `agent_best.zip`/`agent_final.zip` (the production model); earlier windows are namespaced `window_{id}_best.zip`/`window_{id}_final.zip`. The stitched out-of-sample curve across all windows is written to `artifacts/backtest/walkforward_results.parquet` + `walkforward_metrics.json`.
 
 ### 5. Tests
 

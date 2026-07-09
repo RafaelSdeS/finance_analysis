@@ -39,7 +39,7 @@ Every collector writes through one shared function, `_merge_save`, regardless of
 3. Run the relevant `validate.py` check; if it fails, **nothing is written** (fail closed, not partially).
 4. Sort and save.
 
-This is why the whole pipeline is safe to re-run: a crash mid-collection leaves the last successfully-validated parquet on disk, and the next run's `drop_duplicates` reconciles any overlap. Checkpoints (`checkpoint.py`) are one JSON file per collector per mode (`data/checkpoints/{mode}/{name}.json`), storing each ticker's last-collected date/quarter — namespaced by mode so `prototype`, `full_scale`, and `update` never share or clobber each other's resume state.
+This is why the whole pipeline is safe to re-run: a crash mid-collection leaves the last successfully-validated parquet on disk, and the next run's `drop_duplicates` reconciles any overlap. Checkpoints (`checkpoint.py`) are one JSON file per collector per mode (`artifacts/checkpoints/{mode}/{name}.json`), storing each ticker's last-collected date/quarter — namespaced by mode so `prototype`, `full_scale`, and `update` never share or clobber each other's resume state.
 
 ## Validation gates (`validate.py`)
 

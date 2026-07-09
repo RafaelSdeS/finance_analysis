@@ -18,7 +18,7 @@ Building the RL agent for portfolio allocation (Stage 3).
 This roadmap implements the following architectural decisions; **read CLAUDE.md for full rationale:**
 
 1. **Anchored Rolling Windows (never a fixed split):** Training partitions the dataset into anchored windows (train always starts at the dataset's earliest date, test slides forward ~2 years per window); each window's train span is tail-carved into train/val for early stopping. The most recent window is the production model/default split. Prevents lookahead bias, respects market regime shifts, and produces multiple out-of-sample evaluations instead of one.
-2. **Train-Only Scaler:** Fit StandardScaler on training data only; reuse for validation/test/inference. Stored as `data/models/feature_scaler.pkl`.
+2. **Train-Only Scaler:** Fit StandardScaler on training data only; reuse for validation/test/inference. Stored as `artifacts/models/feature_scaler.pkl`.
 3. **State Space:** Concatenated normalized features `[n_tickers * feature_dim]`. Simple, learnable end-to-end.
 4. **Action Space:** Continuous weights via softmax output (guarantees simplex: Σw_i=1, w_i≥0). No-shorting constraint built-in.
 5. **Reward Function:** Excess-return signal — daily log return net of market-mean return, minus transaction cost. Reduces market-wide noise (±1–2%/day common to all allocations) and amplifies per-ticker alpha signal (~0.1%/day), making per-stock credit assignment tractable. See `STAGE3_ML_AGENT.md` § "Recent improvements".
@@ -142,8 +142,8 @@ for episode in range(num_episodes):
 - [ ] Add real-time logging:
   - Per episode: portfolio value, return %, Sharpe, max drawdown, weights (sector %)
   - Per step: loss, gradient norm, policy entropy
-  - Save to `data/logs/agent_training_YYYYMMDD.jsonl`
-- [ ] Checkpoint every N episodes: `data/models/agent_checkpoint_ep{N}.pt`
+  - Save to `artifacts/logs/agent_training_YYYYMMDD.jsonl`
+- [ ] Checkpoint every N episodes: `artifacts/models/agent_checkpoint_ep{N}.pt`
 - [ ] Early stopping: stop if val Sharpe degrades for M consecutive eval cycles
 
 ## Phase 3: Evaluation & Backtesting
@@ -187,18 +187,12 @@ def backtest(agent, env_test, metrics_to_compute):
     'weights': weights,  # N x num_tickers
     'action': ...
   })
-  results_df.to_parquet('data/backtest/results.parquet')
+  results_df.to_parquet('artifacts/backtest/results.parquet')
   
   return {sharpe, max_dd, ...}
 ```
 
-- [ ] Generate plots (Plotly or matplotlib):
-  - Cumulative value: agent vs baselines
-  - Drawdown over time
-  - Sector allocation heatmap (date × sector)
-  - Return distribution histogram
-  - Weights timeline (stacked bar chart)
-- [ ] Save plots to `data/backtest/plots/`
+- [x] Plots: cumulative value, drawdown, return distribution, holdings, sector allocation — done in `src/visualizations/agent_performance.ipynb` / `agent_vs_benchmarks.ipynb`, not `evaluate.py` (static HTML export was redundant with the notebooks, removed 2026-07-09)
 - [ ] Comparative table: agent vs 3 baselines on all metrics
 
 ## Phase 4: Deployment & Inference
@@ -227,8 +221,8 @@ def predict_weights(agent, latest_features_df, n_tickers):
 - [ ] Cron hook (optional): Run daily after market close to generate next-day weights
 
 ### 4c. Model Management
-- [ ] Save final agent: `data/models/agent_final.pt` (+ metadata: train date, test sharpe, etc.)
-- [ ] Version control: git-track `data/models/agent_final.pt` (or use DVC if >100MB)
+- [ ] Save final agent: `artifacts/models/agent_final.pt` (+ metadata: train date, test sharpe, etc.)
+- [ ] Version control: git-track `artifacts/models/agent_final.pt` (or use DVC if >100MB)
 - [ ] Fallback: If agent inference fails, default to equal-weight portfolio
 
 ---

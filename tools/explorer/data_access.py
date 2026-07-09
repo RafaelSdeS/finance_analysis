@@ -29,10 +29,10 @@ COMPANY_INFO_PATH = ROOT / "data/raw/company_info/company_info.parquet"
 PROCESSED_PATH = ROOT / "data/processed/ml_dataset.parquet"
 TRAINING_PATH = ROOT / "data/processed/ml_dataset_training.parquet"
 TENSORS_PATH = ROOT / "data/processed/agent_tensors.npz"
-SCALER_PATH = ROOT / "data/models/feature_scaler.pkl"
-BACKTEST_DIR = ROOT / "data/backtest"
-LOGS_DIR = ROOT / "data/logs"
-ROLLING_EVAL_PATH = ROOT / "data/models/rolling_eval_results.json"
+SCALER_PATH = ROOT / "artifacts/models/feature_scaler.pkl"
+BACKTEST_DIR = ROOT / "artifacts/backtest"
+LOGS_DIR = ROOT / "artifacts/logs"
+ROLLING_EVAL_PATH = ROOT / "artifacts/models/rolling_eval_results.json"
 
 BACKTEST_SOURCES = {
     "Last window (test)": "results.parquet",
@@ -206,7 +206,7 @@ def load_rolling_eval() -> dict | None:
 def load_training_logs() -> pd.DataFrame:
     """All trainer JSONL eval records, one row per checkpoint, tagged by run.
 
-    Layout: data/logs/agent/runs/<run_id>/{tag}.jsonl, tag = 'agent' or 'window_N'.
+    Layout: artifacts/logs/agent/runs/<run_id>/{tag}.jsonl, tag = 'agent' or 'window_N'.
     Records: {timesteps, val_sharpe, val_max_drawdown, val_final_value, timestamp}.
     """
     rows = []

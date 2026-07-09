@@ -68,7 +68,7 @@ PPO (Schulman et al., 2017) and its GAE advantage estimator (Schulman et al., 20
 
 ## Anchored rolling windows — the training strategy
 
-There is no single fixed train/val/test split. `generate_windows(dataset_start, dataset_end, train_years=10, test_years=2)` produces a sequence of **anchored** windows: every window's training span starts at the same `dataset_start` (2000-01-03) and simply grows, while each window's 2-year test span slides forward and never overlaps the previous window's test span. Concretely, with a ~26.5-year dataset this yields 8 non-overlapping test windows (2010–2012, 2012–2014, … through 2026-06-30). The **most recent** window is the production model (`agent_best.zip`); earlier windows are trained and evaluated too, namespaced (`window_{id}_best.zip`), purely to report how robust the strategy is across different historical periods (`data/backtest/walkforward_*`).
+There is no single fixed train/val/test split. `generate_windows(dataset_start, dataset_end, train_years=10, test_years=2)` produces a sequence of **anchored** windows: every window's training span starts at the same `dataset_start` (2000-01-03) and simply grows, while each window's 2-year test span slides forward and never overlaps the previous window's test span. Concretely, with a ~26.5-year dataset this yields 8 non-overlapping test windows (2010–2012, 2012–2014, … through 2026-06-30). The **most recent** window is the production model (`agent_best.zip`); earlier windows are trained and evaluated too, namespaced (`window_{id}_best.zip`), purely to report how robust the strategy is across different historical periods (`artifacts/backtest/walkforward_*`).
 
 Within a window, the tail 15% of its training span (`window_val_fraction`) is carved off chronologically as a validation set for early stopping — always the most recent portion of that window's train span, still strictly before its test span begins.
 
@@ -104,7 +104,7 @@ Note: `RESEARCH_REFERENCES.md` cites Calmar (1991) (return/max-drawdown) as a ta
 - **Market-cap weighted**: proportional to the last known market cap, forward-filled (never looking ahead) to avoid gaps.
 - **Inverse-volatility**: proportional to `1/trailing_60d_volatility` — a simple risk-parity-style construction following Clarke, De Silva & Thorley (2016) on volatility-targeting (already in `RESEARCH_REFERENCES.md`).
 
-Results are written to `data/backtest/metrics.json` (per-strategy metric dict), `data/backtest/results.parquet` (daily values + weight columns for tickers that ever exceed 0.1% weight), and four Plotly plots (cumulative value, drawdown, return distribution, top-10 weights over time).
+Results are written to `artifacts/backtest/metrics.json` (per-strategy metric dict) and `artifacts/backtest/results.parquet` (daily values + weight columns for tickers that ever exceed 0.1% weight). Plotting (cumulative value, drawdown, return distribution, top holdings, and more) lives in `src/visualizations/agent_performance.ipynb` and `agent_vs_benchmarks.ipynb`, reading directly from `results.parquet`.
 
 ## Walk-forward stitching
 

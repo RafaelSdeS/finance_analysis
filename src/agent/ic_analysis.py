@@ -16,7 +16,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +152,7 @@ def main():
                         help="Forward return horizons in trading days")
     parser.add_argument("--min-names", type=int, default=10,
                         help="Minimum valid names per date to include")
-    parser.add_argument("--out", type=Path, default=_PROJECT_ROOT / "data/backtest/ic_analysis.json",
+    parser.add_argument("--out", type=Path, default=_PROJECT_ROOT / "artifacts/backtest/ic_analysis.json",
                         help="Output JSON path")
     args = parser.parse_args()
 

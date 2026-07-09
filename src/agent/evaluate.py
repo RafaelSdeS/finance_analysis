@@ -13,7 +13,7 @@ Baselines:
 
 Usage:
     python -m src.agent.evaluate                             # uses agent_best.zip
-    python -m src.agent.evaluate --model data/models/agent_final.zip
+    python -m src.agent.evaluate --model artifacts/models/agent_final.zip
 """
 
 import argparse
@@ -219,46 +219,6 @@ def bova11_result(dates: pd.DatetimeIndex, config: AgentConfig) -> dict | None:
     }
 
 
-# --------------------------------------------------------------- plotting
-
-def make_plots(results: dict[str, dict], env: PortfolioEnv, plots_dir: Path) -> None:
-    import plotly.graph_objects as go
-
-    plots_dir.mkdir(parents=True, exist_ok=True)
-    agent = results["agent"]
-
-    # 1. Cumulative portfolio value: agent vs baselines
-    fig = go.Figure()
-    for name, res in results.items():
-        fig.add_trace(go.Scatter(x=res["dates"], y=res["values"][1:], name=name, mode="lines"))
-    fig.update_layout(title="Portfolio Value (test set)", yaxis_type="log",
-                      yaxis_title="Value (R$, log scale)")
-    fig.write_html(plots_dir / "cumulative_value.html")
-
-    # 2. Agent drawdown over time
-    v = agent["values"]
-    dd = (np.maximum.accumulate(v) - v) / np.maximum.accumulate(v)
-    fig = go.Figure(go.Scatter(x=agent["dates"], y=-dd[1:] * 100, fill="tozeroy", name="drawdown"))
-    fig.update_layout(title="Agent Drawdown (test set)", yaxis_title="Drawdown (%)")
-    fig.write_html(plots_dir / "drawdown.html")
-
-    # 3. Daily return distribution
-    fig = go.Figure(go.Histogram(x=agent["rewards"] * 100, nbinsx=100))
-    fig.update_layout(title="Agent Daily Log Returns (test set)", xaxis_title="Return (%)")
-    fig.write_html(plots_dir / "return_distribution.html")
-
-    # 4. Weights timeline: top-10 average holdings, stacked
-    mean_w = agent["weights"].mean(axis=0)
-    top = np.argsort(mean_w)[::-1][:10]
-    fig = go.Figure()
-    for i in top:
-        fig.add_trace(go.Scatter(x=agent["dates"], y=agent["weights"][:, i] * 100,
-                                 name=str(env.tickers[i]), stackgroup="w"))
-    fig.update_layout(title="Agent Weights — Top 10 Holdings", yaxis_title="Weight (%)")
-    fig.write_html(plots_dir / "weights_timeline.html")
-
-    logger.info("Plots saved → %s", plots_dir)
-
 
 # --------------------------------------------------------------- main
 
@@ -303,7 +263,7 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
     logger.info("=" * 78)
     logger.info("\n%s", table.round(4).to_string())
 
-    # Persist: metrics.json + results.parquet + plots
+    # Persist: metrics.json + results.parquet (viz lives in src/visualizations/*.ipynb)
     config.backtest_dir.mkdir(parents=True, exist_ok=True)
     with open(config.backtest_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
@@ -328,13 +288,12 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
     out.to_parquet(config.backtest_dir / "results.parquet", index=False)
     logger.info("Saved metrics.json + results.parquet → %s", config.backtest_dir)
 
-    make_plots(results, env, config.backtest_dir / "plots")
     return metrics
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Backtest agent vs baselines on test set")
-    parser.add_argument("--model", type=Path, default=Path("data/models/agent_best.zip"))
+    parser.add_argument("--model", type=Path, default=DEFAULT_CONFIG.model_dir / "agent_best.zip")
     parser.add_argument("--online", action="store_true", help="Run online retraining backtest instead of frozen model")
     parser.add_argument("--retrain-every-days", type=int, default=63, help="Retrain every N days (default: 63)")
     parser.add_argument("--retrain-timesteps", type=int, default=20_000, help="Timesteps per retrain (default: 20,000)")

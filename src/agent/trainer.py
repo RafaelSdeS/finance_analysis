@@ -11,10 +11,10 @@ Per window: trains on the train split, periodically evaluates on the val
 split (deterministic rollout → Sharpe of excess return over equal-weight),
 checkpoints, logs JSONL, and stops early when that excess-over-equal-weight
 Sharpe degrades for `early_stopping_patience` consecutive evaluations. Each
-invocation trains all windows under its own `data/models/runs/<session_id>/`
+invocation trains all windows under its own `artifacts/models/runs/<session_id>/`
 scratch directory (see `rolling_eval.run_rolling_eval()`); the most recent
 window's model (`agent_best.zip`/`agent_final.zip`) is then promoted to the
-stable top-level `data/models/` (the production model); earlier windows stay
+stable top-level `artifacts/models/` (the production model); earlier windows stay
 namespaced `window_{id}_best.zip`/`window_{id}_final.zip` inside the run dir.
 
 Usage:

@@ -131,7 +131,7 @@ for i, row in consensus.head(20).iterrows():
 # ============================================================================
 # Save results
 # ============================================================================
-output_path = Path("data/models/feature_importance_analysis.json")
+output_path = Path("artifacts/models/feature_importance_analysis.json")
 output_path.parent.mkdir(parents=True, exist_ok=True)
 
 results = {

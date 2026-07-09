@@ -229,10 +229,10 @@ window's test span, where the model has observations it was never trained on.
     test_end = pd.Timestamp(DEFAULT_CONFIG.test_end).date()
     infer_date = st.date_input("Date", test_end, min_value=test_start, max_value=test_end)
 
-    models_dir = ROOT / "data/models"
+    models_dir = ROOT / "artifacts/models"
     models = sorted(models_dir.glob("**/*.zip"))
     if not models:
-        st.error("No trained models in data/models/. Train first: `python -m src.agent.trainer`")
+        st.error("No trained models in artifacts/models/. Train first: `python -m src.agent.trainer`")
         model_path = None
     else:
         # Top-level agent_best.zip is the production model when it exists; otherwise pick

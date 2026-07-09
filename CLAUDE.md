@@ -64,7 +64,7 @@ python -m src.agent.trainer --train-years 2 --test-years 1 --timesteps 2048 --un
 python -m src.agent.ranker_baseline   # supervised HistGradientBoosting, daily rank-IC on held-out tickers
 
 # Backtest vs equal-weight / market-cap / inv-vol baselines (uses the most recent window's test split)
-python -m src.agent.evaluate --model data/models/agent_best.zip
+python -m src.agent.evaluate --model artifacts/models/agent_best.zip
 
 # Online retraining: continuous rollout with trailing-window fine-tuning every N days
 # Retrain every 63 trading days on the last ~3 years of data, with revert-if-worse guard
@@ -78,7 +78,7 @@ python -m src.agent.run_allocation --date 2026-06-29 --format csv
 
 **Note on throughput optimization (July 9, 2026):** Benchmark (`tools/bench_training_speed.py`) revealed **n_envs=16, batch_size=512, n_epochs=20** is the recommended config on 20-core hardware: 4,454 steps/sec (~41% faster than previous default of n_envs=8, batch_size=64, n_epochs=10). Config change: DummyVecEnv (in-process, shared tensors) beats SubprocVecEnv (multiprocess IPC overhead); batch_size=512 balances GPU launch efficiency with safety margin; n_epochs=20 maintains optimization intensity despite 2× larger rollout buffer. Default `config.py` updated; no CLI changes needed.
 
-**Outputs:** each `trainer.py` invocation trains all windows under its own scratch dir `data/models/runs/<session_id>/{window_{id},agent}_{best,final}.zip` (checkpoints deleted once a window finishes); the most recent window's model is then promoted to the stable, unmoving production path `data/models/agent_{best,final}.zip` (what `evaluate.py`/`infer.py`/`run_allocation.py` default to); scaler `data/models/feature_scaler.pkl` (one per rolling window); online-retraining artifacts `data/models/online/agent_online_*.{zip,pkl}`; env tensors `data/processed/agent_tensors.npz` ([6568 dates × 51 tickers × 19 features] + mask, when using `--universe-size 50`); backtest `data/backtest/{metrics.json,results.parquet}` + `plots/*.html`; stitched multi-window walk-forward `data/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `data/allocations/allocation_YYYY-MM-DD.{csv,json}`.
+**Outputs:** each `trainer.py` invocation trains all windows under its own scratch dir `artifacts/models/runs/<session_id>/{window_{id},agent}_{best,final}.zip` (checkpoints deleted once a window finishes); the most recent window's model is then promoted to the stable, unmoving production path `artifacts/models/agent_{best,final}.zip` (what `evaluate.py`/`infer.py`/`run_allocation.py` default to); scaler `artifacts/models/feature_scaler.pkl` (one per rolling window); online-retraining artifacts `artifacts/models/online/agent_online_*.{zip,pkl}`; env tensors `data/processed/agent_tensors.npz` ([6568 dates × 51 tickers × 19 features] + mask, when using `--universe-size 50`); backtest `artifacts/backtest/{metrics.json,results.parquet}` (viz in `src/visualizations/*.ipynb`); stitched multi-window walk-forward `artifacts/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `artifacts/allocations/allocation_YYYY-MM-DD.{csv,json}`.
 
 ### Utilities
 
@@ -139,7 +139,7 @@ data/processed/ml_dataset.parquet  (one row per ticker+date)
         ↓ Stage 3
 PortfolioEnv (gymnasium) → PPO trainer → evaluate vs baselines
         ↓
-data/backtest/results.parquet, data/allocations/*.csv
+artifacts/backtest/results.parquet, artifacts/allocations/*.csv
 ```
 
 ### Key Modules
@@ -173,7 +173,7 @@ data/backtest/results.parquet, data/allocations/*.csv
 | `env.py` | PortfolioEnv: masked time-varying universe, masked-softmax action, excess-return reward (net of market mean), transaction-cost term; cached load+normalization for online training |
 | `metrics.py` | Sharpe, Sortino, max drawdown, win rate, max_weight, avg_daily_turnover (shared by trainer + evaluator) |
 | `trainer.py` | SB3 PPO per window, val-Sharpe eval callback, JSONL logging, checkpoints, early stopping; `main()` = sole rolling-window training CLI |
-| `evaluate.py` | Backtest vs 3 baselines, metrics.json, Plotly plots; supports both anchored-window and continuous-rollout backtests |
+| `evaluate.py` | Backtest vs 3 baselines, metrics.json, results.parquet (plotting lives in `src/visualizations/*.ipynb`); supports both anchored-window and continuous-rollout backtests |
 | `infer.py` | `predict_weights(date)` reusing env obs pipeline; equal-weight fallback |
 | `run_allocation.py` | Daily CLI: weights + sector → CSV/JSON |
 | `rolling_eval.py` | Window training/eval orchestration (`trainer.py`); online continuous-rollout backtest with trailing-window fine-tuning; walk-forward stitching; checkpoint resume support |
@@ -182,7 +182,7 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 
 ### Key Design Decisions (Stage 3)
 
-- **Anchored rolling windows, never a fixed split:** training always partitions the dataset into anchored windows (`config.generate_windows()`; default 8 windows, train_years=10, test_years=2, train always starts at `dataset_start`, test slides forward). Each window's train span is tail-carved (`window_val_fraction`, default 15%) into train/val for early stopping; its test span is untouched. The MOST RECENT window is the production model (`agent_best.zip`) and `DEFAULT_CONFIG`'s split; earlier windows are namespaced (`window_{id}_best.zip`) and exist for robustness reporting (`data/backtest/walkforward_*`). There is no flag to opt back into a single fixed split — `python -m src.agent.trainer` always trains this way.
+- **Anchored rolling windows, never a fixed split:** training always partitions the dataset into anchored windows (`config.generate_windows()`; default 8 windows, train_years=10, test_years=2, train always starts at `dataset_start`, test slides forward). Each window's train span is tail-carved (`window_val_fraction`, default 15%) into train/val for early stopping; its test span is untouched. The MOST RECENT window is the production model (`agent_best.zip`) and `DEFAULT_CONFIG`'s split; earlier windows are namespaced (`window_{id}_best.zip`) and exist for robustness reporting (`artifacts/backtest/walkforward_*`). There is no flag to opt back into a single fixed split — `python -m src.agent.trainer` always trains this way.
 - **Train-only scaler:** fit StandardScaler on the FIRST window's train span only (earliest of all windows' train_end, so it can never leak future data into any window's test), apply to val/test/inference; save to `feature_scaler.pkl` (no leakage).
 - **State:** all tickers' 40 normalized features (stationary/relative only — raw OHLC dropped; incl. `has_fundamentals` flag so the agent can tell "no filing yet" from "average company") + per-ticker activity mask + previous weights (for turnover calculation) concatenated → 280×40 + 280 + 280 = **11,760-dim**. Runtime NaN → 0 (mean imputation); dataset on disk keeps honest NaNs.
 - **Action:** temperature-scaled masked softmax over full 280-ticker universe: `weights = softmax(action × logit_scale)`, `logit_scale=10` (279 stocks + CASH; every ticker with ≥252 rows → no survivorship bias). Inactive tickers → −∞ → weight 0; active weights sum to 1. No shorting. The temperature is essential: at scale 1 PPO's trust region (`target_kl`) limits logit drift to ~0.007/update, so the policy stays frozen at the uniform (= equal-weight) softmax init. Conversion lives in `env.action_to_weights()` (shared by `step()` and `infer.py`); `evaluate.py` baselines pre-divide their log-weights by the scale.
@@ -213,7 +213,7 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 - **BCB series:** selic=11 (daily), cdi=12, ipca=433 — **NOT 432** (that's the annual meta target).
 - **Benchmark:** BOVA11 (IBOV proxy ETF) collected automatically; prices only.
 - **Company info:** BolsAI-only (CVM metadata, rarely changes); refresh via `--mode full_scale` when new IPOs appear.
-- **Checkpoints/logs** (not git-tracked): Stage 1 `data/checkpoints/{mode}/`, `data/logs/collection/collection-*.log`; Stage 3 training sessions `data/logs/agent/runs/<session_id>/{train.log,{tag}.jsonl}`; standalone `evaluate.py` runs `data/logs/agent/evaluate/evaluate_<run_id>.log`.
+- **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`; Stage 3 training sessions `artifacts/logs/agent/runs/<session_id>/{train.log,{tag}.jsonl}`; standalone `evaluate.py` runs `artifacts/logs/agent/evaluate/evaluate_<run_id>.log`.
 - **Paths:** absolute via `Path(__file__).resolve().parents[N]`; always run from project root.
 
 ## Data on Disk

@@ -29,7 +29,7 @@ from src.agent.config import AgentConfig, DEFAULT_CONFIG, generate_windows, wind
 logger = logging.getLogger(__name__)
 
 TENSORS_PATH = "data/processed/agent_tensors.npz"
-SCALER_PATH = "data/models/feature_scaler.pkl"
+SCALER_PATH = "artifacts/models/feature_scaler.pkl"
 MIN_ROWS_PER_TICKER = 252  # ~1 trading year; drops stub listings
 
 

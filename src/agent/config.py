@@ -56,9 +56,9 @@ class AgentConfig:
 
     # ===== Data & Paths =====
     data_dir: Path = _PROJECT_ROOT / "data/processed"
-    model_dir: Path = _PROJECT_ROOT / "data/models"
-    backtest_dir: Path = _PROJECT_ROOT / "data/backtest"
-    log_dir: Path = _PROJECT_ROOT / "data/logs"
+    model_dir: Path = _PROJECT_ROOT / "artifacts/models"
+    backtest_dir: Path = _PROJECT_ROOT / "artifacts/backtest"
+    log_dir: Path = _PROJECT_ROOT / "artifacts/logs"
 
     dataset_path: Path = _PROJECT_ROOT / "data/processed/ml_dataset_training.parquet"
 
@@ -95,11 +95,11 @@ class AgentConfig:
     price_features: list[str] = field(
         default_factory=lambda: [
             "returns",  # Computed from prices; stationary. Hard dependency: data_pipeline.py needs this exact name to build the returns tensor — never remove.
-            # "volume",
+            "volume",
             # "rsi_14",
-            # "volatility_20d",
+            "volatility_20d",
             # "volatility_60d",
-            # "drawdown",
+            "drawdown",
             # "momentum_vs_market_1m",
             "momentum_vs_market_3m",  # RF rank 3
             # "momentum_vs_market_12m",

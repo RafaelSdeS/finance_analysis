@@ -43,7 +43,7 @@ def main() -> None:
     print(f"✓ historical date: requested {mid_test_date} → resolved {w2.attrs['date']}")
 
     # --- 3. Fallback: nonexistent model → equal weight, no crash ---
-    w3 = predict_weights(model_path=Path("data/models/DOES_NOT_EXIST.zip"))
+    w3 = predict_weights(model_path=Path("artifacts/models/DOES_NOT_EXIST.zip"))
     assert "FALLBACK" in w3.attrs["source"], "fallback not triggered"
     assert abs(w3["weight"].sum() - 1.0) < 1e-6
     # equal weight: all active tickers get identical weight

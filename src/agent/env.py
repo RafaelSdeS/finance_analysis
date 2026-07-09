@@ -9,7 +9,7 @@ Reward: daily excess log return vs equal-weight (variance-reduced training signa
         info["log_return"] carries absolute portfolio log return for backtest metrics.
 
 Prerequisite: run `python -m src.agent.data_pipeline` once to build
-data/processed/agent_tensors.npz and data/models/feature_scaler.pkl.
+data/processed/agent_tensors.npz and artifacts/models/feature_scaler.pkl.
 """
 
 import logging

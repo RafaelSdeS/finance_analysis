@@ -69,7 +69,6 @@ def compute_ranker_ic(df: pd.DataFrame, horizon: int = 21):
 
     X = df_valid[candidates].values
     y = df_valid["fwd_ret"].values
-    dates = df_valid["trade_date"].values
 
     # Filter to valid features
     X_clean = []
@@ -90,7 +89,6 @@ def compute_ranker_ic(df: pd.DataFrame, horizon: int = 21):
     split_idx = len(X_clean) // 2
     X_train, X_test = X_clean[:split_idx], X_clean[split_idx:]
     y_train, y_test = y[:split_idx], y[split_idx:]
-    dates_test = dates[split_idx:]
 
     logger.info(f"Train: {len(X_train)} rows, Test: {len(X_test)} rows")
 
@@ -143,7 +141,7 @@ def compute_ranker_ic(df: pd.DataFrame, horizon: int = 21):
 def main():
     parser = argparse.ArgumentParser(description="Supervised ranker baseline")
     parser.add_argument("--dataset", type=Path, default=_PROJECT_ROOT / "data/processed/ml_dataset.parquet")
-    parser.add_argument("--out", type=Path, default=_PROJECT_ROOT / "data/backtest/ranker_metrics.json")
+    parser.add_argument("--out", type=Path, default=_PROJECT_ROOT / "artifacts/backtest/ranker_metrics.json")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")

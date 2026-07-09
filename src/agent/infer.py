@@ -18,7 +18,7 @@ from src.agent.env import PortfolioEnv
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL_PATH = Path("data/models/agent_best.zip")
+DEFAULT_MODEL_PATH = DEFAULT_CONFIG.model_dir / "agent_best.zip"
 
 
 def predict_weights(

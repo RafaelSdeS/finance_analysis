@@ -50,7 +50,7 @@ window (`agent` = the production/most-recent window, `window_N` = earlier window
     )
     logs = ui.training_logs_df()
     if len(logs) == 0:
-        st.info("No training logs found in data/logs/agent/runs/*/*.jsonl — train first.")
+        st.info("No training logs found in artifacts/logs/agent/runs/*/*.jsonl — train first.")
     else:
         runs = sorted(logs["run"].unique())
         default_runs = [r for r in runs if r.startswith("agent")][-2:] or runs[-2:]

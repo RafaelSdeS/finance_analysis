@@ -59,11 +59,8 @@ def print_stats():
 
 
 def main():
-    p = argparse.ArgumentParser(description="Audit collected raw data")
-    p.add_argument("--mode", choices=["prototype", "full_scale"], default="prototype",
-                   help="Informational only — stats always scan all files in data/raw/")
-    args = p.parse_args()
-    print(f"=== data audit  mode={args.mode}  {datetime.now():%Y-%m-%d %H:%M} ===")
+    argparse.ArgumentParser(description="Audit collected raw data").parse_args()
+    print(f"=== data audit  {datetime.now():%Y-%m-%d %H:%M} ===")
     print_stats()
     print()
 

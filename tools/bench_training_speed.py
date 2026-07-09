@@ -3,7 +3,7 @@
 
 Each variant runs as its own subprocess (OOM-isolated — a killed variant is recorded
 and skipped, not fatal to the run) that imports trainer.train() directly (never the
-CLI, so scratch runs never touch data/models/agent_{best,final}.zip). Prints each
+CLI, so scratch runs never touch artifacts/models/agent_{best,final}.zip). Prints each
 variant's row as it completes, then a final table sorted by fps.
 
 Measures:

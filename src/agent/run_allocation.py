@@ -3,7 +3,7 @@ Daily allocation entry point.
 
 Loads the trained agent, predicts portfolio weights for the requested date
 (default: latest available), enriches with sector info, and writes CSV or
-JSON to data/allocations/.
+JSON to artifacts/allocations/.
 
 Usage:
     python -m src.agent.run_allocation
@@ -23,7 +23,7 @@ from src.agent.infer import DEFAULT_MODEL_PATH, predict_weights
 
 logger = logging.getLogger(__name__)
 
-OUTPUT_DIR = Path("data/allocations")
+OUTPUT_DIR = Path(__file__).resolve().parents[2] / "artifacts/allocations"
 
 
 def main() -> None:
