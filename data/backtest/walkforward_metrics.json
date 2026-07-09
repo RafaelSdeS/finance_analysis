@@ -1,14 +1,14 @@
 {
   "agent": {
-    "cumulative_return": 5.166170625,
-    "annualized_return": 0.12256195454707242,
-    "sharpe": 0.28764384095827367,
-    "sortino": 0.4305822138686605,
-    "max_drawdown": 0.7053811593819236,
-    "win_rate": 0.5031525851197982,
+    "cumulative_return": 3.7718478125,
+    "annualized_return": 0.10442106957838271,
+    "sharpe": 0.6483558878417289,
+    "sortino": 0.8975993365113137,
+    "max_drawdown": 0.3646786464471365,
+    "win_rate": 0.5225725094577554,
     "n_days": 3965,
-    "gross_sharpe": 0.29402020709853166,
-    "annualized_cost_drag": 0.0025579821524491183
+    "gross_sharpe": 0.6563294227071621,
+    "annualized_cost_drag": 0.0012219149961154926
   },
   "equal_weight": {
     "cumulative_return": 6.9638575,
@@ -22,25 +22,25 @@
     "annualized_cost_drag": 0.001478949788545169
   },
   "market_cap": {
-    "cumulative_return": 6.7187525,
-    "annualized_return": 0.1386992836777008,
-    "sharpe": 0.6083283065820422,
-    "sortino": 0.8033100261421523,
-    "max_drawdown": 0.40669348795565585,
-    "win_rate": 0.5228247162673392,
-    "n_days": 3965,
-    "gross_sharpe": 0.6127749033172049,
-    "annualized_cost_drag": 0.0009398128033896773
-  },
-  "inv_vol": {
-    "cumulative_return": 5.540675,
-    "annualized_return": 0.12677655682054523,
-    "sharpe": 0.6162327090142519,
-    "sortino": 0.790730688598406,
-    "max_drawdown": 0.417038874322099,
+    "cumulative_return": 6.91726875,
+    "annualized_return": 0.14053853062341348,
+    "sharpe": 0.6388949614828878,
+    "sortino": 0.836770984196085,
+    "max_drawdown": 0.40669345712507793,
     "win_rate": 0.5261034047919294,
     "n_days": 3965,
-    "gross_sharpe": 0.6279113995566836,
-    "annualized_cost_drag": 0.0022432095495015644
+    "gross_sharpe": 0.643528579248128,
+    "annualized_cost_drag": 0.0009443161693022409
+  },
+  "inv_vol": {
+    "cumulative_return": 6.047813125,
+    "annualized_return": 0.13213715255836367,
+    "sharpe": 0.6439100647576312,
+    "sortino": 0.8297256214870159,
+    "max_drawdown": 0.41703885802733814,
+    "win_rate": 0.5263556116015132,
+    "n_days": 3965,
+    "gross_sharpe": 0.6554085558628596,
+    "annualized_cost_drag": 0.002196116331375461
   }
 }
