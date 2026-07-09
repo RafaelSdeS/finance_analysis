@@ -35,7 +35,7 @@ from src.agent.evaluate import (
     agent_policy, agent_vs_equal_weight, equal_weight_policy, market_cap_policy, inv_vol_policy,
     selic_policy, rollout
 )
-from src.agent.metrics import compute_all
+from src.agent.metrics import compute_all, hac_mean_test, block_bootstrap_mean_ci
 from src.agent.model_provenance import write_sidecar
 from src.agent.trainer import train
 
@@ -759,21 +759,42 @@ def finalize_and_report(results: list[WindowResult], config: AgentConfig) -> dic
 
     logger.info(f"\nAgent beats equal-weight: {agent_wins}/{len(results)} windows")
 
-    # t-test on concatenated daily excess returns (agent − equal-weight)
+    # Significance testing on concatenated daily excess returns (agent − equal-weight).
+    # Daily observations within a rebalance window (rebalance_interval_days) are strongly
+    # autocorrelated (drifting weights, shared cost/reward shock), so a naive t-test that
+    # treats each day as an independent draw badly overstates the effective sample size and
+    # over-rejects H0 (verified: ~66% false-positive rate on synthetic AR(1) data with true
+    # mean=0, vs the nominal 5% — see tests/agent/test_significance_stats.py). Report the
+    # naive number for continuity, but treat HAC/bootstrap as the trustworthy verdict.
+    significance = None
     if daily_excess_all:
         daily_excess = np.array(daily_excess_all)
-        t_stat, p_value = stats.ttest_1samp(daily_excess, popmean=0.0)
-        logger.info(f"\nRegime-neutral t-test (daily agent − equal-weight):")
+        naive_t_stat, naive_p_value = stats.ttest_1samp(daily_excess, popmean=0.0)
+        lag = config.rebalance_interval_days
+        hac = hac_mean_test(daily_excess, lag=lag)
+        boot = block_bootstrap_mean_ci(daily_excess, block_size=lag, n_resamples=2000)
+        significance = {
+            "naive_t_stat": float(naive_t_stat), "naive_p_value": float(naive_p_value),
+            "hac_t_stat": hac["t_stat"], "hac_p_value": hac["p_value"], "hac_lag": lag,
+            "bootstrap_ci_low": boot["ci_low"], "bootstrap_ci_high": boot["ci_high"],
+        }
+        logger.info(f"\nRegime-neutral significance test (daily agent − equal-weight):")
         logger.info(f"  mean excess return: {daily_excess.mean():+.6f}")
         logger.info(f"  std excess return:  {daily_excess.std():+.6f}")
-        logger.info(f"  t-stat={t_stat:+.3f}, p-value={p_value:.4f} (H0: mean=0)")
-        logger.info(f"  {'Statistically significant' if p_value < 0.05 else 'NOT significant'} at α=0.05")
+        logger.info(f"  naive t-test:  t={naive_t_stat:+.3f}, p={naive_p_value:.4f} "
+                    f"(ignores autocorrelation — historically over-rejects, don't trust alone)")
+        logger.info(f"  HAC t-test:    t={hac['t_stat']:+.3f}, p={hac['p_value']:.4f} "
+                    f"(Newey-West, lag={lag} — trustworthy)")
+        logger.info(f"  block bootstrap 95% CI on mean: [{boot['ci_low']:+.6f}, {boot['ci_high']:+.6f}]"
+                    f"{' (excludes 0)' if not (boot['ci_low'] <= 0 <= boot['ci_high']) else ' (includes 0)'}")
+        logger.info(f"  Verdict (HAC): {'Statistically significant' if hac['p_value'] < 0.05 else 'NOT significant'} at α=0.05")
 
     results_file = config.model_dir / "rolling_eval_results.json"
     with open(results_file, "w") as f:
         json.dump(
             {
                 "summary": summary,
+                "significance": significance,
                 "windows": [
                     {
                         "window_id": r.window_id,

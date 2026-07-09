@@ -135,6 +135,79 @@ def deflated_sharpe_ratio(log_returns: np.ndarray, trial_sharpes: np.ndarray) ->
     return probabilistic_sharpe_ratio(log_returns, benchmark_sr=benchmark)
 
 
+def hac_mean_test(x: np.ndarray, lag: int) -> dict:
+    """Newey-West HAC t-test for H0: mean(x) == 0, robust to autocorrelation
+    up to `lag` periods (Bartlett kernel). Use this instead of a naive
+    scipy.stats.ttest_1samp whenever `x` has serial correlation — e.g. daily
+    excess returns under N-day rebalancing, which correlate within each
+    N-day block. The naive test treats every day as an independent draw and
+    understates the true standard error, over-rejecting H0.
+
+    Returns dict with mean, se (HAC standard error of the mean), t_stat,
+    p_value (two-sided, normal approximation — standard for HAC/asymptotic
+    tests), and n.
+    """
+    r = np.asarray(x, dtype=np.float64)
+    n = len(r)
+    if n < 3:
+        return {"mean": 0.0, "se": float("nan"), "t_stat": 0.0, "p_value": 1.0, "n": n}
+
+    xbar = r.mean()
+    demeaned = r - xbar
+    gamma0 = float(np.dot(demeaned, demeaned) / n)
+
+    lag = max(0, min(lag, n - 1))
+    var = gamma0
+    for k in range(1, lag + 1):
+        gamma_k = float(np.dot(demeaned[k:], demeaned[:-k]) / n)
+        weight = 1.0 - k / (lag + 1)  # Bartlett kernel
+        var += 2 * weight * gamma_k
+
+    se_mean = np.sqrt(max(var, 0.0) / n)
+    if se_mean < EPS:
+        return {"mean": float(xbar), "se": 0.0, "t_stat": 0.0, "p_value": 1.0, "n": n}
+
+    t_stat = xbar / se_mean
+    p_value = float(2 * (1 - scipy_stats.norm.cdf(abs(t_stat))))
+    return {"mean": float(xbar), "se": float(se_mean), "t_stat": float(t_stat), "p_value": p_value, "n": n}
+
+
+def block_bootstrap_mean_ci(
+    x: np.ndarray, block_size: int, n_resamples: int = 2000, ci: float = 0.95, seed: int = 0,
+) -> dict:
+    """Moving-block bootstrap confidence interval on mean(x).
+
+    Resamples overlapping blocks of length `block_size` (with replacement)
+    to reconstruct series of the original length, preserving within-block
+    autocorrelation structure that an i.i.d. bootstrap would destroy. Use
+    alongside hac_mean_test for a second, non-parametric read on significance.
+    """
+    r = np.asarray(x, dtype=np.float64)
+    n = len(r)
+    if n < 3:
+        return {"mean": 0.0, "ci_low": 0.0, "ci_high": 0.0, "n_resamples": 0}
+
+    block_size = max(1, min(block_size, n))
+    n_blocks_needed = int(np.ceil(n / block_size))
+    starts = np.arange(n - block_size + 1)  # valid block start positions
+    rng = np.random.default_rng(seed)
+
+    boot_means = np.empty(n_resamples, dtype=np.float64)
+    for i in range(n_resamples):
+        chosen = rng.choice(starts, size=n_blocks_needed, replace=True)
+        sample = np.concatenate([r[s:s + block_size] for s in chosen])[:n]
+        boot_means[i] = sample.mean()
+
+    alpha = (1 - ci) / 2
+    ci_low, ci_high = np.quantile(boot_means, [alpha, 1 - alpha])
+    return {
+        "mean": float(r.mean()),
+        "ci_low": float(ci_low),
+        "ci_high": float(ci_high),
+        "n_resamples": n_resamples,
+    }
+
+
 def effective_n_positions(weights: np.ndarray) -> float:
     """Effective number of positions (1/HHI) averaged over the period."""
     w = np.asarray(weights, dtype=np.float64)
