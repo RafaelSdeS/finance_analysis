@@ -15,12 +15,12 @@
     "max_weight": 0.10312172025442123,
     "avg_daily_turnover": 0.11530431356732151,
     "probabilistic_sharpe_ratio": 0.779237838913291,
-    "random_baseline_sharpe_mean": 0.5191161456886884,
-    "random_baseline_sharpe_std": 0.24260216293743353,
-    "agent_percentile_vs_random": 70.0,
-    "random_baseline_excess_sharpe_mean": -0.1698965062449819,
-    "random_baseline_excess_sharpe_std": 0.2540461984501877,
-    "agent_percentile_vs_random_excess": 60.0
+    "random_baseline_sharpe_mean": 0.5195663146869941,
+    "random_baseline_sharpe_std": 0.2185141192558757,
+    "agent_percentile_vs_random": 55.50000000000001,
+    "random_baseline_excess_sharpe_mean": -0.1689274577520763,
+    "random_baseline_excess_sharpe_std": 0.2259959959523295,
+    "agent_percentile_vs_random_excess": 54.0
   },
   "equal_weight": {
     "cumulative_return": 0.20397703125,

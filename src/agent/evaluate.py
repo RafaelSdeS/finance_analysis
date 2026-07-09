@@ -338,7 +338,10 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
     else:
         logger.info("No rolling_eval_results.json found — skipping deflated Sharpe (needs multi-window trial record)")
 
-    random_stats = random_baseline_stats(env, selic_log_rets=selic_log_rets, n_samples=20)
+    # n=200 (was 20): 20 samples gives 5pp percentile granularity — too coarse to
+    # distinguish "45th percentile" from "50th percentile" with any confidence.
+    # Cheap enough to afford: ~1s for 200 rollouts on this env/universe size.
+    random_stats = random_baseline_stats(env, selic_log_rets=selic_log_rets, n_samples=200)
     metrics["agent"]["random_baseline_sharpe_mean"] = random_stats["mean"]
     metrics["agent"]["random_baseline_sharpe_std"] = random_stats["std"]
     metrics["agent"]["agent_percentile_vs_random"] = float(
