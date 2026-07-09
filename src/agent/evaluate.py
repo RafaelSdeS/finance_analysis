@@ -196,6 +196,33 @@ def selic_policy(env: PortfolioEnv, config: AgentConfig) -> Callable:
     return act
 
 
+def blend_policy(env: PortfolioEnv, cash_fraction: float) -> Callable:
+    """Static SELIC/equity blend: cash_fraction into CASH (earning SELIC), the rest
+    equal-weighted across active non-cash tickers, rebalanced every decision.
+
+    A fair, cash-aware baseline: unlike equal_weight/market_cap/inv_vol (which are
+    denied CASH entirely via _exclude_cash_from_weights), this holds the same
+    risk-free asset the agent has access to. If the agent can't beat a static blend
+    matching its own realized cash fraction, its cash allocation isn't skill — it's
+    just holding cash, which this replicates with zero learning.
+    """
+    cash_fraction = float(np.clip(cash_fraction, 0.0, 1.0))
+
+    def act(obs: np.ndarray, t: int) -> np.ndarray:
+        active = env.mask[t].astype(float)
+        active_noncash = _exclude_cash_from_weights(active, env)
+        w = np.zeros(len(env.tickers))
+        if "CASH" in env.tickers:
+            cash_idx = np.where(env.tickers == "CASH")[0][0]
+            w[cash_idx] = cash_fraction
+        if active_noncash.sum() > 0:
+            w += (1.0 - cash_fraction) * active_noncash / active_noncash.sum()
+        elif "CASH" in env.tickers:
+            w[cash_idx] = 1.0  # no active non-cash tickers (shouldn't happen): all cash
+        return _weights_to_logits(w, env.config.logit_scale)
+    return act
+
+
 def random_policy(env: PortfolioEnv, rng: np.random.Generator) -> Callable:
     """i.i.d. random logits each day — masking/softmax/costs still handled by
     env.step, same as every other policy here. A null baseline: the agent
@@ -295,14 +322,42 @@ def backtest(model_path: Path, config: AgentConfig = DEFAULT_CONFIG) -> dict:
             else:
                 logger.info("Confirmed: evaluating the newest trained window (window_id=%s)", latest_window_id)
 
+    # Roll the agent first: its realized mean CASH weight seeds the "agent-matched"
+    # blend baseline below (fair comparison — same cash fraction, zero learning).
+    agent_res = rollout(env, agent_policy(model))
+    results = {"agent": agent_res}
+
+    agent_cash_weight = None
+    if "CASH" in env.tickers:
+        cash_idx = int(np.where(env.tickers == "CASH")[0][0])
+        agent_cash_weight = float(agent_res["weights"][:, cash_idx].mean())
+        logger.info("Agent's realized mean CASH weight: %.1f%% (seeds blend_agent_matched)",
+                    agent_cash_weight * 100)
+
     policies = {
-        "agent": agent_policy(model),
         "equal_weight": equal_weight_policy(env),
         "market_cap": market_cap_policy(env, config),
         "inv_vol": inv_vol_policy(env),
         "selic": selic_policy(env, config),
+        "blend_25_selic": blend_policy(env, 0.25),
+        "blend_50_selic": blend_policy(env, 0.50),
+        "blend_75_selic": blend_policy(env, 0.75),
     }
-    results = {name: rollout(env, fn) for name, fn in policies.items()}
+    if agent_cash_weight is not None:
+        policies["blend_agent_matched"] = blend_policy(env, agent_cash_weight)
+
+    # "Beat your own teacher" baseline (M4.3): the BC-pretrain teacher has proven
+    # rank-IC, but nobody checks whether a 20-line heuristic on top of IT (top-quintile
+    # equal-weight) beats the full RL agent. If it does, RL is currently subtracting
+    # value over the thing it was warm-started from. Deferred import: bc_pretrain.py
+    # imports _weights_to_logits from this module, so importing it at module level
+    # here would be circular.
+    from src.agent.bc_pretrain import train_teacher, teacher_policy
+    train_env = PortfolioEnv(config, date_range="train")
+    teacher_model = train_teacher(train_env, seed=config.seed)
+    policies["ranker_top20pct"] = teacher_policy(env, teacher_model, top_frac=0.2)
+
+    results.update({name: rollout(env, fn) for name, fn in policies.items()})
     bova = bova11_result(results["agent"]["dates"], config)
     if bova is not None:
         results["bova11"] = bova
