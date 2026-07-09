@@ -123,38 +123,90 @@ def main() -> None:
     assert turnover2 < turnover1 * 0.1, f"repeated action should have low turnover: {turnover1:.4f} → {turnover2:.4f}"
     print(f"✓ reward penalty: turnover tracked correctly ({turnover1:.4f} → {turnover2:.4f})")
 
-    # --- 7. Uniform action (incl. CASH) yields zero excess reward against the
-    #        cash-aware benchmark: uniform weight w=1/n on every active ticker is
-    #        exactly a (1/n)-cash / (1-1/n)-EW-of-stocks blend, which matches its
-    #        own benchmark exactly (reward = log_return - ew_log_return, no longer
-    #        the whole story now that the benchmark is cash-aware -- see test 7b). ---
-    env_ew = PortfolioEnv(cfg, date_range="val")
-    env_ew.reset(seed=99)
+    # --- 7. First deployment decision (from the 100%-CASH reset state) is a real
+    #        timing call, scored against "what if I'd stayed in cash" -- NOT
+    #        reward-neutral. This is intentional (see test 7b's contrast: a
+    #        REPEATED decision that changes nothing IS reward-neutral). ---
+    env_deploy = PortfolioEnv(cfg, date_range="val")
+    env_deploy.reset(seed=99)
+    ew_action = np.zeros(len(env_deploy.tickers), dtype=np.float32)  # uniform incl. CASH
+    _, rew_deploy, _, _, info_deploy = env_deploy.step(ew_action)
+    assert np.isfinite(rew_deploy) and np.isfinite(info_deploy["log_return"])
+    print(f"✓ first deployment decision (cash→~equity) → reward={rew_deploy:.4f} "
+          f"(a real timing call vs the cash starting point, not forced to ~0)")
 
-    # Uniform action: all tickers (including CASH) get the same logit (softmax is uniform)
-    ew_action = np.zeros(len(env_ew.tickers), dtype=np.float32)
-    obs, rew, _, _, info = env_ew.step(ew_action)
-
-    # excess reward should be ≈ 0 (agent return ≈ its own cash-aware benchmark), maybe
-    # slightly negative due to cost (risk penalty ≈ 0 since excess ≈ 0)
-    assert rew < 0.01 * cfg.reward_scale, f"uniform action should yield ~0 excess reward, got {rew:.4f}"
-    assert np.isfinite(info["log_return"]), "log_return must be finite"
-    print(f"✓ excess reward model: uniform action → reward={rew:.5f} (cost drag only)")
-
-    # --- 7b. Cash-aware reward (M3.1): 100% CASH must ALSO yield ~0 reward now --
-    #         under the OLD equity-only-EW benchmark this would have been LARGE
-    #         POSITIVE reward during any market downturn (the "hiding pays" bug). ---
-    env_cash = PortfolioEnv(cfg, date_range="val")
-    env_cash.reset(seed=99)
-    cash_idx = np.where(env_cash._is_cash_mask)[0][0]
-    cash_action = np.full(len(env_cash.tickers), -100.0, dtype=np.float32)
+    # --- 7b. Cash-aware reward, previous-weight benchmark (M3.1, corrected):
+    #         a decision that changes NOTHING (repeats the prior allocation) must
+    #         net ~0 reward regardless of cash level -- no free lunch for static
+    #         positioning. Deterministic via mocked returns (private copies, not
+    #         the shared lru_cache) so the assertion doesn't depend on what the
+    #         real historical window happened to do. ---
+    env_static = PortfolioEnv(cfg, date_range="val")
+    env_static._simple_rets = env_static._simple_rets.copy()
+    env_static._ew_log_returns = env_static._ew_log_returns.copy()
+    env_static.reset(seed=1)
+    cash_idx = np.where(env_static._is_cash_mask)[0][0]
+    cash_action = np.full(len(env_static.tickers), -100.0, dtype=np.float32)
     cash_action[cash_idx] = 100.0  # near-argmax on CASH
-    _, rew_cash, _, _, info_cash = env_cash.step(cash_action)
-    assert abs(rew_cash) < 0.02 * cfg.reward_scale, (
-        f"100% CASH should yield ~0 reward under the cash-aware benchmark, got {rew_cash:.4f} "
-        "(if large and positive, the benchmark regressed to equity-only EW)"
+
+    N = cfg.rebalance_interval_days
+
+    def mock_scenario(env: PortfolioEnv, market_ret: float, cash_ret: float = 0.0005) -> None:
+        """Force every ticker's return over the NEXT decision window to `market_ret`
+        (so any equity allocation realizes exactly that return, matching the
+        benchmark's EW term by construction) except CASH, forced to `cash_ret`."""
+        idx = np.arange(env._t + 1, min(env._t + N + 1, len(env._ew_log_returns)))
+        env._simple_rets[idx, :] = market_ret
+        env._simple_rets[idx, cash_idx] = cash_ret
+        env._ew_log_returns[idx] = np.log1p(market_ret)
+
+    env_static.step(cash_action)  # decision 1: cash (reset)->cash, i.e. no real change
+    mock_scenario(env_static, market_ret=-0.05)  # force a severe mocked crash
+    _, rew_static, _, _, _ = env_static.step(cash_action)  # decision 2: repeat 100% CASH
+    assert abs(rew_static) < 0.02 * cfg.reward_scale, (
+        f"repeating an unchanged 100% CASH decision should net ~0 reward even during a "
+        f"mocked crash (no NEW timing information), got {rew_static:.4f}"
     )
-    print(f"✓ cash-aware reward: 100% CASH → reward={rew_cash:.5f} (was rewarded under the old equity-only benchmark)")
+    print(f"✓ static repeated CASH decision during a mocked crash → reward={rew_static:.5f} "
+          f"(no free lunch for an already-held position, even a lucky one)")
+
+    # --- 7c. A NEW, well-timed move into cash right before a mocked crash earns
+    #         clearly positive reward, and a NEW, well-timed move BACK into equity
+    #         right before a mocked rally (after that crash) also earns clearly
+    #         positive reward -- the previous-weight benchmark can still teach
+    #         genuine defensive timing in both directions (the whole point of the
+    #         fix). Each transition here is a real decision (prev != new), unlike
+    #         test 7b's repeated, unchanged decision. ---
+    env_timing = PortfolioEnv(cfg, date_range="val")
+    env_timing._simple_rets = env_timing._simple_rets.copy()
+    env_timing._ew_log_returns = env_timing._ew_log_returns.copy()
+    env_timing.reset(seed=1)
+    equity_action = np.zeros(len(env_timing.tickers), dtype=np.float32)
+    equity_action[cash_idx] = -100.0  # exclude cash, uniform over active stocks
+    env_timing.step(equity_action)  # establish a mostly-equity starting position
+
+    mock_scenario(env_timing, market_ret=-0.05)  # mocked crash ahead
+    _, rew_crash, _, _, _ = env_timing.step(cash_action)  # NEW decision: equity → cash
+    assert rew_crash > 0, f"moving into cash right before a mocked crash should be rewarded, got {rew_crash:.4f}"
+    print(f"✓ well-timed equity→cash move before a mocked crash → reward={rew_crash:+.4f} (rewarded)")
+
+    mock_scenario(env_timing, market_ret=0.05)  # mocked rally ahead
+    _, rew_reentry, _, _, _ = env_timing.step(equity_action)  # NEW decision: cash → equity
+    assert rew_reentry > 0, f"re-entering equity right before a mocked rally should be rewarded, got {rew_reentry:.4f}"
+    print(f"✓ well-timed cash→equity re-entry before a mocked rally → reward={rew_reentry:+.4f} (rewarded)")
+
+    # --- 7d. The mirror image: a NEW move into cash right before a mocked rally
+    #         (a bad call) earns clearly negative reward. ---
+    env_bad = PortfolioEnv(cfg, date_range="val")
+    env_bad._simple_rets = env_bad._simple_rets.copy()
+    env_bad._ew_log_returns = env_bad._ew_log_returns.copy()
+    env_bad.reset(seed=1)
+    env_bad.step(equity_action)  # establish a mostly-equity starting position
+
+    mock_scenario(env_bad, market_ret=0.05)  # mocked rally ahead
+    _, rew_bad, _, _, _ = env_bad.step(cash_action)  # NEW decision: equity → cash (bad call)
+    assert rew_bad < 0, f"moving into cash right before a mocked rally should be penalized, got {rew_bad:.4f}"
+    print(f"✓ badly-timed equity→cash move before a mocked rally → reward={rew_bad:+.4f} (penalized)")
 
     # --- 8. Identical-bounds envs share cached tensors (online-backtest memory fix) ---
     env_a = PortfolioEnv(cfg, date_range="train")

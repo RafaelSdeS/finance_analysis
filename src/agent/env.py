@@ -230,6 +230,12 @@ class PortfolioEnv(gym.Env):
         n_days = min(N, self.n_steps - self._t)  # partial final window
         weights = self.action_to_weights(action, self.mask[self._t])
 
+        # Capture the PRE-DECISION cash weight for the reward benchmark below —
+        # must read this before self._prev_weights is overwritten at the end of
+        # this call (it's what "not changing anything" this decision would mean).
+        cash_idx = int(np.where(self._is_cash_mask)[0][0])
+        prev_cash_weight = float(self._prev_weights[cash_idx])
+
         # One-shot rebalance cost (vs drifted prev_weights, day 1 only)
         traded = np.abs(weights - self._prev_weights)[~self._is_cash_mask].sum()
         transaction_cost = traded * (self.config.transaction_cost_bps / 10_000) * self.cost_scale
@@ -243,7 +249,6 @@ class PortfolioEnv(gym.Env):
         day_indices = np.arange(self._t + 1, self._t + n_days + 1)
         ret_vecs = self._simple_rets[day_indices]  # shape: (n_days, n_assets)
         ew_rets = self._ew_log_returns[day_indices]  # shape: (n_days,) — equity-only EW, log
-        cash_idx = int(np.where(self._is_cash_mask)[0][0])
 
         # Batch compute all portfolio returns at once: (n_days,) = (n_days, n_assets) @ (n_assets,)
         # but w drifts each day, so we need sequential iteration for the drift.
@@ -263,18 +268,22 @@ class PortfolioEnv(gym.Env):
             log_r = float(np.log1p(r_p))
             daily_log_rets[day_offset] = log_r
 
-            # Reward: excess return over a CASH-AWARE benchmark that holds the same
-            # cash fraction the agent currently holds (w[cash_idx], the weight going
-            # INTO this day, before today's return). This makes cash timing
-            # reward-neutral by construction: a policy that goes 100% cash gets
-            # benchmark == its own return (excess ≈ 0), and a policy that simply
-            # blends cash with equal-weight equity also nets ≈ 0. Reward only
-            # appears from deviating the EQUITY SLEEVE away from equal-weight —
-            # i.e. genuine cross-sectional stock selection, not carry or timing.
-            w_cash_t = float(w[cash_idx])
+            # Reward: excess return over a benchmark using the PRE-DECISION cash
+            # weight (prev_cash_weight, fixed for this whole window) rather than
+            # the weight this decision just chose. This rewards well-timed CHANGES
+            # in cash allocation (moving to cash right before a drop, or back to
+            # equity right before a rally both score correctly) while making
+            # repeated/static cash-holding reward-neutral once the position is no
+            # longer new (a decision that doesn't change anything compares itself
+            # to "not changing anything", so it nets to ≈0 -- no free lunch just
+            # for sitting in cash). Using the CURRENT decision's own weight instead
+            # (the earlier version of this fix) made ANY cash decision -- good or
+            # bad timing alike -- cancel out of the reward algebraically, since
+            # the benchmark and the return would always share the same cash
+            # fraction; see tests/agent/test_env_basic.py for the worked cases.
             ew_simple_t = float(np.expm1(ew_rets[day_offset]))  # equity-only EW, simple return
             selic_simple_t = float(r_vec[cash_idx])
-            benchmark_simple = w_cash_t * selic_simple_t + (1.0 - w_cash_t) * ew_simple_t
+            benchmark_simple = prev_cash_weight * selic_simple_t + (1.0 - prev_cash_weight) * ew_simple_t
             benchmark_log = float(np.log1p(max(benchmark_simple, -0.9999)))
 
             excess = log_r - benchmark_log
