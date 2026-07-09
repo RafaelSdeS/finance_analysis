@@ -121,13 +121,14 @@ class AgentConfig:
         default_factory=lambda: [
             # "pl",  # Price-to-Earnings (P/L in Portuguese)
             # "pvp",  # Price-to-Book (P/VP in Portuguese)
-            # "roe",
+            "roe",  # Return on Equity — IC 0.0744 at 21d (top-10)
             # "debt_equity",
-            # "roic",
-            "roa",  # Return on Assets — HIGH IC in ranker (0.0968 at 21d!)
-            # "net_margin",
+            "roic",  # Return on Invested Capital — IC 0.0745 at 21d (top-9)
+            "roa",  # Return on Assets — IC 0.0968 at 21d (top-1!)
+            "net_margin",  # IC 0.0921 at 21d (top-3!)
             # "gross_margin",
-            # "ebitda_margin",
+            "ebitda_margin",  # IC 0.0754 at 21d (top-8)
+            "ebit_margin",  # IC 0.0796 at 21d (top-5!)
             # "current_ratio",
             # "cash_ratio",
             # Growth features (YoY, not CAGR to avoid synthetic data)
@@ -140,22 +141,22 @@ class AgentConfig:
             # "roe_zscore_sector",
             # "debt_equity_zscore_sector",
             # Quality trends & signals
-            "f_score",  # Piotroski F-Score — quality metric, high IC in ranker baseline
+            "f_score",  # Piotroski F-Score — quality metric, high IC in ranker baseline (top-7, IC 0.0763)
             # "roe_trend_4q",
             # "margin_trend_4q",
             # "earnings_yield_vs_selic",
             # Dividend signals
-            "div_yield_12m",  # RF rank 2
+            "div_yield_12m",
             # "payout_ratio",
             # 1.0 once the ticker's first filing exists, else 0.0 — lets the
             # model tell "no data yet" apart from "average company" after
             # the env's NaN→0 (post-scaling mean) imputation. Not individually
             # RF-ranked (it's a flag, not a continuous signal) — commented out
-            # under the "top-15 only" rule; uncomment if this distinction
+            # under the "top-IC only" rule; uncomment if this distinction
             # turns out to matter for young/newly-listed tickers.
             # "has_fundamentals",
-            "days_since_fundamental",  # RF rank 11
-            "debt_trend_4q",  # RF rank 15
+            "days_since_fundamental",
+            # "debt_trend_4q",  # Removed; IC ranking not in top-15 at 21d
         ]
     )
 
