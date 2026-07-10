@@ -404,6 +404,8 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--universe-size", type=int, default=None, help="Filter to top N tickers by market cap (default: None = all)")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
     parser.add_argument("--n-envs", type=int, default=None, help="In-process envs batched through the policy (default: 8)")
+    parser.add_argument("--logit-scale", type=float, default=None, help="Softmax temperature scale on raw actions (default: 10.0)")
+    parser.add_argument("--seed", type=int, default=None, help="Random seed for PPO/env/numpy (default: 42)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
     parser.add_argument("--bc-pretrain", action="store_true",
                          help="Warm-start the policy via behavior cloning from a supervised ranker before PPO fine-tuning")
@@ -413,6 +415,11 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--detect-anomaly", action="store_true",
                          help="Enable torch.autograd anomaly detection to pinpoint the exact backward op "
                               "that first produces NaN/Inf (debugging only — significant slowdown)")
+    parser.add_argument("--no-promote", action="store_true",
+                         help="Skip writing to any shared production path: the model promotion "
+                              "(artifacts/models/agent_{best,final}.zip) AND the stitched walk-forward "
+                              "artifacts (artifacts/backtest/walkforward_{results.parquet,metrics.json}). "
+                              "Use for diagnostic/smoke runs so they can't silently overwrite real results.")
     args = parser.parse_args()
 
     if session_id is None:
@@ -456,6 +463,10 @@ def main(session_id: str | None = None) -> None:
         overrides["device"] = args.device
     if args.n_envs is not None:
         overrides["n_envs"] = args.n_envs
+    if args.logit_scale is not None:
+        overrides["logit_scale"] = args.logit_scale
+    if args.seed is not None:
+        overrides["seed"] = args.seed
 
     # dataclasses.replace() (not a fresh AgentConfig(**overrides)) so any CLI
     # override still inherits DEFAULT_CONFIG's window-derived split dates
@@ -467,8 +478,9 @@ def main(session_id: str | None = None) -> None:
     # module at its top level, so this side of the dependency stays lazy to
     # avoid a circular import.
     from src.agent.rolling_eval import run_rolling_eval, finalize_and_report
-    results = run_rolling_eval(base_config, resume=args.resume, session_id=session_id, bc_pretrain=args.bc_pretrain, use_subprocess=args.subprocess)
-    finalize_and_report(results, base_config)
+    results = run_rolling_eval(base_config, resume=args.resume, session_id=session_id, bc_pretrain=args.bc_pretrain,
+                               use_subprocess=args.subprocess, promote=not args.no_promote)
+    finalize_and_report(results, base_config, promote=not args.no_promote)
 
 
 if __name__ == "__main__":

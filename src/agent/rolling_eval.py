@@ -183,6 +183,7 @@ def run_rolling_eval(
     session_id: str | None = None,
     bc_pretrain: bool = False,
     use_subprocess: bool = False,
+    promote: bool = True,
 ) -> list[WindowResult]:
     """
     Train (or load) + evaluate one model per anchored rolling window.
@@ -197,6 +198,12 @@ def run_rolling_eval(
             artifacts/models/runs/<session_id>/ and artifacts/logs/agent/runs/<session_id>/
             so a fresh invocation never collides with a previous one. Defaults
             to a fresh timestamp.
+        promote: If True (default), copy the last window's model to the shared
+            production path (artifacts/models/agent_{best,final}.zip). Set False
+            for diagnostic/smoke runs that must not overwrite the real production
+            model — every window's own files stay safely namespaced under
+            model_dir/runs/<session_id>/ regardless of this flag; only the final
+            copy-up step is skipped.
 
     Returns:
         List of WindowResult, one per window
@@ -240,7 +247,7 @@ def run_rolling_eval(
                 logger.info(f"Window {window.window_id}: Loading pre-trained model from {best_path}")
             else:
                 best_path = train_window(window_config, model_tag, resume=resume, bc_pretrain=bc_pretrain, use_subprocess=use_subprocess)
-                if model_tag == "agent":
+                if model_tag == "agent" and promote:
                     _promote_to_production(window_config, config)
             model = PPO.load(best_path, device=config.device)
 
@@ -745,14 +752,26 @@ def _selfcheck_stitch() -> None:
     print("✓ stitch self-check passed:", df["value_agent"].round(3).tolist())
 
 
-def finalize_and_report(results: list[WindowResult], config: AgentConfig) -> dict:
+def finalize_and_report(results: list[WindowResult], config: AgentConfig, promote: bool = True) -> dict:
     """Stitch the walk-forward curve, summarize, log, and persist rolling_eval_results.json.
 
     Called by trainer.py's main() after run_rolling_eval() completes.
+
+    Args:
+        promote: If False, skip save_walkforward() -- it writes to the shared
+            artifacts/backtest/walkforward_{results.parquet,metrics.json} path
+            regardless of run_rolling_eval's own promote flag, so a diagnostic/
+            smoke run with --no-promote was still silently overwriting the real
+            walk-forward artifacts (caught happening twice in one session before
+            this got gated here too). Same flag as run_rolling_eval's promote --
+            both mean "don't touch shared production paths".
     """
     logger.info("All windows complete; summarizing results")
 
-    save_walkforward(results, config)  # continuous OOS curve for the notebooks
+    if promote:
+        save_walkforward(results, config)  # continuous OOS curve for the notebooks
+    else:
+        logger.info("Skipping save_walkforward (promote=False) -- not touching shared artifacts/backtest/walkforward_*")
 
     summary = summarize_rolling_results(results)
 
