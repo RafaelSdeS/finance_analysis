@@ -28,6 +28,7 @@ FAST = [
     "tests/agent/test_tilt_ic_metric.py",
     "tests/agent/test_early_stopping.py",
     "tests/agent/test_attribution.py",
+    "tests/agent/test_supervised_strategy.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.

@@ -402,14 +402,69 @@ hypotheses as evidence came in:
 **Objective:** the best non-RL portfolio from these features becomes the benchmark RL must
 beat and the achievable-alpha estimate (industry order: forecast → construction → then RL).
 
-- [ ] 1.1 **Walk-forward supervised strategy:** per-window time-split teacher → top-k EW
+- [x] 1.1 **Walk-forward supervised strategy:** per-window time-split teacher → top-k EW
       (k ∈ {10, 20} only), 0.10 cap, 21d rebalance, 10bps costs, turnover band; all 8 PIT
       windows pooled; Phase-0 primary metrics + DSR for the small sweep.
-      - **Tests** (`tests/agent/test_supervised_strategy.py`, fast group): turnover band
-        unit test (rank change inside band → no trade; outside → trade; costs charged only
-        on trades); weights always sum to 1, respect cap, only PIT-active names; no-signal
-        synthetic input → strategy degenerates to ≈EW net of costs (guards against the
-        construction itself manufacturing returns).
+      - **Done (2026-07-10):** new `src/agent/supervised_strategy.py`
+        (`select_topk_weights`, `backtest_topk_strategy`) — deliberately does NOT reuse
+        `PortfolioEnv`: a top-k equal-weight target with k≥10 never actually triggers the
+        0.10 cap (1/10 = 0.10 exactly, 1/20 < 0.10), so a direct, independently-implemented
+        backtest is simpler and doubles as a second check on env.py's portfolio math
+        rather than depending on it. `tools/supervised_strategy_backtest.py` trains a
+        HistGradientBoostingRegressor teacher per window on TRAIN-span PIT-active features
+        only (raw/unscaled — tree models are scale-invariant, matching the 0.3/0.4
+        convention), backtests k∈{10,20} **and an EW-of-all-PIT-active baseline (k=9999,
+        i.e. `select_topk_weights` naturally degenerates to full EW when k exceeds the
+        active count)** on the TEST span, pools all 8 windows, scores with `tilt_ic_significance`
+        (0.5) + HAC/bootstrap + DSR. Two real bugs caught before real numbers came out: (a)
+        forgot to filter constant/all-NaN feature columns per window — reused
+        `ranker_baseline._select_features` (0.4) rather than reinventing it, since early
+        PIT windows have thin enough history to hit exactly this; (b) the module's first
+        draft made the very first allocation free ("no cost on discovery"), inconsistent
+        with `env.py`'s own documented convention that episodes start at 100% CASH and the
+        first deployment IS a real, costed decision — fixed to match.
+      - **Result — the fair comparison is the headline, and it's a clear loss for the
+        supervised strategy:**
+        ```
+                    cum_return  sharpe   HAC p    tilt_ic   tilt_ic p   DSR
+        k10 (top-10)   3.71     0.374    0.151    -0.013    0.279       0.877
+        k20 (top-20)   4.92     0.502    0.061    -0.008    0.505       0.951
+        EW (all-active) 6.23    0.607    0.021    +0.041    0.243       0.979
+        ```
+        (pooled over all 8 PIT windows, 21d rebalance, 10bps costs, turnover band on;
+        tilt_ic_n_days: 192 for k10/k20, only 44 for EW — expected, since EW's own tilt
+        vs. its own benchmark is near-degenerate most days by construction.) Full table:
+        `artifacts/backtest/supervised_strategy.json`.
+      - **Interpretation:** plain equal-weight-of-the-PIT-active-universe *beats both*
+        top-10 and top-20 teacher-selected portfolios, on both raw return and Sharpe, over
+        the pooled 16-year walk-forward test — and EW is the only one of the three whose
+        excess-of-zero clears conventional significance (HAC p=0.021). The teacher's
+        tilt-IC is indistinguishable from zero (even slightly negative) for both k10/k20.
+        This is the honest answer to Phase 1's question — "does the real signal (0.3/0.4)
+        survive actual portfolio construction on the tradable universe?" — **not yet, at
+        least not through this construction.** A plausible mechanism: concentrating into
+        10–20 (of up to 50) names churns much more aggressively on rank reshuffles than a
+        near-full EW book, so turnover-band-limited but still-frequent retargeting drags
+        on returns disproportionately for the more concentrated portfolios — exactly the
+        transfer-coefficient erosion Clarke–de Silva–Thorley predict for long-only,
+        concentrated construction. Whether the loss is COSTS, the LONG-ONLY/top-k
+        discretization itself, or the 21-day HOLD is what 1.2's waterfall isolates next.
+        Caveat: the turnover band used here is the simplest possible (any set change
+        triggers a full retarget); a more forgiving band (e.g. hold-vs-buy buffer) is an
+        easy follow-up lever if 1.2 points at turnover as the dominant loss.
+      - **Tests** (`tests/agent/test_supervised_strategy.py`, fast group, 8 cases):
+        `select_topk_weights` invariants (sums to 1, respects cap by widening the selected
+        count rather than iterative redistribution, only active names, empty-active
+        doesn't crash). Turnover band — checked via COST directly (not aggregate P&L,
+        which is confounded by periodic-reset-to-EW having its own return effect
+        independent of cost): the band charges cost only on the set-changing first
+        decision, zero on 2 subsequent same-set decisions; without the band every decision
+        costs something even with an unchanged set; a genuine set change (ticker swap)
+        correctly triggers a new target. No-signal degeneracy: random scores' mean daily
+        return tracks full-EW's mean closely (doesn't manufacture an edge from noise).
+        Portfolio invariants: daily weights always sum to 1; the cap binds at REBALANCE
+        time (matching env.py exactly) but drifted weights may exceed it between
+        rebalances by design. Full suite: 23/23 passed.
 - [ ] 1.2 **Alpha waterfall:** long–short decile paper portfolio → long-only top-k → +cap →
       +costs → +21d holding, per window. Empirical transfer coefficient; explains the
       "positive IC but ranker loses" paradox mechanically.
