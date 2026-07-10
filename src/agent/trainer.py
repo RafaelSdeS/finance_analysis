@@ -460,6 +460,13 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--eval-freq", type=int, default=None, help="Evaluate on val set every N episodes (default: 20)")
     parser.add_argument("--rebalance-days", type=int, default=None, help="Rebalance interval in trading days (default: 21)")
     parser.add_argument("--universe-size", type=int, default=None, help="Filter to top N tickers by market cap (default: None = all)")
+    parser.add_argument("--pit-universe", action="store_true",
+                         help="Enforce the point-in-time universe membership baked into "
+                              "agent_tensors.npz (requires tensors built with "
+                              "`data_pipeline.py --pit-universe`; DIAGNOSIS_PLAN.md F1/2.4 -- "
+                              "config.pit_universe is the source of truth at load time, so this "
+                              "must be passed explicitly or PIT restriction is silently skipped "
+                              "even if the tensor file has it)")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
     parser.add_argument("--n-envs", type=int, default=None, help="In-process envs batched through the policy (default: 8)")
     parser.add_argument("--logit-scale", type=float, default=None, help="Softmax temperature scale on raw actions (default: 10.0)")
@@ -537,6 +544,8 @@ def main(session_id: str | None = None) -> None:
         overrides["rebalance_interval_days"] = args.rebalance_days
     if args.universe_size is not None:
         overrides["universe_size"] = args.universe_size
+    if args.pit_universe:
+        overrides["pit_universe"] = True
     if args.device is not None:
         overrides["device"] = args.device
     if args.n_envs is not None:
