@@ -168,6 +168,18 @@ class AgentConfig:
     )
 
     # Macro features (daily, from BCB SGS)
+    # DIAGNOSIS_PLAN.md Phase 2.4 recommendation (NOT applied here): the agent owns a
+    # SELIC-earning CASH asset and is scored on cash TIMING (see env.py's reward
+    # benchmark), but without the rate level itself in the observation, that timing
+    # decision is unlearnable -- the policy has no way to tell "SELIC is currently high,
+    # cash is attractive" apart from "SELIC is low". Uncommenting "selic" below is a
+    # one-line fix for this -- deliberately NOT done in this commit, because changing
+    # DEFAULT_CONFIG's feature set immediately invalidates the existing production
+    # tensors (env.py's feature-list staleness check fires) and breaks every test/tool
+    # until data_pipeline.py is rerun to rebuild them; that rebuild is an explicit,
+    # user-facing action, not something to do silently mid-diagnosis (confirmed by
+    # actually trying it: it broke the full test suite immediately). Apply alongside the
+    # next real tensor rebuild (e.g. together with --pit-universe / --cross-sectional-features).
     macro_features: list[str] = field(
         default_factory=lambda: [
             # "selic",
@@ -250,6 +262,13 @@ class AgentConfig:
     n_steps: int = 2048  # Trajectory length per update, PER env
     batch_size: int = 512
     n_epochs: int = 20  # Gradient updates per rollout
+    # DIAGNOSIS_PLAN.md Phase 2.4: TRAIN-only (never val/test) random episode start index,
+    # instead of always day 0 -- see PortfolioEnv.reset(). Default False preserves existing
+    # behavior; SB3 already uniquely seeds each of the n_envs parallel copies
+    # (DummyVecEnv.seed() offsets seed+idx per env), so enabling this alone gives each
+    # parallel env a genuinely different historical slice per episode, not just different
+    # action noise on the same slice.
+    random_episode_start: bool = False
 
     # ===== Checkpointing & Early Stopping =====
     eval_freq: int = 20  # Evaluate on val set every N episodes (20 * n_steps = 40,960 timesteps)

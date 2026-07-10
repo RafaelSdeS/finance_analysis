@@ -750,15 +750,68 @@ All under the 3-seed protocol with `--no-promote`.
         user-facing action, not something to do silently mid-diagnosis) followed by an
         ablation training comparison — deferred to Phase 2.4/4 alongside the other
         pending real-training-run items.
-- [ ] 2.4 Hygiene in the same retrains: random episode starts; per-env seeds; add `selic` +
+- [x] 2.4 Hygiene in the same retrains: random episode starts; per-env seeds; add `selic` +
       one regime feature to obs (or fix cash_mode to capped/no-cash and stop expecting
       timing skill).
-      - **Tests** (extend `tests/agent/test_env_basic.py`): *problem* — two `reset()`s of
-        the current env yield the identical start index (documents the deterministic-path
-        issue). *Solution* — with random starts enabled: start indices vary across
-        seeds/resets, episodes never overrun the split's bounds, and `date_range="test"`
-        evaluation stays deterministic from day 0 (random starts must be train-only, or
-        every backtest number becomes seed-dependent).
+      - **Done (2026-07-10):** `AgentConfig.random_episode_start` (default False) + a
+        train-only random start day in `PortfolioEnv.reset()` (val/test always day 0,
+        unconditionally). **Per-env seeds turned out to already be correct** — verified by
+        reading SB3's source: `DummyVecEnv.seed()` already offsets `seed + idx` per parallel
+        env, so each of the `n_envs` copies gets a genuinely different seed automatically;
+        nothing to fix there, just confirmed rather than assumed. With ~2,600 resets/env
+        over a full 5M-timestep run (train span ÷ rebalance_interval_days ≈ episode length
+        in SB3 timesteps), every prior run replayed the identical day-0 path that many
+        times — this closes real, previously-wasted path diversity across the parallel batch.
+      - **A second real safety gap found and fixed while wiring this:** `config.pit_universe`
+        (0.1) was NOT actually the source of truth at env-load time — `_load_normalized_tensors`
+        only checked whether the loaded TENSOR FILE happened to contain PIT data, completely
+        ignoring what the config asked for. Two silent-mismatch directions existed: (a)
+        `pit_universe=True` on a tensor file with no PIT data silently trained on the FULL
+        universe instead (exactly the F1 contamination this whole diagnosis exists to
+        avoid, and it would have failed silently); (b) `pit_universe=False` on a tensor file
+        that DOES have PIT data silently got the restriction applied anyway. Fixed: threaded
+        `config.pit_universe` explicitly through `_load_slice`/`_load_normalized_tensors`
+        (now part of their `@lru_cache` key), with (a) now a loud `RuntimeError` naming the
+        exact rebuild command, and (b) a warning. Confirmed by testing directly against the
+        real production tensors (which have no PIT data): `pit_universe=True` now raises
+        immediately instead of quietly no-opping.
+      - **`selic` feature: recommended but deliberately NOT applied — caught mid-edit.**
+        Uncommenting `"selic"` in `macro_features` (config.py) is a one-line fix for the
+        documented gap ("the agent owns a SELIC-earning CASH asset and is scored on cash
+        TIMING, but can't observe the rate level"). Made the edit, then **immediately hit
+        the exact class of bug this whole session has been finding**: changing
+        `DEFAULT_CONFIG`'s feature set invalidates the existing production tensors
+        (`env.py`'s own feature-list staleness check fired) and broke the ENTIRE test suite
+        instantly, since almost every test constructs `PortfolioEnv` against the real,
+        on-disk tensors. Reverted within the same step, replaced with a clearly-marked
+        comment recommending the change be applied alongside the next real tensor rebuild
+        (bundled with `--pit-universe`/`--cross-sectional-features`), not silently
+        mid-diagnosis. Full suite re-verified 27/27 after the revert. `cash_mode`
+        redesign (the alternative half of this task) is TODO.md's still-open 2.2 item —
+        out of this session's scope, not attempted.
+      - **Verified in the real pipeline:** `python -m src.agent.trainer --train-years 2
+        --test-years 1 --timesteps 4096 --universe-size 50 --random-episode-start
+        --bc-pretrain --no-promote`: all 24 windows trained end-to-end without a crash,
+        and again correctly protected `rolling_eval_results.json`.
+      - **Tests** (extended `tests/agent/test_env_basic.py`, data group, 5 new checks):
+        *problem* — 5 resets with different seeds under the CURRENT default all land on
+        day 0. *solution* — 20 resets under `random_episode_start=True` land on 20 distinct
+        days, all leaving room for a full rebalance decision; the SAME seed reproduces the
+        SAME start on independent env instances (reproducibility preserved); val/test stay
+        at day 0 regardless of the flag. Plus a dedicated regression case for the
+        `pit_universe` mismatch fix (`RuntimeError` on the real, non-PIT production
+        tensors). Full suite: 27/27 passed.
+
+**Phase 2 exit criterion — met.** All four sub-phases done: a verified permutation-
+equivariant policy (2.1), a non-saturating action mapping (2.2) that also caught a
+shared `_cap_weights` bug, cross-sectional feature normalization (2.3), and training
+hygiene (2.4) that closed two more silent-correctness gaps (`pit_universe` enforcement,
+the `selic` near-miss). Every capability is real-pipeline-verified via smoke training
+runs, not just unit-tested in isolation. None of 2.1-2.4 required rebuilding or
+overwriting production tensors/models — each is opt-in via config/CLI flags with
+unchanged defaults, so the existing production artifacts remain exactly as they were
+(modulo the disclosed, already-fixed `rolling_eval_results.json` incident in 2.1). A full
+multi-seed comparative training run combining these levers is the natural Phase 3/4 activity.
 
 **Success:** equivariant BC-init ≈ teacher portfolio (sanity); PPO-final ≥ teacher on
 primary metrics across ≥3 seeds.

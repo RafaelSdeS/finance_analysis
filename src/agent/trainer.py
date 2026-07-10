@@ -435,6 +435,9 @@ def main(session_id: str | None = None) -> None:
                               "saturation pathology)")
     parser.add_argument("--tilt-kappa", type=float, default=None,
                          help="Tilt strength for --action-mode tilt (default: 2.0)")
+    parser.add_argument("--random-episode-start", action="store_true",
+                         help="Random (TRAIN-only) episode start day instead of always day 0 "
+                              "(DIAGNOSIS_PLAN.md Phase 2.4) -- val/test always stay deterministic")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for PPO/env/numpy (default: 42)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
     parser.add_argument("--bc-pretrain", action="store_true",
@@ -502,6 +505,8 @@ def main(session_id: str | None = None) -> None:
         overrides["action_mode"] = args.action_mode
     if args.tilt_kappa is not None:
         overrides["tilt_kappa"] = args.tilt_kappa
+    if args.random_episode_start:
+        overrides["random_episode_start"] = True
     if args.seed is not None:
         overrides["seed"] = args.seed
 

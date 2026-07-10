@@ -67,7 +67,7 @@ def _load_raw_tensors():
 
 
 @lru_cache(maxsize=1)  # windows train sequentially; unbounded cache leaked ~170MB per window
-def _load_normalized_tensors(train_end_cutoff: str):
+def _load_normalized_tensors(train_end_cutoff: str, pit_universe: bool):
     """Load, normalize, and clip features for a specific window.
 
     Each window has its own scaler (fitted on that window's train span), keyed
@@ -82,11 +82,19 @@ def _load_normalized_tensors(train_end_cutoff: str):
     """
     dates, tickers, mask, returns, feats, scalers, pit_cutoffs, pit_membership_mask = _load_raw_tensors()
 
-    # Point-in-time universe restriction (DIAGNOSIS_PLAN.md F1): if the tensors were built
-    # with --pit-universe, only allow tickers that were actually in THIS window's top-N at
-    # decision time. Applied here (before scaler fit/fallback and before _load_slice) so
-    # both normalization statistics and the tradable universe are window-consistent.
-    if pit_membership_mask is not None:
+    # Point-in-time universe restriction (DIAGNOSIS_PLAN.md F1 / Phase 2.4): config.pit_universe
+    # is the SOURCE OF TRUTH here, not just "does the tensor file happen to have PIT data" --
+    # a mismatch between what the caller asked for and what's on disk must be loud, not a
+    # silent no-op (requested PIT but got the full universe) or a silent surprise (didn't
+    # ask for PIT but got it anyway because someone else's tensor file happened to have it).
+    if pit_universe:
+        if pit_membership_mask is None:
+            raise RuntimeError(
+                "config.pit_universe=True but agent_tensors.npz has no PIT membership data "
+                "(it was built without --pit-universe). Training would silently run on the "
+                "full, non-PIT-restricted universe instead of what was requested. Rebuild "
+                "with: python -m src.agent.data_pipeline --universe-size <N> --pit-universe"
+            )
         cutoff_list = list(pit_cutoffs)
         if train_end_cutoff in cutoff_list:
             row = pit_membership_mask[cutoff_list.index(train_end_cutoff)]
@@ -97,6 +105,12 @@ def _load_normalized_tensors(train_end_cutoff: str):
                 "falling back to the full (non-PIT-restricted) universe for this window.",
                 train_end_cutoff, cutoff_list,
             )
+    elif pit_membership_mask is not None:
+        logger.warning(
+            "agent_tensors.npz has PIT membership data but config.pit_universe=False — "
+            "training on the FULL (non-PIT-restricted) universe as requested. Set "
+            "pit_universe=True to use the tensor file's PIT data instead.",
+        )
 
     scaler = scalers.get(train_end_cutoff)
     if scaler is None:
@@ -114,8 +128,9 @@ def _load_normalized_tensors(train_end_cutoff: str):
 
 
 @lru_cache(maxsize=4)
-def _load_slice(start: str, end: str, train_end_cutoff: str):
-    """Slice + mask the shared tensors once per (start, end, train_end_cutoff) and cache the result.
+def _load_slice(start: str, end: str, train_end_cutoff: str, pit_universe: bool):
+    """Slice + mask the shared tensors once per (start, end, train_end_cutoff, pit_universe)
+    and cache the result.
 
     All PortfolioEnv instances with the same bounds (e.g. the N envs of a
     DummyVecEnv) share these arrays by reference — safe since PortfolioEnv
@@ -129,7 +144,7 @@ def _load_slice(start: str, end: str, train_end_cutoff: str):
       mask_f32       [D,N] mask as float32 for the observation vector
       n_active       [D]   active-ticker count per day
     """
-    dates, tickers, mask, returns, feats_all = _load_normalized_tensors(train_end_cutoff)
+    dates, tickers, mask, returns, feats_all = _load_normalized_tensors(train_end_cutoff, pit_universe)
     sel = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
     sliced_mask = mask[sel]
     feats = feats_all[sel].copy()
@@ -177,7 +192,9 @@ class PortfolioEnv(gym.Env):
         if date_range not in bounds:
             raise ValueError(f"date_range must be one of {list(bounds)}, got '{date_range}'")
         start, end = bounds[date_range]
-        self.dates, self.tickers, self.mask, self.returns, self.features, derived = _load_slice(start, end, config.train_end)
+        self.dates, self.tickers, self.mask, self.returns, self.features, derived = _load_slice(
+            start, end, config.train_end, config.pit_universe
+        )
         self._simple_rets = derived["simple_rets"]       # [D,N] next-day simple returns, 0 if inactive
         self._ew_log_returns = derived["ew_log_returns"] # [D] equal-weight log return per day
         self._mask_f32 = derived["mask_f32"]             # [D,N] mask as float32 for obs
@@ -225,11 +242,22 @@ class PortfolioEnv(gym.Env):
     # ------------------------------------------------------------------ API
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
-        super().reset(seed=seed)
-        self._t = 0
+        super().reset(seed=seed)  # sets self.np_random, uniquely seeded per env instance
+        # DIAGNOSIS_PLAN.md Phase 2.4: TRAIN-only random episode starts. Every episode
+        # otherwise starts at day 0, so all n_envs parallel copies replay the IDENTICAL
+        # historical path every reset (batch diversity comes only from action noise, not
+        # from ever seeing a different slice of history) -- with ~2,600 resets/env over a
+        # full 5M-timestep run (train span / rebalance_interval_days timesteps per
+        # episode), that's a lot of wasted path diversity. val/test MUST stay deterministic
+        # from day 0 (honest, reproducible evaluation) regardless of this flag.
+        if self.date_range == "train" and self.config.random_episode_start:
+            max_start = max(self.n_steps - self.config.rebalance_interval_days, 0)
+            self._t = int(self.np_random.integers(0, max_start + 1)) if max_start > 0 else 0
+        else:
+            self._t = 0
         self.portfolio_value = self.config.initial_capital
         self._prev_weights[:] = self._is_cash_mask  # fresh start: 100% CASH; first allocation incurs full deployment cost
-        return self._obs(), {"date": self.dates[0], "portfolio_value": self.portfolio_value}
+        return self._obs(), {"date": self.dates[self._t], "portfolio_value": self.portfolio_value}
 
     def action_to_weights(self, action: np.ndarray, active: np.ndarray) -> np.ndarray:
         """Policy action → portfolio weights (AgentConfig.action_mode selects the mapping).

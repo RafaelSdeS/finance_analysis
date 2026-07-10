@@ -339,6 +339,67 @@ def main() -> None:
     print(f"✓ _cap_weights thin-universe regression: n_active={n_active_thin}, "
           f"max stock weight={w_thin[stock_mask_thin].max():.4f} <= cap={cap} (was 0.10277 before the fix)")
 
+    # --- 10. Random episode starts (DIAGNOSIS_PLAN.md Phase 2.4): problem (every reset
+    #     replays day 0) vs solution (train-only random starts, val/test stay deterministic) ---
+    env_default = PortfolioEnv(cfg, date_range="train")  # random_episode_start=False (default)
+    starts_default = []
+    for i in range(5):
+        obs_r, info_r = env_default.reset(seed=100 + i)
+        starts_default.append(env_default._t)
+    assert all(s == 0 for s in starts_default), (
+        f"expected the CURRENT default (no random start) to always reset to day 0, got {starts_default}"
+    )
+    print(f"✓ (problem) default reset(): 5 resets with different seeds all land on day 0: {starts_default}")
+
+    random_cfg = dataclasses.replace(cfg, random_episode_start=True)
+    env_random = PortfolioEnv(random_cfg, date_range="train")
+    starts_random = []
+    for i in range(20):
+        obs_r, info_r = env_random.reset(seed=200 + i)
+        starts_random.append(env_random._t)
+        assert env_random._t <= env_random.n_steps - random_cfg.rebalance_interval_days, (
+            f"random start {env_random._t} leaves less than one full rebalance decision "
+            f"of room (n_steps={env_random.n_steps})"
+        )
+        assert info_r["date"] == env_random.dates[env_random._t], "reset() info date must match the actual random start"
+    assert len(set(starts_random)) > 1, (
+        f"expected random starts to vary across different seeds, got the same value every time: {starts_random}"
+    )
+    print(f"✓ (solution) random-start reset(): 20 resets land on {len(set(starts_random))} distinct "
+          f"days out of 20, all within bounds (sample: {sorted(starts_random)[:5]}...)")
+
+    # Same seed -> same start (reproducibility), different seeds -> can differ
+    env_random_a = PortfolioEnv(random_cfg, date_range="train")
+    env_random_b = PortfolioEnv(random_cfg, date_range="train")
+    env_random_a.reset(seed=777)
+    env_random_b.reset(seed=777)
+    assert env_random_a._t == env_random_b._t, "the SAME seed must reproduce the SAME random start"
+    print(f"✓ same seed (777) reproduces the same random start on independent env instances: t={env_random_a._t}")
+
+    # val/test MUST stay deterministic regardless of the flag -- honest, reproducible evaluation
+    for split in ("val", "test"):
+        env_split = PortfolioEnv(random_cfg, date_range=split)
+        split_starts = []
+        for i in range(5):
+            env_split.reset(seed=300 + i)
+            split_starts.append(env_split._t)
+        assert all(s == 0 for s in split_starts), (
+            f"{split} split must stay deterministic (day 0) even with random_episode_start=True, got {split_starts}"
+        )
+    print("✓ val/test splits stay deterministic at day 0 regardless of random_episode_start (honest evaluation)")
+
+    # --- 11. pit_universe is now the SOURCE OF TRUTH at load time, not just "did the tensor
+    #     file happen to have PIT data" (DIAGNOSIS_PLAN.md Phase 2.4): problem this fixes --
+    #     config.pit_universe=True on a tensor file with NO PIT data used to silently train on
+    #     the full universe instead of what was requested; now it raises loudly. ---
+    pit_true_cfg = dataclasses.replace(cfg, pit_universe=True)
+    try:
+        PortfolioEnv(pit_true_cfg, date_range="train")
+        raise AssertionError("expected RuntimeError: these real tensors were NOT built with --pit-universe")
+    except RuntimeError as e:
+        assert "pit_universe=True" in str(e) and "--pit-universe" in str(e), f"unexpected error message: {e}"
+    print("✓ pit_universe=True on tensors with no PIT data raises RuntimeError (was a silent no-op before this fix)")
+
     print("\n" + "=" * 60)
     print("ALL ENV TESTS PASSED ✓")
     print("=" * 60)
