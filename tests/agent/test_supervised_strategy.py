@@ -1,12 +1,13 @@
 """
 Unit tests for supervised_strategy.py (synthetic data, no data files).
 
-DIAGNOSIS_PLAN.md Phase 1.1: this is the ceiling any RL work has to beat, so its own
+DIAGNOSIS_PLAN.md Phase 1.1/1.2: this is the ceiling any RL work has to beat, so its own
 mechanics need to be trustworthy before its verdict is. Covers: select_topk_weights'
 invariants (sums to 1, respects cap, only active names), the turnover band's actual
-behavior (no cost when the top-k set is unchanged, real cost when it changes), and a
-no-signal degeneracy check (random scores should behave like equal-weight, not manufacture
-returns from nothing).
+behavior (no cost when the top-k set is unchanged, real cost when it changes), a no-signal
+degeneracy check (random scores should behave like equal-weight, not manufacture returns
+from nothing), and the alpha waterfall's own instrument validity (monotone decay under a
+genuine planted signal; near-zero-minus-costs under no signal).
 """
 
 import sys
@@ -16,7 +17,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.agent.supervised_strategy import backtest_topk_strategy, select_topk_weights
+from src.agent.supervised_strategy import backtest_topk_strategy, compute_alpha_waterfall, select_topk_weights
 
 
 def main() -> None:
@@ -143,6 +144,58 @@ def main() -> None:
     )
     print(f"  ✓ daily weights always sum to 1; rebal-time weights respect the cap "
           f"(max drifted daily weight {res7['daily_weights'].max():.4f} > 0.10, as expected)")
+
+    print("\nTest 9 (waterfall, solution): a genuine planted signal decays monotonically "
+          "across stages, and long-short recovers it")
+    # 30 names, 3 rebalance periods of 21 days. Score = ticker rank (0..29), and every
+    # period's forward return is EXACTLY monotone in that rank (rank 0 -> worst return,
+    # rank 29 -> best) -- a strong, clean, hand-verifiable planted signal.
+    N9, n_periods = 30, 3
+    D9 = 21 * n_periods + 1
+    active9 = np.ones((D9, N9), dtype=bool)
+    scores9 = np.tile(np.arange(N9, dtype=float), (D9, 1))
+    # Per-period simple return exactly proportional to rank (same pattern every period, so
+    # every rebalance decision sees the identical, noiseless relationship).
+    rank_ret_per_day = (np.arange(N9) - N9 / 2) * 0.002  # spans roughly -3%/+3% total per name
+    simple_rets9 = np.tile(rank_ret_per_day, (D9, 1))
+
+    wf_signal = compute_alpha_waterfall(scores9, active9, simple_rets9, k=5, cap=0.10,
+                                         cost_bps=10.0, rebalance_interval_days=21)
+    print(f"  waterfall (planted signal): {wf_signal}")
+    assert wf_signal["n_periods"] == n_periods, f"expected {n_periods} periods, got {wf_signal['n_periods']}"
+    assert wf_signal["long_short"] > 0, "long-short must recover a clearly positive spread for a planted signal"
+    # Stages 1-4 are strictly nested degradations (no offsetting benefit at each step) --
+    # monotone non-increasing is the correct expectation there. Stage 5 uses the turnover
+    # band (a genuinely different, cost-SAVING mechanism vs stage 4's always-reset
+    # assumption), so it's checked separately, not folded into the same monotonicity chain.
+    nested_stages = ["long_short", "long_only", "long_only_capped", "plus_costs"]
+    values = [wf_signal[s] for s in nested_stages]
+    assert all(values[i] >= values[i + 1] - 1e-9 for i in range(len(values) - 1)), (
+        f"expected monotone non-increasing decay across the nested stages, got {list(zip(nested_stages, values))}"
+    )
+    print(f"  ✓ monotone non-increasing (stages 1-4): {[round(v, 5) for v in values]}")
+    assert wf_signal["plus_holding"] > 0, (
+        f"expected the strong planted signal to survive holding too (band should help, not "
+        f"hurt, when the top-k set is stable), got {wf_signal['plus_holding']}"
+    )
+    print(f"  ✓ plus_holding (band-aware, may exceed plus_costs): {wf_signal['plus_holding']:.5f} "
+          f"vs plus_costs: {wf_signal['plus_costs']:.5f}")
+
+    print("\nTest 10 (waterfall, problem — instrument validation): with NO planted signal, "
+          "every stage sits near zero, and costs pull the later stages negative")
+    rng9 = np.random.default_rng(3)
+    scores_null = rng9.normal(size=(D9, N9))         # pure noise, independent of returns
+    simple_rets_null = rng9.normal(scale=0.01, size=(D9, N9))  # pure noise returns
+
+    wf_null = compute_alpha_waterfall(scores_null, active9, simple_rets_null, k=5, cap=0.10,
+                                       cost_bps=10.0, rebalance_interval_days=21)
+    print(f"  waterfall (no signal): {wf_null}")
+    assert abs(wf_null["long_short"]) < 0.05, f"expected long-short near zero with no signal, got {wf_null['long_short']}"
+    assert abs(wf_null["long_only"]) < 0.05, f"expected long-only near zero with no signal, got {wf_null['long_only']}"
+    assert wf_null["plus_costs"] < wf_null["long_only_capped"], (
+        "costs must pull the cost-inclusive stage below the pre-cost capped stage"
+    )
+    print("  ✓ no-signal waterfall stays near zero (pre-cost stages) and costs drag the later stages down")
 
     print("\n✓ All supervised_strategy tests passed")
 

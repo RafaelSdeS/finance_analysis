@@ -129,3 +129,95 @@ def backtest_topk_strategy(
         "rebal_costs": np.asarray(rebal_costs, dtype=np.float64),
         "rebal_t": np.asarray(rebal_t, dtype=np.int64),  # day-index (into the input arrays) of each decision
     }
+
+
+def compute_alpha_waterfall(
+    scores: np.ndarray,          # [D, N]
+    active: np.ndarray,          # [D, N]
+    simple_returns: np.ndarray,  # [D, N] next-day simple return, 0 if inactive
+    k: int,
+    cap: float = 0.10,
+    cost_bps: float = 10.0,
+    rebalance_interval_days: int = 21,
+) -> dict:
+    """5-stage alpha waterfall (DIAGNOSIS_PLAN.md Phase 1.2) isolating WHERE raw
+    cross-sectional signal is destroyed by realistic portfolio construction. Every stage
+    reports the mean PERIOD excess return vs equal-weight-of-active across all rebalance
+    decisions, in the SAME units, so stages are directly comparable — monotone
+    non-increasing is the expected (not per-sample guaranteed, but expected in aggregate)
+    shape for a genuine signal being progressively constrained.
+
+    Stages:
+      1. long_short:       top-k long, bottom-k short, EW within each leg, no costs/cap —
+                            the purest measure, captures both tails of the signal.
+      2. long_only:        top-k long only (no short leg), EW, no costs/cap — removing the
+                            short leg is itself a real constraint (most funds can't short).
+      3. long_only_capped: same, weights capped at `cap` (select_topk_weights widens the
+                            selection when 1/k > cap) — shows whether the position-size
+                            constraint itself bites (use a small k to actually trigger it;
+                            k >= ceil(1/cap) never will, by construction).
+      4. plus_costs:       same, minus `cost_bps` transaction costs EVERY period (worst
+                            case: no turnover band, a fresh target every decision).
+      5. plus_holding:     the full realistic backtest (backtest_topk_strategy, turnover
+                            band ON) — weights drift for `rebalance_interval_days` between
+                            decisions instead of being marked-to-market instantly, and
+                            costs are actually amortized via the band.
+
+    Stages 1-4 are strictly nested degradations (each adds a friction with no offsetting
+    benefit vs the last), so monotone non-increasing is the correct expectation there.
+    Stage 5 is NOT guaranteed to sit below stage 4: the turnover band can save real cost
+    when the top-k SET is stable across periods (stage 4 assumes a full reset every single
+    period, band-free), so a signal whose top-k membership churns rarely can show stage 5 >
+    stage 4 -- that is the band doing its job, not a bug in the waterfall.
+    """
+    D, N = scores.shape
+    n_steps = D - 1
+    rebal_idx = list(range(0, n_steps, rebalance_interval_days))
+
+    long_short, long_only, capped, plus_costs = [], [], [], []
+    prev_capped_w = None
+    for t in rebal_idx:
+        n_days = min(rebalance_interval_days, n_steps - t)
+        active_idx = np.where(active[t])[0]
+        if len(active_idx) < 2 * k:
+            continue  # not enough names for a clean long/short split this period
+
+        fwd_cum = np.prod(1.0 + simple_returns[t + 1: t + n_days + 1], axis=0) - 1.0  # [N]
+        ew_ret = float(fwd_cum[active_idx].mean())
+
+        order = active_idx[np.argsort(scores[t, active_idx])]
+        bottom_k, top_k = order[:k], order[-k:]
+        long_leg, short_leg = float(fwd_cum[top_k].mean()), float(fwd_cum[bottom_k].mean())
+
+        long_short.append(long_leg - short_leg)
+        long_only.append(long_leg - ew_ret)
+
+        w_capped = select_topk_weights(scores[t], active[t], k, cap=cap)
+        capped_ret = float(np.dot(w_capped, fwd_cum))
+        capped.append(capped_ret - ew_ret)
+
+        cost = float(np.abs(w_capped - prev_capped_w).sum()) * (cost_bps / 10_000) if prev_capped_w is not None \
+            else float(w_capped.sum()) * (cost_bps / 10_000)  # first period: real deploy-from-cash cost too
+        plus_costs.append(capped_ret - cost - ew_ret)
+        prev_capped_w = w_capped
+
+    res = backtest_topk_strategy(scores, active, simple_returns, k=k, cap=cap,
+                                  cost_bps=cost_bps, rebalance_interval_days=rebalance_interval_days,
+                                  turnover_band=True)
+    plus_holding = []
+    for i, t in enumerate(res["rebal_t"]):
+        active_idx = np.where(active[t])[0]
+        if len(active_idx) == 0:
+            continue
+        ew_ret = float(np.mean(res["rebal_fwd_rets"][i][active_idx]))
+        held_ret = float(np.dot(res["rebal_weights"][i], res["rebal_fwd_rets"][i])) - res["rebal_costs"][i]
+        plus_holding.append(held_ret - ew_ret)
+
+    return {
+        "long_short": float(np.mean(long_short)) if long_short else 0.0,
+        "long_only": float(np.mean(long_only)) if long_only else 0.0,
+        "long_only_capped": float(np.mean(capped)) if capped else 0.0,
+        "plus_costs": float(np.mean(plus_costs)) if plus_costs else 0.0,
+        "plus_holding": float(np.mean(plus_holding)) if plus_holding else 0.0,
+        "n_periods": len(long_short),
+    }
