@@ -119,17 +119,35 @@ not weeks of GPU time. **No agent retraining until Phase 2.**
 **Objective:** know whether tradable, point-in-time signal exists in the top-50 universe,
 and define success metrics that can detect the plausible effect size.
 
-- [ ] 0.1 **Point-in-time universe** in `data_pipeline.py`: top-50 by mean market cap using
+- [x] 0.1 **Point-in-time universe** in `data_pipeline.py`: top-50 by mean market cap using
       only data ≤ each window's `train_end` (per-window universes, like per-window scalers).
       Current mode stays behind a flag for A/B.
+      - **Done (2026-07-10):** `select_universe(caps, pool, size, cutoff)` added; `build_tensors`
+        takes `config.pit_universe` (default False = unchanged full-sample behavior). When
+        True, per-window PIT selections are unioned into the tensor's ticker set and a
+        `pit_membership_mask[cutoff, ticker]` array is saved; `env.py`'s
+        `_load_normalized_tensors` ANDs the matching row into the activity mask so a stock
+        only appears in state/action space for windows where it was actually top-N at
+        decision time; `run_pipeline`'s per-window scaler fit is also PIT-restricted for
+        consistency. CLI: `python -m src.agent.data_pipeline --universe-size 50 --pit-universe`.
+        Real-data smoke check (top-10, 8 windows): windows 0–1 (pre-2011, thin listings)
+        select small/illiquid names; windows 2–7 converge to blue chips
+        (PETR4/VALE3/ITUB4/BBDC4/...) — only 3 tickers (ABEV3, B3SA3, VIVT3) turn over across
+        the last 6 windows once the market matures, confirming this isn't just noise.
       - **Tests** (`tests/agent/test_universe_point_in_time.py`, fast group, synthetic
-        panel): *problem* — build a tiny panel where ticker X is small until year 5 then
-        huge; assert the CURRENT selector puts X in year-1's universe (documents the
-        lookahead; flip this assert to its negation once fixed). *Solution* — future-
-        blindness property: truncate the panel after a window's `train_end`, rebuild that
-        window's PIT universe, assert it is byte-identical to the one built from the full
-        panel (changing the future must not change past selections); plus per-window
-        universes differ when caps drift (guards against silently reusing one global list).
+        panel): *problem* — ticker X is small until year 5 then huge; full-sample selection
+        (`cutoff=None`) includes X in a universe_size=2 pick even though X was never
+        actually top-2 early on (demonstrates the lookahead). *Solution* — cutoff-based
+        selection excludes X pre-rocket; future-blindness property (truncating the panel
+        after cutoff doesn't change the cutoff's selection); per-window selections differ
+        once caps drift (rules out silently reusing one global list). All 5 cases pass.
+        Also added `tests/agent/test_data_pipeline_universe.py` (data group) wrapping the
+        module's own `_selfcheck_universe_filter`/`_selfcheck_pit_universe` — these existed
+        as dead code (never wired into `__main__` or any runner) and running them for the
+        first time surfaced a real latent bug: `_selfcheck_universe_filter`'s assertion
+        didn't account for CASH being added on top of `universe_size`, always failing when
+        CASH is in the universe. Fixed the assertion and registered both new test files in
+        `tests/run_all.py`. Full suite: 20/20 passed.
 - [ ] 0.2 **Quantify the bias:** EW backtest PIT vs current universe per window; the gap =
       the survivorship-lookahead premium baked into every result to date.
       - **Test:** analysis, not code — no unit test; the deliverable is the per-window gap

@@ -84,6 +84,13 @@ class AgentConfig:
 
     # ===== Universe Filter (optional) =====
     universe_size: int | None = None  # top-N tickers by mean market cap; None = no filtering (all tickers with >=252 rows)
+    # If True, universe_size selection is computed per-window using only data <= that
+    # window's train_end (no lookahead into future market caps); if False (default,
+    # preserves pre-2026-07-10 behavior), selection uses the full-sample mean market cap.
+    # See DIAGNOSIS_PLAN.md F1: full-sample selection put ~future winners into early windows'
+    # universes (measured: only 29/50 tickers overlap between the full-sample and a
+    # 2011-cutoff top-50).
+    pit_universe: bool = False
 
     # ===== Feature Configuration =====
     # 2026-07: pruned to the top-15 by Random Forest importance (R²=0.233 on

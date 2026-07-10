@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FAST = [
     "tests/build_dataset/test_build_dataset_features.py",
     "tests/agent/test_ic_analysis.py",
+    "tests/agent/test_universe_point_in_time.py",
     "tests/agent/test_ranker_baseline.py",
     "tests/agent/test_bc_pretrain.py",
     "tests/agent/test_significance_stats.py",
@@ -34,6 +35,7 @@ DATA = [
     "tests/agent/test_feature_engineering.py",
     "tests/agent/verify_dataset_for_training.py",
     "tests/agent/test_env_basic.py",
+    "tests/agent/test_data_pipeline_universe.py",
     "tests/agent/test_excess_sharpe.py",
     "tests/agent/test_eval_integrity.py",
     "tests/agent/test_inference_output.py",

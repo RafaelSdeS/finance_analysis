@@ -58,7 +58,12 @@ def _load_raw_tensors():
     mask = data["mask"]
     returns = data["returns"]
     feats = data["features"]
-    return dates, tickers, mask, returns, feats, scalers
+    # Point-in-time universe membership (DIAGNOSIS_PLAN.md F1): only present when the
+    # tensors were built with --pit-universe. Presence alone gates application in
+    # _load_slice below — no separate config flag needed at read time.
+    pit_cutoffs = data["pit_cutoffs"] if "pit_cutoffs" in data else None
+    pit_membership_mask = data["pit_membership_mask"] if "pit_membership_mask" in data else None
+    return dates, tickers, mask, returns, feats, scalers, pit_cutoffs, pit_membership_mask
 
 
 @lru_cache(maxsize=1)  # windows train sequentially; unbounded cache leaked ~170MB per window
@@ -75,7 +80,24 @@ def _load_normalized_tensors(train_end_cutoff: str):
     call time instead of upfront.
     Clipping at ±10 std devs provides defense-in-depth against outliers.
     """
-    dates, tickers, mask, returns, feats, scalers = _load_raw_tensors()
+    dates, tickers, mask, returns, feats, scalers, pit_cutoffs, pit_membership_mask = _load_raw_tensors()
+
+    # Point-in-time universe restriction (DIAGNOSIS_PLAN.md F1): if the tensors were built
+    # with --pit-universe, only allow tickers that were actually in THIS window's top-N at
+    # decision time. Applied here (before scaler fit/fallback and before _load_slice) so
+    # both normalization statistics and the tradable universe are window-consistent.
+    if pit_membership_mask is not None:
+        cutoff_list = list(pit_cutoffs)
+        if train_end_cutoff in cutoff_list:
+            row = pit_membership_mask[cutoff_list.index(train_end_cutoff)]
+            mask = mask & row[np.newaxis, :]
+        else:
+            logger.warning(
+                "No precomputed PIT universe membership for cutoff=%s (available: %s) — "
+                "falling back to the full (non-PIT-restricted) universe for this window.",
+                train_end_cutoff, cutoff_list,
+            )
+
     scaler = scalers.get(train_end_cutoff)
     if scaler is None:
         logger.warning(
