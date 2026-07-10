@@ -25,8 +25,12 @@ logger = logging.getLogger(__name__)
 # math, and None just means "no constraint requested", not a behavioral difference.
 SEMANTIC_FIELDS = [
     "rebalance_interval_days", "logit_scale", "max_position_weight",
-    "transaction_cost_bps", "action_mode", "tilt_kappa",
+    "transaction_cost_bps", "action_mode", "tilt_kappa", "tilt_ema_alpha",
 ]
+
+# Informational only (don't affect how a saved model's action should be decoded,
+# just what it was optimized for / reproducibility) -- not compared in check_sidecar.
+INFO_FIELDS = ["risk_aversion", "seed"]
 
 
 def _git_info() -> dict:
@@ -61,6 +65,7 @@ def write_sidecar(model_path: Path, config: AgentConfig, timesteps: int | None =
         "test_start": config.test_start,
         "test_end": config.test_end,
         **{f: getattr(config, f) for f in SEMANTIC_FIELDS},
+        **{f: getattr(config, f) for f in INFO_FIELDS},
         "universe_size": config.universe_size,  # informational only, not a semantic field (see SEMANTIC_FIELDS comment)
         "state_features": list(config.state_features),
         **_git_info(),

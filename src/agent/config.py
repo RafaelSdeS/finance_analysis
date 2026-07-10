@@ -337,7 +337,9 @@ class AgentConfig:
             f"val {self.val_start}→{self.val_end} | test {self.test_start}→{self.test_end} | "
             f"ppo: lr={self.learning_rate} γ={self.gamma:.4f} (eff={self.effective_gamma:.4f} per {self.rebalance_interval_days}d step) "
             f"λ={self.gae_lambda} "
-            f"steps={self.total_timesteps:,} batch={self.batch_size} epochs={self.n_epochs}"
+            f"steps={self.total_timesteps:,} batch={self.batch_size} epochs={self.n_epochs} | "
+            f"seed={self.seed} risk_aversion={self.risk_aversion} action_mode={self.action_mode} "
+            f"tilt_kappa={self.tilt_kappa} tilt_ema_alpha={self.tilt_ema_alpha}"
         )
 
 
