@@ -2,6 +2,13 @@
 
 > Local file (companion to `TODO.md`). Created 2026-07-09 from a full-pipeline review.
 > Check boxes as phases complete; record verdicts inline under each phase.
+>
+> **Status (2026-07-10): all four phases complete.** Verdict: provisional #2 (RL ≈
+> supervised, currently both lose to plain EW) — see Phase 4 for the full synthesis and the
+> one concrete experiment (a production-scale retrain with Phase 2's fixes) that would
+> settle it definitively, not yet run because it requires rebuilding production tensors and
+> promoting a new production model. Read Phase 4 first for the destination, then the
+> individual phases for how each piece of evidence was obtained and verified.
 
 ## Context
 
@@ -921,13 +928,63 @@ Analyses (0.2, 1.2's verdict, 3.1, the power memo) aren't unit-testable — thei
 
 ### Phase 4 — The verdict memo. ~1 day.
 
-- [ ] Compare on PIT data with powered metrics, across seeds: supervised vs BC-init vs
+- [x] Compare on PIT data with powered metrics, across seeds: supervised vs BC-init vs
       PPO-final. Write the explicit go/no-go:
       1. RL > supervised robustly → scale up RL.
       2. RL ≈ supervised → ship supervised as the product; RL only as a bounded experiment
          where it's uniquely suited (multi-period cost-aware trading/execution).
       3. Everything ≈ 0 → features/universe don't support alpha; documented negative →
          redirect to data (new features, wider PIT universe, delisted-company data).
+
+#### Verdict (2026-07-10)
+
+**Provisional #2, pending one concrete experiment not yet run: a full production-scale
+retrain combining every Phase 2 fix together.** Everything measured through Phase 0–3 is
+internally consistent and points at the same root cause, but the one comparison the
+original three-way framework asks for — supervised vs BC-init vs a **PPO-final that
+actually incorporates the Phase 2 architecture fixes, at production scale (5M
+timesteps × 8 PIT windows)** — has not been run. Every Phase 2 verification in this session
+was a smoke test (~4-45K timesteps) proving the code works, not a real training result.
+Rebuilding production tensors (`--pit-universe --cross-sectional-features`) and promoting
+a new production model are exactly the kind of shared-artifact, hard-to-reverse actions
+this session has twice already shown can go wrong silently (the `rolling_eval_results.json`
+incident) — **deliberately not done without asking first**, distinct from every other
+`--no-promote` smoke run in this session.
+
+**What the evidence says, synthesized across all four phases:**
+
+| Phase | Finding |
+|---|---|
+| 0 | Real, temporally-persistent cross-sectional signal exists (full-universe IC 0.083, t≈20/window walk-forward). Shrinks but survives on the tradable top-50 (IC 0.047), though breadth there isn't enough to resolve it statistically alone (t=0.51) — a power problem, not an absence-of-signal problem. |
+| 1 | That signal does **not** currently survive long-only/capped/costed portfolio construction: a real supervised strategy built directly from it **loses to plain equal-weight** (k10 Sharpe 0.37 vs EW's 0.61). Mechanistically pinned down, not just observed: the 0.10 position cap forces a 5→10 name dilution that destroys more value than transaction costs and holding combined. The signal is not simply a size/momentum tilt in disguise (R²=0.20, 43% residual alpha). |
+| 2 | Built and real-pipeline-verified (not yet trained at scale) the three architecture changes that directly target Phase 1's identified mechanism: a permutation-equivariant policy (parameter sharing across ticker slots), a non-saturating tilt-based action mapping (removes the softmax collapse-to-argmax pathology entirely), and cross-sectional feature normalization (immune to regime drift by construction). Also closed two more silent-correctness gaps found along the way (a shared `_cap_weights` bug, `pit_universe` enforcement). |
+| 3 | Even the CURRENT (pre-Phase-2) training methodology has real, measured problems independent of the architecture question: checkpoint selection is statistically indistinguishable from a coin flip on val→test generalization (and scored below-median in all 3 windows sampled in a real run), and the reward's risk-aversion penalty currently outweighs the raw alpha signal it's meant to only temper (154% of raw excess). |
+
+**Why this is #2-not-#3:** the signal is real (0.3/0.4), survives a genuine walk-forward
+test (0.4), and isn't explained away by a known factor (1.3) — this is not "there is no
+alpha here." **Why this is #2-not-#1 (yet):** no RL run in this session or its predecessors
+has beaten the supervised ceiling, and the pre-Phase-2 architecture (TODO.md M5 5.1:
+BC-init excess_sharpe −0.51, PPO-final −0.32, both losing to EW) was PPO fighting an
+action-space and construction mechanism that Phase 1.2 shows structurally can't express
+calibrated, low-turnover conviction — Phase 2 built the fix for exactly that mechanism,
+but it hasn't been given a real training budget to prove out.
+
+**Concrete next action, not taken in this session:** rebuild tensors with `--pit-universe
+--cross-sectional-features`, then `python -m src.agent.trainer --policy equivariant
+--action-mode tilt --bc-pretrain` at full production scale (5M timesteps, 8 windows,
+ideally 3 seeds per TODO.md's M7 protocol), scored against Phase 1's supervised ceiling and
+Phase 0.5's tilt-IC significance test (not just excess Sharpe). If that run **still** loses
+to supervised/EW, the honest conclusion moves to #2-final (ship the supervised strategy;
+RL isn't earning its complexity here) or even reopens whether Option C's specific tilt
+formula needs the sweep 2.2 flagged as an easy follow-up (a more forgiving turnover band).
+If it wins, that's real evidence for #1. Either way, this is now a single well-defined
+experiment away from a settled answer, not an open-ended search.
+
+**What would change this verdict:** (a) the production-scale RL run beating supervised —
+moves to #1; (b) the λ sweep (3.2) or purged-validation fix (3.1) meaningfully changing
+either the RL or supervised numbers — would need re-running this comparison; (c) new data
+(delisted-company history, a wider PIT universe, additional features) — could raise the
+ceiling for both approaches simultaneously, independent of this verdict.
 
 ---
 
