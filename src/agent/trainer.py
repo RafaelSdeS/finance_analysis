@@ -252,8 +252,14 @@ def _resolve_session_id(config: AgentConfig, resume: bool) -> str:
     return datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
-def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", bc_pretrain: bool = False, use_subprocess: bool = False) -> Path:
-    """Run PPO training for one window; returns path to its final model."""
+def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", bc_pretrain: bool = False,
+          use_subprocess: bool = False, policy: str = "MlpPolicy") -> Path:
+    """Run PPO training for one window; returns path to its final model.
+
+    policy: "MlpPolicy" (default, SB3 stock flat MLP) or "equivariant" (DIAGNOSIS_PLAN.md
+    Phase 2.1 / roadmap M6.1 — src.agent.policy.EquivariantActorCriticPolicy, a shared
+    per-ticker encoder instead of one flat MLP over the whole 1224-dim observation).
+    """
     # config.log_dir is already run-scoped (see rolling_eval.run_rolling_eval), so the
     # filename doesn't need its own timestamp — the directory disambiguates the run.
     log_path = config.log_dir / f"{model_tag}.jsonl"
@@ -284,8 +290,25 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", b
         else:
             if resume:
                 logger.warning("No checkpoint found; starting fresh")
+            if policy == "equivariant":
+                from src.agent.policy import EquivariantActorCriticPolicy
+                n_features = len(config.state_features)
+                obs_dim = train_env.observation_space.shape[0]
+                n_tickers = obs_dim // (n_features + 2)
+                assert n_tickers * (n_features + 2) == obs_dim, (
+                    f"obs_dim={obs_dim} doesn't factor as n_tickers*(n_features+2) with "
+                    f"n_features={n_features} -- state_features/tensor mismatch"
+                )
+                policy_cls = EquivariantActorCriticPolicy
+                policy_kwargs = dict(n_tickers=n_tickers, n_features=n_features, log_std_init=config.log_std_init)
+                logger.info("Using EquivariantActorCriticPolicy (n_tickers=%d, n_features=%d)", n_tickers, n_features)
+            elif policy == "MlpPolicy":
+                policy_cls = "MlpPolicy"
+                policy_kwargs = dict(net_arch=[256, 256], log_std_init=config.log_std_init)
+            else:
+                raise ValueError(f"policy must be 'MlpPolicy' or 'equivariant', got {policy!r}")
             model = PPO(
-                "MlpPolicy",
+                policy_cls,
                 train_env,
                 learning_rate=config.learning_rate,
                 gamma=config.effective_gamma,
@@ -304,7 +327,7 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", b
                 # (max_grad_norm=0.5 below is already SB3's default; it clips size, not update *count*).
                 target_kl=0.03,
                 max_grad_norm=0.5,
-                policy_kwargs=dict(net_arch=[256, 256], log_std_init=config.log_std_init),
+                policy_kwargs=policy_kwargs,
                 device=config.device,
                 verbose=config.verbose,
             )
@@ -409,6 +432,9 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
     parser.add_argument("--bc-pretrain", action="store_true",
                          help="Warm-start the policy via behavior cloning from a supervised ranker before PPO fine-tuning")
+    parser.add_argument("--policy", type=str, default="MlpPolicy", choices=["MlpPolicy", "equivariant"],
+                         help="'MlpPolicy' (default, SB3 stock flat MLP) or 'equivariant' "
+                              "(DIAGNOSIS_PLAN.md Phase 2.1 / roadmap M6.1 -- shared per-ticker encoder)")
     parser.add_argument("--subprocess", action="store_true",
                          help="Use SubprocessVecEnv (parallel worker processes) instead of DummyVecEnv (single-process, GIL-bound). "
                               "Faster for high --n-envs but uses more memory (each subprocess copies tensors)")
@@ -479,7 +505,7 @@ def main(session_id: str | None = None) -> None:
     # avoid a circular import.
     from src.agent.rolling_eval import run_rolling_eval, finalize_and_report
     results = run_rolling_eval(base_config, resume=args.resume, session_id=session_id, bc_pretrain=args.bc_pretrain,
-                               use_subprocess=args.subprocess, promote=not args.no_promote)
+                               use_subprocess=args.subprocess, promote=not args.no_promote, policy=args.policy)
     finalize_and_report(results, base_config, promote=not args.no_promote)
 
 

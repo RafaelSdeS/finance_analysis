@@ -74,7 +74,8 @@ class WindowResult:
     rollouts: dict | None = None
 
 
-def train_window(window_config: AgentConfig, model_tag: str, resume: bool = False, bc_pretrain: bool = False, use_subprocess: bool = False) -> Path:
+def train_window(window_config: AgentConfig, model_tag: str, resume: bool = False, bc_pretrain: bool = False,
+                  use_subprocess: bool = False, policy: str = "MlpPolicy") -> Path:
     """
     Train one window by delegating into trainer.train() — reuses the same
     PPO construction, val-based early stopping, checkpointing, and resume
@@ -92,7 +93,7 @@ def train_window(window_config: AgentConfig, model_tag: str, resume: bool = Fals
     if final_path.exists():
         logger.info("%s exists — window already trained, skipping", final_path.name)
     else:
-        train(window_config, resume=resume, model_tag=model_tag, bc_pretrain=bc_pretrain, use_subprocess=use_subprocess)
+        train(window_config, resume=resume, model_tag=model_tag, bc_pretrain=bc_pretrain, use_subprocess=use_subprocess, policy=policy)
     return best_path if best_path.exists() else final_path
 
 
@@ -184,6 +185,7 @@ def run_rolling_eval(
     bc_pretrain: bool = False,
     use_subprocess: bool = False,
     promote: bool = True,
+    policy: str = "MlpPolicy",
 ) -> list[WindowResult]:
     """
     Train (or load) + evaluate one model per anchored rolling window.
@@ -246,7 +248,7 @@ def run_rolling_eval(
                     continue
                 logger.info(f"Window {window.window_id}: Loading pre-trained model from {best_path}")
             else:
-                best_path = train_window(window_config, model_tag, resume=resume, bc_pretrain=bc_pretrain, use_subprocess=use_subprocess)
+                best_path = train_window(window_config, model_tag, resume=resume, bc_pretrain=bc_pretrain, use_subprocess=use_subprocess, policy=policy)
                 if model_tag == "agent" and promote:
                     _promote_to_production(window_config, config)
             model = PPO.load(best_path, device=config.device)
@@ -758,13 +760,16 @@ def finalize_and_report(results: list[WindowResult], config: AgentConfig, promot
     Called by trainer.py's main() after run_rolling_eval() completes.
 
     Args:
-        promote: If False, skip save_walkforward() -- it writes to the shared
-            artifacts/backtest/walkforward_{results.parquet,metrics.json} path
-            regardless of run_rolling_eval's own promote flag, so a diagnostic/
-            smoke run with --no-promote was still silently overwriting the real
-            walk-forward artifacts (caught happening twice in one session before
-            this got gated here too). Same flag as run_rolling_eval's promote --
-            both mean "don't touch shared production paths".
+        promote: If False, skip save_walkforward() AND the rolling_eval_results.json
+            write below -- both write to shared, non-run-scoped top-level paths
+            (artifacts/backtest/walkforward_{results.parquet,metrics.json} and
+            artifacts/models/rolling_eval_results.json) regardless of
+            run_rolling_eval's own promote flag, so a diagnostic/smoke run with
+            --no-promote was still silently overwriting real production artifacts.
+            save_walkforward was caught and gated first; rolling_eval_results.json
+            was missed in that pass and got overwritten by a real smoke run before
+            being caught here too (2026-07-10). Same flag as run_rolling_eval's
+            promote -- both mean "don't touch shared production paths".
     """
     logger.info("All windows complete; summarizing results")
 
@@ -845,27 +850,30 @@ def finalize_and_report(results: list[WindowResult], config: AgentConfig, promot
                     f"{' (excludes 0)' if not (boot['ci_low'] <= 0 <= boot['ci_high']) else ' (includes 0)'}")
         logger.info(f"  Verdict (HAC): {'Statistically significant' if hac['p_value'] < 0.05 else 'NOT significant'} at α=0.05")
 
-    results_file = config.model_dir / "rolling_eval_results.json"
-    with open(results_file, "w") as f:
-        json.dump(
-            {
-                "summary": summary,
-                "significance": significance,
-                "windows": [
-                    {
-                        "window_id": r.window_id,
-                        "train_end": r.train_end,
-                        "test_start": r.test_start,
-                        "test_end": r.test_end,
-                        "metrics": r.metrics,
-                    }
-                    for r in results
-                ],
-            },
-            f,
-            indent=2,
-        )
-    logger.info(f"✓ Results saved → {results_file}")
+    if promote:
+        results_file = config.model_dir / "rolling_eval_results.json"
+        with open(results_file, "w") as f:
+            json.dump(
+                {
+                    "summary": summary,
+                    "significance": significance,
+                    "windows": [
+                        {
+                            "window_id": r.window_id,
+                            "train_end": r.train_end,
+                            "test_start": r.test_start,
+                            "test_end": r.test_end,
+                            "metrics": r.metrics,
+                        }
+                        for r in results
+                    ],
+                },
+                f,
+                indent=2,
+            )
+        logger.info(f"✓ Results saved → {results_file}")
+    else:
+        logger.info("Skipping rolling_eval_results.json write (promote=False) -- not touching the shared production file")
     return summary
 
 
@@ -933,6 +941,38 @@ def _selfcheck_promote_to_production() -> None:
         print("✓ promote_to_production self-check passed")
 
 
+def _selfcheck_no_promote_protects_rolling_eval_results() -> None:
+    """Regression test for the bug fixed 2026-07-10: rolling_eval_results.json used to be
+    written unconditionally by finalize_and_report, ignoring promote=False -- so a
+    diagnostic/smoke run with --no-promote still silently overwrote the shared production
+    file at artifacts/models/rolling_eval_results.json (the exact category of bug
+    save_walkforward was already gated against, just missed for this one call site).
+    A real smoke run tripped this during DIAGNOSIS_PLAN.md Phase 2.1 before it was caught.
+    """
+    fake_results = [
+        WindowResult(
+            window_id=0, train_end="2020-12-31", test_start="2021-01-01", test_end="2021-12-31",
+            metrics={
+                "agent": {"sharpe": 1.0, "excess_sharpe": 0.1},
+                "equal_weight": {"sharpe": 0.9, "excess_sharpe": 0.05},
+            },
+            model_path="fake.zip", rollouts=None,
+        )
+    ]
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        config = dataclasses.replace(DEFAULT_CONFIG, model_dir=Path(tmpdir))
+        results_file = Path(tmpdir) / "rolling_eval_results.json"
+
+        finalize_and_report(fake_results, config, promote=False)
+        assert not results_file.exists(), "promote=False must NOT write rolling_eval_results.json"
+
+        finalize_and_report(fake_results, config, promote=True)
+        assert results_file.exists(), "promote=True must write rolling_eval_results.json"
+
+        print("✓ no-promote protects rolling_eval_results.json self-check passed")
+
+
 if __name__ == "__main__":
 	import argparse
 
@@ -961,3 +1001,4 @@ if __name__ == "__main__":
 		_selfcheck_stitch()
 		_selfcheck_online_checkpoint()
 		_selfcheck_promote_to_production()
+		_selfcheck_no_promote_protects_rolling_eval_results()

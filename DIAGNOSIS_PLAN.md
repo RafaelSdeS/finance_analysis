@@ -586,17 +586,67 @@ Supervised OOS > 0 → quantified ceiling; RL must beat it or be dropped.
 
 All under the 3-seed protocol with `--no-promote`.
 
-- [ ] 2.1 **M6.1 permutation-equivariant policy** (shared per-ticker encoder + market
+- [x] 2.1 **M6.1 permutation-equivariant policy** (shared per-ticker encoder + market
       pooling, custom SB3 policy). Highest-leverage RL change: parameter sharing across 50
       slots turns ~120 decisions × 50 names into ~6,000 effective samples; BC from the
       honest teacher becomes near-lossless.
-      - **Tests** (`tests/agent/test_equivariant_policy.py`, fast group): *problem* —
-        permute the ticker slots of an observation and show the CURRENT flat MlpPolicy's
-        outputs do NOT permute accordingly (slot-specific weights; documents the broken
-        inductive bias). *Solution* — equivariance property: for random permutations π,
-        `policy(π(obs)) == π(policy(obs))` within tolerance, including mask and
-        prev-weights channels; plus BC-fidelity smoke: after BC on a synthetic teacher,
-        per-ticker score order matches the teacher's.
+      - **Done (2026-07-10):** new `src/agent/policy.py`. `SharedTickerEncoder`: the SAME
+        small MLP applied to every ticker slot (batched matmul, no cross-slot mixing),
+        each slot's input augmented with a masked-mean/std cross-sectional context vector
+        (a symmetric function of the other active slots, so it's order-independent too) —
+        this is what lets the shared weights judge a stock RELATIVE to that day's market,
+        not just in absolute terms. `EquivariantMlpExtractor` mimics SB3's `MlpExtractor`
+        interface (`policy_net`, `value_net`, `forward_actor`, `forward_critic`,
+        `latent_dim_pi`, `latent_dim_vf`) so `bc_pretrain.py`'s existing BC code works
+        **completely unmodified** against it. `EquivariantActorCriticPolicy` wires it into
+        SB3, additionally replacing SB3's default `action_net` — a full `Linear(n_tickers,
+        n_tickers)` that would silently remix every ticker's latent into every output
+        logit and destroy equivariance — with `nn.Identity()`, since the extractor's actor
+        head already outputs per-ticker logits directly. Wired into `trainer.py` via a new
+        `--policy {MlpPolicy,equivariant}` flag (default unchanged), threaded through
+        `rolling_eval.run_rolling_eval`/`train_window`.
+      - **Verified at three levels:** (1) pure-PyTorch — actor path exactly equivariant
+        (max error 7e-9), critic path exactly invariant (1e-8), corrupting an INACTIVE
+        slot's features changes zero active-slot outputs (context vector genuinely ignores
+        masked names, error 0.0 exactly), architecture is trainable (loss drops >99.99% on
+        a synthetic per-ticker target). (2) SB3 integration — `PPO` constructs with the
+        custom policy against `PortfolioEnv`'s real spaces, `action_net` confirmed
+        `Identity`, deterministic `predict()` stays exactly equivariant end-to-end through
+        the full SB3 stack (4e-7), and `bc_pretrain.pretrain_policy`/`pretrain_value` run
+        completely unmodified and measurably update the new architecture's parameters.
+        (3) **Real pipeline smoke run** — `python -m src.agent.trainer --train-years 2
+        --test-years 1 --timesteps 4096 --universe-size 50 --policy equivariant
+        --bc-pretrain --no-promote`: all 24 windows trained end-to-end (BC-pretrain, PPO,
+        val eval, checkpointing, final report) without a single crash.
+      - **Incident during the smoke run, disclosed and fixed:** the run (correctly,
+        `--no-promote`) skipped model promotion and `walkforward_*`, but still silently
+        **overwrote the shared, gitignored `artifacts/models/rolling_eval_results.json`**
+        — a pre-existing bug (that write was never gated by `promote`, unlike
+        `save_walkforward`, which had already been fixed for the exact same failure mode
+        once before per its own code comment: "caught happening twice... before this got
+        gated here too" — this one instance was missed). Because the file is gitignored,
+        the prior production content (presumably from the 8-window/5M-timestep run
+        referenced in TODO.md) is **not recoverable** — only a real production retrain
+        restores it. Fixed immediately: the write is now gated behind `promote` in
+        `finalize_and_report`, matching `save_walkforward`. Added
+        `tests/agent/test_rolling_eval_promote.py` (data group) wrapping this and three
+        other previously dead-code self-checks in `rolling_eval.py` (reachable only via
+        `python -m src.agent.rolling_eval` with no CLI mode — never run by any test
+        runner, which is exactly why this gap went undetected) — including a direct
+        regression test for this bug: `promote=False` must not create the file,
+        `promote=True` must. Audited every other `config.model_dir`/`config.backtest_dir`
+        write in `trainer.py`/`rolling_eval.py` for the same pattern — confirmed this was
+        the only unguarded instance.
+      - **Tests** (`tests/agent/test_equivariant_policy.py`, fast group, 5 cases + 4 cases
+        in `test_equivariant_policy_integration.py`, data group): *problem* — a generic
+        flat MLP violates equivariance under a ticker-slot permutation (max error 0.40,
+        confirming the broken inductive bias this architecture exists to fix). *solution*
+        — exact equivariance/invariance/masking as above, plus the full SB3-level checks.
+        Full suite: 26/26 passed.
+      - **Scope note:** this validates the architecture is CORRECT and INTEGRATES
+        cleanly — it is not yet a full multi-seed comparative training result (that needs
+        real timesteps and the 3-seed protocol from TODO.md M7.2, deferred to when Phase 2
+        is complete and a proper comparison run is warranted, not before).
 - [ ] 2.2 **Action reparameterization (Option C):** per-ticker scores → deterministic tilt
       rule (EW·(1+κ·cs-z(score)), capped, renormalized) or Dirichlet head. Removes the
       logit_scale saturation pathology entirely.

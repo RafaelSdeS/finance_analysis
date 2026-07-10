@@ -29,6 +29,7 @@ FAST = [
     "tests/agent/test_early_stopping.py",
     "tests/agent/test_attribution.py",
     "tests/agent/test_supervised_strategy.py",
+    "tests/agent/test_equivariant_policy.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
@@ -39,6 +40,8 @@ DATA = [
     "tests/agent/verify_dataset_for_training.py",
     "tests/agent/test_env_basic.py",
     "tests/agent/test_data_pipeline_universe.py",
+    "tests/agent/test_equivariant_policy_integration.py",
+    "tests/agent/test_rolling_eval_promote.py",
     "tests/agent/test_excess_sharpe.py",
     "tests/agent/test_eval_integrity.py",
     "tests/agent/test_inference_output.py",
