@@ -30,9 +30,13 @@ cheaply before any further agent training.
 - The dataset is survivor-only: 288 tickers, only 10 stop trading before mid-2025 —
   essentially **zero delistings/bankruptcies in 26 years of Brazilian equities**, impossible
   for a point-in-time universe. Collection started from today's listing.
-- Impact: every learned feature→return relationship is conditioned on survival/growth; the
-  EW-of-future-winners benchmark is inflated; magnitude unknown → no Sharpe measured on
-  this data is trustworthy at the ±0.1 precision being chased.
+- Impact: every learned feature→return relationship is conditioned on survival/growth, and
+  no Sharpe measured on the non-PIT tensors is a legitimate backtest of a historically
+  executable strategy. **Measured in Phase 0.2 (below): the bias is real but its sign is
+  NOT a uniform inflation** — full-sample selection actually *understates* EW Sharpe in
+  6/8 windows (mean gap −0.13 Sharpe), concentrated in the earliest windows where the
+  candidate pool was thin. The takeaway is contamination of *which strategy is being
+  tested*, not a one-directional overstatement of performance.
 
 ### F2. Signal was measured on the wrong universe (feature layer) — code-confirmed
 - `ic_analysis.py` computes IC on the **full ~288-name dataset**, but the agent trades only
@@ -148,12 +152,48 @@ and define success metrics that can detect the plausible effect size.
         didn't account for CASH being added on top of `universe_size`, always failing when
         CASH is in the universe. Fixed the assertion and registered both new test files in
         `tests/run_all.py`. Full suite: 20/20 passed.
-- [ ] 0.2 **Quantify the bias:** EW backtest PIT vs current universe per window; the gap =
-      the survivorship-lookahead premium baked into every result to date.
-      - **Test:** analysis, not code — no unit test; the deliverable is the per-window gap
-        table in this file. Add a V8 gate to `verify_dataset_for_training.py` that *reports*
-        the delisting count (tickers ending >90d before dataset end) so the survivor-only
-        data limitation is printed at every verification instead of rediscovered.
+- [x] 0.2 **Quantify the bias:** EW backtest PIT vs current universe per window.
+      - **Done (2026-07-10):** `tools/quantify_survivorship_bias.py` (in-memory only, no
+        production artifacts touched) rolls plain equal-weight through both universes'
+        masks over each window's test span and diffs cumulative return / Sharpe.
+        Added V8 to `verify_dataset_for_training.py` — report-only gate (always passes),
+        prints the delisting count so the survivor-only limitation shows at every
+        verification: **10/288 tickers (3.5%) end >90d before dataset end over 27 years** —
+        confirms F1's "essentially survivor-only" claim with an exact number.
+      - **Result — the bias is real but NOT a uniform inflation (revises the plan's
+        original hypothesis):**
+        ```
+        window  test span              current_sharpe  pit_sharpe  gap(cur−pit)
+        0       2010-01 → 2012-01      0.44            1.11        -0.67
+        1       2012-01 → 2014-01      0.63            1.14        -0.50
+        2       2014-01 → 2016-01     -0.34           -0.76        +0.43
+        3       2016-01 → 2018-01      2.11            2.25        -0.14
+        4       2018-01 → 2020-01      1.96            1.77        +0.19
+        5       2020-01 → 2022-01     -0.02            0.20        -0.21
+        6       2022-01 → 2024-01      0.68            0.70        -0.02
+        7       2024-01 → 2026-01      0.30            0.44        -0.14
+        mean gap: -0.13 Sharpe, -0.093 cumulative return. Current-mode overstates PIT in
+        only 2/8 windows.
+        ```
+        **Interpretation:** the full-sample selector's contamination is largest in the
+        earliest windows (0, 1) — but it *understates* rather than inflates Sharpe there.
+        Mechanism: with few tickers having enough trading history by 2008–2011, the PIT
+        top-50 for those early windows draws from a thin, then-emerging-company pool;
+        several of those names had unusually strong 2010–2014 runs. The full-sample
+        selector instead plugs in today's already-enormous blue chips (PETR4/VALE3/ITUB4/
+        ...) from window 0 onward, which were already large and comparatively flat over
+        that same 2010–2014 span. **The takeaway is not "backtests are inflated" — it's
+        that the full-sample selector is testing a DIFFERENT, unrealized strategy** ("hold
+        the stocks that will turn out to dominate 2026") in early windows, not the one a
+        live 2010 investor could have run. The methodological problem (F1) stands
+        regardless of sign: no Sharpe computed on the current (non-PIT) tensors is a
+        legitimate backtest of any strategy that could have been executed historically.
+        For the RL agent specifically (windows 2–7 dominate its training/eval budget,
+        where PIT and full-sample universes are nearly identical — only 3 of 50 names turn
+        over), this softens F1's practical impact on the agent's own headline numbers —
+        but windows 0–1 remain contaminated, and Phase 1's supervised ceiling and any
+        multi-window pooled statistic should use the PIT tensors, not the current ones.
+        Full table: `artifacts/backtest/survivorship_bias.json`.
 - [ ] 0.3 **Tradable-universe IC audit:** `ic_analysis.py` gains a `--tickers`/universe
       filter; run per PIT top-50 per test window, 21d horizon, non-overlap t-stats.
       - **Tests** (extend `tests/agent/test_ic_analysis.py`, fast group): *problem* —

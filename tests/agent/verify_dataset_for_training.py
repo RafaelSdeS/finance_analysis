@@ -306,6 +306,37 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
         print(f"⚠ 'sector' column not found, skipping check")
         results['pass_v7'] = True
 
+    # ===== V8: Delisting Coverage (survivorship-bias report, DIAGNOSIS_PLAN.md F1) =====
+    print("\n" + "=" * 70)
+    print("V8: DELISTING COVERAGE (survivorship-bias check)")
+    print("=" * 70)
+
+    if date_col and 'ticker' in df.columns:
+        last_seen = df.groupby('ticker')[date_col].max()
+        dataset_end = df[date_col].max()
+        delisted = last_seen[last_seen < dataset_end - pd.Timedelta(days=90)]
+        n_tickers = df['ticker'].nunique()
+        results['n_delisted'] = len(delisted)
+        results['delisted_pct'] = len(delisted) / max(n_tickers, 1) * 100
+
+        print(f"Tickers whose data ends >90d before dataset end: {len(delisted)} / {n_tickers} "
+              f"({results['delisted_pct']:.1f}%)")
+        # Report-only: always passes. A real point-in-time Brazilian-equity universe over
+        # 26 years should show meaningfully more attrition (bankruptcies, delistings,
+        # M&A) than this. A low count here does not mean the data is wrong for what it
+        # is (collection started from today's listing) — it means every backtest is
+        # implicitly survivor-conditioned, and that bias is currently unquantified
+        # outside of the point-in-time universe work in DIAGNOSIS_PLAN.md Phase 0.
+        results['pass_v8'] = True
+        if results['delisted_pct'] < 5.0:
+            print(f"⚠ NOTE: only {results['delisted_pct']:.1f}% delisting rate over "
+                  f"{(dataset_end - df[date_col].min()).days / 365.25:.0f} years is low for "
+                  f"a real point-in-time universe — this dataset is survivor-conditioned. "
+                  f"See DIAGNOSIS_PLAN.md F1 (not a failure; a documented limitation).")
+    else:
+        print(f"⚠ ticker/date columns not found, skipping check")
+        results['pass_v8'] = True
+
     # ===== SUMMARY =====
     print("\n" + "=" * 70)
     print("SUMMARY & RECOMMENDATIONS")
@@ -319,6 +350,7 @@ def verify_dataset_for_training(dataset_path: str = "data/processed/ml_dataset.p
         'V5 Distributions': results['pass_v5'],
         'V6 No Lookahead Bias': results['pass_v6'],
         'V7 Sector Coverage': results['pass_v7'],
+        'V8 Delisting Coverage (report)': results['pass_v8'],
     }
 
     for check, passed in checks.items():
