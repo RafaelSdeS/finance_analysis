@@ -1031,6 +1031,75 @@ the ceiling for both approaches simultaneously, independent of this verdict.
 
 ---
 
+## Phase 5 — Cheap fixes from reward/turnover/feature/selection deep-dive. ~4 hours.
+
+Post-Phase-4 follow-up: the verdict identifies clear mechanisms (turnover cost, weak signal,
+noisy checkpoint selection, reward imbalance) and the diagnostic ranged across SELIC-benchmark
+bugs, baseline-inversion bugs, and feature surgery. This phase implements four high-confidence,
+low-effort code fixes directly from those findings. None change the Phase 4 verdict (signal is
+still weak); all reduce noise/waste in the current system and unblock future experiments.
+
+### Phase 5 Changes (committed 2026-07-10)
+
+- [x] **Item 0 (bonus, trivial):** Fix per-window excess-Sharpe bug in `eval_window`
+      (`src/agent/rolling_eval.py`). Rollouts were computed in a single loop, so non-selic
+      policies got `selic_log_returns=None` during their metric computation (SELIC was still
+      unknown). Now: roll out all 5 policies first, then compute all metrics with the known
+      `selic_log_rets`. Matches the pattern already in `stitch_walkforward_results()` and
+      online-backtest summary. No behavior change, just fixes silent data loss on non-selic
+      policy rows in the per-window metrics. Regression test: every policy's `excess_sharpe`
+      is non-null after `eval_window()`.
+
+- [x] **Item 1:** Turnover EMA anchoring in tilt action map (Phase 5 version of Option C).
+      - Added `config.py::tilt_ema_alpha` (default 1.0 = no anchoring, fully backward-compatible).
+      - `env.py::_tilt_to_weights`: if `alpha < 1.0`, blend pre-cap raw weights toward
+        `_prev_weights` before capping: `raw = alpha * raw + (1-alpha) * prev`, renormalize,
+        then cap. Measured in isolation: 0.66 one-way turnover → ~0.2 at `alpha=0.3`.
+      - `trainer.py`: added `--tilt-ema-alpha` CLI override.
+      - Regression tests: confirm `alpha=1.0` exhibits measured high turnover, `alpha<1.0`
+        materially lower, weights still sum to 1 and respect cap.
+
+- [x] **Item 2:** Feature surgery in `config.py` (tensor rebuild required after merge, not done here).
+      - **Drop:** `days_since_fundamental` (IC 0.0052 at 21d, t=0.50 — statistically zero).
+      - **Add:** `momentum_vs_market_12m` (IC 0.062, t=6.03), `earnings_yield_vs_selic`
+        (IC 0.071, t=8.04), `roe_qoq` (IC 0.073, t=9.59), `net_margin_qoq` (IC 0.066, t=8.33),
+        `debt_equity_qoq` (IC -0.058, t=-8.89, strong negative signal), `ebitda_growth_yoy`
+        (IC 0.059, t=6.72), `hl_ratio` (IC 0.064, t=6.94). All verified in
+        `artifacts/backtest/ic_analysis.json`.
+      - **Keep** (despite weak IC): `momentum_vs_sector_3m` (t=2.64), `momentum_vs_market_3m`
+        (t=2.89), `real_return` (t=-3.36), `drawdown_percentile` (t=3.76) — not zero, just weak.
+      - **Swap macro:** comment `ipca`, uncomment `selic`. SELIC level is essential for
+        cash-timing decisions (agent owns a SELIC-earning CASH asset and is scored on timing,
+        but couldn't observe the rate). One-liner unflag of config.py lines 172-183's own
+        documented intent.
+      - Feature-existence regression test: every name in `state_features` resolves to a real
+        parquet column before training touches it (catches typos in new QoQ columns).
+      - **Action required:** after merge, run `python -m src.agent.data_pipeline --universe-size 50`
+        to rebuild tensors (env.py's feature-list staleness check will otherwise raise).
+
+- [x] **Item 3:** Smooth checkpoint selection in `ValSharpeCallback` (fixes ρ≈0.09 val→test
+      rank-correlation coin-flip problem from Phase 3.1).
+      - Added `config.py::val_smoothing_window` (default 3, trailing-window size).
+      - `trainer.py::ValSharpeCallback`: track `excess_sharpe_history` deque; use trailing
+        mean (not raw point) for both checkpoint-save gate and patience-reset gate.
+      - Keeps raw per-eval value in JSONL for diagnostics; only selection/patience reads
+        smoothed version.
+      - Regression test: synthetic noisy-but-improving val-Sharpe sequence shows smoothed
+        version captures more checkpoints than raw, correctly tracks trend not noise.
+
+- [x] **Item 4 (no code):** `--risk-aversion` sweep ready to run. Flag already exists
+      (`trainer.py:453`, `config.py:294` default 5.0). CLI override works. Ready for
+      `--risk-aversion {0, 1, 2}` × 3 seeds whenever GPU time is available.
+
+**Phase 5 exit criterion — met.** All four items implemented and test-covered (fast group
+passes). No training runs, no tensor rebuild (those are user actions gated on approval).
+None of these changes affect Phase 4's verdict (signal is still weak); they're noise-reduction
+and unblocking infrastructure. Item 2 (feature surgery) + data rebuild will temporarily
+invalidate the current production model/scaler (tensors change → env's staleness check fires)
+but that's expected and documented.
+
+---
+
 ## Deliberately NOT doing
 
 - No reward re-redesign (M3.1 is sound and test-covered).
