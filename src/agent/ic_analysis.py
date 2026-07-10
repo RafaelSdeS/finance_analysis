@@ -33,8 +33,15 @@ SKIP_COLS = {
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def load_panel(dataset_path: Path, horizons: list[int] = None):
+def load_panel(dataset_path: Path, horizons: list[int] = None, tickers: set[str] | None = None):
     """Load panel data and compute forward returns.
+
+    Args:
+        tickers: if given, restrict to this ticker set BEFORE computing anything else
+            (feature pivots, forward returns, cross-sectional IC) — e.g. a tradable
+            top-N universe, so IC reflects only names the agent could actually hold
+            instead of the full listed universe (DIAGNOSIS_PLAN.md F2). None = no
+            filtering (original, full-universe behavior).
 
     Returns:
         dict[str, pd.DataFrame]: feature_name -> [dates x tickers] matrix
@@ -49,6 +56,9 @@ def load_panel(dataset_path: Path, horizons: list[int] = None):
     # Drop CASH if present (synthetic row from training file)
     if "ticker" in df.columns:
         df = df[df["ticker"] != "CASH"].reset_index(drop=True)
+    if tickers is not None:
+        df = df[df["ticker"].isin(tickers)].reset_index(drop=True)
+        logger.info(f"Restricted to {len(tickers)}-ticker universe: {len(df)} rows remain")
 
     # Identify candidate features (float columns, not in skip list)
     candidates = [c for c in df.columns if df[c].dtype.kind == "f" and c not in SKIP_COLS]
@@ -152,14 +162,19 @@ def main():
                         help="Forward return horizons in trading days")
     parser.add_argument("--min-names", type=int, default=10,
                         help="Minimum valid names per date to include")
+    parser.add_argument("--tickers", type=str, default=None,
+                        help="Comma-separated ticker whitelist (e.g. a tradable top-N universe); "
+                             "default: no filtering, use every ticker in the dataset")
     parser.add_argument("--out", type=Path, default=_PROJECT_ROOT / "artifacts/backtest/ic_analysis.json",
                         help="Output JSON path")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
+    tickers = set(args.tickers.split(",")) if args.tickers else None
+
     # Load data
-    features, fwd_rets = load_panel(args.dataset, args.horizons)
+    features, fwd_rets = load_panel(args.dataset, args.horizons, tickers=tickers)
 
     # Compute IC per feature and horizon
     results = {}

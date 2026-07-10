@@ -38,14 +38,20 @@ cheaply before any further agent training.
   candidate pool was thin. The takeaway is contamination of *which strategy is being
   tested*, not a one-directional overstatement of performance.
 
-### F2. Signal was measured on the wrong universe (feature layer) — code-confirmed
+### F2. Signal was measured on the wrong universe (feature layer) — code-confirmed, measured
 - `ic_analysis.py` computes IC on the **full ~288-name dataset**, but the agent trades only
   the **top-50 large caps**, where cross-sectional alpha (quality/value especially) is
-  typically far weaker. The headline IC 0.03–0.10 may not exist where the agent trades.
+  typically far weaker.
 - `ranker_baseline.py:89` splits **by rows** (ticker-holdout with full temporal overlap),
   so the teacher's t=24 partly measures contemporaneous fit, not real-time knowledge.
 - This mechanically explains the standing paradox: positive measured IC everywhere, yet the
   ranker-top-20% portfolio loses OOS (Sharpe −0.34, worst of the M5 four-way).
+- **Measured in Phase 0.3 (below):** the headline IC 0.03–0.10 does NOT vanish on the
+  tradable top-50 — mean |rank-IC| shrinks moderately (0.060 → 0.047, full → PIT top-50),
+  but its **non-overlap t-stat collapses from 1.91 to 0.51**. Revised framing: the signal
+  isn't absent on the tradable universe, but ~50 names/day isn't enough breadth to
+  distinguish it from noise — F2 is really an instance of F3's power problem, one level
+  earlier than expected (signal detection, not just strategy evaluation).
 
 ### F3. The success bar is statistically unreachable as defined (evaluation layer)
 - SE of annualized Sharpe ≈ 1/√T-years: **±0.71 per 2y window, ±0.25 pooled over 16y** →
@@ -194,13 +200,57 @@ and define success metrics that can detect the plausible effect size.
         but windows 0–1 remain contaminated, and Phase 1's supervised ceiling and any
         multi-window pooled statistic should use the PIT tensors, not the current ones.
         Full table: `artifacts/backtest/survivorship_bias.json`.
-- [ ] 0.3 **Tradable-universe IC audit:** `ic_analysis.py` gains a `--tickers`/universe
+- [x] 0.3 **Tradable-universe IC audit:** `ic_analysis.py` gains a `--tickers`/universe
       filter; run per PIT top-50 per test window, 21d horizon, non-overlap t-stats.
-      - **Tests** (extend `tests/agent/test_ic_analysis.py`, fast group): *problem* —
-        synthetic panel where only small-cap names carry signal; assert full-universe
-        IC > 0 while top-N-filtered IC ≈ 0 (demonstrates the F2 masking effect the current
-        default hides). *Solution* — filter honored exactly (only supplied tickers enter
-        the cross-sections; per-date min_names respected on the filtered set).
+      - **Done (2026-07-10):** `load_panel()` takes an optional `tickers` set (+ CLI
+        `--tickers`), filtering before any pivot/forward-return computation. New
+        `tools/tradable_universe_ic_audit.py` loads the panel once, then per window slices
+        to that window's test span and to two ticker sets: the full listed universe and
+        the PIT top-50 (`select_universe`, same selector as 0.1), reusing `daily_rank_ic`/
+        `summarize` unchanged. Had to align feature/forward-return matrices by both date
+        index AND ticker columns per feature (`_aligned_window`) — discovered that
+        fundamental-feature pivots (e.g. `roe`) have fewer dates/tickers than price-based
+        ones, since `pivot_table` drops slices that are entirely NaN (pre-2011 CVM era;
+        the odd ticker with no fundamentals ever) — a real data-shape quirk, not a bug in
+        the new code, but it would have silently misaligned cross-sections if unhandled.
+      - **Result — signal shrinks moderately, but statistical confidence collapses:**
+        ```
+        window  test span          full |IC|  pit |IC|  full t-stat  pit t-stat
+        0       2010→2012          0.067      0.059     1.64          0.66
+        1       2012→2014          0.073      0.028     2.36         -0.11
+        2       2014→2016          0.074      0.075     2.59          1.57
+        3       2016→2018          0.025      0.043     0.66         -0.54
+        4       2018→2020          0.034      0.034     1.14          0.25
+        5       2020→2022          0.047      0.022     1.47          0.61
+        6       2022→2024          0.065      0.052     1.48          0.86
+        7       2024→2026          0.094      0.060     3.91          0.75
+        mean:                      0.060      0.047     1.91          0.51
+        ```
+        (mean |rank-IC| across 20 of the agent's 21 `state_features` — `volume` is
+        excluded by `ic_analysis.py`'s own `SKIP_COLS`, unrelated to this change; non-
+        overlap t-stat, 21d horizon.) Full table: `artifacts/backtest/tradable_universe_ic.json`.
+      - **Interpretation:** the headline "IC 0.03–0.10" from TODO.md's M5 diagnosis is
+        confirmed on the full universe (mean 0.060, consistent with that range) — but on
+        the top-50 the agent actually trades it drops to 0.047 (a real but moderate ~22%
+        shrinkage, not the "IC≈0" the plan's F2 hypothesis worried about) while the
+        **non-overlap t-stat collapses from 1.91 to 0.51** — nowhere near conventional
+        significance even before any multiple-testing correction. This reframes F2: the
+        cross-sectional signal is not *absent* on the tradable universe, but on ~50 names
+        per day there isn't enough breadth to distinguish it from noise with the data
+        available. This is the F3 power problem showing up one level earlier than
+        expected (in signal detection, not just strategy evaluation) — directly motivates
+        widening breadth (0.5's tilt-IC test, pooling across windows) before concluding
+        "no signal" from any single-window number.
+      - **Tests** (extended `tests/agent/test_ic_analysis.py`, fast group, 3 new cases):
+        *problem* (Test 6) — synthetic 12-ticker panel where only a "SMALL" 6-ticker group
+        carries signal (myfeat exactly ranks their next-day returns) and a "BIG" 6-ticker
+        group's returns are a fixed derangement of its own feat order; full-universe IC
+        (0.867, hand-verified via the Spearman formula) is driven almost entirely by the
+        SMALL group. *Solution* (Test 7) — filtering to the BIG-only ("tradable") subset
+        collapses IC to −0.086, matching the hand-derived value exactly, demonstrating the
+        real audit's mechanism on a controlled case. (Test 8) — filter honored exactly:
+        `features[feat].columns == requested set`, no leakage; `min_names` exceeding the
+        filtered set's size correctly yields all-NaN days. Full suite: 20/20 passed.
 - [ ] 0.4 **Honest teacher validation:** `ranker_baseline.py` → time split (train ≤ cutoff,
       test after); walk-forward IC per window.
       - **Tests** (`tests/agent/test_ranker_time_split.py`, fast group): *problem* —
