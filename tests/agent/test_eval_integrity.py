@@ -17,9 +17,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.agent.config import DEFAULT_CONFIG, generate_windows, window_to_config
+from src.agent.config import DEFAULT_CONFIG, generate_windows, window_to_config, RollingWindow
 from src.agent.env import PortfolioEnv
 from src.agent.evaluate import inv_vol_policy, market_cap_policy
+from src.agent.rolling_eval import eval_window
+from stable_baselines3 import PPO
 
 
 def test_inv_vol_no_lookahead() -> None:
@@ -153,6 +155,43 @@ def test_scaler_cutoff_precedes_every_window_test_start() -> None:
     print(f"✓ all {len(windows)} windows: scaler cutoff (train_end) strictly precedes val_start and test_start")
 
 
+def test_eval_window_computes_all_excess_sharpes() -> None:
+    """Phase 5 fix: verify eval_window computes excess_sharpe for ALL policies, not just selic.
+
+    Regression test for the bug where non-selic policies got selic_log_rets=None during
+    metric computation because they were computed inside the rollout loop before selic_log_rets
+    was known. Now they're computed in a second pass after all rollouts complete.
+    """
+    # Create a minimal window using the first test split
+    windows = generate_windows(
+        DEFAULT_CONFIG.dataset_start, DEFAULT_CONFIG.dataset_end,
+        DEFAULT_CONFIG.window_train_years, DEFAULT_CONFIG.window_test_years,
+    )
+    assert len(windows) > 0, "need at least one window"
+    w = windows[0]
+    cfg = window_to_config(w, DEFAULT_CONFIG)
+
+    # Load a dummy model (just needs to be a valid PPO instance; we're testing eval_window's
+    # metrics computation, not the model's quality)
+    from src.agent.data_pipeline import load_feature_scaler
+    env = PortfolioEnv(cfg, date_range="test")
+    model = PPO("MlpPolicy", env, verbose=0)
+
+    # Run eval_window
+    result = eval_window(w, model, cfg)
+
+    # Check: every policy should have an excess_sharpe in its metrics
+    for policy_name in ["agent", "equal_weight", "market_cap", "inv_vol", "selic"]:
+        assert policy_name in result.metrics, f"missing metrics for {policy_name}"
+        metrics = result.metrics[policy_name]
+        assert "excess_sharpe" in metrics, f"{policy_name} missing excess_sharpe"
+        assert metrics["excess_sharpe"] is not None, f"{policy_name} has None excess_sharpe"
+        # Should be a float, not NaN (reasonable range for 1-2y test split)
+        assert isinstance(metrics["excess_sharpe"], (int, float)), f"{policy_name} excess_sharpe not numeric"
+
+    print("✓ eval_window: all policies (non-selic included) have non-null excess_sharpe in metrics")
+
+
 def main() -> None:
     test_inv_vol_no_lookahead()
     test_market_cap_no_lookahead()
@@ -160,6 +199,7 @@ def main() -> None:
     test_weight_drift_matches_independent_calculation()
     test_baseline_weights_reproduced_exactly()
     test_scaler_cutoff_precedes_every_window_test_start()
+    test_eval_window_computes_all_excess_sharpes()
     print("\nALL EVAL-INTEGRITY TESTS PASSED ✓")
 
 

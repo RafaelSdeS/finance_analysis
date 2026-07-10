@@ -134,16 +134,19 @@ def eval_window(window: RollingWindow, model: PPO, window_config: AgentConfig) -
             "selic": selic_policy(env, window_config),
         }
 
-        metrics = {}
         rollouts = {}
         selic_log_rets = None
+        # Roll out all strategies first, then compute metrics once selic_log_rets is known
         for name, fn in policies.items():
             logger.info("  Window %d: Rolling out %s...", window.window_id, name)
             res = rollout(env, fn)
             rollouts[name] = res
             if name == "selic":
                 selic_log_rets = res["rewards"]
-            # Pass costs for gross/net decomposition
+
+        # Now compute metrics for all strategies with the known selic_log_rets
+        metrics = {}
+        for name, res in rollouts.items():
             if "costs" in res:
                 metrics[name] = compute_all(res["rewards"], res["values"], res.get("weights"),
                                            daily_costs=res["costs"], cost_bps=window_config.transaction_cost_bps,

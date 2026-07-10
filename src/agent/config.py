@@ -110,7 +110,7 @@ class AgentConfig:
             "drawdown",
             # "momentum_vs_market_1m",
             "momentum_vs_market_3m",  # RF rank 3
-            # "momentum_vs_market_12m",
+            "momentum_vs_market_12m",  # IC 0.0621 at 21d
             # "momentum_vs_sector_1m",
             "momentum_vs_sector_3m",  # RF rank 1
             "momentum_vs_sector_12m",  # RF rank 14
@@ -121,6 +121,7 @@ class AgentConfig:
             "price_percentile_5y",  # RF rank 6
             "drawdown_percentile",  # RF rank 8
             "return_6m",  # RF rank 12
+            "hl_ratio",  # (high - low) / adj_close; IC 0.0635 at 21d
         ]
     )
 
@@ -142,7 +143,7 @@ class AgentConfig:
             # Growth features (YoY, not CAGR to avoid synthetic data)
             # "earnings_growth_yoy",
             # "revenue_growth_yoy",
-            # "ebitda_growth_yoy",
+            "ebitda_growth_yoy",  # IC 0.0587 at 21d
             # Sector-relative valuation & quality
             "pl_zscore_sector",  # Valuation relative to sector — helps identify cheap/expensive
             # "pvp_zscore_sector",
@@ -152,7 +153,7 @@ class AgentConfig:
             "f_score",  # Piotroski F-Score — quality metric, high IC in ranker baseline (top-7, IC 0.0763)
             # "roe_trend_4q",
             # "margin_trend_4q",
-            # "earnings_yield_vs_selic",
+            "earnings_yield_vs_selic",  # IC 0.0710 at 21d
             # Dividend signals
             "div_yield_12m",
             # "payout_ratio",
@@ -163,7 +164,10 @@ class AgentConfig:
             # under the "top-IC only" rule; uncomment if this distinction
             # turns out to matter for young/newly-listed tickers.
             # "has_fundamentals",
-            "days_since_fundamental",
+            # "days_since_fundamental",  # IC 0.0052 at 21d (t=0.50), clearly dead
+            "roe_qoq",  # IC 0.0729 at 21d (t=9.59)
+            "net_margin_qoq",  # IC 0.0661 at 21d (t=8.33)
+            "debt_equity_qoq",  # IC -0.0577 at 21d (t=-8.89), strong negative signal
             # "debt_trend_4q",  # Removed; IC ranking not in top-15 at 21d
         ]
     )
@@ -183,9 +187,9 @@ class AgentConfig:
     # next real tensor rebuild (e.g. together with --pit-universe / --cross-sectional-features).
     macro_features: list[str] = field(
         default_factory=lambda: [
-            # "selic",
+            "selic",  # Cash-timing benchmark: agent is scored on CASH decisions but needs rate level to learn them (Phase 5 fix)
             # "cdi",
-            "ipca",  # RF rank 13
+            # "ipca",  # RF rank 13 — removed; no cross-sectional signal (identical across tickers daily)
             # "selic_trend_20d",
         ]
     )
@@ -256,6 +260,7 @@ class AgentConfig:
     # (M2.3 sweep found no logit_scale fixes it); production model trained this way.
     action_mode: str = "tilt"
     tilt_kappa: float = 2.0  # calibrated so a modestly differentiated score (z~2) sits near the 0.10 cap boundary at n_active~50
+    tilt_ema_alpha: float = 1.0  # EMA blend toward prev_weights: 1.0 = no anchoring (current behavior), <1 reduces turnover
 
     # ===== Training Configuration =====
     total_timesteps: int = 5_000_000  # raised from 1M (2026-07-09): window_1 of the 132721 run
@@ -277,6 +282,7 @@ class AgentConfig:
 
     # ===== Checkpointing & Early Stopping =====
     eval_freq: int = 20  # Evaluate on val set every N episodes (20 * n_steps = 40,960 timesteps)
+    val_smoothing_window: int = 3  # Trailing-mean window for checkpoint selection (smooths noise in single-point val Sharpe; ρ≈0.09 → p=0.60 on val→test correlation, Phase 5 fix)
     early_stopping_patience: int = 8  # Stop if val Sharpe degrades 8x in a row; generous because concentration initially costs turnover before alpha shows (the "paying to learn" valley)
 
     # ===== Portfolio Constraints =====

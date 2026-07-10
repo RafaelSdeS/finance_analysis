@@ -124,5 +124,40 @@ def test_preserves_other_columns() -> None:
     assert result.iloc[0]["date"] == "2026-01-01"
 
 
+def test_state_features_exist_in_dataset() -> None:
+    """Phase 5 feature surgery: all names in config.state_features resolve to actual parquet columns.
+
+    Catches typos in new feature additions (roe_qoq, net_margin_qoq, debt_equity_qoq, hl_ratio, etc.)
+    before training tries to use them.
+    """
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+    from src.agent.config import DEFAULT_CONFIG
+    import pyarrow.parquet as pq
+
+    # Load the actual parquet dataset
+    ds_path = Path(__file__).resolve().parents[2] / "data" / "processed" / "ml_dataset.parquet"
+    if not ds_path.exists():
+        pytest.skip(f"dataset not found at {ds_path}")
+
+    pf = pq.ParquetFile(ds_path)
+    parquet_cols = set(pf.schema.names)
+
+    # Check: every base feature (price/fundamental/macro) exists in the parquet
+    missing_features = []
+    for feature in DEFAULT_CONFIG.base_state_features:
+        if feature not in parquet_cols:
+            missing_features.append(feature)
+
+    assert not missing_features, (
+        f"The following features in config.state_features are not in the parquet dataset: {missing_features}. "
+        f"You may need to rerun data_pipeline.py to rebuild the dataset with the new feature columns."
+    )
+    print(f"✓ All {len(DEFAULT_CONFIG.base_state_features)} base features exist in parquet "
+          f"({len(parquet_cols)} total columns)")
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

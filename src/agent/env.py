@@ -330,6 +330,12 @@ class PortfolioEnv(gym.Env):
         raw[~active] = 0.0
         total = raw.sum()
         raw = raw / total if total > 1e-9 else ew.copy()  # degenerate (everything clipped to 0): fall back to EW
+
+        # EMA blend toward prev_weights to reduce turnover (default alpha=1.0 is no anchoring)
+        if self.config.tilt_ema_alpha < 1.0:
+            raw = self.config.tilt_ema_alpha * raw + (1.0 - self.config.tilt_ema_alpha) * self._prev_weights
+            raw /= raw.sum()  # renormalize after blending
+
         return self._cap_weights(raw, active)
 
     def step(self, action: np.ndarray):

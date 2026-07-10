@@ -33,6 +33,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from collections import deque
 from tqdm import tqdm
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
@@ -80,6 +81,7 @@ class ValSharpeCallback(BaseCallback):
         self.best_excess_sharpe = -np.inf   # gates the patience-reset below (needs a MEANINGFUL jump)
         self.best_saved_sharpe = -np.inf    # gates checkpoint saving (ANY improvement saves)
         self.degrade_count = 0
+        self.excess_sharpe_history = []  # trailing history for smoothed checkpoint selection
         # Noise floor for resetting the patience counter -- lowered from 0.05 (2026-07-09):
         # window_3 of the 132721 run improved monotonically every single eval (0.283 -> 0.315
         # over 8 evals, ~0.004-0.017/eval) but never once cleared a 0.05 jump in a single step,
@@ -198,11 +200,20 @@ class ValSharpeCallback(BaseCallback):
             if old != ckpt:
                 old.unlink(missing_ok=True)
 
+        # Smooth checkpoint selection: use trailing mean of excess_sharpe instead of single noisy point
+        # (Phase 5: val→test rank correlation ρ≈0.09 on raw values; smoothing targets the 0.09 problem).
+        self.excess_sharpe_history.append(val["excess_sharpe"])
+        # Keep only the last N values
+        if len(self.excess_sharpe_history) > self.config.val_smoothing_window:
+            self.excess_sharpe_history.pop(0)
+        smoothed_excess_sharpe = float(np.mean(self.excess_sharpe_history))
+
         # Checkpoint on ANY new best (decoupled from the patience-reset threshold below): a real
         # but small improvement that never clears improvement_threshold in a single eval would
         # otherwise never get saved at all, silently discarding it even if training runs longer.
-        if val["excess_sharpe"] > self.best_saved_sharpe:
-            self.best_saved_sharpe = val["excess_sharpe"]
+        # Use smoothed value for checkpoint selection to reduce overfitting to noise.
+        if smoothed_excess_sharpe > self.best_saved_sharpe:
+            self.best_saved_sharpe = smoothed_excess_sharpe
             best_path = self.config.model_dir / f"{self.model_tag}_best.zip"
             self.model.save(best_path)
             write_sidecar(best_path, self.config, timesteps=self.num_timesteps)
@@ -211,8 +222,9 @@ class ValSharpeCallback(BaseCallback):
         # to avoid noise-driven early stops from small sample validation splits. Keyed on
         # excess-over-equal-weight Sharpe, not absolute Sharpe: keep training as long as the
         # agent is still pulling ahead of the equal-weight baseline.
-        if val["excess_sharpe"] > self.best_excess_sharpe + self.improvement_threshold:
-            self.best_excess_sharpe = val["excess_sharpe"]
+        # Use smoothed value to reduce patience counter noise.
+        if smoothed_excess_sharpe > self.best_excess_sharpe + self.improvement_threshold:
+            self.best_excess_sharpe = smoothed_excess_sharpe
             self.degrade_count = 0
         else:
             self.degrade_count += 1
@@ -220,7 +232,8 @@ class ValSharpeCallback(BaseCallback):
                 self.pbar.close()
                 logger.warning(
                     "Early stopping: val excess Sharpe (vs equal-weight) degraded %d consecutive "
-                    "evals (best=%.3f)", self.degrade_count, self.best_excess_sharpe,
+                    "evals (best=%.3f, smoothed over last %d evals)", self.degrade_count, self.best_excess_sharpe,
+                    len(self.excess_sharpe_history),
                 )
                 return False
         return True
@@ -484,6 +497,8 @@ def main(session_id: str | None = None) -> None:
                               "saturation pathology)")
     parser.add_argument("--tilt-kappa", type=float, default=None,
                          help="Tilt strength for --action-mode tilt (default: 2.0)")
+    parser.add_argument("--tilt-ema-alpha", type=float, default=None,
+                         help="EMA blend toward prev_weights in tilt action map (default: 1.0, no anchoring)")
     parser.add_argument("--random-episode-start", action="store_true",
                          help="Random (TRAIN-only) episode start day instead of always day 0 "
                               "(DIAGNOSIS_PLAN.md Phase 2.4) -- val/test always stay deterministic")
@@ -565,6 +580,8 @@ def main(session_id: str | None = None) -> None:
         overrides["action_mode"] = args.action_mode
     if args.tilt_kappa is not None:
         overrides["tilt_kappa"] = args.tilt_kappa
+    if args.tilt_ema_alpha is not None:
+        overrides["tilt_ema_alpha"] = args.tilt_ema_alpha
     if args.random_episode_start:
         overrides["random_episode_start"] = True
     if args.seed is not None:

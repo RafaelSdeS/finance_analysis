@@ -193,3 +193,16 @@ Si tu veux une version vraiment efficace, je recommanderais de commencer avec un
 
     corrélation moyenne du portefeuille.
 
+
+
+HOW DOES SELIC HAVE A DRAWDOWN????
+
+agent turnover ~ 4x ew turnover
+
+Is there predictive information in the state?
+Does the reward align with long-term portfolio performance?
+Is the policy overreacting to short-term noise?
+Does the agent actually beat a one-day-lag random policy?
+Does it beat a linear model using the same features?
+
+I am noticing the training is more smooth, without a lot of jumping around of the metrics.

@@ -452,6 +452,60 @@ def main() -> None:
     print(f"✓ reward decomposition identity holds exactly: reward_raw_excess - reward_penalty "
           f"== reward (checked over {n_checked} steps, max diff < 1e-6)")
 
+    # --- 13. Tilt EMA anchoring (Phase 5): high turnover at alpha=1.0 (no anchoring),
+    #     much lower at alpha<1.0, weights still sum to 1 and respect cap.
+    ema_cfg = dataclasses.replace(cfg, tilt_ema_alpha=1.0)
+    env_ema = PortfolioEnv(ema_cfg, date_range="train")
+    env_ema.reset(seed=99)
+    rng_ema = np.random.default_rng(99)
+
+    # Problem test: default alpha=1.0 should have high turnover
+    turnover_1_0 = []
+    for _ in range(50):
+        action_ema = rng_ema.normal(size=len(env_ema.tickers), scale=2.0).astype(np.float32)
+        _, _, _, _, info_ema = env_ema.step(action_ema)
+        daily_turns = info_ema["daily_one_way_turnover"]
+        turnover_1_0.extend(daily_turns)
+    mean_turnover_1_0 = float(np.mean(turnover_1_0))
+    assert mean_turnover_1_0 > 0.3, (
+        f"default tilt_ema_alpha=1.0 should show high turnover, got mean {mean_turnover_1_0:.3f} "
+        "(replicates measured 0.66-ish baseline behavior)"
+    )
+    print(f"✓ (problem) tilt_ema_alpha=1.0 (no anchoring): mean one-way turnover {mean_turnover_1_0:.3f} (high)")
+
+    # Solution test: alpha=0.3 should have materially lower turnover
+    ema_cfg_smooth = dataclasses.replace(cfg, tilt_ema_alpha=0.3)
+    env_ema_smooth = PortfolioEnv(ema_cfg_smooth, date_range="train")
+    env_ema_smooth.reset(seed=99)
+    rng_ema_smooth = np.random.default_rng(99)
+
+    turnover_0_3 = []
+    for _ in range(50):
+        action_ema_s = rng_ema_smooth.normal(size=len(env_ema_smooth.tickers), scale=2.0).astype(np.float32)
+        _, _, _, _, info_ema_s = env_ema_smooth.step(action_ema_s)
+        daily_turns_s = info_ema_s["daily_one_way_turnover"]
+        turnover_0_3.extend(daily_turns_s)
+    mean_turnover_0_3 = float(np.mean(turnover_0_3))
+    assert mean_turnover_0_3 < mean_turnover_1_0 * 0.8, (
+        f"tilt_ema_alpha=0.3 should reduce turnover substantially, got {mean_turnover_0_3:.3f} "
+        f"vs {mean_turnover_1_0:.3f} at alpha=1.0 (ratio {mean_turnover_0_3/mean_turnover_1_0:.2f})"
+    )
+
+    # Check: weights still sum to 1 and respect the cap
+    env_ema_check = PortfolioEnv(ema_cfg_smooth, date_range="train")
+    env_ema_check.reset(seed=99)
+    rng_check = np.random.default_rng(99)
+    for _ in range(10):
+        action_check = rng_check.normal(size=len(env_ema_check.tickers)).astype(np.float32)
+        obs_check, _, _, _, _ = env_ema_check.step(action_check)
+        weights_check = env_ema_check._prev_weights
+        assert abs(weights_check.sum() - 1.0) < 1e-6, f"weights don't sum to 1: {weights_check.sum()}"
+        assert (weights_check <= cfg.max_position_weight + 1e-6).all() or weights_check[env_ema_check._is_cash_mask].all(), (
+            "weights exceed cap (CASH exempt)"
+        )
+    print(f"✓ (solution) tilt_ema_alpha=0.3: mean one-way turnover {mean_turnover_0_3:.3f} (much lower); "
+          f"weights sum to 1, respect cap")
+
     print("\n" + "=" * 60)
     print("ALL ENV TESTS PASSED ✓")
     print("=" * 60)
