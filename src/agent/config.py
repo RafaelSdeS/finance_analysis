@@ -89,8 +89,9 @@ class AgentConfig:
     # preserves pre-2026-07-10 behavior), selection uses the full-sample mean market cap.
     # See DIAGNOSIS_PLAN.md F1: full-sample selection put ~future winners into early windows'
     # universes (measured: only 29/50 tickers overlap between the full-sample and a
-    # 2011-cutoff top-50).
-    pit_universe: bool = False
+    # 2011-cutoff top-50). Default True since 2026-07-10 (Phase 4): this is a confirmed
+    # lookahead-bias fix, not an experimental variant -- production tensors/model built this way.
+    pit_universe: bool = True
 
     # ===== Feature Configuration =====
     # 2026-07: pruned to the top-15 by Random Forest importance (R²=0.233 on
@@ -198,7 +199,9 @@ class AgentConfig:
     # price+fundamental feature (NOT macro: a macro series like ipca is identical across
     # every ticker on a given date, so its cross-sectional spread is degenerate/undefined)
     # as additional state_features channels, computed by data_pipeline.cross_sectional_transform.
-    cross_sectional_features: bool = False
+    # Default True since 2026-07-10 (Phase 4): regime-robust by construction; production
+    # tensors/model built this way.
+    cross_sectional_features: bool = True
     cross_sectional_method: str = "zscore"  # "zscore" or "rank"
 
     # Base features actually present as columns in the parquet dataset (used to build the
@@ -249,7 +252,9 @@ class AgentConfig:
     # equal-weight, so there is no equivalent saturation failure mode: kappa=0 is exactly
     # EW, and concentration grows smoothly (not via an exponential softmax) as action
     # dispersion grows. See env.py's action_to_weights/_tilt_to_weights.
-    action_mode: str = "softmax"
+    # Default "tilt" since 2026-07-10 (Phase 4): removes the softmax saturation pathology
+    # (M2.3 sweep found no logit_scale fixes it); production model trained this way.
+    action_mode: str = "tilt"
     tilt_kappa: float = 2.0  # calibrated so a modestly differentiated score (z~2) sits near the 0.10 cap boundary at n_active~50
 
     # ===== Training Configuration =====

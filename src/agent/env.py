@@ -32,18 +32,27 @@ _logged_configs: set[tuple] = set()  # dedupe identical PortfolioEnv init logs (
 
 
 @lru_cache(maxsize=1)
-def _load_raw_tensors():
+def _load_raw_tensors(expected_features: tuple[str, ...]):
     """Load raw tensors and per-window scalers once per process.
 
     TENSORS_PATH contains raw (unscaled) features. SCALER_PATH contains a dict
     of scalers indexed by train_end cutoff date, allowing each window to
     normalize using its own distribution (fitted on that window's train span,
     no lookahead).
+
+    expected_features: the CALLING config's own state_features (part of the cache
+    key, not a global default) — DIAGNOSIS_PLAN.md Phase 4 bug: this used to
+    hardcode DEFAULT_CONFIG.state_features regardless of what config a caller
+    actually passed, so a config with pit_universe=True/cross_sectional_features=True
+    set via a CLI override (not baked into DEFAULT_CONFIG's class default) would
+    always fail this check even when correctly matching the tensor file, because
+    the check was comparing the tensor file against a DIFFERENT (unmodified,
+    module-level) config than the one actually asking to load it.
     """
     data = np.load(TENSORS_PATH, allow_pickle=True)
     # Guard against stale tensors: a feature-list change with the same count trains
     # silently on old data (fixed seed → byte-identical results, easy to miss).
-    expected = list(DEFAULT_CONFIG.state_features)
+    expected = list(expected_features)
     stored = list(data["feature_names"]) if "feature_names" in data else None
     if stored != expected:
         raise RuntimeError(
@@ -67,7 +76,7 @@ def _load_raw_tensors():
 
 
 @lru_cache(maxsize=1)  # windows train sequentially; unbounded cache leaked ~170MB per window
-def _load_normalized_tensors(train_end_cutoff: str, pit_universe: bool):
+def _load_normalized_tensors(train_end_cutoff: str, pit_universe: bool, expected_features: tuple[str, ...]):
     """Load, normalize, and clip features for a specific window.
 
     Each window has its own scaler (fitted on that window's train span), keyed
@@ -80,7 +89,7 @@ def _load_normalized_tensors(train_end_cutoff: str, pit_universe: bool):
     call time instead of upfront.
     Clipping at ±10 std devs provides defense-in-depth against outliers.
     """
-    dates, tickers, mask, returns, feats, scalers, pit_cutoffs, pit_membership_mask = _load_raw_tensors()
+    dates, tickers, mask, returns, feats, scalers, pit_cutoffs, pit_membership_mask = _load_raw_tensors(expected_features)
 
     # Point-in-time universe restriction (DIAGNOSIS_PLAN.md F1 / Phase 2.4): config.pit_universe
     # is the SOURCE OF TRUTH here, not just "does the tensor file happen to have PIT data" --
@@ -128,9 +137,9 @@ def _load_normalized_tensors(train_end_cutoff: str, pit_universe: bool):
 
 
 @lru_cache(maxsize=4)
-def _load_slice(start: str, end: str, train_end_cutoff: str, pit_universe: bool):
-    """Slice + mask the shared tensors once per (start, end, train_end_cutoff, pit_universe)
-    and cache the result.
+def _load_slice(start: str, end: str, train_end_cutoff: str, pit_universe: bool, expected_features: tuple[str, ...]):
+    """Slice + mask the shared tensors once per (start, end, train_end_cutoff, pit_universe,
+    expected_features) and cache the result.
 
     All PortfolioEnv instances with the same bounds (e.g. the N envs of a
     DummyVecEnv) share these arrays by reference — safe since PortfolioEnv
@@ -144,7 +153,7 @@ def _load_slice(start: str, end: str, train_end_cutoff: str, pit_universe: bool)
       mask_f32       [D,N] mask as float32 for the observation vector
       n_active       [D]   active-ticker count per day
     """
-    dates, tickers, mask, returns, feats_all = _load_normalized_tensors(train_end_cutoff, pit_universe)
+    dates, tickers, mask, returns, feats_all = _load_normalized_tensors(train_end_cutoff, pit_universe, expected_features)
     sel = (dates >= pd.Timestamp(start)) & (dates <= pd.Timestamp(end))
     sliced_mask = mask[sel]
     feats = feats_all[sel].copy()
@@ -193,7 +202,7 @@ class PortfolioEnv(gym.Env):
             raise ValueError(f"date_range must be one of {list(bounds)}, got '{date_range}'")
         start, end = bounds[date_range]
         self.dates, self.tickers, self.mask, self.returns, self.features, derived = _load_slice(
-            start, end, config.train_end, config.pit_universe
+            start, end, config.train_end, config.pit_universe, tuple(config.state_features)
         )
         self._simple_rets = derived["simple_rets"]       # [D,N] next-day simple returns, 0 if inactive
         self._ew_log_returns = derived["ew_log_returns"] # [D] equal-weight log return per day
@@ -207,11 +216,24 @@ class PortfolioEnv(gym.Env):
         # tensors weren't built with, fail loudly instead of silently training
         # on the wrong ticker set.
         if config.universe_size is not None:
-            expected_n = config.universe_size + int("CASH" in self.tickers)
-            if n_tickers != expected_n:
+            min_expected_n = config.universe_size + int("CASH" in self.tickers)
+            if config.pit_universe:
+                # PIT-built tensors hold the UNION of every window's own top-N (each
+                # window's own membership is enforced separately, per-date, by the
+                # pit_membership_mask AND above) -- that union is >= universe_size+1
+                # and generally larger (different eras' top-N drift), not an exact match.
+                if n_tickers < min_expected_n:
+                    raise RuntimeError(
+                        f"agent_tensors.npz has {n_tickers} tickers but config.universe_size="
+                        f"{config.universe_size} with pit_universe=True expects at least "
+                        f"{min_expected_n} (the union across windows can only be >= a single "
+                        f"window's top-N). Rebuild with: python -m src.agent.data_pipeline "
+                        f"--universe-size {config.universe_size} --pit-universe"
+                    )
+            elif n_tickers != min_expected_n:
                 raise RuntimeError(
                     f"agent_tensors.npz has {n_tickers} tickers but config.universe_size="
-                    f"{config.universe_size} (expected {expected_n} incl. CASH). "
+                    f"{config.universe_size} (expected {min_expected_n} incl. CASH). "
                     f"Rebuild with: python -m src.agent.data_pipeline --universe-size {config.universe_size}"
                 )
 
@@ -316,9 +338,26 @@ class PortfolioEnv(gym.Env):
         Accumulates daily returns, drifts weights, costs applied once on day 1.
         Returns daily-granularity arrays in info for backward-compatible backtesting.
         """
+        weights = self.action_to_weights(action, self.mask[self._t])
+        return self.step_weights(weights)
+
+    def step_weights(self, weights: np.ndarray):
+        """Same as step(), but takes final portfolio weights directly, bypassing
+        action_to_weights (still applies the same position cap via _cap_weights).
+
+        For benchmark/baseline policies with a well-defined target allocation (equal-weight,
+        market-cap, 100% CASH, ...): those targets are independent of the trained policy's
+        action_mode and must NOT be round-tripped through it. DIAGNOSIS_PLAN.md Phase 4 bug:
+        baselines used to invert their target weights into softmax logits (`log(w)/scale`)
+        and feed them through action_to_weights -- silently wrong whenever action_mode="tilt"
+        (a different, non-invertible parameterization), which mangled every non-uniform
+        baseline (market-cap, inv-vol, SELIC, blends) while EW happened to survive by
+        accident (a uniform target maps to z=0 under tilt, i.e. EW again). See
+        evaluate.py's rollout() / *_policy() functions, which now call this directly.
+        """
+        weights = self._cap_weights(np.asarray(weights, dtype=np.float64), self.mask[self._t])
         N = self.config.rebalance_interval_days
         n_days = min(N, self.n_steps - self._t)  # partial final window
-        weights = self.action_to_weights(action, self.mask[self._t])
 
         # Capture the PRE-DECISION cash weight for the reward benchmark below —
         # must read this before self._prev_weights is overwritten at the end of

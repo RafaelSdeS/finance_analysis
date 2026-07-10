@@ -290,10 +290,14 @@ def run_pipeline(config: AgentConfig = DEFAULT_CONFIG) -> None:
 
 
 def _selfcheck_universe_filter() -> None:
-    """Verify universe_size caps the ticker count and stays a subset of the unfiltered universe."""
-    config = dataclasses.replace(DEFAULT_CONFIG, universe_size=5)
+    """Verify universe_size caps the ticker count and stays a subset of the unfiltered universe.
+
+    pit_universe=False here deliberately: PIT unions per-window top-Ns (see
+    _selfcheck_pit_universe for that growth behavior), which would break the <=6 bound below.
+    """
+    config = dataclasses.replace(DEFAULT_CONFIG, universe_size=5, pit_universe=False)
     tensors = build_tensors(config)
-    full_universe = set(build_tensors(DEFAULT_CONFIG)["tickers"])
+    full_universe = set(build_tensors(dataclasses.replace(DEFAULT_CONFIG, pit_universe=False))["tickers"])
 
     # +1 allowance: CASH is always added on top of universe_size (exempt from ranking).
     assert len(tensors["tickers"]) <= 6, f"expected <=5 stocks +CASH, got {len(tensors['tickers'])}"

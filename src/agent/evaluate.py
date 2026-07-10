@@ -44,13 +44,41 @@ VOL_WINDOW = 60  # trailing days for inverse-volatility baseline
 
 # --------------------------------------------------------------- rollouts
 
-def _weights_to_logits(weights: np.ndarray, logit_scale: float) -> np.ndarray:
-    """Logits whose temperature-scaled masked softmax reproduces the given weights.
+def _weights_to_action(weights: np.ndarray, env: PortfolioEnv, t: int) -> np.ndarray:
+    """The action that env.action_to_weights (current action_mode) maps back to `weights`
+    -- exact for softmax, approximate for tilt (exact up to tilt's own clip/cap, same as any
+    real policy action). For callers that need a genuine ACTION as a training/regression
+    target (e.g. bc_pretrain.py's BC-imitation teacher), not a backtest bypass -- evaluate.py's
+    own baseline rollouts use step_weights() directly instead (exact, no action_mode coupling).
 
-    The env computes softmax(action * logit_scale), so pre-divide by the scale
-    to make baseline weights come out exactly as intended.
+    tilt derivation: _tilt_to_weights z-scores the action, and mean((w/ew - 1)) == 0 exactly
+    whenever both w and ew sum to 1 over the active set, so passing (w/ew - 1) directly needs
+    no additional shift -- only tilt_kappa's fixed reachable scale limits how closely the
+    z-scored result matches `weights` (same limitation the real trained policy has).
     """
-    return (np.log(np.maximum(weights, 1e-12)) / logit_scale).astype(np.float32)
+    if env.config.action_mode == "tilt":
+        active = env.mask[t]
+        n_active = max(int(active.sum()), 1)
+        ew = active.astype(np.float64) / n_active
+        action = np.zeros_like(weights, dtype=np.float32)
+        nz = ew > 1e-12
+        action[nz] = (weights[nz] / ew[nz] - 1.0).astype(np.float32)
+        return action
+    return (np.log(np.maximum(weights, 1e-12)) / env.config.logit_scale).astype(np.float32)
+
+
+def _as_weights_fn(act: Callable) -> Callable:
+    """Mark a policy callable as returning target WEIGHTS directly (not an action to be
+    interpreted by action_to_weights). rollout() dispatches env.step_weights() for these.
+
+    Deterministic baselines (equal-weight, market-cap, ...) have a well-defined target
+    allocation that must NOT be round-tripped through the trained policy's action_mode --
+    see PortfolioEnv.step_weights for why (DIAGNOSIS_PLAN.md Phase 4 bug: the old
+    logits-inversion approach silently broke every non-uniform baseline under
+    action_mode="tilt").
+    """
+    act.returns_weights = True
+    return act
 
 
 def _exclude_cash_from_weights(w: np.ndarray, env: PortfolioEnv) -> np.ndarray:
@@ -72,12 +100,16 @@ def rollout(env: PortfolioEnv, act_fn: Callable[[np.ndarray, int], np.ndarray]) 
     to maintain daily-frequency rewards/dates/weights for backward-compatible backtesting.
     """
     obs, _ = env.reset()
+    weights_mode = getattr(act_fn, "returns_weights", False)
     rewards, values, weights_log, dates, costs = [], [env.config.initial_capital], [], [], []
     terminated = False
     while not terminated:
         t_dec = env._t  # Day index at decision time (passed to act_fn)
         action = act_fn(obs, t_dec)
-        obs, reward, terminated, _, info = env.step(action)
+        if weights_mode:
+            obs, reward, terminated, _, info = env.step_weights(action)
+        else:
+            obs, reward, terminated, _, info = env.step(action)
 
         # Unpack daily arrays from this N-day step
         daily_rets = info["daily_log_returns"]  # [n_days]
@@ -121,8 +153,8 @@ def equal_weight_policy(env: PortfolioEnv) -> Callable:
         active = _exclude_cash_from_weights(active, env)
         if active.sum() == 0:  # shouldn't happen, but be safe
             active = env.mask[t].astype(float)
-        return _weights_to_logits(active / active.sum(), env.config.logit_scale)
-    return act
+        return active / active.sum()
+    return _as_weights_fn(act)
 
 
 def agent_vs_equal_weight(env: PortfolioEnv, model: PPO) -> dict:
@@ -164,8 +196,8 @@ def market_cap_policy(env: PortfolioEnv, config: AgentConfig) -> Callable:
         if w.sum() == 0:  # no caps known yet → fall back to equal weight
             w = env.mask[t].astype(float)
             w = _exclude_cash_from_weights(w, env)
-        return _weights_to_logits(w / w.sum(), env.config.logit_scale)
-    return act
+        return w / w.sum()
+    return _as_weights_fn(act)
 
 
 def inv_vol_policy(env: PortfolioEnv) -> Callable:
@@ -180,8 +212,8 @@ def inv_vol_policy(env: PortfolioEnv) -> Callable:
         if w.sum() == 0:  # first day / degenerate → equal weight
             w = env.mask[t].astype(float)
             w = _exclude_cash_from_weights(w, env)
-        return _weights_to_logits(w / w.sum(), env.config.logit_scale)
-    return act
+        return w / w.sum()
+    return _as_weights_fn(act)
 
 
 def selic_policy(env: PortfolioEnv, config: AgentConfig) -> Callable:
@@ -192,8 +224,8 @@ def selic_policy(env: PortfolioEnv, config: AgentConfig) -> Callable:
         if "CASH" in env.tickers:
             cash_idx = np.where(env.tickers == "CASH")[0][0]
             w[cash_idx] = 1.0
-        return _weights_to_logits(w, env.config.logit_scale)
-    return act
+        return w
+    return _as_weights_fn(act)
 
 
 def blend_policy(env: PortfolioEnv, cash_fraction: float) -> Callable:
@@ -219,8 +251,8 @@ def blend_policy(env: PortfolioEnv, cash_fraction: float) -> Callable:
             w += (1.0 - cash_fraction) * active_noncash / active_noncash.sum()
         elif "CASH" in env.tickers:
             w[cash_idx] = 1.0  # no active non-cash tickers (shouldn't happen): all cash
-        return _weights_to_logits(w, env.config.logit_scale)
-    return act
+        return w
+    return _as_weights_fn(act)
 
 
 def random_policy(env: PortfolioEnv, rng: np.random.Generator) -> Callable:

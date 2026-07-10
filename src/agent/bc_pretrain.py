@@ -30,7 +30,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 from stable_baselines3 import PPO
 
 from src.agent.env import PortfolioEnv
-from src.agent.evaluate import _weights_to_logits
+from src.agent.evaluate import _weights_to_action
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +101,7 @@ def teacher_policy(env: PortfolioEnv, model: HistGradientBoostingRegressor, top_
             active[cash_idx] = False
         scores = model.predict(env.features[t])
         weights = teacher_scores_to_weights(scores, active, top_frac)
-        return _weights_to_logits(weights, env.config.logit_scale)
+        return _weights_to_action(weights, env, t)
 
     return act
 

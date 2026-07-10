@@ -103,24 +103,35 @@ def test_weight_drift_matches_independent_calculation() -> None:
 
 
 def test_baseline_weights_reproduced_exactly() -> None:
-    """Baseline policies' target weights must survive the logits→softmax→cap
-    round trip unchanged (within numerical tolerance) -- if the round trip
-    distorted them, every baseline's reported performance would be wrong."""
+    """Baseline policies' target weights must survive the step_weights round trip unchanged
+    (within numerical tolerance) -- if the round trip distorted them, every baseline's
+    reported performance would be wrong. DIAGNOSIS_PLAN.md Phase 4: baselines used to be
+    inverted into action_mode-specific logits and re-interpreted by action_to_weights, which
+    silently broke every non-uniform baseline under action_mode="tilt" (only a uniform target
+    survives tilt's action inversion by coincidence). step_weights bypasses that entirely --
+    this test now covers a genuinely NON-uniform target (market-cap-shaped), which the old
+    logits round trip could not have passed under tilt mode."""
+    from src.agent.evaluate import _exclude_cash_from_weights
+
     env = PortfolioEnv(DEFAULT_CONFIG, date_range="test")
-    t = 50
-    active = env.mask[t]
+    env.reset()
+    active = env.mask[env._t]
 
-    from src.agent.evaluate import _weights_to_logits, _exclude_cash_from_weights
-    target = _exclude_cash_from_weights(active.astype(float), env)
-    target = target / target.sum()
-    logits = _weights_to_logits(target, env.config.logit_scale)
-    reproduced = env.action_to_weights(logits, active)
+    active_f = _exclude_cash_from_weights(active.astype(float), env)
+    rng = np.random.default_rng(0)
+    raw = active_f * rng.uniform(0.5, 5.0, size=len(active_f))  # non-uniform, market-cap-shaped
+    target = raw / raw.sum()
+    assert target.max() < 0.10, "test target must stay under the cap to assert an EXACT round trip"
 
-    assert np.allclose(target, reproduced, atol=1e-4), (
-        f"equal-weight target not reproduced through logits/softmax/cap round trip: "
+    # step_weights() applies exactly this cap step to its input before anything else touches
+    # it (see env.py); reproducing it directly isolates the round trip from day-1 market drift.
+    reproduced = env._cap_weights(target, active)
+
+    assert np.allclose(target, reproduced, atol=1e-6), (
+        f"non-uniform target not reproduced through step_weights' cap step: "
         f"max diff {np.abs(target - reproduced).max():.2e}"
     )
-    print("✓ baseline target weights survive the logits→softmax→cap round trip")
+    print("✓ non-uniform baseline target weights survive the step_weights round trip exactly")
 
 
 def test_scaler_cutoff_precedes_every_window_test_start() -> None:

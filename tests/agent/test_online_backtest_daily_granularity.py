@@ -38,11 +38,28 @@ def main() -> None:
 
     expected_days = len(PortfolioEnv(DEFAULT_CONFIG, date_range="test").dates) - 1
 
+    # Regression guard for the incident this exact test caused before promote=False existed
+    # (DIAGNOSIS_PLAN.md Phase 4): this diagnostic run must not touch the real production
+    # online_results.parquet/online_metrics.json.
+    results_path = DEFAULT_CONFIG.backtest_dir / "online_results.parquet"
+    metrics_path = DEFAULT_CONFIG.backtest_dir / "online_metrics.json"
+    mtime_before = (results_path.stat().st_mtime if results_path.exists() else None,
+                    metrics_path.stat().st_mtime if metrics_path.exists() else None)
+
     df, metrics = run_online_backtest(
         DEFAULT_CONFIG,
         retrain_every_days=10**9,  # far beyond the test span: isolates day-counting from retraining
         retrain_timesteps=1,
+        promote=False,  # diagnostic run -- must not overwrite real online_results.parquet/metrics.json
     )
+
+    mtime_after = (results_path.stat().st_mtime if results_path.exists() else None,
+                   metrics_path.stat().st_mtime if metrics_path.exists() else None)
+    assert mtime_before == mtime_after, (
+        "promote=False must not touch online_results.parquet/online_metrics.json "
+        f"(mtimes changed: {mtime_before} -> {mtime_after})"
+    )
+    print("✓ promote=False left online_results.parquet/online_metrics.json untouched")
 
     print(f"Test span days: {expected_days}, online_results rows: {len(df)}")
     assert len(df) == expected_days, (

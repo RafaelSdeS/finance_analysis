@@ -42,6 +42,16 @@ from src.agent.trainer import train
 logger = logging.getLogger(__name__)
 
 
+def _step_baseline(env: PortfolioEnv, act_fn, t_dec: int):
+    """Dispatch a baseline policy's output through step_weights (deterministic-target
+    baselines, marked via evaluate._as_weights_fn) or step (action-based policies) --
+    see PortfolioEnv.step_weights for why this distinction matters under action_mode="tilt"."""
+    out = act_fn(None, t_dec)
+    if getattr(act_fn, "returns_weights", False):
+        return env.step_weights(out)
+    return env.step(out)
+
+
 def _save_online_checkpoint(model_path: Path, state_path: Path, model: PPO, state: dict) -> None:
 	"""Save online backtest checkpoint: model + resumption state (day index, weights, rollout history)."""
 	model.save(model_path)
@@ -380,6 +390,7 @@ def run_online_backtest(
     retrain_timesteps: int = 20_000,
     model_tag: str = "agent",
     resume: bool = False,
+    promote: bool = True,
 ) -> tuple[pd.DataFrame, dict]:
     """
     Online retraining backtest: continuous rollout with periodic trailing-window fine-tuning.
@@ -395,6 +406,13 @@ def run_online_backtest(
     4. Checkpoint and continue
 
     Returns results.parquet (same schema as frozen backtest) + metrics.json.
+
+    promote: If False, skip writing online_results.parquet/online_metrics.json and the final
+    online model to shared production paths (config.backtest_dir / online model_dir) -- for
+    diagnostic/smoke runs (e.g. tests/agent/test_online_backtest_daily_granularity.py, which
+    used retrain_timesteps=1 against the real production config and silently overwrote real
+    online-backtest results before this flag existed; DIAGNOSIS_PLAN.md Phase 4, same bug
+    class as finalize_and_report's promote gate above).
     """
     from stable_baselines3.common.vec_env import DummyVecEnv
 
@@ -499,7 +517,7 @@ def run_online_backtest(
         env_b = baseline_envs[name]
         while env_b._t < start_day_idx:
             t_dec = env_b._t
-            _, _, _, _, b_info = env_b.step(act_fn(None, t_dec))
+            _, _, _, _, b_info = _step_baseline(env_b, act_fn, t_dec)
             baseline_results[name]["rewards"].extend(b_info["daily_log_returns"].tolist())
             for d_ret in b_info["daily_log_returns"]:
                 baseline_results[name]["values"].append(baseline_results[name]["values"][-1] * np.exp(d_ret))
@@ -546,7 +564,7 @@ def run_online_backtest(
         for name, act_fn in baseline_policies.items():
             env_b = baseline_envs[name]
             t_dec = env_b._t
-            _, _, _, _, b_info = env_b.step(act_fn(None, t_dec))
+            _, _, _, _, b_info = _step_baseline(env_b, act_fn, t_dec)
             baseline_results[name]["rewards"].extend(b_info["daily_log_returns"].tolist())
             for d_ret in b_info["daily_log_returns"]:
                 baseline_results[name]["values"].append(baseline_results[name]["values"][-1] * np.exp(d_ret))
@@ -679,18 +697,21 @@ def run_online_backtest(
         selic_log_returns=selic_log_rets
     )
 
-    # Save results
-    config.backtest_dir.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(config.backtest_dir / "online_results.parquet", index=False)
-    with open(config.backtest_dir / "online_metrics.json", "w") as f:
-        json.dump(metrics, f, indent=2)
+    # Save results (shared production paths -- gated on promote, see docstring)
+    if promote:
+        config.backtest_dir.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(config.backtest_dir / "online_results.parquet", index=False)
+        with open(config.backtest_dir / "online_metrics.json", "w") as f:
+            json.dump(metrics, f, indent=2)
 
-    # Save final model
-    online_model_path = online_dir / f"{model_tag}_online_final.zip"
-    model.save(online_model_path)
-    write_sidecar(online_model_path, config, timesteps=model.num_timesteps)
-    logger.info("✓ Online results → online_results.parquet + online_metrics.json")
-    logger.info("✓ Final model → %s", online_model_path.name)
+        online_model_path = online_dir / f"{model_tag}_online_final.zip"
+        model.save(online_model_path)
+        write_sidecar(online_model_path, config, timesteps=model.num_timesteps)
+        logger.info("✓ Online results → online_results.parquet + online_metrics.json")
+        logger.info("✓ Final model → %s", online_model_path.name)
+    else:
+        logger.info("Skipping online_results.parquet/online_metrics.json/final model save "
+                     "(promote=False) -- not touching shared production paths.")
 
     test_env.close()
     for env_b in baseline_envs.values():
@@ -983,6 +1004,8 @@ if __name__ == "__main__":
 	parser.add_argument("--resume", action="store_true", help="Resume online backtest from checkpoint (if --mode online_backtest).")
 	parser.add_argument("--retrain-every-days", type=int, default=63, help="Retrain every N trading days (default 63).")
 	parser.add_argument("--retrain-timesteps", type=int, default=20_000, help="Timesteps per retrain (default 20000).")
+	parser.add_argument("--no-promote", action="store_true",
+	                    help="Skip writing online_results.parquet/online_metrics.json/final model to shared production paths (diagnostic/smoke runs).")
 	args = parser.parse_args()
 
 	if args.mode == "online_backtest":
@@ -994,6 +1017,7 @@ if __name__ == "__main__":
 			retrain_every_days=args.retrain_every_days,
 			retrain_timesteps=args.retrain_timesteps,
 			resume=args.resume,
+			promote=not args.no_promote,
 		)
 		logger.info("Online backtest complete. Results → %s", DEFAULT_CONFIG.backtest_dir / "online_results.parquet")
 	else:

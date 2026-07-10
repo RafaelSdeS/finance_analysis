@@ -467,6 +467,13 @@ def main(session_id: str | None = None) -> None:
                               "config.pit_universe is the source of truth at load time, so this "
                               "must be passed explicitly or PIT restriction is silently skipped "
                               "even if the tensor file has it)")
+    parser.add_argument("--cross-sectional-features", action="store_true",
+                         help="Expect the per-date rank/z-score channels in agent_tensors.npz "
+                              "(requires tensors built with `data_pipeline.py "
+                              "--cross-sectional-features`; DIAGNOSIS_PLAN.md 2.3) -- must match "
+                              "how the tensor file was actually built, or env.py's feature-list "
+                              "staleness check raises (as intended: a silent feature-count "
+                              "mismatch is worse than a loud one)")
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
     parser.add_argument("--n-envs", type=int, default=None, help="In-process envs batched through the policy (default: 8)")
     parser.add_argument("--logit-scale", type=float, default=None, help="Softmax temperature scale on raw actions (default: 10.0)")
@@ -546,6 +553,8 @@ def main(session_id: str | None = None) -> None:
         overrides["universe_size"] = args.universe_size
     if args.pit_universe:
         overrides["pit_universe"] = True
+    if args.cross_sectional_features:
+        overrides["cross_sectional_features"] = True
     if args.device is not None:
         overrides["device"] = args.device
     if args.n_envs is not None:

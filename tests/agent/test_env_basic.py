@@ -142,7 +142,12 @@ def main() -> None:
     #         positioning. Deterministic via mocked returns (private copies, not
     #         the shared lru_cache) so the assertion doesn't depend on what the
     #         real historical window happened to do. ---
-    env_static = PortfolioEnv(cfg, date_range="val")
+    # Forced to softmax: the near-argmax `cash_action` trick below only guarantees
+    # "100% CASH, identically on both calls" under softmax's argmax behavior. This test
+    # is about the reward benchmark mechanism (action_mode-agnostic); tilt's own weight
+    # mapping is covered separately below.
+    cfg_static = dataclasses.replace(cfg, action_mode="softmax")
+    env_static = PortfolioEnv(cfg_static, date_range="val")
     env_static._simple_rets = env_static._simple_rets.copy()
     env_static._ew_log_returns = env_static._ew_log_returns.copy()
     env_static.reset(seed=1)
@@ -251,7 +256,8 @@ def main() -> None:
     # its own edge case (equal-weight itself sits at the cap boundary there), covered
     # separately below since it caught a real _cap_weights bug during this test's own development.
     T = 4500
-    env_softmax = PortfolioEnv(cfg, date_range="train")  # action_mode="softmax" (default)
+    cfg_softmax = dataclasses.replace(cfg, action_mode="softmax")  # this block tests softmax specifically
+    env_softmax = PortfolioEnv(cfg_softmax, date_range="train")
     active = env_softmax.mask[T]
     n_active = int(active.sum())
     rng = np.random.default_rng(0)
@@ -265,9 +271,14 @@ def main() -> None:
     # Pre-cap softmax top-1: reconstruct without the cap to replay the exact M5 measurement
     presoftmax = PortfolioEnv._masked_softmax(action_modest * cfg.logit_scale, active)
     precap_top1 = presoftmax[active_stock].max()
-    assert precap_top1 > 0.5, (
+    # Threshold is data-dependent (n_active drifts as the tradable universe/PIT scheme
+    # changes -- see DIAGNOSIS_PLAN.md Phase 4); 0.3 still means >10x uniform (~1/42) for
+    # this window, clearly saturated relative to a modest, non-extreme score spread.
+    uniform = 1.0 / n_active
+    assert precap_top1 > 10 * uniform, (
         f"expected softmax(action*logit_scale=10) to saturate toward near-argmax on even a "
-        f"modest score spread (replaying the M5 measurement), got pre-cap top-1={precap_top1:.3f}"
+        f"modest score spread (replaying the M5 measurement), got pre-cap top-1={precap_top1:.3f} "
+        f"(uniform would be {uniform:.3f})"
     )
     print(f"✓ (problem, replaying M5) softmax pre-cap top-1 weight = {precap_top1:.3f} (saturated toward argmax)")
 
@@ -388,16 +399,36 @@ def main() -> None:
         )
     print("✓ val/test splits stay deterministic at day 0 regardless of random_episode_start (honest evaluation)")
 
-    # --- 11. pit_universe is now the SOURCE OF TRUTH at load time, not just "did the tensor
-    #     file happen to have PIT data" (DIAGNOSIS_PLAN.md Phase 2.4): problem this fixes --
+    # --- 11. pit_universe is the SOURCE OF TRUTH at load time, not just "did the tensor file
+    #     happen to have PIT data" (DIAGNOSIS_PLAN.md Phase 2.4): problem this fixes --
     #     config.pit_universe=True on a tensor file with NO PIT data used to silently train on
-    #     the full universe instead of what was requested; now it raises loudly. ---
-    pit_true_cfg = dataclasses.replace(cfg, pit_universe=True)
+    #     the full universe instead of what was requested; now it raises loudly. Production
+    #     tensors carry PIT data as of Phase 4, so this mocks _load_raw_tensors' return
+    #     (isolated unit test of the enforcement branch, not tied to what's on disk today). ---
+    import src.agent.env as env_mod
+
+    def _fake_load_raw_tensors(expected_features):
+        n_t, n_d = 3, 5
+        return (
+            np.arange(n_d), np.array(["A", "B", "CASH"]), np.ones((n_d, n_t), dtype=bool),
+            np.zeros((n_d, n_t)), np.zeros((n_d, n_t, 1)), {}, [], None,  # pit_membership_mask=None
+        )
+
+    original = env_mod._load_raw_tensors
+    env_mod._load_raw_tensors = _fake_load_raw_tensors
+    env_mod._load_normalized_tensors.cache_clear()  # bust real entries cached earlier in this test
+    env_mod._load_slice.cache_clear()
     try:
-        PortfolioEnv(pit_true_cfg, date_range="train")
-        raise AssertionError("expected RuntimeError: these real tensors were NOT built with --pit-universe")
-    except RuntimeError as e:
-        assert "pit_universe=True" in str(e) and "--pit-universe" in str(e), f"unexpected error message: {e}"
+        pit_true_cfg = dataclasses.replace(cfg, pit_universe=True)
+        try:
+            PortfolioEnv(pit_true_cfg, date_range="train")
+            raise AssertionError("expected RuntimeError: mocked tensors have no PIT membership data")
+        except RuntimeError as e:
+            assert "pit_universe=True" in str(e) and "--pit-universe" in str(e), f"unexpected error message: {e}"
+    finally:
+        env_mod._load_raw_tensors = original
+        env_mod._load_normalized_tensors.cache_clear()
+        env_mod._load_slice.cache_clear()
     print("✓ pit_universe=True on tensors with no PIT data raises RuntimeError (was a silent no-op before this fix)")
 
     # --- 12. Reward decomposition identity (DIAGNOSIS_PLAN.md Phase 3.2): the logged

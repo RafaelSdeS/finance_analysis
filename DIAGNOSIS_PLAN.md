@@ -3,12 +3,12 @@
 > Local file (companion to `TODO.md`). Created 2026-07-09 from a full-pipeline review.
 > Check boxes as phases complete; record verdicts inline under each phase.
 >
-> **Status (2026-07-10): all four phases complete.** Verdict: provisional #2 (RL ≈
-> supervised, currently both lose to plain EW) — see Phase 4 for the full synthesis and the
-> one concrete experiment (a production-scale retrain with Phase 2's fixes) that would
-> settle it definitively, not yet run because it requires rebuilding production tensors and
-> promoting a new production model. Read Phase 4 first for the destination, then the
-> individual phases for how each piece of evidence was obtained and verified.
+> **Status (2026-07-10): all four phases complete, verdict FINAL.** The production-scale
+> retrain (Phase 2 architecture, 8 PIT windows × 5M timesteps) ran: **#2 confirmed, not
+> provisional.** Agent mean raw Sharpe 0.465 (3/8 windows beat EW; HAC t=-0.871, p=0.38 on
+> daily agent−EW excess, not significant, point estimate slightly negative). Lands in the
+> same band as Phase 1's supervised ceiling (k10 0.37 / k20 0.50) and still loses to plain
+> EW (0.66), inv-vol (0.70), market-cap (0.72). See Phase 4 for full numbers and synthesis.
 
 ## Context
 
@@ -936,20 +936,64 @@ Analyses (0.2, 1.2's verdict, 3.1, the power memo) aren't unit-testable — thei
       3. Everything ≈ 0 → features/universe don't support alpha; documented negative →
          redirect to data (new features, wider PIT universe, delisted-company data).
 
-#### Verdict (2026-07-10)
+#### Verdict (2026-07-10, FINAL)
 
-**Provisional #2, pending one concrete experiment not yet run: a full production-scale
-retrain combining every Phase 2 fix together.** Everything measured through Phase 0–3 is
-internally consistent and points at the same root cause, but the one comparison the
-original three-way framework asks for — supervised vs BC-init vs a **PPO-final that
-actually incorporates the Phase 2 architecture fixes, at production scale (5M
-timesteps × 8 PIT windows)** — has not been run. Every Phase 2 verification in this session
-was a smoke test (~4-45K timesteps) proving the code works, not a real training result.
-Rebuilding production tensors (`--pit-universe --cross-sectional-features`) and promoting
-a new production model are exactly the kind of shared-artifact, hard-to-reverse actions
-this session has twice already shown can go wrong silently (the `rolling_eval_results.json`
-incident) — **deliberately not done without asking first**, distinct from every other
-`--no-promote` smoke run in this session.
+**#2 confirmed by the real production-scale run** (`--pit-universe --cross-sectional-features`
+tensors; `trainer.py --policy equivariant --action-mode tilt --bc-pretrain`, 8 PIT windows,
+5M timesteps each, promoted). Full walk-forward summary (`rolling_eval_results.json`,
+2010-01→2026-01, 3965 days):
+
+| | agent | equal_weight | inv_vol | market_cap |
+|---|---|---|---|---|
+| sharpe (mean of 8 windows) | **0.465** | 0.660 | 0.696 | 0.718 |
+| effective_n | 21.1 | 44.3 | 43.1 | 34.9 |
+| max_weight | 0.091 | 0.028 | 0.031 | 0.046 |
+| avg_daily_turnover | 0.645 | 0.168 | 0.179 | 0.132 |
+| annualized_cost_drag | 0.008 | 0.002 | 0.002 | 0.002 |
+
+Per-window agent vs EW (excess-of-SELIC): **3/8 windows won** (w0 +0.14, w3 +0.42, w5 +0.12),
+5/8 lost (w1 −0.88, w2 −0.12, w4 −0.06, w6 −0.59, w7 −0.59). Regime-neutral significance on
+daily agent−EW excess: HAC t=-0.871, p=0.384 (Newey-West lag=21) — **not significant**, point
+estimate slightly *negative*; block-bootstrap 95% CI on the mean [-0.000229, +0.000093]
+includes 0.
+
+**This settles the question the plan set out to answer.** The Phase 2 architecture fixes
+(equivariant policy, non-saturating tilt action, cross-sectional features, PIT universe) did
+what they were built to do at the mechanism level — training curves are visibly smoother
+window-to-window than any pre-Phase-2 run (consistent with removing the softmax
+collapse-to-argmax pathology; see M2.3 sweep) — but the agent's raw Sharpe (0.465) lands in
+the *same band* as Phase 1's non-RL supervised ceiling (k10 0.37 / k20 0.50), and both still
+lose to plain equal-weight (0.66). Turnover is the visible mechanism: the agent trades ~3.8×
+EW's daily turnover (0.645 vs 0.168) for a 4× larger cost drag and no compensating return —
+it is expressing a real but weak signal (Phase 0: tradable-universe IC 0.047, t=0.51,
+underpowered) at a trading intensity the signal can't pay for.
+
+**Regime pattern (visible in the per-window table):** the agent wins during volatility/
+regime-shift windows (2010–12 recovery, 2016–18 post-crisis bull, 2020–22 COVID) and loses
+during grinding/steady-trend windows (2012–14, 2022–24, 2024–26) — consistent with a signal
+that pays off unevenly across regimes rather than a uniform edge, matching Phase 0's
+statistical-power finding (F3) rather than a data or optimization defect.
+
+**Bug found and fixed while producing this table (2026-07-10):** the non-uniform baselines
+(market_cap, inv_vol, selic, blend_*) were computing their target weights correctly but then
+inverting them into `log(w)/logit_scale` "logits" and re-interpreting them through
+`env.action_to_weights` — an inversion that's only exact under `action_mode="softmax"`. Under
+`action_mode="tilt"` (now the default/promoted setting), that round trip silently mangled
+every NON-uniform target (worst case: the "selic" row showed a 0.147 mean drawdown and 0.317
+max_weight despite being intended as 100% CASH — cash has zero drawdown by construction).
+`equal_weight` happened to survive by coincidence (a uniform target z-scores to exactly 0
+under tilt, reproducing EW regardless of the bug). Root-fixed generally: `PortfolioEnv` gained
+`step_weights()`, which applies deterministic target weights directly (still capped, still
+costed) bypassing `action_to_weights` entirely; `evaluate.py`'s five deterministic baselines
+and `rolling_eval.py`'s online-backtest loop now route through it. `bc_pretrain.py`'s
+BC-imitation teacher target (which genuinely needs an ACTION, not a bypass, since it's a
+regression target for the actor network) got its own action_mode-aware inverse
+(`evaluate._weights_to_action`) instead of the softmax-only one. This does **not** change the
+Phase 4 verdict above — the agent-vs-EW significance test was never affected (EW was immune)
+— but it does mean **the market_cap/inv_vol/selic/blend rows in any pre-2026-07-10 tilt-mode
+backtest table are unreliable** and should be re-run, not trusted as-is. New regression
+coverage: `tests/agent/test_eval_integrity.py::test_baseline_weights_reproduced_exactly`
+(rewritten for a genuinely non-uniform target, which the old test couldn't have caught).
 
 **What the evidence says, synthesized across all four phases:**
 
@@ -962,29 +1006,28 @@ incident) — **deliberately not done without asking first**, distinct from ever
 
 **Why this is #2-not-#3:** the signal is real (0.3/0.4), survives a genuine walk-forward
 test (0.4), and isn't explained away by a known factor (1.3) — this is not "there is no
-alpha here." **Why this is #2-not-#1 (yet):** no RL run in this session or its predecessors
-has beaten the supervised ceiling, and the pre-Phase-2 architecture (TODO.md M5 5.1:
-BC-init excess_sharpe −0.51, PPO-final −0.32, both losing to EW) was PPO fighting an
-action-space and construction mechanism that Phase 1.2 shows structurally can't express
-calibrated, low-turnover conviction — Phase 2 built the fix for exactly that mechanism,
-but it hasn't been given a real training budget to prove out.
+alpha here." **Why this is #2-not-#1:** the real production-scale run with every Phase 2
+fix applied (equivariant policy + non-saturating tilt + cross-sectional features + PIT
+universe, 8 windows × 5M timesteps, 3/8 windows won, HAC p=0.38) still doesn't beat
+supervised or EW — the architecture fix removed the *pathology* (saturating softmax,
+lookahead-contaminated universe/teacher) but the underlying signal (Phase 0: tradable IC
+0.047, t=0.51) is simply too weak/underpowered to clear long-only + cap + cost construction
+at any of the architectures tried so far.
 
-**Concrete next action, not taken in this session:** rebuild tensors with `--pit-universe
---cross-sectional-features`, then `python -m src.agent.trainer --policy equivariant
---action-mode tilt --bc-pretrain` at full production scale (5M timesteps, 8 windows,
-ideally 3 seeds per TODO.md's M7 protocol), scored against Phase 1's supervised ceiling and
-Phase 0.5's tilt-IC significance test (not just excess Sharpe). If that run **still** loses
-to supervised/EW, the honest conclusion moves to #2-final (ship the supervised strategy;
-RL isn't earning its complexity here) or even reopens whether Option C's specific tilt
-formula needs the sweep 2.2 flagged as an easy follow-up (a more forgiving turnover band).
-If it wins, that's real evidence for #1. Either way, this is now a single well-defined
-experiment away from a settled answer, not an open-ended search.
+**Recommended path forward:** ship the equal-weight (or, if a mild tilt toward the
+supervised teacher is wanted, the k20 supervised strategy) as the production allocator —
+it's simpler, cheaper (no training pipeline), and not measurably beaten by RL. Treat further
+RL spend as gated on new data (Phase 4's option (c) below), not further architecture or
+hyperparameter work on the current feature set. One open, cheap follow-up not yet tried:
+a turnover-band/hysteresis on the tilt action (Option C's 2.2 note) to attack the 3.8×
+turnover-vs-EW cost drag directly, since that's the single largest visible leak between the
+agent's raw signal and its realized Sharpe.
 
-**What would change this verdict:** (a) the production-scale RL run beating supervised —
-moves to #1; (b) the λ sweep (3.2) or purged-validation fix (3.1) meaningfully changing
-either the RL or supervised numbers — would need re-running this comparison; (c) new data
-(delisted-company history, a wider PIT universe, additional features) — could raise the
-ceiling for both approaches simultaneously, independent of this verdict.
+**What would change this verdict:** (a) a turnover-band retrain closing most of the cost-drag
+gap — would need re-running this comparison, could move to #1; (b) the λ sweep (3.2) or
+purged-validation fix (3.1) meaningfully changing either the RL or supervised numbers; (c)
+new data (delisted-company history, a wider PIT universe, additional features) — could raise
+the ceiling for both approaches simultaneously, independent of this verdict.
 
 ---
 
