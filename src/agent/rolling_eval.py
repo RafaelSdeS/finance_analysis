@@ -162,17 +162,18 @@ def eval_window(window: RollingWindow, model: PPO, window_config: AgentConfig) -
 
 
 def _promote_to_production(window_config: AgentConfig, config: AgentConfig) -> None:
-    """Copy the most-recent window's agent_{best,final}.zip (+ provenance sidecar)
+    """Copy the most-recent window's agent_{best,final,bc_init}.zip (+ provenance sidecar)
     up to the stable top-level artifacts/models/ path that evaluate.py/infer.py/
-    run_allocation.py default to."""
-    for suffix in ("best", "final"):
+    run_allocation.py default to. bc_init (M5.1) lets evaluate.py backtest the pre-PPO
+    warm start directly alongside the final agent, to see whether PPO helped or hurt."""
+    for suffix in ("best", "final", "bc_init"):
         src = window_config.model_dir / f"agent_{suffix}.zip"
         if src.exists():
             shutil.copy2(src, config.model_dir / f"agent_{suffix}.zip")
         src_sidecar = src.with_suffix(".json")
         if src_sidecar.exists():
             shutil.copy2(src_sidecar, (config.model_dir / f"agent_{suffix}.zip").with_suffix(".json"))
-    logger.info("Promoted agent_{best,final}.zip (+ provenance) → %s", config.model_dir)
+    logger.info("Promoted agent_{best,final,bc_init}.zip (+ provenance) → %s", config.model_dir)
 
 
 def run_rolling_eval(

@@ -333,6 +333,16 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", b
                     "BC pretrain [%s]: val Sharpe after imitation = %.3f (pre-PPO)",
                     model_tag, sharpe_ratio(bc_res["rewards"]),
                 )
+
+                # M5.1: snapshot the policy right after BC pretraining, before PPO ever
+                # touches it. Backtesting this alongside the final agent (evaluate.py's
+                # standard pipeline) answers "does PPO improve or destroy the warm start?" --
+                # without this, there's no way to tell whether a disappointing final agent
+                # already started disappointing or whether PPO made it worse.
+                bc_init_path = config.model_dir / f"{model_tag}_bc_init.zip"
+                model.save(bc_init_path)
+                write_sidecar(bc_init_path, config, timesteps=0)
+                logger.info("BC pretrain [%s]: snapshot saved → %s", model_tag, bc_init_path.name)
         logger.info("Training PPO [%s] (device=%s), log → %s", model_tag, model.device, log_path)
 
         t0 = time.time()
