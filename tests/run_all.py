@@ -30,6 +30,7 @@ FAST = [
     "tests/agent/test_attribution.py",
     "tests/agent/test_supervised_strategy.py",
     "tests/agent/test_equivariant_policy.py",
+    "tests/agent/test_cross_sectional_features.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.

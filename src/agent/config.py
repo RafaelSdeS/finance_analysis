@@ -177,11 +177,34 @@ class AgentConfig:
         ]
     )
 
+    # Cross-sectional feature channels (DIAGNOSIS_PLAN.md Phase 2.3): the existing scaler
+    # is a per-window GLOBAL mean/std, fit once on a 10+ year train span, then applied
+    # unchanged to every date in that window. A feature's typical level/scale can drift
+    # over a decade+ of regime change, and the decision the policy actually needs to make
+    # is cross-sectional ("which stock TODAY"), so global scaling lets that drift swamp the
+    # cross-sectional signal. When True, adds a per-date rank/z-score variant of every
+    # price+fundamental feature (NOT macro: a macro series like ipca is identical across
+    # every ticker on a given date, so its cross-sectional spread is degenerate/undefined)
+    # as additional state_features channels, computed by data_pipeline.cross_sectional_transform.
+    cross_sectional_features: bool = False
+    cross_sectional_method: str = "zscore"  # "zscore" or "rank"
+
+    # Base features actually present as columns in the parquet dataset (used to build the
+    # raw tensor / for the parquet column read) -- state_features may extend this with
+    # synthetic per-date cross-sectional channels that don't exist as real columns.
+    @property
+    def base_state_features(self) -> list[str]:
+        return self.price_features + self.fundamental_features + self.macro_features
+
     # Combined state features (price + fundamental + macro, excluding meta)
     @property
     def state_features(self) -> list[str]:
         """All features that go into agent state (normalized)."""
-        return self.price_features + self.fundamental_features + self.macro_features
+        base = self.base_state_features
+        if not self.cross_sectional_features:
+            return base
+        cs_source = self.price_features + self.fundamental_features  # macro excluded, see above
+        return base + [f"{f}_cs" for f in cs_source]
 
     @property
     def effective_gamma(self) -> float:

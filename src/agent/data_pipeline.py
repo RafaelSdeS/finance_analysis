@@ -48,9 +48,58 @@ def select_universe(caps: pd.DataFrame, ticker_pool: list[str], universe_size: i
     return set(top.index)
 
 
+def cross_sectional_transform(feat_tensor: np.ndarray, mask: np.ndarray, method: str = "zscore") -> np.ndarray:
+    """Per-date cross-sectional rank or z-score of each feature, computed ONLY over active
+    names that day (DIAGNOSIS_PLAN.md Phase 2.3).
+
+    Unlike the existing per-window GLOBAL scaler (fit once on a 10+ year train span and
+    applied unchanged to every date), this comparison is always relative to that SAME
+    day's peers, so decades of regime drift in a feature's typical level/scale can't swamp
+    the cross-sectional signal the policy actually needs (rank stocks against TODAY's
+    market, not a multi-year historical average).
+
+    Args:
+        feat_tensor: [D, N, F] raw feature values, NaN where inactive/missing.
+        mask:        [D, N] bool, True where that (date, ticker) is active.
+        method: "zscore" (per-date mean-0/std-1) or "rank" (per-date percentile rank in
+            [-1, 1], 0 = cross-sectional median; ties broken arbitrarily by argsort order,
+            not averaged -- ponytail: fine for continuous financial features, exact ties
+            are rare, and this avoids an O(D*F) scipy.stats.rankdata loop).
+
+    Returns:
+        [D, N, F] array, same shape as feat_tensor. Inactive or single-name-active cells
+        are 0 (matching this pipeline's existing post-normalization NaN->0 convention;
+        cross-sectional stats are undefined with <2 active names).
+    """
+    if method not in ("zscore", "rank"):
+        raise ValueError(f"method must be 'zscore' or 'rank', got {method!r}")
+
+    D, N, F = feat_tensor.shape
+    valid = mask[:, :, None] & ~np.isnan(feat_tensor)  # [D, N, F]
+    n_valid = valid.sum(axis=1)  # [D, F]
+
+    if method == "zscore":
+        filled = np.where(valid, feat_tensor, 0.0)
+        count = np.maximum(n_valid, 1)[:, None, :]  # [D, 1, F]
+        mean = filled.sum(axis=1, keepdims=True) / count
+        var = np.where(valid, (feat_tensor - mean) ** 2, 0.0).sum(axis=1, keepdims=True) / count
+        std = np.sqrt(var)
+        std = np.where(std < 1e-8, 1.0, std)
+        out = (feat_tensor - mean) / std
+    else:  # rank
+        filled = np.where(valid, feat_tensor, np.inf)  # NaN/inactive sorts last, excluded via n_valid below
+        order = np.argsort(filled, axis=1)
+        ranks = np.argsort(order, axis=1).astype(np.float64)  # 0-indexed rank per (date, feature)
+        denom = np.maximum(n_valid - 1, 1)[:, None, :]
+        out = (ranks / denom) * 2.0 - 1.0  # [-1, 1]
+
+    out = np.where(valid & (n_valid[:, None, :] >= 2), out, 0.0)
+    return out.astype(np.float32)
+
+
 def build_tensors(config: AgentConfig = DEFAULT_CONFIG) -> dict:
     """Pivot long-format dataset into dense [dates, tickers, features] tensors."""
-    features = config.state_features
+    features = config.base_state_features
     cols = ["ticker", "trade_date"] + features
     logger.info("Loading %s (%d columns)", config.dataset_path, len(cols))
     df = pd.read_parquet(config.dataset_path, columns=cols)
@@ -116,6 +165,16 @@ def build_tensors(config: AgentConfig = DEFAULT_CONFIG) -> dict:
 
     returns_idx = features.index("returns")
     returns = feat_tensor[:, :, returns_idx].copy()  # [n_dates, n_tickers], NaN if inactive
+
+    if config.cross_sectional_features:
+        cs_source = config.price_features + config.fundamental_features  # macro excluded: degenerate cross-section
+        cs_idx = [features.index(f) for f in cs_source]
+        cs_tensor = cross_sectional_transform(feat_tensor[:, :, cs_idx], mask, method=config.cross_sectional_method)
+        feat_tensor = np.concatenate([feat_tensor, cs_tensor], axis=2)
+        logger.info(
+            "Cross-sectional features: added %d channels (method=%s) -> %d total features",
+            cs_tensor.shape[2], config.cross_sectional_method, feat_tensor.shape[2],
+        )
 
     result = {
         "features": feat_tensor,
@@ -263,6 +322,31 @@ def _selfcheck_pit_universe() -> None:
     print(f"✓ PIT universe self-check passed: {len(cutoffs)} windows, {len(tickers)} tickers in union")
 
 
+def _selfcheck_cross_sectional_features() -> None:
+    """Verify build_tensors(cross_sectional_features=True) against the REAL dataset (no
+    disk writes -- build_tensors never touches TENSORS_PATH/SCALER_PATH, only run_pipeline
+    does): tensor shape matches the extended state_features count, and the cross-sectional
+    channels carry real (non-degenerate) signal, not silently all-zero."""
+    config = dataclasses.replace(DEFAULT_CONFIG, universe_size=10, cross_sectional_features=True)
+    tensors = build_tensors(config)
+
+    n_base = len(config.base_state_features)
+    n_expected = len(config.state_features)
+    assert tensors["features"].shape[2] == n_expected, (
+        f"tensor has {tensors['features'].shape[2]} feature channels, expected {n_expected}"
+    )
+    assert n_expected > n_base, "cross_sectional_features=True must add channels beyond the base set"
+
+    cs_channels = tensors["features"][:, :, n_base:]
+    active_std = np.nanstd(cs_channels[tensors["mask"]])
+    assert active_std > 0.1, (
+        f"cross-sectional channels look degenerate (std={active_std:.4f} on active cells) -- "
+        f"expected real, non-trivial spread from a zscore transform"
+    )
+    print(f"✓ Cross-sectional features self-check passed: {n_base} base -> {n_expected} total "
+          f"channels, active-cell std={active_std:.3f}")
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -272,6 +356,12 @@ if __name__ == "__main__":
     parser.add_argument("--pit-universe", action="store_true",
                          help="Select universe per-window using only data <= that window's train_end "
                               "(no lookahead into future market caps); requires --universe-size")
+    parser.add_argument("--cross-sectional-features", action="store_true",
+                         help="Add per-date rank/z-score channels of every price+fundamental "
+                              "feature, computed only over active names that day (DIAGNOSIS_PLAN.md "
+                              "Phase 2.3) -- doubles state_features' price+fundamental count")
+    parser.add_argument("--cross-sectional-method", type=str, default="zscore", choices=["zscore", "rank"],
+                         help="Method for --cross-sectional-features (default: zscore)")
     args = parser.parse_args()
 
     config = DEFAULT_CONFIG
@@ -281,5 +371,7 @@ if __name__ == "__main__":
         if args.universe_size is None:
             raise SystemExit("--pit-universe requires --universe-size")
         config = dataclasses.replace(config, pit_universe=True)
+    if args.cross_sectional_features:
+        config = dataclasses.replace(config, cross_sectional_features=True, cross_sectional_method=args.cross_sectional_method)
 
     run_pipeline(config)

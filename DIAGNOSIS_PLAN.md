@@ -709,12 +709,47 @@ All under the 3-seed protocol with `--no-promote`.
         and monotone, saturating gracefully at the cap rather than an exponential blowup.
         Dedicated regression case locks in the `_cap_weights` fix at the exact thin-universe
         date that found it (max weight 0.1000, was 0.10277). Full suite: 26/26 passed.
-- [ ] 2.3 **Cross-sectional obs normalization (6.2):** per-date rank/z channels — matches
+- [x] 2.3 **Cross-sectional obs normalization (6.2):** per-date rank/z channels — matches
       how the scale-invariant tree teacher reads the features.
-      - **Tests** (extend `tests/agent/test_feature_engineering.py`): rank/z computed
-        within-date over active names only (no leakage across dates, NaN-safe); a global
-        level shift applied to all names on one date leaves that date's rank channels
-        unchanged (regime drift can't swamp cross-section — the problem being fixed).
+      - **Done (2026-07-10):** new `data_pipeline.cross_sectional_transform(feat_tensor,
+        mask, method)` — per-date mean-0/std-1 z-score or [-1,1] percentile rank, computed
+        ONLY over that date's active names, fully vectorized (no Python loop over dates or
+        features). New `AgentConfig.cross_sectional_features` (default False, unchanged)
+        + `cross_sectional_method`. Required separating `base_state_features` (real
+        parquet columns, used for the data load) from `state_features` (the tensor's final
+        channel list, extended with `f"{feat}_cs"` names when the flag is on) — macro
+        features (e.g. `ipca`) are excluded from the cross-sectional set since they're
+        identical across every ticker on a given date, making their cross-section
+        degenerate/undefined by construction. Wired into `build_tensors()`: computes the
+        transform on the raw price+fundamental channels and concatenates it, so
+        `env.py`/PortfolioEnv need zero changes (obs_dim, feature count, etc. are already
+        fully generic over `n_features`). CLI: `python -m src.agent.data_pipeline
+        --cross-sectional-features [--cross-sectional-method rank]`.
+      - **Verified against real data (in-memory, no disk writes):** 22 base → 43 total
+        channels on a 10-ticker smoke universe; active-cell std of the new channels ≈0.92
+        (real, non-degenerate spread, not silently zero). New self-check
+        `_selfcheck_cross_sectional_features` wired into `test_data_pipeline_universe.py`
+        (previously-dead-code-avoidance convention from 0.1, reused here directly).
+      - **Tests** (`tests/agent/test_cross_sectional_features.py`, fast group, 7 cases):
+        z-score and rank correctness hand-verified against known values (test 1/2 match to
+        4 decimals). *Problem vs solution* (test 3) — a market-wide +1000 shock on one
+        synthetic date changes a global (whole-history) scaler's output on that date by
+        4.42 z-score units, while the cross-sectional transform's output on the SAME date
+        changes by 3.5e-05 — **126,254× smaller**, because a uniform shift cancels exactly
+        in mean-subtraction. (Test 4) shocking one date leaves every other date's output
+        bit-identical (no cross-date leakage). (Test 5) inactive/NaN names are excluded
+        from the cross-section's mean/std, not leaked in, and map to exactly 0. (Test 6)
+        <2 active names → 0, not NaN/crash. (Test 7) invalid method raises. Full suite:
+        27/27 passed.
+      - **Scope note (matching 2.1's honest framing):** this validates the transform is
+        mathematically correct and integrates cleanly into the existing tensor pipeline —
+        it does not rebuild production tensors (would overwrite the shared, gitignored
+        `agent_tensors.npz`/`feature_scaler.pkl`) or run a training comparison. Adopting it
+        for a real run needs `python -m src.agent.data_pipeline --universe-size 50
+        --pit-universe --cross-sectional-features` (rebuilding tensors is an explicit,
+        user-facing action, not something to do silently mid-diagnosis) followed by an
+        ablation training comparison — deferred to Phase 2.4/4 alongside the other
+        pending real-training-run items.
 - [ ] 2.4 Hygiene in the same retrains: random episode starts; per-env seeds; add `selic` +
       one regime feature to obs (or fix cash_mode to capped/no-cash and stop expecting
       timing skill).
