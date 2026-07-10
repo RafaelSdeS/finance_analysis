@@ -17,7 +17,12 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.agent.supervised_strategy import backtest_topk_strategy, compute_alpha_waterfall, select_topk_weights
+from src.agent.supervised_strategy import (
+    backtest_topk_strategy,
+    compute_alpha_waterfall,
+    regress_on_factors,
+    select_topk_weights,
+)
 
 
 def main() -> None:
@@ -196,6 +201,30 @@ def main() -> None:
         "costs must pull the cost-inclusive stage below the pre-cost capped stage"
     )
     print("  ✓ no-signal waterfall stays near zero (pre-cost stages) and costs drag the later stages down")
+
+    print("\nTest 11 (problem — factor sanity check): a strategy that IS just a size tilt "
+          "regresses out to ~zero residual alpha")
+    rng11 = np.random.default_rng(11)
+    T11 = 100
+    size_factor = rng11.normal(scale=0.01, size=T11)
+    strategy_pure_tilt = 1.7 * size_factor  # noiseless linear function of the factor alone
+    fit_tilt = regress_on_factors(strategy_pure_tilt, size_factor)
+    print(f"  pure size-tilt strategy: R^2={fit_tilt['r_squared']:.4f}, beta={fit_tilt['betas'][0]:.4f}, "
+          f"residual_mean={fit_tilt['residual_mean']:.2e}")
+    assert fit_tilt["r_squared"] > 0.99, f"expected R^2~=1 for a pure factor tilt, got {fit_tilt['r_squared']}"
+    assert abs(fit_tilt["betas"][0] - 1.7) < 1e-6, f"expected beta~=1.7, got {fit_tilt['betas'][0]}"
+    assert abs(fit_tilt["residual_mean"]) < 1e-6, f"expected ~zero residual alpha, got {fit_tilt['residual_mean']}"
+    print("  ✓ R^2~=1, beta recovered exactly, ~zero residual -- correctly identified as a pure tilt")
+
+    print("\nTest 12 (solution — factor sanity check): a strategy INDEPENDENT of the factors "
+          "keeps its return as residual alpha, not explained away")
+    strategy_independent = rng11.normal(scale=0.01, size=T11) + 0.003  # unrelated to size_factor, real mean shift
+    fit_indep = regress_on_factors(strategy_independent, size_factor)
+    print(f"  independent strategy: R^2={fit_indep['r_squared']:.4f}, alpha={fit_indep['alpha']:.4f}, "
+          f"residual_mean={fit_indep['residual_mean']:.2e}")
+    assert fit_indep["r_squared"] < 0.10, f"expected low R^2 for an independent strategy, got {fit_indep['r_squared']}"
+    assert abs(fit_indep["alpha"] - 0.003) < 0.002, f"expected alpha (intercept) near the true 0.003 mean, got {fit_indep['alpha']}"
+    print("  ✓ low R^2, alpha correctly recovers the real mean shift -- not explained away by an unrelated factor")
 
     print("\n✓ All supervised_strategy tests passed")
 

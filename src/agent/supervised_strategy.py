@@ -174,13 +174,14 @@ def compute_alpha_waterfall(
     n_steps = D - 1
     rebal_idx = list(range(0, n_steps, rebalance_interval_days))
 
-    long_short, long_only, capped, plus_costs = [], [], [], []
+    long_short, long_only, capped, plus_costs, used_t = [], [], [], [], []
     prev_capped_w = None
     for t in rebal_idx:
         n_days = min(rebalance_interval_days, n_steps - t)
         active_idx = np.where(active[t])[0]
         if len(active_idx) < 2 * k:
             continue  # not enough names for a clean long/short split this period
+        used_t.append(t)
 
         fwd_cum = np.prod(1.0 + simple_returns[t + 1: t + n_days + 1], axis=0) - 1.0  # [N]
         ew_ret = float(fwd_cum[active_idx].mean())
@@ -220,4 +221,44 @@ def compute_alpha_waterfall(
         "plus_costs": float(np.mean(plus_costs)) if plus_costs else 0.0,
         "plus_holding": float(np.mean(plus_holding)) if plus_holding else 0.0,
         "n_periods": len(long_short),
+        "long_short_series": np.asarray(long_short, dtype=np.float64),  # per-period, for downstream factor regression (1.3)
+        "long_short_t": np.asarray(used_t, dtype=np.int64),             # matching day-index of each period
+    }
+
+
+def regress_on_factors(strategy_returns: np.ndarray, factor_returns: np.ndarray) -> dict:
+    """OLS: strategy_returns_t = alpha + sum_j beta_j * factor_returns[t, j] + residual_t.
+
+    DIAGNOSIS_PLAN.md Phase 1.3: is a strategy's return series explained by known style
+    factors (size, momentum, ...), or does it carry residual "alpha" beyond them? A high
+    R-squared / small residual means the strategy is a persistent factor tilt in disguise,
+    not a novel, independent edge — the honest question to ask before crediting any
+    long-short spread (e.g. the alpha waterfall's stage 1) to genuine stock-selection skill.
+
+    Args:
+        strategy_returns: [T] period returns of the strategy being attributed
+        factor_returns:   [T] or [T, F] period returns of F independent factor portfolios
+
+    Returns dict with alpha (intercept), betas [F], r_squared, residual [T]
+    (= strategy_returns - fitted), residual_mean.
+    """
+    y = np.asarray(strategy_returns, dtype=np.float64)
+    X = np.asarray(factor_returns, dtype=np.float64)
+    if X.ndim == 1:
+        X = X.reshape(-1, 1)
+    design = np.column_stack([np.ones(len(y)), X])
+    coefs, *_ = np.linalg.lstsq(design, y, rcond=None)
+    fitted = design @ coefs
+    residual = y - fitted
+
+    ss_res = float(np.sum(residual ** 2))
+    ss_tot = float(np.sum((y - y.mean()) ** 2))
+    r_squared = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else 0.0
+
+    return {
+        "alpha": float(coefs[0]),
+        "betas": coefs[1:].tolist(),
+        "r_squared": float(r_squared),
+        "residual": residual,
+        "residual_mean": float(residual.mean()),
     }
