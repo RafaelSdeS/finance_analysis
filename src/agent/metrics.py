@@ -208,6 +208,70 @@ def block_bootstrap_mean_ci(
     }
 
 
+def daily_tilt_ic(weights: np.ndarray, ew_weights: np.ndarray, fwd_returns: np.ndarray,
+                   active: np.ndarray | None = None, min_names: int = 10) -> np.ndarray:
+    """Daily cross-sectional rank-IC of ACTIVE TILTS (weights - equal-weight) vs forward
+    returns: does the strategy systematically overweight names that go on to outperform?
+
+    DIAGNOSIS_PLAN.md F3: a time-series Sharpe needs an edge to show up averaged over
+    T_years of daily observations (SE ~ 1/sqrt(T_years), so a realistic ~0.2-0.4 Sharpe
+    effect is barely resolvable even pooled over 16 years). This test instead has one
+    cross-section PER REBALANCE DATE with N names each — for a ~50-name universe rebalanced
+    monthly over 16 years, that's ~190 independent-ish cross-sections x 50 names, sized to
+    detect an IC on the order of what Phase 0 actually measured (0.03-0.10), not just a
+    diluted-by-time-series-noise annualized alpha number.
+
+    Args:
+        weights:      [T, N] strategy weights per rebalance date
+        ew_weights:   [T, N] equal-weight (benchmark) weights, same shape/dates
+        fwd_returns:  [T, N] forward returns aligned to each row's decision date (caller's
+                      responsibility — e.g. the return realized over the NEXT rebalance
+                      window, never the return already realized when the weights were set)
+        active:       [T, N] boolean mask, True where a name is tradable that day
+                      (default: every name active)
+        min_names:    minimum active names on a date to include that day (else NaN)
+
+    Returns:
+        [T] daily rank-IC of (weights - ew_weights) vs fwd_returns; NaN where <min_names
+        active names or degenerate (zero-variance) cross-sections.
+    """
+    w = np.asarray(weights, dtype=np.float64)
+    ew = np.asarray(ew_weights, dtype=np.float64)
+    fwd = np.asarray(fwd_returns, dtype=np.float64)
+    T, N = w.shape
+    mask = np.ones((T, N), dtype=bool) if active is None else np.asarray(active, dtype=bool)
+
+    tilt = w - ew
+    ic = np.full(T, np.nan, dtype=np.float64)
+    for t in range(T):
+        m = mask[t] & ~np.isnan(tilt[t]) & ~np.isnan(fwd[t])
+        if m.sum() < min_names:
+            continue
+        tilt_rank = scipy_stats.rankdata(tilt[t, m])
+        fwd_rank = scipy_stats.rankdata(fwd[t, m])
+        if tilt_rank.std() < EPS or fwd_rank.std() < EPS:
+            continue
+        ic[t] = float(np.corrcoef(tilt_rank, fwd_rank)[0, 1])
+    return ic
+
+
+def tilt_ic_significance(weights: np.ndarray, ew_weights: np.ndarray, fwd_returns: np.ndarray,
+                          active: np.ndarray | None = None, min_names: int = 10, lag: int = 1) -> dict:
+    """HAC-corrected significance test on the daily tilt-IC series (see daily_tilt_ic).
+
+    `lag` should match the rebalance interval in cross-section STEPS (not trading days —
+    daily_tilt_ic already returns one value per REBALANCE date, so consecutive entries are
+    already `rebalance_interval_days` apart; lag=1 is usually enough unless tilts
+    themselves are held for multiple rebalances without change).
+    """
+    ic = daily_tilt_ic(weights, ew_weights, fwd_returns, active, min_names)
+    valid = ic[~np.isnan(ic)]
+    result = hac_mean_test(valid, lag=lag)
+    result["n_total_days"] = int(len(ic))
+    result["n_valid_days"] = int(len(valid))
+    return result
+
+
 def effective_n_positions(weights: np.ndarray) -> float:
     """Effective number of positions (1/HHI) averaged over the period."""
     w = np.asarray(weights, dtype=np.float64)

@@ -25,6 +25,7 @@ FAST = [
     "tests/agent/test_ranker_time_split.py",
     "tests/agent/test_bc_pretrain.py",
     "tests/agent/test_significance_stats.py",
+    "tests/agent/test_tilt_ic_metric.py",
     "tests/agent/test_early_stopping.py",
     "tests/agent/test_attribution.py",
 ]
