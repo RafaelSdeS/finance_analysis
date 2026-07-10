@@ -647,16 +647,68 @@ All under the 3-seed protocol with `--no-promote`.
         cleanly — it is not yet a full multi-seed comparative training result (that needs
         real timesteps and the 3-seed protocol from TODO.md M7.2, deferred to when Phase 2
         is complete and a proper comparison run is warranted, not before).
-- [ ] 2.2 **Action reparameterization (Option C):** per-ticker scores → deterministic tilt
+- [x] 2.2 **Action reparameterization (Option C):** per-ticker scores → deterministic tilt
       rule (EW·(1+κ·cs-z(score)), capped, renormalized) or Dirichlet head. Removes the
       logit_scale saturation pathology entirely.
-      - **Tests** (extend `tests/agent/test_env_basic.py`): *problem* — reuse the M5
-        measurement as a replay assert: at logit_scale=10, a modestly differentiated score
-        vector produces pre-cap top-1 weight > 0.8 (near-argmax saturation). *Solution* —
-        tilt rule maps zero scores → exactly EW; is monotone in score; output on the capped
-        simplex (sums to 1, per-stock ≤ cap, inactive = 0); κ sweeps concentration smoothly
-        with pre-cap top-1 staying in a usable band (~0.1–0.6) — the acceptance band 2.3
-        defined but temperature alone couldn't hit.
+      - **Done (2026-07-10):** new `AgentConfig.action_mode` ("softmax" default, unchanged;
+        "tilt" new) + `tilt_kappa` (default 2.0). `env.py`'s `action_to_weights` dispatches
+        on it; new `_tilt_to_weights`: `weights = cap(normalize(clip(EW · (1 + κ·cs_z(action)), 0)))`,
+        where `cs_z` is the cross-sectional z-score of the raw action over active names
+        only — the mapping is invariant to whatever raw scale the policy outputs, so there
+        is no equivalent to softmax's saturate-once-logit-spreads-exceed-O(1/scale) failure
+        mode. `kappa=0` is exactly equal-weight; reuses the existing, already-tested
+        `_cap_weights` for the final cap enforcement (shared with the softmax path — same
+        redistribution logic, not reinvented). Wired into `trainer.py` via
+        `--action-mode {softmax,tilt}` / `--tilt-kappa` (defaults unchanged), and
+        `action_mode`/`tilt_kappa` added to `model_provenance.SEMANTIC_FIELDS` (a saved
+        model's action output means something different under each mode, exactly the
+        criterion that list's own docstring uses to decide membership).
+      - **A real, pre-existing bug in `_cap_weights` found and fixed while testing this**
+        (not tilt-specific, but the tilt formula's tendency to zero out negative-tilt names
+        exposed it): the redistribution loop, when it runs out of uncapped active stocks to
+        absorb overflow mid-iteration (e.g. a thin ~10-name early-history window where
+        equal-weight itself already sits at the 0.10 cap boundary), silently DROPPED that
+        overflow rather than accounting for it — total mass then summed to <1, and the
+        function's final unconditional renormalize-the-whole-vector step scaled the
+        just-capped stocks back UP, re-violating the cap by construction (measured: 9
+        stocks tied at 0.10277, all breaching the 0.10 cap by the same amount). Root cause
+        was purely inside the loop, not the final-enforcement step — traced by watching the
+        exact iteration where `n_uncapped` hit 0. Fixed by routing genuinely-
+        unredistributable overflow to CASH (the only always-uncapped absorber) at the exact
+        point it would otherwise vanish — **not** a reintroduction of the M2.1 dead-code
+        bug (which sent essentially ALL normal-case overflow to CASH via an always-false
+        condition); this only fires on the rare residual left after the stock pool is
+        already fully saturated at the cap. Since `_cap_weights` is shared by both action
+        modes, this could in principle have bitten the production softmax path too in a
+        sufficiently thin/saturated window — it just hadn't been hit by the existing test
+        suite.
+      - **Verified in the real pipeline:** `python -m src.agent.trainer --train-years 2
+        --test-years 1 --timesteps 4096 --universe-size 50 --action-mode tilt
+        --bc-pretrain --no-promote`: all 24 windows trained end-to-end without a crash.
+        This run also served as a live confirmation that 2.1's `rolling_eval_results.json`
+        promote-gating fix works correctly in practice, not just in its unit test (log:
+        "Skipping rolling_eval_results.json write (promote=False)").
+      - **Known scope boundary, not fixed here:** `bc_pretrain.py`'s BC-target encoding
+        (`_weights_to_logits`, a softmax-inverse: `log(w)/logit_scale`) and `evaluate.py`'s
+        baseline-weight reproduction both assume `action_mode="softmax"`; under `"tilt"`
+        they'd feed a softmax-shaped target into a z-score-based interpreter, giving a
+        miscalibrated (not crashing, just not exactly-target) BC warm-start or baseline. A
+        real tilt-mode training/comparison run should either skip `--bc-pretrain` or accept
+        an imperfect warm-start (PPO still fine-tunes from there), and should roll baselines
+        through a separately-configured `action_mode="softmax"` env (same tensors/costs,
+        different action interpretation) for a fair comparison. Not attempted here —
+        genuinely out of 2.2's scope (giving the AGENT a non-saturating action space),
+        deferred to whichever future step first runs a real tilt-mode comparison.
+      - **Tests** (extended `tests/agent/test_env_basic.py`, data group, 6 new checks +
+        1 dedicated regression case): *problem* — replays the M5 measurement directly:
+        softmax(action×10) on a modestly differentiated score (not an extreme one-hot)
+        saturates to pre-cap top-1 0.625 at a representative ~38-active-name date.
+        *solution* — tilt keeps top-1 at 0.094 (usable band) on the identical input; zero
+        action maps to EXACTLY equal-weight; monotone in score (w(-1)=0.0000 <
+        w(+1)=0.0732); κ sweep {0,1,2,4,8} → top-1 {0.026, 0.072, 0.094, 0.10, 0.10}, smooth
+        and monotone, saturating gracefully at the cap rather than an exponential blowup.
+        Dedicated regression case locks in the `_cap_weights` fix at the exact thin-universe
+        date that found it (max weight 0.1000, was 0.10277). Full suite: 26/26 passed.
 - [ ] 2.3 **Cross-sectional obs normalization (6.2):** per-date rank/z channels — matches
       how the scale-invariant tree teacher reads the features.
       - **Tests** (extend `tests/agent/test_feature_engineering.py`): rank/z computed

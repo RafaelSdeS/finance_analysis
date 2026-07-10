@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # math, and None just means "no constraint requested", not a behavioral difference.
 SEMANTIC_FIELDS = [
     "rebalance_interval_days", "logit_scale", "max_position_weight",
-    "transaction_cost_bps",
+    "transaction_cost_bps", "action_mode", "tilt_kappa",
 ]
 
 

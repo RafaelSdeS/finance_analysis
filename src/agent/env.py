@@ -232,15 +232,55 @@ class PortfolioEnv(gym.Env):
         return self._obs(), {"date": self.dates[0], "portfolio_value": self.portfolio_value}
 
     def action_to_weights(self, action: np.ndarray, active: np.ndarray) -> np.ndarray:
-        """Policy action → portfolio weights: temperature-scaled masked softmax + concentration cap.
+        """Policy action → portfolio weights (AgentConfig.action_mode selects the mapping).
 
-        logit_scale amplifies weight-space movement per unit of PPO trust region
-        (see AgentConfig.logit_scale). Max position weight enforced via iterative clipping.
-        CASH (last element) is exempt from cap. Shared by step() and infer.py so the
-        action semantics live in exactly one place.
+        "softmax" (default): temperature-scaled masked softmax (see AgentConfig.logit_scale).
+        "tilt" (DIAGNOSIS_PLAN.md Phase 2.2 / roadmap Option C): EW-anchored linear tilt
+        on the cross-sectional z-score of the raw action (see _tilt_to_weights) — removes
+        the softmax saturation pathology the M2.3 sweep couldn't fix with temperature alone.
+
+        Both paths finish with the same max-position cap (CASH exempt). Shared by step()
+        and infer.py so the action semantics live in exactly one place.
         """
+        if self.config.action_mode == "tilt":
+            return self._tilt_to_weights(action, active)
+        if self.config.action_mode != "softmax":
+            raise ValueError(f"action_mode must be 'softmax' or 'tilt', got {self.config.action_mode!r}")
         weights = self._masked_softmax(np.asarray(action, dtype=np.float64) * self.config.logit_scale, active)
         return self._cap_weights(weights, active)
+
+    def _tilt_to_weights(self, action: np.ndarray, active: np.ndarray) -> np.ndarray:
+        """Option C: weights = cap(normalize(clip(EW * (1 + kappa * cs_z(action)), 0))).
+
+        cs_z is the cross-sectional z-score of the raw action OVER ACTIVE names only, so
+        the mapping is invariant to whatever raw scale the policy network happens to output
+        (unlike softmax*logit_scale, which saturates once logit spreads exceed O(1/scale)).
+        kappa=0 is exactly equal-weight; a positive/negative z-score tilts a name's weight
+        up/down from its EW share LINEARLY, not exponentially, so there is no equivalent
+        collapse-to-argmax failure mode. Negative-tilt names can clip to exactly 0 (still
+        long-only) if kappa*z < -1, which is intended: weak-scoring names can be excluded
+        entirely, not just down-weighted, same as the softmax path's ability to put ~0
+        weight on a name via a very negative logit.
+        """
+        a = np.asarray(action, dtype=np.float64)
+        n_active = int(active.sum())
+        if n_active == 0:
+            return active.astype(np.float64)  # degenerate: shouldn't happen, mirrors _masked_softmax's guard
+
+        ew = active.astype(np.float64) / n_active
+        active_vals = a[active]
+        std = active_vals.std()
+        z = np.zeros_like(a)
+        if std > 1e-8:
+            z[active] = (active_vals - active_vals.mean()) / std
+        # std==0 (e.g. a constant action, or n_active==1): z stays 0 -> raw==ew exactly, the
+        # correct "no information to tilt on" fallback.
+
+        raw = np.clip(ew * (1.0 + self.config.tilt_kappa * z), 0.0, None)
+        raw[~active] = 0.0
+        total = raw.sum()
+        raw = raw / total if total > 1e-9 else ew.copy()  # degenerate (everything clipped to 0): fall back to EW
+        return self._cap_weights(raw, active)
 
     def step(self, action: np.ndarray):
         """One step = one decision spanning N days (rebalance_interval_days).
@@ -416,6 +456,7 @@ class PortfolioEnv(gym.Env):
         w = weights.copy()
         # Stocks = all non-CASH tickers; CASH is exempt from cap
         stocks_mask = ~self._is_cash_mask
+        cash_idx = np.where(self._is_cash_mask)[0]
 
         for _ in range(stocks_mask.sum() + 1):  # safety: max iterations = n_stocks
             stock_weights = w[stocks_mask]
@@ -437,11 +478,25 @@ class PortfolioEnv(gym.Env):
                     # Distribute overflow equally among uncapped active stocks
                     per_stock = total_overflow / n_uncapped
                     w[stocks_mask] = np.where(uncapped_active, w[stocks_mask] + per_stock, w[stocks_mask])
+                elif len(cash_idx) > 0:
+                    # No uncapped active stock left to absorb this iteration's overflow (can
+                    # happen when n_active*cap is close to or below the total stock mass
+                    # being allocated — e.g. a thin early-history window, or a tilt-mode
+                    # action that zeroed out several active names, shrinking the pool that
+                    # cap enforcement can redistribute into). Without this branch the
+                    # overflow silently vanishes from `w` right here — total mass then sums
+                    # to < 1, and the final renormalization below would scale every stock
+                    # (including the ones just capped) back UP, re-violating the cap. CASH
+                    # is the only always-uncapped absorber, so route it there. NOT the old
+                    # dead-code bug (which sent ALL normal-case overflow to CASH via an
+                    # always-false condition) — this only fires on the residual left after
+                    # the stock pool is already fully saturated at the cap.
+                    w[cash_idx[0]] += total_overflow
 
-        # Final enforcement: ensure everything is in bounds
+        # Final defensive clip + renormalize (should be a near-exact no-op: the loop above
+        # now conserves total mass in every branch, including the cash-overflow one).
         w[~active] = 0.0
         w[stocks_mask] = np.clip(w[stocks_mask], 0.0, cap)
-        # CASH and inactive stocks keep their weight; renormalize to sum=1 to account for any rounding
         current_sum = w.sum()
         if current_sum > 1e-9:
             w /= current_sum

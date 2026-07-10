@@ -5,6 +5,7 @@ PortfolioEnv validation: shapes, masking invariants, reward sanity, speed.
 Run from project root: python tests/agent/test_env_basic.py
 """
 
+import dataclasses
 import sys
 import time
 from pathlib import Path
@@ -242,6 +243,101 @@ def main() -> None:
     assert nonzero_stocks > 10, f"overflow should redistribute to {nonzero_stocks} stocks, not CASH"
     assert cash_weight < 0.5, f"CASH weight {cash_weight:.2%} should not absorb the capped overflow"
     print(f"✓ max position cap + redistribution: one-hot → {nonzero_stocks} stocks, CASH={cash_weight:.1%} (was 90% before fix)")
+
+    # --- 8. Action reparameterization (DIAGNOSIS_PLAN.md Phase 2.2 / roadmap Option C):
+    #     problem (softmax saturation, replaying the M5 measurement) vs solution (tilt) ---
+    # Uses a date well into train (not t=0) so n_active (~38) is representative of the
+    # regime tilt_kappa was calibrated for (~50 names) -- t=0's thin ~10-name universe is
+    # its own edge case (equal-weight itself sits at the cap boundary there), covered
+    # separately below since it caught a real _cap_weights bug during this test's own development.
+    T = 4500
+    env_softmax = PortfolioEnv(cfg, date_range="train")  # action_mode="softmax" (default)
+    active = env_softmax.mask[T]
+    n_active = int(active.sum())
+    rng = np.random.default_rng(0)
+    modest_scores = rng.normal(size=n_active)  # a "modestly differentiated" score, not an extreme one-hot
+
+    action_modest = np.zeros(len(env_softmax.tickers), dtype=np.float64)
+    action_modest[active] = modest_scores
+    stock_mask = ~env_softmax._is_cash_mask
+    active_stock = active & stock_mask
+
+    # Pre-cap softmax top-1: reconstruct without the cap to replay the exact M5 measurement
+    presoftmax = PortfolioEnv._masked_softmax(action_modest * cfg.logit_scale, active)
+    precap_top1 = presoftmax[active_stock].max()
+    assert precap_top1 > 0.5, (
+        f"expected softmax(action*logit_scale=10) to saturate toward near-argmax on even a "
+        f"modest score spread (replaying the M5 measurement), got pre-cap top-1={precap_top1:.3f}"
+    )
+    print(f"✓ (problem, replaying M5) softmax pre-cap top-1 weight = {precap_top1:.3f} (saturated toward argmax)")
+
+    tilt_cfg = dataclasses.replace(cfg, action_mode="tilt", tilt_kappa=2.0)
+    env_tilt = PortfolioEnv(tilt_cfg, date_range="train")
+    w_tilt = env_tilt.action_to_weights(action_modest, active)
+
+    assert abs(w_tilt.sum() - 1.0) < 1e-9, f"tilt weights don't sum to 1: {w_tilt.sum()}"
+    assert (w_tilt[stock_mask] <= cap + 1e-9).all(), "tilt weights must respect the cap"
+    assert (w_tilt[~active] == 0.0).all(), "tilt weights must be exactly 0 on inactive names"
+    tilt_top1 = w_tilt[active_stock].max()
+    assert 0.05 < tilt_top1 < 0.7, (
+        f"expected the tilt rule to keep top-1 in a usable, non-saturated band on a modest "
+        f"score spread (the band M2.3's temperature sweep couldn't hit), got {tilt_top1:.3f}"
+    )
+    print(f"✓ (solution) tilt top-1 weight = {tilt_top1:.3f} (usable band, not saturated)")
+
+    zero_action = np.zeros(len(env_tilt.tickers), dtype=np.float64)
+    w_zero = env_tilt.action_to_weights(zero_action, active)
+    ew_expected = active.astype(np.float64) / n_active
+    assert np.allclose(w_zero, ew_expected, atol=1e-9), "kappa*z=0 (all-zero action) must map to EXACTLY equal-weight"
+    print("✓ zero action -> exactly equal-weight under the tilt rule")
+
+    # Monotonicity: strictly increasing one ticker's score (others fixed) must strictly
+    # increase its pre-cap weight -- check on a ticker far from the cap boundary.
+    probe = np.where(active_stock)[0][0]
+    action_lo, action_hi = action_modest.copy(), action_modest.copy()
+    action_lo[probe], action_hi[probe] = -1.0, 1.0
+    w_lo = env_tilt.action_to_weights(action_lo, active)
+    w_hi = env_tilt.action_to_weights(action_hi, active)
+    assert w_hi[probe] > w_lo[probe], (
+        f"raising one ticker's score must raise its tilt weight (monotonicity), "
+        f"got w_lo={w_lo[probe]:.4f} w_hi={w_hi[probe]:.4f}"
+    )
+    print(f"✓ monotone in score: w(score=-1)={w_lo[probe]:.4f} < w(score=+1)={w_hi[probe]:.4f}")
+
+    # kappa sweep: concentration should grow smoothly and roughly monotonically with kappa
+    top1s = []
+    for kappa in [0.0, 1.0, 2.0, 4.0, 8.0]:
+        env_k = PortfolioEnv(dataclasses.replace(cfg, action_mode="tilt", tilt_kappa=kappa), date_range="train")
+        w_k = env_k.action_to_weights(action_modest, active)
+        top1s.append(float(w_k[active_stock].max()))
+    assert abs(top1s[0] - ew_expected[active_stock][0]) < 1e-9, f"kappa=0 must be exactly EW, got {top1s[0]}"
+    assert all(top1s[i] <= top1s[i + 1] + 1e-9 for i in range(len(top1s) - 1)), (
+        f"expected concentration to grow smoothly (non-decreasing) with kappa, got {top1s}"
+    )
+    print(f"✓ kappa sweep {[0, 1, 2, 4, 8]} -> top-1 weight {[round(t, 4) for t in top1s]} (smooth, monotone in kappa)")
+
+    # --- 9. _cap_weights thin-universe regression (found via this session's own tilt-mode
+    #     testing): when n_active*cap is close to the total mass being allocated (e.g. a
+    #     thin ~10-name early-history window where equal-weight itself sits at the cap
+    #     boundary), the redistribution loop could run out of uncapped active stocks to
+    #     absorb overflow mid-iteration -- the overflow silently vanished from `w` right
+    #     there, and the final clip-then-renormalize-the-WHOLE-vector step scaled the
+    #     just-capped stocks back UP, re-violating the cap by construction, not by chance. ---
+    env_thin = PortfolioEnv(dataclasses.replace(cfg, action_mode="tilt", tilt_kappa=2.0), date_range="train")
+    active_thin = env_thin.mask[0]  # the pathological ~10-name window
+    n_active_thin = int(active_thin.sum())
+    rng_thin = np.random.default_rng(0)
+    action_thin = np.zeros(len(env_thin.tickers), dtype=np.float64)
+    action_thin[active_thin] = rng_thin.normal(size=n_active_thin)
+
+    w_thin = env_thin.action_to_weights(action_thin, active_thin)
+    stock_mask_thin = ~env_thin._is_cash_mask
+    assert (w_thin[stock_mask_thin] <= cap + 1e-9).all(), (
+        f"cap violated in the thin-universe regression case: max={w_thin[stock_mask_thin].max():.6f} > cap={cap}"
+    )
+    assert abs(w_thin.sum() - 1.0) < 1e-9, f"thin-universe weights don't sum to 1: {w_thin.sum()}"
+    print(f"✓ _cap_weights thin-universe regression: n_active={n_active_thin}, "
+          f"max stock weight={w_thin[stock_mask_thin].max():.4f} <= cap={cap} (was 0.10277 before the fix)")
 
     print("\n" + "=" * 60)
     print("ALL ENV TESTS PASSED ✓")

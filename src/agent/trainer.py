@@ -428,6 +428,13 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--device", type=str, default=None, choices=["cuda", "cpu"], help="Device (default: cuda)")
     parser.add_argument("--n-envs", type=int, default=None, help="In-process envs batched through the policy (default: 8)")
     parser.add_argument("--logit-scale", type=float, default=None, help="Softmax temperature scale on raw actions (default: 10.0)")
+    parser.add_argument("--action-mode", type=str, default=None, choices=["softmax", "tilt"],
+                         help="Action->weights mapping: 'softmax' (default) or 'tilt' "
+                              "(DIAGNOSIS_PLAN.md Phase 2.2 / roadmap Option C -- EW-anchored "
+                              "linear tilt on the cross-sectional z-score of the action, no "
+                              "saturation pathology)")
+    parser.add_argument("--tilt-kappa", type=float, default=None,
+                         help="Tilt strength for --action-mode tilt (default: 2.0)")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for PPO/env/numpy (default: 42)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
     parser.add_argument("--bc-pretrain", action="store_true",
@@ -491,6 +498,10 @@ def main(session_id: str | None = None) -> None:
         overrides["n_envs"] = args.n_envs
     if args.logit_scale is not None:
         overrides["logit_scale"] = args.logit_scale
+    if args.action_mode is not None:
+        overrides["action_mode"] = args.action_mode
+    if args.tilt_kappa is not None:
+        overrides["tilt_kappa"] = args.tilt_kappa
     if args.seed is not None:
         overrides["seed"] = args.seed
 

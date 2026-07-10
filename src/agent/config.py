@@ -205,6 +205,18 @@ class AgentConfig:
     # Scaling by 10 gives 10x weight-space movement and exploration per unit of trust region.
     logit_scale: float = 10.0
 
+    # Action -> weights mapping (DIAGNOSIS_PLAN.md Phase 2.2 / roadmap Option C).
+    # "softmax" (default, unchanged): weights = cap(softmax(action * logit_scale)) -- the
+    # M2.3 sweep found no logit_scale in {4,5,6,10} gives a seed-robust improvement; at the
+    # production default (10) it saturates to near-argmax (pre-cap top-1 weight ~0.83).
+    # "tilt": weights = cap(normalize(clip(EW * (1 + tilt_kappa * cross_sectional_zscore(action)), 0))).
+    # A z-score of the RAW action (not its absolute scale) drives a linear tilt around
+    # equal-weight, so there is no equivalent saturation failure mode: kappa=0 is exactly
+    # EW, and concentration grows smoothly (not via an exponential softmax) as action
+    # dispersion grows. See env.py's action_to_weights/_tilt_to_weights.
+    action_mode: str = "softmax"
+    tilt_kappa: float = 2.0  # calibrated so a modestly differentiated score (z~2) sits near the 0.10 cap boundary at n_active~50
+
     # ===== Training Configuration =====
     total_timesteps: int = 5_000_000  # raised from 1M (2026-07-09): window_1 of the 132721 run
     # hit the 1M ceiling still monotonically improving (val excess Sharpe -0.73 -> -0.14, no sign
