@@ -16,13 +16,14 @@ from src.agent.ranker_baseline import compute_ranker_ic
 def _synthetic_df(n_dates: int = 80, n_tickers: int = 20, seed: int = 42) -> pd.DataFrame:
     """Build a panel with a cross-sectional, ticker-invariant signal->return mapping.
 
-    ranker_baseline's 50/50 split is a row-index split on data pre-sorted by
-    [ticker, trade_date] (matching ml_dataset.parquet's sort order) — i.e. a
-    held-out-tickers split, not a temporal split. A per-ticker "quality" level
-    driving both `signal` and forward returns is the relationship a
-    cross-sectional ranker actually needs to generalize across an unseen
-    ticker, and is what this codebase's real fundamental features look like
-    (e.g. ROA is roughly stable per company, not a time-series predictor).
+    A per-ticker "quality" level driving both `signal` and forward returns is
+    stable across all dates (like this codebase's real fundamental features,
+    e.g. ROA is roughly constant per company, not a time-series predictor), so
+    it survives BOTH compute_ranker_ic's honest default time split and the
+    legacy row split — a positive control that a genuinely persistent
+    relationship is detected either way. See test_ranker_time_split.py for the
+    contrasting negative control (a contemporaneous-only signal that only the
+    row split can "detect").
     """
     rng = np.random.default_rng(seed)
     dates = pd.bdate_range("2020-01-01", periods=n_dates)

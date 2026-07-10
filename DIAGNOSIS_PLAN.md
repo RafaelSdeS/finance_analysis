@@ -48,10 +48,14 @@ cheaply before any further agent training.
   ranker-top-20% portfolio loses OOS (Sharpe −0.34, worst of the M5 four-way).
 - **Measured in Phase 0.3 (below):** the headline IC 0.03–0.10 does NOT vanish on the
   tradable top-50 — mean |rank-IC| shrinks moderately (0.060 → 0.047, full → PIT top-50),
-  but its **non-overlap t-stat collapses from 1.91 to 0.51**. Revised framing: the signal
-  isn't absent on the tradable universe, but ~50 names/day isn't enough breadth to
-  distinguish it from noise — F2 is really an instance of F3's power problem, one level
-  earlier than expected (signal detection, not just strategy evaluation).
+  but its **non-overlap t-stat collapses from 1.91 to 0.51**.
+- **Measured in Phase 0.4 (below), and this is the more surprising half:** fixing the
+  row-split leak itself (genuine walk-forward validation, honest per-window time split)
+  does NOT collapse the signal on the full universe — mean |IC| 0.083, t~20 per window,
+  every one of 8 windows individually significant. **Revised framing: the signal is real
+  and temporally persistent; the problem is specifically cross-sectional breadth (~50 vs
+  ~288 names), not a lookahead artifact.** F2 is an instance of F3's power problem
+  showing up in signal detection, not evidence the signal doesn't exist.
 
 ### F3. The success bar is statistically unreachable as defined (evaluation layer)
 - SE of annualized Sharpe ≈ 1/√T-years: **±0.71 per 2y window, ±0.25 pooled over 16y** →
@@ -251,15 +255,59 @@ and define success metrics that can detect the plausible effect size.
         real audit's mechanism on a controlled case. (Test 8) — filter honored exactly:
         `features[feat].columns == requested set`, no leakage; `min_names` exceeding the
         filtered set's size correctly yields all-NaN days. Full suite: 20/20 passed.
-- [ ] 0.4 **Honest teacher validation:** `ranker_baseline.py` → time split (train ≤ cutoff,
+- [x] 0.4 **Honest teacher validation:** `ranker_baseline.py` → time split (train ≤ cutoff,
       test after); walk-forward IC per window.
-      - **Tests** (`tests/agent/test_ranker_time_split.py`, fast group): *problem* —
-        synthetic panel with a purely contemporaneous common-shock feature (predictive
-        within a period across tickers, zero persistence): assert the OLD row-split scores
-        it as high-IC while the time split scores ≈ 0 — this is the leak that manufactured
-        t=24. *Solution* — a genuinely persistent synthetic signal scores IC > 0 under the
-        time split (the honest validator still detects real signal), and train rows are
-        strictly ≤ cutoff < all test rows.
+      - **Done (2026-07-10):** `compute_ranker_ic(df, horizon, split="time"|"row")` — new
+        default `"time"` splits by calendar date cutoff (no overlap); `"row"` (old
+        behavior) kept only for comparison, documented as leaky. Refactored the function
+        into `_compute_forward_returns`/`_select_features`/`_score_predictions` helpers
+        (feature-selection now correctly uses TRAIN rows only, a small additional
+        lookahead fix beyond the split itself — the old code picked "valid" feature
+        columns using the full train+test array). `tools/ranker_walk_forward_ic.py`
+        applies the honest split per the RL pipeline's own anchored rolling windows
+        (`config.generate_windows`) instead of one global 50/50 split.
+      - **Result — surprising, and revises F2's original framing:** the row-split leak is
+        real (proven on synthetic data below) and worth fixing on principle, but on the
+        actual dataset, fixing it does **not** collapse the signal:
+        ```
+        window  test span        n_train    n_test   mean_ic  t_stat
+        0       2010→2012        104,405     58,192   0.064    13.6
+        1       2012→2014        148,472     63,083   0.054    11.4
+        2       2014→2016        198,095     64,949   0.068    16.8
+        3       2016→2018        251,333     68,219   0.085    17.0
+        4       2018→2020        306,777     73,329   0.096    23.3
+        5       2020→2022        362,532    100,160   0.107    21.4
+        6       2022→2024        422,708    121,055   0.118    33.2
+        7       2024→2026        487,474    126,250   0.073    24.0
+        mean |IC| = 0.083, mean t-stat = 20.1 — every one of the 8 walk-forward windows
+        individually clears conventional significance, several by a wide margin.
+        ```
+        Full table: `artifacts/backtest/ranker_walk_forward_ic.json`.
+      - **Interpretation:** on the full ~288-name universe, the honest walk-forward IC
+        (0.083, t~20/window) is at least as strong as the original row-split's pooled
+        t=24 — the earlier number wasn't fabricated by the leak after all, at least not on
+        this dataset. Combined with 0.3's result (same date ranges, restricted to the
+        tradable top-50: IC 0.047, t collapses to 0.51), the full picture is now clearer
+        than either result alone: **the feature→return relationship is genuinely real and
+        temporally persistent — the problem is specifically breadth (~50 vs ~288 names per
+        cross-section), not a lookahead artifact.** This means F2 was half right: the
+        row-split methodology WAS broken (confirmed below) and shouldn't be trusted as
+        written, but the practical worry it raised — "maybe there's no real signal at
+        all" — is not what's actually going on. Reframes Phase 1's job: build the
+        supervised ceiling on a walk-forward-honest basis (now available via this tool),
+        and treat the tradable universe's narrow breadth, not signal existence, as the
+        thing to design around.
+      - **Tests** (`tests/agent/test_ranker_time_split.py`, fast group, 4 cases, synthetic
+        24-ticker/120-day regime-shift panel): *problem* (Test 1) — a feature that ranks
+        returns perfectly in "era A" (first half of dates) but is exactly uncorrelated
+        (hand-verified zero-Spearman derangement) in "era B" (second half): the row split
+        reports mean_ic=0.51, t=12.6 — a spuriously strong "signal", because its test set
+        still spans era A via held-out tickers. *Solution* (Test 2) — the time split's
+        test set is confined to era B only (the true out-of-sample regime) and reports
+        mean_ic=**exactly 0.0000**, matching the hand-derived value to the decimal —
+        honestly exposing the lack of forward skill the row split hid. (Test 3) train ≤
+        cutoff < test strictly enforced; (Test 4) unknown `split` value raises
+        `ValueError`. Full suite: 21/21 passed.
 - [ ] 0.5 **Power memo + new primary metrics:** minimum-detectable-effect table; implement
       (a) mean daily cross-sectional rank-IC of active tilts (weights − EW) vs forward
       returns, HAC-corrected; (b) selection-residual mean test (attribution.py + 1.5 stats).
