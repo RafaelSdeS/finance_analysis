@@ -346,6 +346,8 @@ class PortfolioEnv(gym.Env):
         daily_log_rets = np.empty(n_days, dtype=np.float64)
         daily_drifted_weights = np.empty((n_days, len(w)), dtype=np.float32)
         cumulative_reward = 0.0
+        raw_excess_sum = 0.0   # DIAGNOSIS_PLAN.md Phase 3.2: sum(excess), pre-penalty, pre-reward_scale
+        penalty_sum = 0.0      # sum(risk_aversion * excess^2), pre-reward_scale
 
         for day_offset in range(n_days):
             r_vec = ret_vecs[day_offset]
@@ -377,7 +379,10 @@ class PortfolioEnv(gym.Env):
             benchmark_log = float(np.log1p(max(benchmark_simple, -0.9999)))
 
             excess = log_r - benchmark_log
-            cumulative_reward += excess - self.config.risk_aversion * excess * excess
+            penalty = self.config.risk_aversion * excess * excess
+            cumulative_reward += excess - penalty
+            raw_excess_sum += excess
+            penalty_sum += penalty
 
             # Update portfolio value
             self.portfolio_value *= 1.0 + r_p
@@ -398,6 +403,13 @@ class PortfolioEnv(gym.Env):
             daily_drifted_weights[day_offset] = w
 
         cumulative_reward *= self.config.reward_scale
+        # DIAGNOSIS_PLAN.md Phase 3.2: scaled the same way as cumulative_reward, so
+        # info["reward_raw_excess"] - info["reward_penalty"] == cumulative_reward exactly
+        # (an identity, not an approximation) -- lets an eval callback / audit script
+        # measure how much of the reward signal the risk_aversion penalty is eating
+        # without re-deriving it from daily_log_returns.
+        reward_raw_excess = raw_excess_sum * self.config.reward_scale
+        reward_penalty = penalty_sum * self.config.reward_scale
 
         # _prev_weights for next step (end-of-window drifted weights)
         self._prev_weights = w
@@ -423,6 +435,8 @@ class PortfolioEnv(gym.Env):
             "n_active": int(self._n_active[self._t]),
             "turnover": float(traded),
             "transaction_cost": float(transaction_cost),
+            "reward_raw_excess": float(reward_raw_excess),  # Phase 3.2: reward_raw_excess - reward_penalty == the returned reward, exactly
+            "reward_penalty": float(reward_penalty),
             # Daily-granularity arrays (critical for results.parquet schema)
             "daily_log_returns": daily_log_rets.astype(np.float32),
             "daily_dates": self.dates[self._t - n_days + 1 : self._t + 1],

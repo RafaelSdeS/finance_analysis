@@ -67,7 +67,7 @@ class ValSharpeCallback(BaseCallback):
 
     def __init__(
         self, config: AgentConfig, val_env: PortfolioEnv, log_path: Path, total_timesteps: int,
-        model_tag: str = "agent",
+        model_tag: str = "agent", test_env: PortfolioEnv | None = None,
     ):
         super().__init__()
         self.config = config
@@ -89,6 +89,16 @@ class ValSharpeCallback(BaseCallback):
         self.pbar = tqdm(total=total_timesteps, unit="step", unit_scale=True, desc=f"Training [{model_tag}]")
         # Cache the equal-weight rollout's absolute-return series once (env is deterministic, reused ~eval_freq times)
         self.ew_returns = rollout(self.val_env, equal_weight_policy(self.val_env))["rewards"]
+
+        # DIAGNOSIS_PLAN.md Phase 3.1: optional TEST-set logging at every val-eval checkpoint,
+        # purely for a post-hoc val->test rank-correlation diagnostic (does "best val Sharpe"
+        # checkpoint selection actually track test performance, or select regime luck?).
+        # Diagnostic-only: test_sharpe is logged but NEVER read by early stopping or
+        # checkpoint/best-model selection below, which stay exactly as val-only as before --
+        # this does not turn into a second, quieter form of test-set leakage.
+        self.test_env = test_env
+        self.test_ew_returns = rollout(self.test_env, equal_weight_policy(self.test_env))["rewards"] \
+            if test_env is not None else None
 
     def _on_rollout_start(self) -> None:
         # Defense-in-depth against log_std collapse/explosion: SB3's log_std is an unconstrained
@@ -132,6 +142,18 @@ class ValSharpeCallback(BaseCallback):
             "max_drawdown": max_drawdown(agent_res["values"]),
             "final_value": agent_res["values"][-1],
         }
+
+        test_record = {}
+        if self.test_env is not None:
+            # Diagnostic only (Phase 3.1): rolled out and logged, but NOT read by early
+            # stopping or checkpoint selection below (those stay val-only, unchanged).
+            test_res = rollout(self.test_env, agent_policy(self.model))
+            test_excess = test_res["rewards"] - self.test_ew_returns
+            test_record = {
+                "test_sharpe": sharpe_ratio(test_res["rewards"]),
+                "test_sharpe_excess": sharpe_ratio(test_excess),
+            }
+
         log_std = self.model.policy.log_std.data
         # SB3's name_to_value is populated by each train() call; values are None before first rollout/train completes
         record = {
@@ -140,6 +162,7 @@ class ValSharpeCallback(BaseCallback):
             "val_sharpe_excess": val["excess_sharpe"],  # Sharpe of the agent's day-by-day excess return over equal-weight
             "val_max_drawdown": val["max_drawdown"],
             "val_final_value": val["final_value"],
+            **test_record,
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "train_entropy_loss": self.model.logger.name_to_value.get("train/entropy_loss"),
             "train_approx_kl": self.model.logger.name_to_value.get("train/approx_kl"),
@@ -253,12 +276,16 @@ def _resolve_session_id(config: AgentConfig, resume: bool) -> str:
 
 
 def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", bc_pretrain: bool = False,
-          use_subprocess: bool = False, policy: str = "MlpPolicy") -> Path:
+          use_subprocess: bool = False, policy: str = "MlpPolicy", log_test_eval: bool = False) -> Path:
     """Run PPO training for one window; returns path to its final model.
 
     policy: "MlpPolicy" (default, SB3 stock flat MLP) or "equivariant" (DIAGNOSIS_PLAN.md
     Phase 2.1 / roadmap M6.1 — src.agent.policy.EquivariantActorCriticPolicy, a shared
     per-ticker encoder instead of one flat MLP over the whole 1224-dim observation).
+    log_test_eval: diagnostic only (DIAGNOSIS_PLAN.md Phase 3.1) — also roll out on the
+    TEST split at every val-eval checkpoint and log test_sharpe/test_sharpe_excess, purely
+    to measure val->test checkpoint rank correlation after the fact. Never read by early
+    stopping or checkpoint/model selection, which stay exactly val-only.
     """
     # config.log_dir is already run-scoped (see rolling_eval.run_rolling_eval), so the
     # filename doesn't need its own timestamp — the directory disambiguates the run.
@@ -280,6 +307,7 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", b
         logger.info("Using DummyVecEnv (%d workers) — shared tensors, lower memory", config.n_envs)
         train_env = DummyVecEnv([_make_train_env for _ in range(config.n_envs)])
     val_env = PortfolioEnv(config, date_range="val")  # single deterministic pass, no need to parallelize
+    test_env = PortfolioEnv(config, date_range="test") if log_test_eval else None  # diagnostic only, see log_test_eval above
 
     try:
         ckpt_path = _find_latest_checkpoint(config, model_tag) if resume else None
@@ -369,7 +397,7 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", b
         logger.info("Training PPO [%s] (device=%s), log → %s", model_tag, model.device, log_path)
 
         t0 = time.time()
-        callback = ValSharpeCallback(config, val_env, log_path, config.total_timesteps, model_tag=model_tag)
+        callback = ValSharpeCallback(config, val_env, log_path, config.total_timesteps, model_tag=model_tag, test_env=test_env)
         cost_anneal_callback = CostAnnealCallback(config.total_timesteps, anneal_frac=0.5)
         try:
             model.learn(total_timesteps=config.total_timesteps, callback=[callback, cost_anneal_callback])
@@ -409,6 +437,8 @@ def train(config: AgentConfig, resume: bool = False, model_tag: str = "agent", b
         # close envs explicitly so nothing piles up across windows.
         train_env.close()
         val_env.close()
+        if test_env is not None:
+            test_env.close()
 
 
 def main(session_id: str | None = None) -> None:
@@ -420,6 +450,11 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--learning-rate", type=float, default=None, help="Override learning rate (default: 3e-4)")
     parser.add_argument("--gamma", type=float, default=None, help="Discount factor (default: 0.997)")
     parser.add_argument("--ent-coef", type=float, default=None, help="Entropy coefficient (default: 0.001)")
+    parser.add_argument("--risk-aversion", type=float, default=None,
+                         help="Reward mean-variance penalty lambda (default: 5.0) -- DIAGNOSIS_PLAN.md "
+                              "Phase 3.2 audit found the penalty term at 154%% of raw excess / 61%% of "
+                              "total reward on the current production model, well above TODO.md's 50%% "
+                              "sweep-trigger threshold; use this flag for that sweep")
     parser.add_argument("--log-std-init", type=float, default=None, help="Initial policy log_std (default: -3.0)")
     parser.add_argument("--batch-size", type=int, default=None, help="Override batch size (default: 64)")
     parser.add_argument("--eval-freq", type=int, default=None, help="Evaluate on val set every N episodes (default: 20)")
@@ -438,6 +473,11 @@ def main(session_id: str | None = None) -> None:
     parser.add_argument("--random-episode-start", action="store_true",
                          help="Random (TRAIN-only) episode start day instead of always day 0 "
                               "(DIAGNOSIS_PLAN.md Phase 2.4) -- val/test always stay deterministic")
+    parser.add_argument("--log-test-eval", action="store_true",
+                         help="Diagnostic only (DIAGNOSIS_PLAN.md Phase 3.1): also roll out on "
+                              "TEST at every val-eval checkpoint and log test_sharpe alongside "
+                              "val_sharpe, to measure val->test checkpoint rank correlation. "
+                              "Never affects early stopping or checkpoint/model selection.")
     parser.add_argument("--seed", type=int, default=None, help="Random seed for PPO/env/numpy (default: 42)")
     parser.add_argument("--resume", action="store_true", help="Resume the currently in-progress window from its latest checkpoint")
     parser.add_argument("--bc-pretrain", action="store_true",
@@ -485,6 +525,8 @@ def main(session_id: str | None = None) -> None:
         overrides["gamma"] = args.gamma
     if args.ent_coef is not None:
         overrides["entropy_coef"] = args.ent_coef
+    if args.risk_aversion is not None:
+        overrides["risk_aversion"] = args.risk_aversion
     if args.log_std_init is not None:
         overrides["log_std_init"] = args.log_std_init
     if args.batch_size is not None:
@@ -521,7 +563,8 @@ def main(session_id: str | None = None) -> None:
     # avoid a circular import.
     from src.agent.rolling_eval import run_rolling_eval, finalize_and_report
     results = run_rolling_eval(base_config, resume=args.resume, session_id=session_id, bc_pretrain=args.bc_pretrain,
-                               use_subprocess=args.subprocess, promote=not args.no_promote, policy=args.policy)
+                               use_subprocess=args.subprocess, promote=not args.no_promote, policy=args.policy,
+                               log_test_eval=args.log_test_eval)
     finalize_and_report(results, base_config, promote=not args.no_promote)
 
 

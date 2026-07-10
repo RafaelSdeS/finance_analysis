@@ -820,14 +820,89 @@ primary metrics across ≥3 seeds.
 
 ### Phase 3 — Validation & selection hardening (parallel with Phase 2, small).
 
-- [ ] 3.1 Measure **val→test rank correlation of checkpoints** (6.4) from existing JSONL;
+- [x] 3.1 Measure **val→test rank correlation of checkpoints** (6.4) from existing JSONL;
       if ≈0, early stopping selects regime luck → purged/embargoed multi-fold validation.
-      - **Test:** analysis first (no unit test); if purged multi-fold validation is then
-        built, it gets the standard purging test — no train fold sample within the embargo
-        of any val sample (synthetic dates, assert on indices).
-- [ ] 3.2 λ reward-shaping decomposition audit from training logs (TODO 3.2).
-      - **Test:** decomposition identity check in `test_env_basic.py` — logged
-        (raw excess, penalty, cost) recompose to the step reward exactly.
+      - **Done (2026-07-10):** existing JSONL logs only ever recorded `val_sharpe` — no
+        test-set evaluation at intermediate checkpoints exists to correlate against (only
+        the final promoted best-val checkpoint gets a one-time test evaluation, via
+        `evaluate.py`, after training ends). Added a diagnostic-only capability instead of
+        working around the gap: `ValSharpeCallback` takes an optional `test_env`, and when
+        provided (`trainer.py --log-test-eval`) also rolls out on TEST at every val-eval
+        checkpoint and logs `test_sharpe`/`test_sharpe_excess` alongside `val_sharpe` in
+        the same JSONL — **never read by early stopping or checkpoint/model selection**,
+        which stay exactly val-only (checked directly: unchanged code path). Ran a real
+        (not smoke-scale) training job — `--train-years 20 --test-years 2 --timesteps
+        600000 --universe-size 50 --log-test-eval --no-promote` — 3 windows, ~15
+        checkpoints each, to get genuine data. New `tools/val_test_correlation_audit.py`
+        reads the resulting JSONL and reports Spearman rank correlation.
+      - **Result:**
+        ```
+        window     n   spearman_rho   p       best-val checkpoint's test rank
+        window_0   15  -0.225         0.420   BELOW window's own test median
+        window_1   15  +0.157         0.576   BELOW window's own test median
+        window_2    6  -0.543         0.266   BELOW window's own test median
+        pooled     36  +0.092         0.595   —
+        ```
+      - **Interpretation:** the pooled val→test correlation is essentially zero (ρ=0.092,
+        nowhere near significant) — and more strikingly, in **all three windows tested**,
+        the checkpoint that "best val Sharpe" selection would have picked scored BELOW
+        that window's own test-set median. This is concrete evidence, not just a
+        theoretical worry: on this run, model selection based on a single contiguous
+        15%-tail validation split was **not** reliably picking the checkpoint that
+        generalizes best — it's closer to a coin flip, and slightly worse than that on
+        every window sampled. This directly corroborates the DSR≈0.58-flavored suspicion
+        already on record in TODO.md ("'best' checkpoints may be regime luck") with an
+        actual measurement. **Caveat:** n=36 pooled checkpoints from one 3-window,
+        non-multi-seed run is a real but modest sample — this is a strong enough signal to
+        prioritize purged/embargoed multi-fold validation as a genuine next step, not yet
+        enough to fully retire single-split validation on its own.
+      - **Test:** analysis, not unit-testable — the deliverable is the measurement above
+        plus the reusable audit tool. Purged/embargoed multi-fold validation itself
+        (the natural next step this result motivates) is not built in this session —
+        genuinely out of Phase 3's "small" scope; flagged as the clear next lever.
+- [x] 3.2 λ reward-shaping decomposition audit from training logs (TODO 3.2).
+      - **Done (2026-07-10):** `env.py`'s `step()` now tracks `reward_raw_excess` and
+        `reward_penalty` (the two components of `excess - risk_aversion*excess²`,
+        pre-summed and scaled identically to the returned reward) and returns them in
+        `info`, so `reward_raw_excess - reward_penalty == reward` exactly — a real
+        identity, not an approximation. New `tools/reward_decomposition_audit.py` rolls a
+        model through an env split and sums both components; new `--risk-aversion` CLI
+        flag on `trainer.py` (was previously not overridable) for whoever runs the
+        sweep this motivates.
+      - **Result (production `agent_best.zip`, train split, 241 decisions):**
+        ```
+        sum(reward_raw_excess): -20.23      sum(reward_penalty): +31.22
+        mean |raw_excess| per decision: 0.084     mean |penalty| per decision: 0.130
+        penalty / |raw_excess|:  154.3%
+        penalty / |total reward| (TODO 3.2's own stated criterion): 60.7%
+        identity check: 6.4e-14 (exact, floating-point noise only)
+        ```
+      - **Interpretation: the risk_aversion=5 mean-variance penalty dominates the reward
+        signal**, at both of TODO 3.2's own candidate measures (154% of raw excess, 61% of
+        total reward) — well above the 50% trigger threshold TODO.md set for this exact
+        audit. This means PPO's gradient signal is currently weighted more toward
+        SUPPRESSING excess-return VARIANCE than toward MAXIMIZING excess return itself —
+        plausibly compounding Phase 0/1's finding of an already-weak raw alpha signal:
+        if the dominant reward component rewards "be smooth" over "be right", that's
+        additional pressure toward the near-EW, low-conviction behavior this whole
+        diagnosis has been tracing back to other causes (the 0.10 cap's forced dilution,
+        etc.) — another lever pointing the same direction, not a contradictory one.
+        **Recommended next step (not run in this session, per TODO.md's own guidance that
+        this needs the M7 multi-seed protocol, a bigger undertaking than Phase 3's "small"
+        budget):** sweep `--risk-aversion {0, 1, 5}` under the 3-seed comparison protocol
+        already established and demonstrated in this session (0.3/2.1/etc.).
+      - **Test** (extended `tests/agent/test_env_basic.py`, data group): the decomposition
+        identity holds exactly (`reward_raw_excess - reward_penalty == reward`, checked
+        over 5 real steps against real production tensors, max diff < 1e-6) — the
+        precondition for trusting the audit tool's output at all. Full suite: 27/27 passed.
+
+**Phase 3 exit criterion — met.** Both sub-phases produced real, measured findings from
+actual runs, not just built capability: checkpoint selection is currently close to a coin
+flip on val→test generalization (and slightly worse than that on the 3 windows sampled),
+and the reward's risk-aversion penalty dominates over the raw alpha signal it's meant to
+merely temper. Both point toward the same next-step recommendations already on record
+(purged validation, a λ sweep) — this phase turned "should probably look into this" into
+"confirmed, here are the numbers."
 
 ### Testing policy for this plan
 

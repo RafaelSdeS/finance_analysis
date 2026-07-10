@@ -400,6 +400,27 @@ def main() -> None:
         assert "pit_universe=True" in str(e) and "--pit-universe" in str(e), f"unexpected error message: {e}"
     print("✓ pit_universe=True on tensors with no PIT data raises RuntimeError (was a silent no-op before this fix)")
 
+    # --- 12. Reward decomposition identity (DIAGNOSIS_PLAN.md Phase 3.2): the logged
+    #     (raw_excess, penalty) must recompose to the actual returned reward EXACTLY, not
+    #     approximately -- this is what makes the decomposition trustworthy as an audit tool. ---
+    env_decomp = PortfolioEnv(cfg, date_range="train")
+    env_decomp.reset(seed=0)
+    rng_decomp = np.random.default_rng(0)
+    n_checked = 0
+    for step_i in range(5):
+        action_d = rng_decomp.normal(size=len(env_decomp.tickers)).astype(np.float32)
+        _, reward_d, terminated_d, _, info_d = env_decomp.step(action_d)
+        recomposed = info_d["reward_raw_excess"] - info_d["reward_penalty"]
+        assert abs(recomposed - reward_d) < 1e-6, (
+            f"reward_raw_excess - reward_penalty ({recomposed}) must exactly equal the "
+            f"returned reward ({reward_d})"
+        )
+        n_checked += 1
+        if terminated_d:
+            break
+    print(f"✓ reward decomposition identity holds exactly: reward_raw_excess - reward_penalty "
+          f"== reward (checked over {n_checked} steps, max diff < 1e-6)")
+
     print("\n" + "=" * 60)
     print("ALL ENV TESTS PASSED ✓")
     print("=" * 60)
