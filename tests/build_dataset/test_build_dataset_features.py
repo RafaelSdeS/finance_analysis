@@ -385,6 +385,34 @@ def test_merge_applies_filing_lag() -> None:
     assert approx(result.iloc[2]["pl"], 15.0)      # lag has elapsed: fundamental now visible
 
 
+def test_merge_honors_actual_filing_date() -> None:
+    """When fundamentals carry a real fundamentals_available_date (CVM DT_RECEB),
+    merge_asof uses it instead of the statutory fallback — both directions:
+    an early filer is visible before the statutory deadline, a late filer after."""
+    ref_date = pd.Timestamp("2026-03-31")
+    early, late = ref_date + pd.Timedelta(days=20), ref_date + pd.Timedelta(days=200)
+
+    fundamentals = pd.DataFrame({
+        "ticker": ["EARLY", "LATE"],
+        "reference_date": [ref_date, ref_date],
+        "fundamentals_available_date": [early, late],
+        "pl": [10.0, 20.0],
+    })
+    prices = pd.DataFrame({
+        "ticker": ["EARLY", "EARLY", "LATE", "LATE"],
+        "trade_date": [early - pd.Timedelta(days=1), early,
+                       ref_date + pd.Timedelta(days=45), late],
+    })
+
+    result = merge_prices_and_fundamentals(prices, fundamentals).set_index(
+        ["ticker", "trade_date"])
+
+    assert pd.isna(result.loc[("EARLY", early - pd.Timedelta(days=1)), "pl"])
+    assert approx(result.loc[("EARLY", early), "pl"], 10.0)   # visible at day 20 < statutory 45
+    assert pd.isna(result.loc[("LATE", ref_date + pd.Timedelta(days=45)), "pl"])  # statutory day, not yet filed
+    assert approx(result.loc[("LATE", late), "pl"], 20.0)
+
+
 def _advanced_features_fixture(n_rows: int) -> pd.DataFrame:
     """Minimal single-ticker frame with every column compute_advanced_features touches."""
     dates = pd.date_range("2026-01-01", periods=n_rows, freq="D")

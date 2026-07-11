@@ -46,6 +46,7 @@ COMPANY_INFO_PATH = ROOT / "data/raw/company_info/company_info.parquet"
 MACRO_DIR = ROOT / "data/raw/macro"
 DIVIDENDS_DIR = ROOT / "data/raw/dividends"
 CORPORATE_EVENTS_PATH = ROOT / "data/raw/corporate_events/corporate_events.parquet"
+FILING_DATES_PATH = ROOT / "data/raw/filing_dates/filing_dates.parquet"
 OUTPUT_PATH = ROOT / "data/processed/ml_dataset.parquet"
 
 # Tickers with fewer price rows than this carry no usable history (e.g. EGGY3 has 1 row)
@@ -366,15 +367,73 @@ def load_dividends():
 
 # `reference_date` from BolsAI is the fiscal quarter-end, not the real filing/
 # disclosure date (verified: BolsAI's /fundamentals history has no filing-date
-# field at all, so it can't be recovered from the API). CVM requires quarterly
-# ITR filings within 45 days of quarter-end and annual DFP within ~90 days —
-# merging fundamentals in on reference_date directly makes them "available"
-# weeks to months before a real trader could have seen them. These are
-# statutory-deadline estimates, not per-company actual filing dates.
-# ponytail: conservative fixed buffer, not per-company actual filing dates —
-# upgrade if BolsAI ever exposes a real disclosure date.
+# field at all). The real publication date (CVM's DT_RECEB) is collected by
+# src/data_collection/filing_dates.py and attached per quarter; these statutory
+# deadlines (ITR 45d, DFP ~90d) are the fallback for quarters missing from the
+# CVM register.
 FILING_LAG_DAYS_QUARTERLY = 45
 FILING_LAG_DAYS_ANNUAL = 90
+
+
+def _statutory_available_date(reference_dates):
+    """Fallback availability: quarter-end + statutory CVM filing deadline."""
+    lag_days = np.where(
+        reference_dates.dt.month == 12,
+        FILING_LAG_DAYS_ANNUAL,
+        FILING_LAG_DAYS_QUARTERLY,
+    )
+    return reference_dates + pd.to_timedelta(lag_days, unit="D")
+
+
+def attach_filing_dates(fundamentals, company_info):
+    """Set fundamentals_available_date = real CVM receipt date (DT_RECEB),
+    statutory deadline where the quarter is missing from the CVM register.
+
+    Measured on Q1-2025: median real lag is 44 days (the statutory buffer is
+    well calibrated), but 8.6% of companies file late — up to 443 days — so
+    the fixed buffer alone leaks their fundamentals before publication.
+    """
+    print()
+    print("=" * 80)
+    print("ATTACHING FILING DATES (CVM DT_RECEB)")
+    print("=" * 80)
+
+    fundamentals = fundamentals.copy()
+
+    if not FILING_DATES_PATH.exists():
+        print("filing_dates.parquet missing — statutory deadlines only "
+              "(run: python -m src.data_collection.filing_dates)")
+        fundamentals["fundamentals_available_date"] = (
+            _statutory_available_date(fundamentals["reference_date"])
+        )
+        return fundamentals
+
+    # a quarter can appear in both ITR and DFP registers — one row per
+    # (cnpj, quarter), earliest receipt, or the merge would duplicate rows
+    filings = (
+        pd.read_parquet(FILING_DATES_PATH)
+        .groupby(["cnpj", "reference_date"], as_index=False)["received_date"].min()
+        .rename(columns={"cnpj": "_cnpj"})
+    )
+    cnpj_map = company_info.assign(
+        cnpj=company_info["cnpj"].str.replace(r"\D", "", regex=True)
+    ).set_index("ticker")["cnpj"]
+
+    fundamentals["_cnpj"] = fundamentals["ticker"].map(cnpj_map)
+    fundamentals = fundamentals.merge(filings, on=["_cnpj", "reference_date"], how="left")
+
+    # a filing can't precede its own quarter-end; treat such rows as unknown
+    bad = fundamentals["received_date"] < fundamentals["reference_date"]
+    fundamentals.loc[bad, "received_date"] = pd.NaT
+
+    n_real = int(fundamentals["received_date"].notna().sum())
+    print(f"Real filing dates: {n_real}/{len(fundamentals)} quarters "
+          f"({100 * n_real / len(fundamentals):.1f}%), statutory fallback for the rest")
+
+    fundamentals["fundamentals_available_date"] = fundamentals["received_date"].fillna(
+        _statutory_available_date(fundamentals["reference_date"])
+    )
+    return fundamentals.drop(columns=["_cnpj", "received_date"])
 
 
 def merge_prices_and_fundamentals(prices, fundamentals):
@@ -402,18 +461,14 @@ def merge_prices_and_fundamentals(prices, fundamentals):
             .sort_values("reference_date")
         )
 
-        lag_days = np.where(
-            f["reference_date"].dt.month == 12,
-            FILING_LAG_DAYS_ANNUAL,
-            FILING_LAG_DAYS_QUARTERLY,
-        )
-        f["fundamentals_available_date"] = f["reference_date"] + pd.to_timedelta(lag_days, unit="D")
+        # attach_filing_dates() normally sets this (real CVM receipt date with
+        # statutory fallback); synthesize the fallback if called standalone
+        if "fundamentals_available_date" not in f.columns:
+            f["fundamentals_available_date"] = _statutory_available_date(f["reference_date"])
         f = f.sort_values("fundamentals_available_date")
 
-        # merge_asof: uses the most recent fundamental whose estimated filing
-        # date has already passed as of each trade_date (no lookahead bias).
-        # fundamentals_available_date is kept (not dropped) — recompute_valuation_daily's
-        # split-guard needs it to know which rows just picked up a new fundamental.
+        # merge_asof: uses the most recent fundamental whose filing date has
+        # already passed as of each trade_date (no lookahead bias).
         merged = pd.merge_asof(
             p,
             f,
@@ -749,8 +804,10 @@ def recompute_valuation_daily(df):
     # apart from "average company" after the env's NaN→0 imputation
     df["has_fundamentals"] = df["reference_date"].notna().astype(float)
 
-    # close_price (price at filing date) is now redundant and misleading
-    df = df.drop(columns=["close_price", "fundamentals_available_date"])
+    # close_price (price at filing date) is now redundant and misleading.
+    # fundamentals_available_date stays: the T31 validation gate needs it, and
+    # "when did these numbers become public" is legitimate agent-visible state.
+    df = df.drop(columns=["close_price"])
 
     print(f"Valuation ratios re-anchored for {len(df)} rows")
     return df
@@ -1012,6 +1069,7 @@ def main():
     company_info = load_company_info()
     dividends    = load_dividends()
 
+    fundamentals = attach_filing_dates(fundamentals, company_info)
     dataset = merge_prices_and_fundamentals(prices, fundamentals)
     dataset = merge_company_info(dataset, company_info)
     dataset = merge_macro(dataset)

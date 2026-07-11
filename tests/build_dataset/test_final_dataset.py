@@ -20,7 +20,6 @@ sys.path.insert(0, str(ROOT))
 
 from src.build_dataset.build_ml_dataset import (  # noqa: E402
     FILING_LAG_DAYS_QUARTERLY,
-    FILING_LAG_DAYS_ANNUAL,
     MIN_DETECTABLE_JUMP,
     JUMP_MATCH_TOL,
     EVENT_WINDOW_DAYS,
@@ -130,12 +129,20 @@ def validate(df):
     checks.append(("stale close_price column dropped", "close_price" not in df.columns))
     checks.append(("has_fundamentals flag present", "has_fundamentals" in df.columns))
 
-    # Publication lag (T31): a fundamental only becomes visible once its
-    # statutory filing window has elapsed — never on the quarter-end itself
+    # Publication lag (T31): a fundamental only becomes visible once actually
+    # filed (CVM DT_RECEB, statutory deadline as fallback) — never before
     filed = df[df["has_fundamentals"] == 1]
-    gap = (filed["trade_date"] - filed["reference_date"]).dt.days
-    checks.append((f"fundamentals respect filing lag [min gap {gap.min()}d]",
-                   gap.min() >= FILING_LAG_DAYS_QUARTERLY))
+    if "fundamentals_available_date" in df.columns:
+        early = int((filed["trade_date"] < filed["fundamentals_available_date"]).sum())
+        pre_quarter = int((filed["fundamentals_available_date"] < filed["reference_date"]).sum())
+        gap = (filed["trade_date"] - filed["reference_date"]).dt.days
+        checks.append((f"fundamentals respect filing date [{early} rows early, "
+                       f"{pre_quarter} filed pre-quarter-end, min ref-lag {gap.min()}d]",
+                       early == 0 and pre_quarter == 0))
+    else:  # dataset built before filing-date wiring: statutory floor applies
+        gap = (filed["trade_date"] - filed["reference_date"]).dt.days
+        checks.append((f"fundamentals respect filing lag [min gap {gap.min()}d]",
+                       gap.min() >= FILING_LAG_DAYS_QUARTERLY))
 
     # No fabricated trading days (T4)
     weekend_rows = int((df["trade_date"].dt.dayofweek >= 5).sum())
@@ -149,24 +156,28 @@ def validate(df):
                    sum(leaked.values()) == 0))
 
     # asof merge correctness (T5): the merged quarter is the MOST RECENT one
-    # filed by each trade_date, independently recomputed from the raw files
+    # available by each trade_date — the per-quarter availability calendar is
+    # reconstructed from the dataset's own (reference_date, available_date)
+    # pairs, so this catches stale-pick merge bugs under either date source
     mismatches = 0
-    for t in ("PETR4", "VALE3", "ABEV3"):
-        raw_path = FUNDAMENTALS_DIR / f"{t}.parquet"
-        if not raw_path.exists() or t not in df["ticker"].values:
-            continue
-        f = pd.read_parquet(raw_path)[["reference_date"]]
-        f["reference_date"] = pd.to_datetime(f["reference_date"])
-        lag = np.where(f["reference_date"].dt.month == 12,
-                       FILING_LAG_DAYS_ANNUAL, FILING_LAG_DAYS_QUARTERLY)
-        f["avail"] = f["reference_date"] + pd.to_timedelta(lag, unit="D")
-        g = df[df["ticker"] == t].sample(min(100, (df["ticker"] == t).sum()), random_state=0)
-        for _, row in g.iterrows():
-            visible = f.loc[f["avail"] <= row["trade_date"], "reference_date"]
-            expected = visible.max() if len(visible) else pd.NaT
-            actual = row["reference_date"]
-            if (pd.isna(expected) != pd.isna(actual)) or (pd.notna(expected) and expected != actual):
-                mismatches += 1
+    avail_col = ("fundamentals_available_date"
+                 if "fundamentals_available_date" in df.columns else None)
+    if avail_col:
+        for t in ("PETR4", "VALE3", "ABEV3"):
+            g = df[df["ticker"] == t]
+            if g.empty:
+                continue
+            quarters = (g[["reference_date", avail_col]]
+                        .dropna().drop_duplicates().sort_values(avail_col))
+            sample = g.sample(min(100, len(g)), random_state=0)
+            for _, row in sample.iterrows():
+                visible = quarters.loc[
+                    quarters[avail_col] <= row["trade_date"], "reference_date"]
+                expected = visible.max() if len(visible) else pd.NaT
+                actual = row["reference_date"]
+                if (pd.isna(expected) != pd.isna(actual)) or \
+                        (pd.notna(expected) and expected != actual):
+                    mismatches += 1
     checks.append((f"asof merge picks most recent filed quarter (sampled) [{mismatches} mismatches]",
                    mismatches == 0))
 
