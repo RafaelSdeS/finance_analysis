@@ -111,30 +111,30 @@ every `T#`.
   delisted B3 companies with their real (truncated) histories. Until then, treat every performance
   number produced from this dataset as an upper bound. **Remains open as a Stage-1 collection task.**
 
-- [x] **T4 — Timestamp alignment.** DONE (build-level part): `no weekend trade_date rows` gate added
+- [x] **T4 — Timestamp alignment.** ✅ DONE (2026-07-11): `no weekend trade_date rows` gate added
   to `test_final_dataset.py:validate()` — passes (0 found). Gap continuity beyond that is already
   warned at collection time (`validate.py`, >5-calendar-day gaps); a full B3 holiday-calendar check
   was skipped deliberately (needs an external calendar dependency for marginal value).
 
-- [x] **T5 — Merge correctness.** DONE: `asof merge picks most recent filed quarter (sampled)` gate
+- [x] **T5 — Merge correctness.** ✅ DONE (2026-07-11): `asof merge picks most recent filed quarter (sampled)` gate
   in `validate()` — independently recomputes, from the **raw** fundamentals files + the filing-lag
   constants, which quarter should be visible on each sampled trade_date (100 sampled rows × 3
   tickers) and asserts the dataset's merged `reference_date` matches. 0 mismatches.
 
-- [x] **T6 — Unexpected distributions.** MOSTLY DONE: every build now writes
+- [x] **T6 — Unexpected distributions.** ✅ DONE (2026-07-11): every build now writes
   `data/processed/ml_dataset.manifest.json` with per-column `nan_pct/mean/std/p1/p50/p99` — the
   comparable snapshot exists. Automated diff-against-previous-build is not built (manifests overwrite
   in place); comparing two builds is currently a manual diff of saved manifests. Build the automated
   diff when there's a workflow that keeps historical manifests (couples naturally with T23's
   `dataset_v{N}` versioning).
 
-- [x] **T7 — Outlier/staleness gating.** DONE: `--strict` flag added to `test_final_dataset.py` —
+- [x] **T7 — Outlier/staleness gating.** ✅ DONE (2026-07-11): `--strict` flag added to `test_final_dataset.py` —
   default keeps the anomaly report informational (legitimate extremes land there alongside errors);
   `--strict` turns any stale-price/outlier finding into exit 1. The one confirmed-garbage case the
   triage surfaced (WDCN3) was handled at the source instead — see T8.
 
-- [x] **T8 — Adjusted-price consistency.** DONE, and it uncovered the **worst data-quality bug in the
-  dataset**: 44+ corporate events (of 577 in the audit log) were never adjusted in BolsAI's `adj_*`
+- [x] **T8 — Adjusted-price consistency.** ✅ DONE (2026-07-11), and it uncovered the **worst data-quality bug in the
+  dataset**: 53 corporate events (of 577 in the audit log) were never adjusted in BolsAI's `adj_*`
   columns — fake single-day "returns" up to −99.99% (ln −9.3) sat in `log_return` for ~40 tickers
   including CSNA3, CMIG4, SBSP3, TIMS3, poisoning returns/volatility/drawdown/momentum and any reward
   built on them. Verified against raw files: raw `close` is continuous at these events while `adj_close`
@@ -155,13 +155,13 @@ every `T#`.
   (both directions) against the final dataset; 0 events leaking. Extreme-return census after repair:
   190 → 108 rows > |1.2| ex-WDCN3, all 1-5 per ticker penny-stock moves (informational).
 
-- [x] **T9 — `has_fundamentals` consistency.** DONE: gate asserts `pl/pvp/roe/net_income/market_cap`
+- [x] **T9 — `has_fundamentals` consistency.** ✅ DONE (2026-07-11): gate asserts `pl/pvp/roe/net_income/market_cap`
   are all-NaN wherever `has_fundamentals == 0` (0 leaked values), plus the filing-lag gate asserts
   `days_since_fundamental >= 45` with no negatives. The original "< ~120 days" upper-bound idea was
   dropped — it was written pre-T31; with the statutory lag the legitimate staleness range extends to
   ~185 days (Q3 filing carried until Q4's +90d annual deadline), so a hard upper bound would false-fail.
 
-- [x] **T10 — Reproducibility manifest.** DONE: `write_manifest()` in `build_ml_dataset.py` writes
+- [x] **T10 — Reproducibility manifest.** ✅ DONE (2026-07-11): `write_manifest()` in `build_ml_dataset.py` writes
   `ml_dataset.manifest.json` per build — git commit, pandas/numpy versions, build timestamp, row/ticker
   counts, date range, column list, and per-column distribution stats (doubles as T6's snapshot).
   Input-file hashing skipped (hashing 300 parquets per build for marginal provenance value); row
@@ -370,7 +370,7 @@ that as the baseline rather than re-deriving it.
 | Delisted companies | trailing history for a delisted ticker | Don't fill through a delisting — the row should stop existing at the delisting date, not interpolate implied continued trading. |
 | Single-stock sectors | `*_zscore_sector` when `std<=0` | Already correctly NaN'd (`std.where(std > 0)`, line 709) — no action needed. |
 
-- [x] **T27 — Macro fill mechanism confirmed by inspection.** `merge_macro()` uses
+- [x] **T27 — Macro fill mechanism confirmed by inspection.** ✅ DONE (2026-07-11): `merge_macro()` uses
   `merge_asof(..., direction="backward")` on each series — i.e. last-published-value carry-forward,
   causal by construction, no gap-dropping and no interpolation. No change needed.
 
@@ -423,29 +423,36 @@ pattern T1/T2 extends), and the collection-time schema gates in `validate.py`.
 
 ## 7. Priority-ordered task index
 
-1. ~~**T31**~~ ✅ DONE — fixed the fundamental publication-lag leak (~40+ columns affected, every
-   quarter, every ticker — bigger blast radius than T1, verified against raw data)
-2. ~~**T1**~~ ✅ DONE — fixed the volatility-percentile lookahead bug
-3. **T28** — walk-forward split (blocks T21, T29, and any rigorous agent claim) — **next up**
-4. **T29** — feature scaling, train-only fit, with per-feature-type scaler choice (coupled to T28)
-5. ~~**T2**~~ ✅ DONE — causality-test pattern implemented (currently covers the T1 columns; extending
+**✅ COMPLETED (2026-07-11 data-quality pass):**
+1. ✅ **T31** — fixed the fundamental publication-lag leak (~40+ columns affected, every
+   quarter, every ticker — bigger blast radius than T1, verified against real CVM data)
+2. ✅ **T1** — fixed the volatility-percentile lookahead bug
+3. ✅ **T2** — causality-test pattern implemented (currently covers the T1 columns; extending
    to more columns is still open, see §0)
-6. ~~**T4–T10, T27**~~ ✅ DONE (2026-07-11, data-quality pass) — 5 new validation gates in
-   `test_final_dataset.py` (18 total, all passing), the T8 split-repair + `hl_ratio` fix + WDCN3
-   quarantine in `build_ml_dataset.py`, `--strict` mode, and the build manifest. Details in §1.
-7. **T3** — ⚠️ survivorship bias CONFIRMED structural (universe is 100% `ATIVO`, zero delisted
+4. ✅ **T4–T10, T27** — 5 new validation gates in `test_final_dataset.py` (18 total, all passing), 
+   the T8 split-repair (53 events fixed) + `hl_ratio` fix + WDCN3 quarantine in `build_ml_dataset.py`, 
+   `--strict` mode, and the build manifest. Details in §1.
+
+**⏭️ NEXT (blocking chain):**
+1. **T28** — walk-forward split (blocks T21, T29, and any rigorous agent claim) — **highest priority**
+2. **T29** — feature scaling, train-only fit, with per-feature-type scaler choice (coupled to T28)
+
+**STRUCTURAL FINDINGS (not tasks, but context):**
+- **T3** — ⚠️ survivorship bias CONFIRMED structural (universe is 100% `ATIVO`, zero delisted
    companies). Open Stage-1 collection task: backfill delisted B3 tickers. Until then all backtest
    numbers are upper bounds.
-8. **T32** — audit agent observation for Markov sufficiency (`ml_agent`, deferred — agent work paused
-   in favor of data quality per 2026-07-11 decision)
-9. **T30** — resolve cross-branch fragmentation (reproducibility risk, not urgent but compounding)
-10. **T33** — audit train/inference feature parity (`ml_agent`, deferred, see §8)
-11. **T18–T20** — cheap feature triage (§3), do before T21
-12. **T21–T22** — ablation-based feature decisions (§3), blocked on T28
-13. **T11–T17** — new feature candidates (§2), lowest priority — don't add before T28/T29 exist, since
-    you can't rigorously evaluate any new feature without a working split/scaling pipeline
-14. **T23** — `dataset_v{N}` versioning (manifest half of it is done; the versioned-directory half
-    remains)
+
+**DEFERRED (agent branch, `ml_agent`):**
+- **T32** — audit agent observation for Markov sufficiency
+- **T33** — audit train/inference feature parity
+
+**REMAINING PRIORITIES (§2–§6):**
+1. **T18–T20** — cheap feature triage (§3), do before T21
+2. **T21–T22** — ablation-based feature decisions (§3), blocked on T28
+3. **T11–T17** — new feature candidates (§2), lowest priority — don't add before T28/T29 exist
+4. **T23** — `dataset_v{N}` versioning (manifest half is done; versioned-directory half remains)
+5. **T24–T26** — splits, scalers, validation reports (coupled to T28/T29)
+6. **T30** — resolve cross-branch fragmentation (reproducibility risk, not urgent)
 
 **Not worth doing at all:** YAML-driven feature-config system, full pairwise-correlation feature
 matrix, calendar-feature suite, premature `data/interim/` caching, and a per-feature compute/storage
