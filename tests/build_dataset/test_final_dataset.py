@@ -12,6 +12,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 DEFAULT_FILE = Path(__file__).resolve().parents[2] / "data/processed/ml_dataset.parquet"
@@ -19,6 +20,41 @@ DEFAULT_FILE = Path(__file__).resolve().parents[2] / "data/processed/ml_dataset.
 
 def print_separator():
     print("-" * 80)
+
+
+def check_stale_prices(df, price_col="close", run_len=5):
+    """Flag runs of >= run_len identical closes while volume > 0."""
+    findings = []
+    for t, g in df.sort_values("date").groupby("ticker"):
+        same = (g[price_col].diff() == 0) & (g["volume"] > 0)
+        run = same.groupby((~same).cumsum()).cumsum()
+        hits = g[run >= run_len]
+        for _, row in hits.iterrows():
+            findings.append({"ticker": t, "date": row["date"], "value": row[price_col]})
+    return pd.DataFrame(findings)
+
+
+def check_outliers_zscore(df, feature_cols, threshold=8.0):
+    """Robust (median/MAD) z-score outlier flagging, computed within each
+    ticker's own history — a global z-score would flag every large-cap as an
+    outlier on absolute-scale columns (market_cap, volume, ...) just for
+    being large, since company size varies by orders of magnitude."""
+    findings = []
+    by_ticker = df.groupby("ticker")
+    for col in feature_cols:
+        s = df[col]
+        med = by_ticker[col].transform("median")
+        mad = (s - med).abs().groupby(df["ticker"]).transform("median")
+        z = 0.6745 * (s - med) / mad.replace(0, float("nan"))
+        mask = z.abs() > threshold
+        if mask.any():
+            sub = df.loc[mask, ["ticker", "date"]].copy()
+            sub["column"] = col
+            sub["value"] = s[mask].values
+            findings.append(sub)
+    if not findings:
+        return pd.DataFrame(columns=["ticker", "date", "column", "value"])
+    return pd.concat(findings, ignore_index=True)
 
 
 def validate(df):
@@ -47,6 +83,12 @@ def validate(df):
     # Critical columns have no NaN
     for col in ("close", "volume"):
         checks.append((f"no NaN in {col}", col in df.columns and df[col].notna().all()))
+
+    # No inf/-inf leaking through (division-by-zero in growth rates/ratios
+    # must be cleaned to NaN by clean_dataset(), never a literal inf)
+    numeric_cols = df.select_dtypes(include="number").columns
+    n_inf = np.isinf(df[numeric_cols]).sum().sum()
+    checks.append((f"no inf values in numeric columns [{n_inf} found]", n_inf == 0))
 
     # Macro merged and not entirely null
     for col in ("selic", "cdi", "ipca"):
@@ -236,13 +278,41 @@ def main():
     print(f"Duplicate rows: {total_duplicates}")
 
     if "ticker" in df.columns:
-        print(f"Duplicated tickers: {df['ticker'].duplicated().sum()}")
+        print(f"Unique tickers: {df['ticker'].nunique()}")
+
+    # -------------------------------------------------------------------------
+    # ANOMALY REPORT (informational, does not affect exit code)
+    # -------------------------------------------------------------------------
+
+    print("\n")
+    print_separator()
+    print("ANOMALY REPORT (informational, does not affect exit code)")
+    print_separator()
+
+    df_dated = df.rename(columns={"trade_date": "date"})
+
+    stale = check_stale_prices(df_dated)
+    print(f"Stale price runs (>=5 identical closes, volume>0): {len(stale)}")
+    if len(stale):
+        print(stale.head(20).to_string(index=False))
+
+    # Exclude raw macro passthrough columns: identical across all tickers on a
+    # given date by construction, so they flood this report with repeats of
+    # the same macro regime shift rather than per-observation data errors.
+    macro_cols = {"selic", "cdi", "ipca", "selic_trend_20d"}
+    numeric_cols = [c for c in df.select_dtypes(include="number").columns if c not in macro_cols]
+    outliers = check_outliers_zscore(df_dated, numeric_cols)
+    print(f"\nOutliers (robust z-score > 8): {len(outliers)}")
+    if len(outliers):
+        print(outliers["column"].value_counts().head(10).to_string())
+        print(outliers.head(20).to_string(index=False))
 
     # -------------------------------------------------------------------------
     # DATE RANGE
     # -------------------------------------------------------------------------
 
     possible_date_cols = [
+        "trade_date",
         "date",
         "reference_date",
         "trading_date",
