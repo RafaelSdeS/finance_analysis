@@ -124,7 +124,9 @@ def collect_prices_yf(tickers: list[str], mode: str):
                 "volume_adjusted": raw["Volume"].values,  # ponytail: yfinance doesn't split-adjust
                 # volume; BolsAI does. Documented divergence, not worth reconstructing from splits.
                 "traded_amount": (close * raw["Volume"]).values,  # approximation, no yfinance equivalent
-                "num_trades": None,  # no yfinance equivalent at all
+                "num_trades": np.nan,  # no yfinance equivalent at all; nan keeps it float64,
+                                        # matching the on-disk BolsAI dtype (None -> object dtype
+                                        # triggers pd.concat's all-NA FutureWarning)
             })
 
             saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"prices/{ticker}")
@@ -162,40 +164,46 @@ def _compute_ratios(r: dict) -> dict:
     net_debt = total_debt - cash
     ev = market_cap + net_debt * K
 
-    out = {
-        "market_cap": market_cap,
-        "lpa": net_income * K / shares,
-        "vpa": equity * K / shares,
-        "pl": market_cap / (net_income * K),
-        "pvp": market_cap / (equity * K),
-        "roe": net_income / equity * 100,
-        "roa": net_income / total_assets * 100,
-        "net_margin": net_income / net_revenue * 100,
-        "ebitda_margin": ebitda / net_revenue * 100,
-        "net_debt": net_debt,
-        "debt_equity": total_debt / equity,
-        "ev_ebitda": ev / (ebitda * K),
-        "ev_ebit": ev / (ebit * K),
-        "p_ebitda": market_cap / (ebitda * K),
-        "p_ebit": market_cap / (ebit * K),
-        "p_sr": market_cap / (net_revenue * K),
-        "ebit_margin": ebit / net_revenue * 100,
-        "ebit_over_assets": ebit / total_assets * 100,
-        "asset_turnover": net_revenue / total_assets,
-        "p_assets": market_cap / (total_assets * K),
-        "current_ratio": current_assets / current_liabilities,
-        "net_debt_equity": net_debt / equity,
-        "net_debt_ebitda": net_debt / ebitda,
-        "net_debt_ebit": net_debt / ebit,
-        # ponytail: approximation — no tax-effected NOPAT available from yfinance.
-        "roic": ebit / (total_debt + equity - cash) * 100,
-        "gross_margin": (net_revenue - cost_of_revenue) / net_revenue * 100,
-        # filled later by cagr_handler.fill_cagr_columns() over the combined
-        # historical series — yfinance alone has ~1.5y depth, not enough for 5y CAGR.
-        "cagr_revenue_5y": np.nan,
-        "cagr_earnings_5y": np.nan,
-    }
-    return out
+    # Zero denominators (pre-revenue/holding-company quarters) are expected and
+    # handled below by the inf->NaN cleanup, not a bug — silence numpy's warning.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out = {
+            "market_cap": market_cap,
+            "lpa": net_income * K / shares,
+            "vpa": equity * K / shares,
+            "pl": market_cap / (net_income * K),
+            "pvp": market_cap / (equity * K),
+            "roe": net_income / equity * 100,
+            "roa": net_income / total_assets * 100,
+            "net_margin": net_income / net_revenue * 100,
+            "ebitda_margin": ebitda / net_revenue * 100,
+            "net_debt": net_debt,
+            "debt_equity": total_debt / equity,
+            "ev_ebitda": ev / (ebitda * K),
+            "ev_ebit": ev / (ebit * K),
+            "p_ebitda": market_cap / (ebitda * K),
+            "p_ebit": market_cap / (ebit * K),
+            "p_sr": market_cap / (net_revenue * K),
+            "ebit_margin": ebit / net_revenue * 100,
+            "ebit_over_assets": ebit / total_assets * 100,
+            "asset_turnover": net_revenue / total_assets,
+            "p_assets": market_cap / (total_assets * K),
+            "current_ratio": current_assets / current_liabilities,
+            "net_debt_equity": net_debt / equity,
+            "net_debt_ebitda": net_debt / ebitda,
+            "net_debt_ebit": net_debt / ebit,
+            # ponytail: approximation — no tax-effected NOPAT available from yfinance.
+            "roic": ebit / (total_debt + equity - cash) * 100,
+            "gross_margin": (net_revenue - cost_of_revenue) / net_revenue * 100,
+            # filled later by cagr_handler.fill_cagr_columns() over the combined
+            # historical series — yfinance alone has ~1.5y depth, not enough for 5y CAGR.
+            "cagr_revenue_5y": np.nan,
+            "cagr_earnings_5y": np.nan,
+        }
+    # nonzero/0 divisions land here as inf, not NaN (only 0/0 propagates NaN
+    # naturally) — clean at the source so raw parquet never stores literal inf.
+    return {k: (np.nan if isinstance(v, float | np.floating) and np.isinf(v) else v)
+            for k, v in out.items()}
 
 
 def _shares_outstanding(bs: pd.DataFrame, path) -> pd.Series:

@@ -75,7 +75,7 @@ DIVIDENDS_YEARS = 20  # API max; covers full history
 
 # --- yfinance update pipeline ---
 # Flip any entry to "yfinance" to fall back to the free collector for that data type.
-DATA_SOURCE = {"prices": "bolsai", "fundamentals": "bolsai", "dividends": "bolsai"}
+DATA_SOURCE = {"prices": "yfinance", "fundamentals": "yfinance", "dividends": "yfinance"}
 YF_SUFFIX = ".SA"
 YF_RETRIES = 3
 YF_RETRY_SLEEP = 2          # seconds; doubles each retry

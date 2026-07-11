@@ -135,6 +135,11 @@ def collect_macro(mode: str):
                     if ex.response.status_code == 404:
                         continue
                     raise
+                # BCB returns a bare object (not a list) when the range has exactly
+                # one data point — normalize before extending, or dict iteration
+                # silently corrupts rows with its keys instead of the record.
+                if isinstance(d, dict):
+                    d = [d]
                 rows += d or []
             if not rows:
                 log.info("macro %s: no new rows", name)

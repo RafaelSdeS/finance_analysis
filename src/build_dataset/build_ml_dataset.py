@@ -323,14 +323,6 @@ def merge_company_info(df, company_info):
         how="left",
     )
 
-    # Filter out delisted/inactive companies (status != ATIVO)
-    # Can't trade suspended or cancelled stocks; exclude from training
-    before = len(merged)
-    merged = merged[merged["status"].fillna("").eq("ATIVO")]
-    filtered_out = before - len(merged)
-    if filtered_out > 0:
-        print(f"Filtered out {filtered_out} rows from inactive/delisted companies")
-
     return merged
 
 
