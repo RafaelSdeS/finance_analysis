@@ -8,6 +8,10 @@ Gitignored — everything here is a local build artifact, not tracked.
 - `dataset_v{N}/` — immutable snapshots of the same three files, one per build
   whose content actually changed (unchanged reruns don't bump `N`). Cite
   `dataset_v{N}` when referencing exactly which build an experiment used.
+- `scalers/feature_scaler.joblib` + `scaler_metadata.json` — fit train-only
+  (per `split_config.json`) via `python -m src.build_dataset.scale_features`.
+  Rerun after every rebuild — it isn't wired into `build_ml_dataset.py` since
+  it should be refit deliberately, not silently on every build.
 - `ml_dataset_training.parquet` (and anything else not listed above) — **not**
   built by this repo. Produced by pipeline code that lives on the `ml_agent`
   branch (`src/agent/data_pipeline.py`), consumed by

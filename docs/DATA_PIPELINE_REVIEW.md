@@ -287,10 +287,11 @@ Cheapest/most-diagnostic first — each step's "Test" is what makes it a checkab
       ablation to be meaningful against RL's own training variance), a significance-tested verdict:
       removing it either significantly hurts validation performance (keep), significantly helps (drop —
       it was actively harmful), or neither (drop for simplicity, since it adds nothing).
-      **Test:** blocked on T13/T14 in §7 (walk-forward split must exist first). Once unblocked: fixed
-      train/val split, N-seed baseline (full feature set) vs. N-seed leave-one-family-out runs, compared
-      via the same HAC+bootstrap significance test already used in the agent's diagnosis work (per
-      `notes.md`) — not point-estimate comparison.
+      **Test:** was blocked on T28 (walk-forward split must exist first — fixed typo, this previously
+      misreferenced T13/T14) — **unblocked**, `split_config.json` now exists (§4/§6). Fixed train/val
+      split, N-seed baseline (full feature set) vs. N-seed leave-one-family-out runs, compared via the
+      same HAC+bootstrap significance test already used in the agent's diagnosis work (per `notes.md`) —
+      not point-estimate comparison.
 
 - [ ] **T22 — Sequential/recursive feature elimination on the supervised proxy model only** — not
       worth building against the RL training loop directly; T21's per-family ablation is the RL-relevant
@@ -303,50 +304,77 @@ Cheapest/most-diagnostic first — each step's "Test" is what makes it a checkab
 
 ## 4. Processed-data directory architecture
 
-Current state: `data/processed/` holds three large files with no manifest, no versioning, and (per
+Previous state: `data/processed/` held three large files with no manifest, no versioning, and (per
 CLAUDE.md) no clear ownership — `ml_dataset.parquet` is built by this repo, but
 `ml_dataset_training.parquet` and `agent_tensors.npz` are produced by pipeline code that isn't in this
 branch (`src/agent/data_pipeline.py` on `ml_agent`), invisible to anyone checking out `refactor` alone.
+**All four gaps below are now closed** (2026-07-11).
 
-- [ ] **T23 — Add `data/processed/manifest.json`, and version the output directory.** Same manifest
-      deliverable as T10, plus: put each build under `data/processed/dataset_v{N}/` (containing
-      `ml_dataset.parquet` + its `manifest.json`) rather than overwriting `ml_dataset.parquet` in place —
-      so an experiment can pin `dataset_v3` by name instead of reconstructing "which build was that" from
-      git log + timestamp after the fact. `N` increments only on a build whose feature set or fix (like T1
-      or T31) actually changed output values — not on every re-run of an unchanged pipeline.
-      **Goal:** any experiment result can cite an immutable `dataset_v{N}` and reproduce it exactly.
-      **Test:** two consecutive builds with no code changes produce byte-identical `dataset_v{N}` content
-      (or are skipped/deduped rather than incrementing `N`).
+- [x] **T23 — Version the output directory.** ✅ DONE. `sync_dataset_version()` in `build_ml_dataset.py`
+      snapshots the current build (parquet + manifest + `split_config.json`) into
+      `data/processed/dataset_v{N}/` after every build. `N` only bumps when the new manifest's content
+      fingerprint (`rows`/`tickers`/`date_min`/`date_max`/`columns`/`column_stats` — deliberately excluding
+      `built_at`/`git_commit`, which always differ) differs from the latest existing version; an unchanged
+      rerun is skipped and logged rather than piling up another 250MB+ copy. Files are `shutil.copy2`'d
+      from the just-written flat outputs, not re-serialized, so versioning costs a file copy, not a second
+      `to_parquet()`. The flat `ml_dataset.parquet`/`.manifest.json`/`split_config.json` paths are left in
+      place (every existing consumer — `test_final_dataset.py`, `test_ticker_data.py`, the CLAUDE.md-documented
+      run commands — reads from there); `dataset_v{N}/` is purely additive.
+      **Test:** `test_dataset_versioning.py` (3 cases) — first build creates `dataset_v1`; an identical
+      rerun is skipped (no `dataset_v2`); a content change creates `dataset_v2`.
 
-- [ ] **T24 — Add `data/processed/splits/{train,val,test}.parquet` + `split_config.json`.**
-      **Goal:** a leak-safe, time-ordered (walk-forward, not random) split exists as physical files, not
-      just an in-memory train/test call scattered across notebooks.
-      **Test:** assert `max(train.trade_date) < min(val.trade_date) < ... < min(test.trade_date)` — no
-      date overlap across splits, for every ticker.
+- [x] **T24 — Add `split_config.json`.** ✅ DONE, with one deliberate simplification from the original
+      spec: no materialized `train/val/test.parquet` copies. `compute_split_dates()` picks walk-forward
+      cutoffs over **unique `trade_date`**, not row count — a row-count split would let long-history
+      tickers drag the boundary later than a short-history ticker would, since tickers don't all start on
+      the same date. `write_split_config()` writes `train_end`/`val_end` (default 70/15/15) plus row counts
+      per split to `data/processed/split_config.json`. Consumers filter `ml_dataset.parquet` by date against
+      these two cutoffs at load time instead of three parquet files that could drift out of sync with the
+      source.
+      **Test:** `test_split_config.py` (2 cases) — `train_end < val_end` and both are real trading dates;
+      the cutoff dates are provably identical whether or not a short-history ticker is mixed into the input
+      (the specific failure mode a row-count split would have).
+      **Note:** this also satisfies §6's **T28** (walk-forward split logic) — same deliverable, same test.
 
-- [ ] **T25 — Add `data/processed/scalers/feature_scaler.pkl` + `scaler_metadata.json`, fit only on
-      the train split.**
-      **Goal:** scaler parameters are traceable to exactly which rows/date-range they were fit on, and the
-      scaler choice matches each feature's actual distribution rather than one scaler applied blindly to
-      everything:
-  - Ratio/level features with fat tails and real outliers (`pl`, `pvp`, `ev_ebitda`, `debt_equity`,
-    growth-rate columns) → `RobustScaler` (median/IQR) — `StandardScaler` lets a handful of extreme
-    P/E or leverage outliers dominate the fit.
-  - Already-bounded features → **don't scale at all**: `*_percentile*`, `*_pct_rank*` (already
-    `[0,1]`), `has_fundamentals`, `f_score` sub-flags, any `f_*` binary Piotroski component (already
-    `{0,1}`), `*_zscore_sector` (already ~unit-scaled by construction). Scaling an already-`[0,1]` or
-    already-`z`-scored column doesn't help the model and makes the scaler config harder to audit.
-  - Return/log-return-family features (`log_return`, `return_1m/3m/...`) → usually left unscaled or
-    only mean-centered — the RL agent likely already treats these as roughly-normalized by
-    construction; verify against what `src/agent`'s existing tensor-construction code assumes (don't
-    duplicate/conflict with scaling it may already do).
-    **Test:** assert the scaler's fit statistics (mean/scale or median/IQR) match a fresh fit on
-    `train.parquet` alone — re-fitting reproduces the checked-in scaler exactly, proving it wasn't fit on
-    val/test. Add a second assertion that no percentile/binary/z-score column appears in
-    `scaler_metadata.json`'s scaled-columns list.
+- [x] **T25 — Add `data/processed/scalers/feature_scaler.joblib` + `scaler_metadata.json`, fit only on
+      the train split.** ✅ DONE. Implemented with `sklearn.compose.ColumnTransformer` (already an
+      installed dependency, pinned for Stage 3) rather than hand-rolled per-column scaling code —
+      `RobustScaler` on a `RATIO_COLUMNS` list (54 unitless ratios/margins/leverage/growth-rate columns:
+      `pl`, `pvp`, `ev_ebitda`, `debt_equity`, `cagr_*`, etc.), `remainder="passthrough"` for everything
+      else (percentiles, z-scores, binary flags, returns, prices, identifiers) — no need to enumerate the
+      ~80 passthrough columns by hand. `RobustScaler` in the installed sklearn version (1.9.0, verified
+      directly) ignores NaN when fitting (nanmedian/IQR) and leaves NaN as NaN on transform, matching the
+      project's no-imputation invariant for free. Fit only on rows at/before `split_config.json`'s
+      `train_end` (`fit_scaler_on_train_split()`). One real gotcha caught and fixed:
+      `ColumnTransformer`'s pandas output groups columns by transformer (all `robust` columns, then all
+      passthrough columns), not original order — `transform_features()` reindexes the output back to the
+      input's column order so nothing downstream can silently read the wrong column by position.
+      `scaler_metadata.json` (`center`/`scale`/`scaled_columns`/`passthrough_columns`) is derived from the
+      fitted transformer's own attributes (`center_`, `scale_`, `feature_names_in_`), not hand-copied, so
+      it can't drift from what was actually fit. Standalone script
+      (`python -m src.build_dataset.scale_features`), not wired into `build_ml_dataset.py`'s `main()` —
+      refitting the scaler is a deliberate action, not something that should happen silently on every
+      build. `joblib` (already an implicit transitive dependency of sklearn) added to `requirements.txt`
+      as a direct dependency since it's now imported directly.
+      **Test:** `test_scale_features.py` (5 cases) — column-order reindex after transform, ratio columns
+      actually change while passthrough columns and NaN don't, refit-on-train reproduces identical
+      `center_`/`scale_` (proves it wasn't fit on val/test), and `RATIO_COLUMNS` never contains a known
+      percentile/z-score/binary column.
+      **Note:** this also satisfies §6's **T29** (feature scaling, train-only fit) — same deliverable, same
+      test.
 
-- [ ] **T26 — Add `data/validation_reports/`** — same deliverable as T6, listed here for the
-      directory-structure view.
+- [x] **T26 — Directory ownership documented.** ✅ DONE — broader than the original "validation_reports"
+      framing, closes the actual gap named in this section's intro. `data/processed/README.md` documents
+      which files this repo builds (`ml_dataset.parquet`, `.manifest.json`, `split_config.json`,
+      `dataset_v{N}/`, `scalers/`) vs. the foreign `ml_dataset_training.parquet` produced by the `ml_agent`
+      branch's `src/agent/data_pipeline.py`. Tracking this required fixing the `.gitignore` rule itself:
+      `data/processed/` (directory-level ignore) silently blocks a `!data/processed/README.md` negation
+      from taking effect — git won't descend into an ignored directory to evaluate per-file exceptions.
+      Changed to `data/processed/*` (ignore contents, not the directory) so the negation actually works.
+      `data/validation_reports/` (the original T6-adjacent ask) remains unbuilt — no automated
+      diff-against-previous-build exists yet; comparing two manifests is still a manual step. Build that
+      when there's a workflow that consumes historical manifests programmatically (natural next use of
+      `dataset_v{N}`, now that the versioned history exists to diff against).
 
 **Skip:** `data/interim/` staging (only worth it if build time becomes a bottleneck — it isn't yet), a
 YAML-driven feature-config registry (a `FEATURES.md` doc or a `FEATURE_COLUMNS` dict co-located with
@@ -391,21 +419,17 @@ formula-level unit tests in `test_build_dataset_features.py`, the `recompute_val
 regression guard (a real, previously-fixed bug with a test protecting against regression — the exact
 pattern T1/T2 extends), and the collection-time schema gates in `validate.py`.
 
-**Structural gap bigger than any single task above:**
+**Structural gap, now closed:**
 
-- [ ] **T28 — Build leak-safe walk-forward train/val/test split logic.** Not implemented anywhere in
-      `src/` (confirmed: zero `train_test_split`/`TimeSeriesSplit` hits repo-wide). Blocks T21's entire
-      ablation methodology and any rigorous performance claim about the agent. A random split on financial
-      time series would itself be a lookahead bug — must be time-ordered.
-      **Goal:** if this exists on `ml_agent`, reviewed with the same scrutiny as this document; if it
-      doesn't exist there either, this is the single highest-leverage thing to build next, ahead of any new
-      feature from §2.
-      **Test:** T24's date-overlap assertion.
+- [x] **T28 — Build leak-safe walk-forward train/val/test split logic.** ✅ DONE via §4's T24
+      (`split_config.json`) — same deliverable, same test. Not implemented anywhere in `src/` before this
+      (confirmed: zero `train_test_split`/`TimeSeriesSplit` hits repo-wide). This was blocking T21's entire
+      ablation methodology and any rigorous performance claim about the agent; unblocked now. Whether
+      `ml_agent`'s own training loop actually consumes `split_config.json` (vs. its own ad hoc split) is
+      unverified from this branch — worth checking before relying on it for T21.
 
-- [ ] **T29 — Build feature scaling, fit train-only.** Same urgency as T28, and coupled to it — a
-      scaler fit on the full dataset (including val/test dates) is a leak regardless of how correct the
-      split itself is.
-      **Goal/Test:** T25.
+- [x] **T29 — Build feature scaling, fit train-only.** ✅ DONE via §4's T25
+      (`scale_features.py`) — same deliverable, same test.
 
 ---
 
@@ -422,10 +446,18 @@ pattern T1/T2 extends), and the collection-time schema gates in `validate.py`.
    the T8 split-repair (53 events fixed) + `hl_ratio` fix + WDCN3 quarantine in `build_ml_dataset.py`,
    `--strict` mode, and the build manifest. Details in §1.
 
-**⏭️ NEXT (blocking chain):**
+**✅ COMPLETED (2026-07-11 `data/processed/` architecture pass):**
 
-1. **T28** — walk-forward split (blocks T21, T29, and any rigorous agent claim) — **highest priority**
-2. **T29** — feature scaling, train-only fit, with per-feature-type scaler choice (coupled to T28)
+1. ✅ **T23** — `dataset_v{N}` versioning, dedup on unchanged rerun (fingerprint = manifest content,
+   excluding `built_at`/`git_commit`)
+2. ✅ **T24 / T28** — walk-forward `split_config.json` (date cutoffs, not materialized parquet copies),
+   split on unique `trade_date` so it's robust to uneven per-ticker history — the single
+   highest-priority item from the previous pass, now unblocking T21
+3. ✅ **T25 / T29** — `feature_scaler.joblib` + `scaler_metadata.json`, `sklearn.ColumnTransformer`
+   (`RobustScaler` on ratio columns, passthrough elsewhere), fit train-only, output reindexed back to
+   original column order
+4. ✅ **T26** — `data/processed/README.md` documents build ownership; `.gitignore` fixed
+   (`data/processed/*`, not `data/processed/`) so the exception actually takes effect
 
 **STRUCTURAL FINDINGS (not tasks, but context):**
 
@@ -437,15 +469,18 @@ pattern T1/T2 extends), and the collection-time schema gates in `validate.py`.
 
 - **T32** — audit agent observation for Markov sufficiency
 - **T33** — audit train/inference feature parity
+- Whether `ml_agent`'s training loop actually consumes the new `split_config.json` / `feature_scaler.joblib`
+  rather than its own ad hoc split/scaling — unverified from this branch, worth checking before citing
+  T21 results against them.
 
 **REMAINING PRIORITIES (§2–§6):**
 
 1. **T18–T20** — cheap feature triage (§3), do before T21
-2. **T21–T22** — ablation-based feature decisions (§3), blocked on T28
-3. **T11–T17** — new feature candidates (§2), lowest priority — don't add before T28/T29 exist
-4. **T23** — `dataset_v{N}` versioning (manifest half is done; versioned-directory half remains)
-5. **T24–T26** — splits, scalers, validation reports (coupled to T28/T29)
-6. **T30** — resolve cross-branch fragmentation (reproducibility risk, not urgent)
+2. **T21–T22** — ablation-based feature decisions (§3) — unblocked now that T24/T28 exist
+3. **T11–T17** — new feature candidates (§2), lowest priority
+4. `data/validation_reports/` automated manifest-diff (T6/T26-adjacent) — couples naturally with the
+   `dataset_v{N}` history that now exists to diff against; still manual today
+5. **T30** — resolve cross-branch fragmentation (reproducibility risk, not urgent)
 
 **Not worth doing at all:** YAML-driven feature-config system, full pairwise-correlation feature
 matrix, calendar-feature suite, premature `data/interim/` caching, and a per-feature compute/storage
