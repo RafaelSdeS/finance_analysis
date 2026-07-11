@@ -21,7 +21,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.build_dataset.build_ml_dataset import (
     compute_price_features,
     compute_fundamental_features,
+    compute_advanced_features,
     recompute_valuation_daily,
+    merge_prices_and_fundamentals,
+    FILING_LAG_DAYS_QUARTERLY,
 )
 
 
@@ -40,8 +43,8 @@ def test_log_return_basic() -> None:
         "ticker": ["A"] * 3,
         "trade_date": pd.date_range("2026-01-01", periods=3),
         "adj_close": [100.0, 102.0, 101.0],
-        "high": [100.0, 102.0, 101.0],
-        "low": [100.0, 102.0, 101.0],
+        "adj_high": [100.0, 102.0, 101.0],
+        "adj_low": [100.0, 102.0, 101.0],
     })
     result = compute_price_features(df)
 
@@ -57,8 +60,8 @@ def test_moving_averages() -> None:
         "ticker": ["A"] * 100,
         "trade_date": pd.date_range("2026-01-01", periods=100),
         "adj_close": prices,
-        "high": prices,
-        "low": prices,
+        "adj_high": prices,
+        "adj_low": prices,
     })
     result = compute_price_features(df)
 
@@ -86,8 +89,8 @@ def test_volatility() -> None:
         "ticker": ["A"] * 30,
         "trade_date": pd.date_range("2026-01-01", periods=30),
         "adj_close": [100.0] * 30,
-        "high": [100.0] * 30,
-        "low": [100.0] * 30,
+        "adj_high": [100.0] * 30,
+        "adj_low": [100.0] * 30,
     })
     result = compute_price_features(df)
 
@@ -103,8 +106,8 @@ def test_rsi_calculation() -> None:
         "ticker": ["A"] * len(prices),
         "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
         "adj_close": prices,
-        "high": prices,
-        "low": prices,
+        "adj_high": prices,
+        "adj_low": prices,
     })
     result = compute_price_features(df)
 
@@ -131,8 +134,8 @@ def test_rsi_mixed_trend() -> None:
         "ticker": ["A"] * len(prices),
         "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
         "adj_close": prices,
-        "high": prices,
-        "low": prices,
+        "adj_high": prices,
+        "adj_low": prices,
     })
     result = compute_price_features(df)
 
@@ -150,8 +153,8 @@ def test_rsi_downtrend() -> None:
         "ticker": ["A"] * len(prices),
         "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
         "adj_close": prices,
-        "high": prices,
-        "low": prices,
+        "adj_high": prices,
+        "adj_low": prices,
     })
     result = compute_price_features(df)
 
@@ -167,8 +170,8 @@ def test_drawdown_calculation() -> None:
         "ticker": ["A"] * len(prices),
         "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
         "adj_close": prices,
-        "high": prices,
-        "low": prices,
+        "adj_high": prices,
+        "adj_low": prices,
     })
     result = compute_price_features(df)
 
@@ -191,8 +194,8 @@ def test_hl_ratio() -> None:
         "ticker": ["A"] * 3,
         "trade_date": pd.date_range("2026-01-01", periods=3),
         "adj_close": [100.0, 102.0, 101.0],
-        "high": [105.0, 106.0, 104.0],
-        "low": [95.0, 98.0, 99.0],
+        "adj_high": [105.0, 106.0, 104.0],
+        "adj_low": [95.0, 98.0, 99.0],
     })
     result = compute_price_features(df)
 
@@ -212,8 +215,8 @@ def test_return_windows() -> None:
         "ticker": ["A"] * len(prices),
         "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
         "adj_close": prices,
-        "high": prices,
-        "low": prices,
+        "adj_high": prices,
+        "adj_low": prices,
     })
     result = compute_price_features(df)
 
@@ -234,8 +237,8 @@ def test_ticker_grouping_isolation() -> None:
         "ticker": ["A", "A", "B", "B"],
         "trade_date": pd.date_range("2026-01-01", periods=4),
         "adj_close": [100.0, 102.0, 50.0, 52.0],
-        "high": [100.0, 102.0, 50.0, 52.0],
-        "low": [100.0, 102.0, 50.0, 52.0],
+        "adj_high": [100.0, 102.0, 50.0, 52.0],
+        "adj_low": [100.0, 102.0, 50.0, 52.0],
     })
     result = compute_price_features(df)
 
@@ -254,8 +257,8 @@ def test_non_positive_prices_masked() -> None:
         "ticker": ["A", "A", "A", "A"],
         "trade_date": pd.date_range("2026-01-01", periods=4),
         "adj_close": [100.0, 0.0, -50.0, 101.0],
-        "high": [100.0, 1.0, 1.0, 101.0],
-        "low": [100.0, 0.0, 0.0, 101.0],
+        "adj_high": [100.0, 1.0, 1.0, 101.0],
+        "adj_low": [100.0, 0.0, 0.0, 101.0],
     })
     result = compute_price_features(df)
 
@@ -313,6 +316,7 @@ def test_recompute_valuation_daily_rescales_by_price_factor() -> None:
         "ticker": ["A"],
         "trade_date": pd.to_datetime(["2026-01-01"]),
         "reference_date": pd.to_datetime(["2026-01-01"]),
+        "fundamentals_available_date": pd.to_datetime(["2026-01-01"]),
         "close": [110.0],
         "close_price": [100.0],
         "pl": [10.0],
@@ -346,6 +350,7 @@ def test_recompute_valuation_daily_no_fundamentals_flag() -> None:
         "ticker": ["A"],
         "trade_date": pd.to_datetime(["2026-01-01"]),
         "reference_date": pd.to_datetime([None]),
+        "fundamentals_available_date": pd.to_datetime([None]),
         "close": [110.0],
         "close_price": [np.nan],
         "pl": [np.nan],
@@ -355,6 +360,83 @@ def test_recompute_valuation_daily_no_fundamentals_flag() -> None:
     result = recompute_valuation_daily(df)
 
     assert result.iloc[0]["has_fundamentals"] == 0.0
+
+
+def test_merge_applies_filing_lag() -> None:
+    """merge_asof only picks up a fundamental once its statutory filing lag has elapsed
+    (T31: reference_date is the fiscal quarter-end, not the real filing date)."""
+    ref_date = pd.Timestamp("2026-03-31")
+    available = ref_date + pd.Timedelta(days=FILING_LAG_DAYS_QUARTERLY)
+
+    fundamentals = pd.DataFrame({
+        "ticker": ["A"],
+        "reference_date": [ref_date],
+        "pl": [15.0],
+    })
+    prices = pd.DataFrame({
+        "ticker": ["A", "A", "A"],
+        "trade_date": [ref_date, available - pd.Timedelta(days=1), available],
+    })
+
+    result = merge_prices_and_fundamentals(prices, fundamentals)
+
+    assert pd.isna(result.iloc[0]["pl"])          # trade_date == reference_date: not yet filed
+    assert pd.isna(result.iloc[1]["pl"])           # one day before the lag elapses: still not filed
+    assert approx(result.iloc[2]["pl"], 15.0)      # lag has elapsed: fundamental now visible
+
+
+def _advanced_features_fixture(n_rows: int) -> pd.DataFrame:
+    """Minimal single-ticker frame with every column compute_advanced_features touches."""
+    dates = pd.date_range("2026-01-01", periods=n_rows, freq="D")
+    volatility = [0.1, 0.2, 0.05, 0.3, 0.15, 0.25][:n_rows]
+    return pd.DataFrame({
+        "ticker": ["A"] * n_rows,
+        "sector": ["Tech"] * n_rows,
+        "trade_date": dates,
+        "reference_date": dates,
+        "div_value_recent": [0.5] * n_rows,
+        "lpa": [1.0] * n_rows,
+        "ebitda": [100.0] * n_rows,
+        "shares_outstanding": [1000.0] * n_rows,
+        "net_revenue": [500.0] * n_rows,
+        "net_income": [50.0] * n_rows,
+        "revenue_growth_yoy": [0.05] * n_rows,
+        "earnings_growth_yoy": [0.03] * n_rows,
+        "volatility_20d": volatility,
+        "volatility_60d": volatility,
+        "adj_close": [100.0 + i for i in range(n_rows)],
+        "pl": [10.0] * n_rows,
+        "drawdown": [0.0] * n_rows,
+        "pvp": [2.0] * n_rows,
+        "roe": [0.15] * n_rows,
+        "debt_equity": [0.5] * n_rows,
+        "div_yield_12m": [0.03] * n_rows,
+        "return_1m": [0.01] * n_rows,
+        "return_3m": [0.02] * n_rows,
+        "return_12m": [0.05] * n_rows,
+        "net_margin": [0.1] * n_rows,
+        "roa": [0.05] * n_rows,
+        "selic": [0.1] * n_rows,
+    })
+
+
+def test_volatility_percentile_no_lookahead() -> None:
+    """volatility_20d_percentile at row i must not depend on rows after i (T1 regression guard:
+    a plain .rank(pct=True) here would rank each row against the ticker's future volatility too)."""
+    df = _advanced_features_fixture(6)
+
+    full = compute_advanced_features(df.copy())
+    truncated = compute_advanced_features(df.iloc[:3].copy())
+
+    for i in range(3):
+        assert approx(
+            full.iloc[i]["volatility_20d_percentile"],
+            truncated.iloc[i]["volatility_20d_percentile"],
+        )
+        assert approx(
+            full.iloc[i]["volatility_60d_percentile"],
+            truncated.iloc[i]["volatility_60d_percentile"],
+        )
 
 
 if __name__ == "__main__":

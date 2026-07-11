@@ -24,7 +24,11 @@ Uso:
     python build_ml_dataset.py
 """
 
+import json
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
+
 import pandas as pd
 import numpy as np
 
@@ -41,10 +45,18 @@ FUNDAMENTALS_DIR = ROOT / "data/raw/fundamentals"
 COMPANY_INFO_PATH = ROOT / "data/raw/company_info/company_info.parquet"
 MACRO_DIR = ROOT / "data/raw/macro"
 DIVIDENDS_DIR = ROOT / "data/raw/dividends"
+CORPORATE_EVENTS_PATH = ROOT / "data/raw/corporate_events/corporate_events.parquet"
 OUTPUT_PATH = ROOT / "data/processed/ml_dataset.parquet"
 
 # Tickers with fewer price rows than this carry no usable history (e.g. EGGY3 has 1 row)
 MIN_PRICE_ROWS = 10
+
+# Tickers whose raw price feed is broken beyond programmatic repair.
+# Quarantined deliberately — document the reason, don't silently drop.
+QUARANTINED_TICKERS = {
+    "WDCN3": "raw close alternates between two price bases (~6x apart) "
+             "hundreds of times 2021-2025; not a split, no factor to repair with",
+}
 
 # Columns the fundamentals API doesn't actually populate
 FUNDAMENTALS_NULL_COLS = [
@@ -84,6 +96,97 @@ def load_prices():
     return prices
 
 
+# =============================================================================
+# REPAIR UNADJUSTED SPLITS
+# =============================================================================
+
+ADJ_PRICE_COLS = ["adj_open", "adj_high", "adj_low", "adj_close"]
+
+# An event is only detectable when its raw jump ln(1/factor) stands out from
+# normal market moves (0.3 ≈ ±35%); the observed return must match it within
+# JUMP_MATCH_TOL. The window is wide because corporate_events dates are
+# month-granular (most are recorded as the 1st of the month).
+MIN_DETECTABLE_JUMP = 0.3
+JUMP_MATCH_TOL = 0.15
+EVENT_WINDOW_DAYS = (-10, 35)
+
+
+def repair_unadjusted_splits(prices):
+    """Rescale adj_* history where the source left a split/inplit unadjusted.
+
+    corporate_events.parquet is the audit log of all splits. Most are already
+    baked into adj_close upstream, but ~45 events are not: the raw jump
+    ln(1/factor) shows up verbatim in the daily return (a fake ±90-99.99%
+    move that poisons returns, volatility, drawdown and any reward built on
+    them). Detect that jump near each recorded event date and divide all
+    adj_* history before it by the factor, making the series continuous.
+
+    ponytail: events with |ln(1/factor)| < 0.3 can't be told apart from
+    market moves and are left alone; volume is not rescaled (only raw volume
+    reaches the dataset, no cross-scale volume features exist yet).
+    """
+    if not CORPORATE_EVENTS_PATH.exists():
+        print("corporate_events.parquet missing — skipping split repair")
+        return prices
+
+    ev = pd.read_parquet(CORPORATE_EVENTS_PATH)
+    ev = ev[ev["factor"] > 0].copy()
+    ev["date"] = pd.to_datetime(ev["date"])
+    ev = ev[np.abs(np.log(1.0 / ev["factor"])) >= MIN_DETECTABLE_JUMP]
+
+    print()
+    print("=" * 80)
+    print("REPAIRING UNADJUSTED SPLITS IN adj_* PRICES")
+    print("=" * 80)
+
+    n_fixed = 0
+    for ticker, g_ev in ev.groupby("ticker"):
+        mask = prices["ticker"] == ticker
+        if not mask.any():
+            continue
+        g_idx = prices.index[mask]  # trade_date-sorted (load_prices sorts)
+        adj = prices.loc[g_idx, "adj_close"].to_numpy(dtype=float)
+        dates = prices.loc[g_idx, "trade_date"].to_numpy()
+
+        # The audit log's factor direction is inconsistent (SBSP3 records 0.2
+        # where the observed basis change is x5, ETER3 records 100 for /100),
+        # and one event can manifest as several re-anchoring steps days apart
+        # (TIMS3's /10000 arrives as two /100 jumps). So: match the jump in
+        # BOTH directions, always repair the EARLIEST unrepaired jump first,
+        # and rescan until the ticker's windows are clean.
+        applied = set()
+        for _ in range(2 * len(g_ev) + 2):  # bound: each pass fixes a new day
+            with np.errstate(divide="ignore", invalid="ignore"):
+                lr = np.log(adj[1:] / adj[:-1])
+            best = None  # (jump_row, factor)
+            for _, e in g_ev.iterrows():
+                lo = np.datetime64(e["date"] + pd.Timedelta(days=EVENT_WINDOW_DAYS[0]))
+                hi = np.datetime64(e["date"] + pd.Timedelta(days=EVENT_WINDOW_DAYS[1]))
+                win = (dates[1:] >= lo) & (dates[1:] <= hi)
+                for factor in (e["factor"], 1.0 / e["factor"]):
+                    expected = np.log(1.0 / factor)
+                    cand = np.where(win & (np.abs(lr - expected) < JUMP_MATCH_TOL))[0]
+                    for c in cand:
+                        jump = c + 1  # first row already on the post-event scale
+                        if dates[jump] in applied:
+                            continue
+                        if best is None or jump < best[0]:
+                            best = (jump, factor)
+                        break
+            if best is None:
+                break  # all windows clean — the normal case is zero passes
+            jump, factor = best
+            applied.add(dates[jump])
+            prices.loc[g_idx[:jump], ADJ_PRICE_COLS] /= factor
+            adj[:jump] /= factor
+            n_fixed += 1
+            print(f"  {ticker} {pd.Timestamp(dates[jump]).date()}: rescaled "
+                  f"{jump} rows before factor-{factor:g} basis change")
+
+    print(f"Repaired {n_fixed} unadjusted events")
+    return prices
+
+
 def filter_tickers_with_no_fundamentals(prices, fundamentals):
     """Drop any ticker from prices that has zero fundamental rows.
 
@@ -96,6 +199,11 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
     print("=" * 80)
     print("FUNDAMENTAL COVERAGE CHECK")
     print("=" * 80)
+
+    quarantined = set(QUARANTINED_TICKERS) & set(prices["ticker"].unique())
+    for t in sorted(quarantined):
+        print(f"QUARANTINED {t}: {QUARANTINED_TICKERS[t]}")
+    prices = prices[~prices["ticker"].isin(quarantined)]
 
     tickers_with_prices = set(prices["ticker"].unique())
     tickers_with_fundamentals = set(fundamentals["ticker"].unique())
@@ -256,6 +364,19 @@ def load_dividends():
 # MERGE DAILY PRICES + QUARTERLY FUNDAMENTALS
 # =============================================================================
 
+# `reference_date` from BolsAI is the fiscal quarter-end, not the real filing/
+# disclosure date (verified: BolsAI's /fundamentals history has no filing-date
+# field at all, so it can't be recovered from the API). CVM requires quarterly
+# ITR filings within 45 days of quarter-end and annual DFP within ~90 days —
+# merging fundamentals in on reference_date directly makes them "available"
+# weeks to months before a real trader could have seen them. These are
+# statutory-deadline estimates, not per-company actual filing dates.
+# ponytail: conservative fixed buffer, not per-company actual filing dates —
+# upgrade if BolsAI ever exposes a real disclosure date.
+FILING_LAG_DAYS_QUARTERLY = 45
+FILING_LAG_DAYS_ANNUAL = 90
+
+
 def merge_prices_and_fundamentals(prices, fundamentals):
 
     print()
@@ -281,13 +402,23 @@ def merge_prices_and_fundamentals(prices, fundamentals):
             .sort_values("reference_date")
         )
 
-        # merge_asof: uses the most recent fundamental
-        # available up to each trade_date (no lookahead bias)
+        lag_days = np.where(
+            f["reference_date"].dt.month == 12,
+            FILING_LAG_DAYS_ANNUAL,
+            FILING_LAG_DAYS_QUARTERLY,
+        )
+        f["fundamentals_available_date"] = f["reference_date"] + pd.to_timedelta(lag_days, unit="D")
+        f = f.sort_values("fundamentals_available_date")
+
+        # merge_asof: uses the most recent fundamental whose estimated filing
+        # date has already passed as of each trade_date (no lookahead bias).
+        # fundamentals_available_date is kept (not dropped) — recompute_valuation_daily's
+        # split-guard needs it to know which rows just picked up a new fundamental.
         merged = pd.merge_asof(
             p,
             f,
             left_on="trade_date",
-            right_on="reference_date",
+            right_on="fundamentals_available_date",
             by="ticker",
             direction="backward",
         )
@@ -482,7 +613,10 @@ def compute_price_features(df):
         g["volatility_60d"] = g["log_return"].rolling(60).std()
         g["ma_20"]          = g["adj_close"].rolling(20).mean()
         g["ma_60"]          = g["adj_close"].rolling(60).mean()
-        g["hl_ratio"]       = (g["high"] - g["low"]) / g["adj_close"]
+        # adj_high/adj_low, not raw high/low: raw and adjusted prices live on
+        # different scales whenever the cumulative split adjustment != 1, and
+        # mixing them made hl_ratio meaningless around splits.
+        g["hl_ratio"]       = (g["adj_high"] - g["adj_low"]) / g["adj_close"]
         g["drawdown"]       = (g["adj_close"] - g["adj_close"].cummax()) / g["adj_close"].cummax()
         g["rsi_14"]         = _rsi(g["adj_close"], 14)
         g["return_1m"]      = g["log_return"].rolling(21).sum()
@@ -580,11 +714,14 @@ def recompute_valuation_daily(df):
 
     factor = (df["close"] / df["close_price"]).where(df["close_price"] > 0)
 
-    # Split guard: right after a filing the factor should be ~1; a big jump
-    # means the share count changed between close_price and today's close
-    # (split/grouping) and rescaled ratios are off until the next filing.
+    # Split guard: right after a fundamental first becomes available the factor
+    # should be ~1; a big jump means the share count changed between close_price
+    # and today's close (split/grouping) and rescaled ratios are off until the
+    # next filing. Uses fundamentals_available_date (reference_date + statutory
+    # filing lag), not reference_date directly, since that's when a row could
+    # first have picked up this fundamental via merge_asof.
     # ponytail: warning only; a per-ticker split-factor correction if it fires often
-    near_filing = (df["trade_date"] - df["reference_date"]).dt.days.between(0, 7)
+    near_filing = (df["trade_date"] - df["fundamentals_available_date"]).dt.days.between(0, 7)
     suspicious = near_filing & ((factor > 1.5) | (factor < 1 / 1.5))
     if suspicious.any():
         bad = sorted(df.loc[suspicious, "ticker"].unique())
@@ -613,7 +750,7 @@ def recompute_valuation_daily(df):
     df["has_fundamentals"] = df["reference_date"].notna().astype(float)
 
     # close_price (price at filing date) is now redundant and misleading
-    df = df.drop(columns=["close_price"])
+    df = df.drop(columns=["close_price", "fundamentals_available_date"])
 
     print(f"Valuation ratios re-anchored for {len(df)} rows")
     return df
@@ -669,15 +806,22 @@ def compute_advanced_features(df):
     for ticker, g in df.groupby("ticker", sort=False):
         g = g.sort_values("trade_date").reset_index(drop=True)
 
-        # Volatility percentile: where is current vol vs this stock's history?
-        g["volatility_20d_percentile"] = g["volatility_20d"].rank(pct=True)
-        g["volatility_60d_percentile"] = g["volatility_60d"].rank(pct=True)
-
-        # Price percentile: is price high/low vs own history (last 5 years)?
         # rolling.rank(method="max", pct=True) == share of window values <= current,
         # same as the old rolling.apply lambda but computed in cython (~1000x faster).
         # ponytail: NaNs are excluded from the window count here (old lambda counted them)
         window_252 = 252 * 5  # 5 years
+
+        # Volatility percentile: where is current vol vs this stock's history?
+        # Rolling (not a plain .rank()) so row i only sees rows <= i — a plain
+        # rank() here would rank against the ticker's *future* volatility too.
+        g["volatility_20d_percentile"] = g["volatility_20d"].rolling(
+            window=window_252, min_periods=1
+        ).rank(method="max", pct=True)
+        g["volatility_60d_percentile"] = g["volatility_60d"].rolling(
+            window=window_252, min_periods=1
+        ).rank(method="max", pct=True)
+
+        # Price percentile: is price high/low vs own history (last 5 years)?
         g["price_percentile_5y"] = g["adj_close"].rolling(
             window=window_252, min_periods=1
         ).rank(method="max", pct=True)
@@ -802,6 +946,56 @@ def clean_dataset(df):
 
 
 # =============================================================================
+# BUILD MANIFEST
+# =============================================================================
+
+def write_manifest(dataset):
+    """Reproducibility record + per-column distribution snapshot, one per build.
+
+    Written next to the parquet as ml_dataset.manifest.json. Comparing two
+    manifests (e.g. before/after a code change) surfaces silent distribution
+    drift that passes every schema check.
+    """
+    try:
+        commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, cwd=ROOT,
+        ).stdout.strip() or "unknown"
+    except OSError:
+        commit = "unknown"
+
+    def _f(x):
+        return None if pd.isna(x) else round(float(x), 6)
+
+    numeric = dataset.select_dtypes(include="number")
+    manifest = {
+        "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "git_commit": commit,
+        "pandas": pd.__version__,
+        "numpy": np.__version__,
+        "rows": len(dataset),
+        "tickers": int(dataset["ticker"].nunique()),
+        "date_min": str(dataset["trade_date"].min().date()),
+        "date_max": str(dataset["trade_date"].max().date()),
+        "columns": list(dataset.columns),
+        "column_stats": {
+            c: {
+                "nan_pct": round(float(numeric[c].isna().mean()) * 100, 2),
+                "mean": _f(numeric[c].mean()),
+                "std": _f(numeric[c].std()),
+                "p1": _f(numeric[c].quantile(0.01)),
+                "p50": _f(numeric[c].quantile(0.50)),
+                "p99": _f(numeric[c].quantile(0.99)),
+            }
+            for c in numeric.columns
+        },
+    }
+    path = OUTPUT_PATH.with_suffix(".manifest.json")
+    path.write_text(json.dumps(manifest, indent=1))
+    print(f"Manifest saved to: {path}")
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -810,6 +1004,7 @@ def main():
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     prices       = load_prices()
+    prices       = repair_unadjusted_splits(prices)
     fundamentals = load_fundamentals()
     prices       = filter_tickers_with_no_fundamentals(prices, fundamentals)
     fundamentals = compute_fundamental_features(fundamentals)
@@ -834,6 +1029,7 @@ def main():
     print("=" * 80)
 
     dataset.to_parquet(OUTPUT_PATH, index=False)
+    write_manifest(dataset)
 
     print(f"Saved to: {OUTPUT_PATH}")
 

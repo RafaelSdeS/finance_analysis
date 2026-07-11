@@ -15,7 +15,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-DEFAULT_FILE = Path(__file__).resolve().parents[2] / "data/processed/ml_dataset.parquet"
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+from src.build_dataset.build_ml_dataset import (  # noqa: E402
+    FILING_LAG_DAYS_QUARTERLY,
+    FILING_LAG_DAYS_ANNUAL,
+    MIN_DETECTABLE_JUMP,
+    JUMP_MATCH_TOL,
+    EVENT_WINDOW_DAYS,
+)
+
+DEFAULT_FILE = ROOT / "data/processed/ml_dataset.parquet"
+CORPORATE_EVENTS_FILE = ROOT / "data/raw/corporate_events/corporate_events.parquet"
+FUNDAMENTALS_DIR = ROOT / "data/raw/fundamentals"
 
 
 def print_separator():
@@ -117,6 +130,69 @@ def validate(df):
     checks.append(("stale close_price column dropped", "close_price" not in df.columns))
     checks.append(("has_fundamentals flag present", "has_fundamentals" in df.columns))
 
+    # Publication lag (T31): a fundamental only becomes visible once its
+    # statutory filing window has elapsed — never on the quarter-end itself
+    filed = df[df["has_fundamentals"] == 1]
+    gap = (filed["trade_date"] - filed["reference_date"]).dt.days
+    checks.append((f"fundamentals respect filing lag [min gap {gap.min()}d]",
+                   gap.min() >= FILING_LAG_DAYS_QUARTERLY))
+
+    # No fabricated trading days (T4)
+    weekend_rows = int((df["trade_date"].dt.dayofweek >= 5).sum())
+    checks.append((f"no weekend trade_date rows [{weekend_rows} found]", weekend_rows == 0))
+
+    # Rows without a filing carry no fundamental values (T9): NaN, never stale/zero-filled
+    nf = df[df["has_fundamentals"] == 0]
+    leaked = {c: int(nf[c].notna().sum())
+              for c in ("pl", "pvp", "roe", "net_income", "market_cap") if c in df.columns}
+    checks.append((f"has_fundamentals=0 rows have NaN fundamentals {leaked}",
+                   sum(leaked.values()) == 0))
+
+    # asof merge correctness (T5): the merged quarter is the MOST RECENT one
+    # filed by each trade_date, independently recomputed from the raw files
+    mismatches = 0
+    for t in ("PETR4", "VALE3", "ABEV3"):
+        raw_path = FUNDAMENTALS_DIR / f"{t}.parquet"
+        if not raw_path.exists() or t not in df["ticker"].values:
+            continue
+        f = pd.read_parquet(raw_path)[["reference_date"]]
+        f["reference_date"] = pd.to_datetime(f["reference_date"])
+        lag = np.where(f["reference_date"].dt.month == 12,
+                       FILING_LAG_DAYS_ANNUAL, FILING_LAG_DAYS_QUARTERLY)
+        f["avail"] = f["reference_date"] + pd.to_timedelta(lag, unit="D")
+        g = df[df["ticker"] == t].sample(min(100, (df["ticker"] == t).sum()), random_state=0)
+        for _, row in g.iterrows():
+            visible = f.loc[f["avail"] <= row["trade_date"], "reference_date"]
+            expected = visible.max() if len(visible) else pd.NaT
+            actual = row["reference_date"]
+            if (pd.isna(expected) != pd.isna(actual)) or (pd.notna(expected) and expected != actual):
+                mismatches += 1
+    checks.append((f"asof merge picks most recent filed quarter (sampled) [{mismatches} mismatches]",
+                   mismatches == 0))
+
+    # Corporate events (T8): no split's raw jump ln(1/factor) may survive in
+    # log_return — that's a fake ±90-99.99% move from an unadjusted adj_close
+    leaks = 0
+    if CORPORATE_EVENTS_FILE.exists() and "log_return" in df.columns:
+        ev = pd.read_parquet(CORPORATE_EVENTS_FILE)
+        ev = ev[ev["factor"] > 0].copy()
+        ev["date"] = pd.to_datetime(ev["date"])
+        ev = ev[np.abs(np.log(1.0 / ev["factor"])) >= MIN_DETECTABLE_JUMP]
+        by_ticker = {t: g for t, g in df.groupby("ticker")}
+        for _, e in ev.iterrows():
+            g = by_ticker.get(e["ticker"])
+            if g is None:
+                continue
+            # both directions: the audit log's factor convention is inconsistent
+            expected = np.log(1.0 / e["factor"])
+            lo = e["date"] + pd.Timedelta(days=EVENT_WINDOW_DAYS[0])
+            hi = e["date"] + pd.Timedelta(days=EVENT_WINDOW_DAYS[1])
+            w = g[g["trade_date"].between(lo, hi)]
+            leaks += int(((w["log_return"] - expected).abs() < JUMP_MATCH_TOL).any()
+                         or ((w["log_return"] + expected).abs() < JUMP_MATCH_TOL).any())
+    checks.append((f"no unadjusted split jumps in log_return [{leaks} events leaking]",
+                   leaks == 0))
+
     failed = 0
     for label, ok in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {label}")
@@ -145,6 +221,12 @@ def main():
         type=int,
         default=10,
         help="Número de linhas de exemplo"
+    )
+
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="anomaly-report findings (stale prices, outliers) also fail the run"
     )
 
     args = parser.parse_args()
@@ -376,6 +458,14 @@ def main():
     print("=" * 80)
 
     validate(df)
+
+    # ponytail: strict mode gates on the anomaly report too; default keeps it
+    # informational because legitimate extremes (circuit breakers, penny-stock
+    # moves) land there alongside real data errors — triage before enabling.
+    if args.strict and (len(stale) or len(outliers)):
+        print(f"\nSTRICT MODE FAILED: {len(stale)} stale-price rows, "
+              f"{len(outliers)} outlier cells")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
