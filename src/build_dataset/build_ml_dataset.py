@@ -86,10 +86,11 @@ def load_prices():
     for file in files:
         print(f"Loading: {file.name}")
         df = pd.read_parquet(file)
+        df = df.dropna(axis=1, how="all")  # Drop all-NA columns per-file
         df["trade_date"] = pd.to_datetime(df["trade_date"])
         dfs.append(df)
 
-    prices = pd.concat(dfs, ignore_index=True)
+    prices = pd.concat(dfs, ignore_index=True, sort=False)
     prices = prices.sort_values(["ticker", "trade_date"])
 
     print(f"Total price rows: {len(prices)}")
@@ -249,10 +250,11 @@ def load_fundamentals():
     for file in files:
         print(f"Loading: {file.name}")
         df = pd.read_parquet(file)
+        df = df.dropna(axis=1, how="all")  # Drop all-NA columns per-file
         df["reference_date"] = pd.to_datetime(df["reference_date"])
         dfs.append(df)
 
-    fundamentals = pd.concat(dfs, ignore_index=True)
+    fundamentals = pd.concat(dfs, ignore_index=True, sort=False)
 
     # Drop columns that are always null (API doesn't return them)
     cols_to_drop = [
