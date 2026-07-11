@@ -181,11 +181,6 @@ def main():
         print("\n[INTERNAL CONSISTENCY — BolsAI derived cols recomputed from raw, same row]")
         results.append(check_internal_consistency(ticker))
 
-    print("\n" + "=" * 70)
-    print("CAGR — not checked here. Run:")
-    for t in TICKERS:
-        print(f"  python src/build_dataset/cagr_handler.py --ticker {t}")
-
     overall = all(results)
     print("\n" + "=" * 70)
     print(f"OVERALL: {'PASS' if overall else 'FAIL'}")
