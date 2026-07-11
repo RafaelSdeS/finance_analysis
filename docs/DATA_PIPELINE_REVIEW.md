@@ -36,26 +36,39 @@ every `T#`.
   that quarter's fundamentals on the reference date itself. `merge_asof(direction='backward')` on
   `reference_date` was making `pl`, `pvp`, `roe`, every growth/Piotroski/valuation-composite column
   "available" starting exactly on the quarter-end date, ~40+ columns affected every quarter.
-  The "recover the real filing date" lead was chased and ruled out: `collectors.py`'s `_merge_save`
-  saves whatever BolsAI's `/fundamentals/{ticker}/history` response returns verbatim (no column
-  trimming), and the raw response has no filing/disclosure-date field at all — confirmed against
-  `PETR4.parquet`'s full 39-column schema. So the fix uses the statutory-buffer fallback: `merge_asof`
-  now joins on a synthesized `fundamentals_available_date = reference_date + lag` (45d quarterly / 90d
-  for Q4-annual, `FILING_LAG_DAYS_QUARTERLY`/`FILING_LAG_DAYS_ANNUAL` in `build_ml_dataset.py`), not
-  `reference_date` directly. `reference_date` itself is untouched and still drives all the
-  YoY/QoQ/trend calculations that should stay keyed to the real fiscal period.
+  The "recover the real filing date" lead through BolsAI was chased and ruled out: `collectors.py`'s
+  `_merge_save` saves whatever BolsAI's `/fundamentals/{ticker}/history` response returns verbatim (no
+  column trimming), and the raw response has no filing/disclosure-date field at all — confirmed against
+  `PETR4.parquet`'s full 39-column schema. First shipped as the statutory-buffer fallback: `merge_asof`
+  joined on a synthesized `fundamentals_available_date = reference_date + lag` (45d quarterly / 90d
+  Q4-annual, `FILING_LAG_DAYS_QUARTERLY`/`FILING_LAG_DAYS_ANNUAL`).
+  **Upgraded same day to real dates.** CVM's own open-data portal
+  (`dados.cvm.gov.br/dados/CIA_ABERTA/DOC/{ITR,DFP}/DADOS/`) publishes a `DT_RECEB` field — the date
+  CVM actually received each filing — keyed by CNPJ, free and keyless. New
+  `src/data_collection/filing_dates.py` downloads the ITR+DFP registers 2010–2026, extracts
+  `(cnpj, reference_date) → received_date`, saves incrementally per year (robust to
+  network interruptions — a run that dies partway through keeps everything collected so far and
+  resumes on re-run). `attach_filing_dates()` joins these onto fundamentals by `cnpj` + `reference_date`
+  before the price merge, falling back to the statutory buffer only for quarters missing from the CVM
+  register. `reference_date` itself is untouched and still drives all YoY/QoQ/trend calculations.
   Side effect caught and fixed in the same change: `recompute_valuation_daily`'s split-guard
-  (`near_filing`) assumed a fundamental became visible right at `reference_date` — with the lag now
-  applied, that window would never fire again (every row is now ≥45 days past `reference_date`). Fixed
-  to key off `fundamentals_available_date` instead, dropped after use.
-  **Test:** `test_merge_applies_filing_lag` in `test_build_dataset_features.py` — trade dates at
-  `reference_date`, one day before the lag elapses, and exactly at the lag boundary; asserts the
-  fundamental is NaN for the first two and visible for the third.
-  **Verified on real data:** rebuilt `ml_dataset.parquet` end-to-end (293 tickers) and checked the gap
-  directly — across all 668,014 rows with `has_fundamentals==1`, `min(trade_date - reference_date) ==
-  45` days, zero rows below the buffer. Full `tests/run_all.py --group fast` (16/16 in
-  `test_build_dataset_features.py`) and `--group data` (`test_final_dataset.py`: VALIDATION PASSED)
-  both green against the rebuilt dataset; `ruff check` clean on both changed files.
+  (`near_filing`) assumed a fundamental became visible right at `reference_date`; fixed to key off
+  `fundamentals_available_date` instead (now retained in the output — not dropped — since "when did
+  these numbers become public" is legitimate agent-visible state).
+  **Tests:** `test_merge_applies_filing_lag` (statutory-buffer path) and
+  `test_merge_honors_actual_filing_date` (real-date path, both directions: an early filer visible
+  before the statutory deadline, a late filer after) in `test_build_dataset_features.py`.
+  **Verified on real data, twice.** Statutory-only build: 668,014 rows, `min(trade_date -
+  reference_date) == 45` days, zero violations. Real-date build (2026-07-11): collector returned
+  **41,530 filings, 1,223 companies, 100% coverage of all 293 tickers in the universe** (zero nulls,
+  zero negative lags after dropping 2 corrupt register rows); rebuild reports **14,362/14,362 quarters
+  (100%) using real CVM dates, zero statutory fallback needed**. Quantified the actual improvement over
+  the statutory estimate: comparing real `fundamentals_available_date` to what the fixed buffer would
+  have assumed, **4,657 rows (0.7%) had real filings >30 days later than the statutory estimate** — the
+  residual leak a fixed buffer structurally cannot catch, now closed; 84.8% of rows also got *tighter*
+  (fundamentals correctly visible earlier for companies that file ahead of the deadline). Full
+  `tests/run_all.py --group all` (4/4 files) and all 18 `test_final_dataset.py` gates green against the
+  real-date rebuild; `ruff check` clean.
 
 - [x] **T2 — Add a feature-internal causality test (generalizes T1's fix into permanent coverage)**
   DONE — `test_volatility_percentile_no_lookahead` is exactly this generic truncation-diff pattern
