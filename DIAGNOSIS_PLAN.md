@@ -1087,16 +1087,34 @@ still weak); all reduce noise/waste in the current system and unblock future exp
       - Regression test: synthetic noisy-but-improving val-Sharpe sequence shows smoothed
         version captures more checkpoints than raw, correctly tracks trend not noise.
 
-- [x] **Item 4 (no code):** `--risk-aversion` sweep ready to run. Flag already exists
-      (`trainer.py:453`, `config.py:294` default 5.0). CLI override works. Ready for
-      `--risk-aversion {0, 1, 2}` × 3 seeds whenever GPU time is available.
+- [x] **Item 4:** `--risk-aversion {0, 1, 5}` × 3 seeds run (2026-07-10), full 8-window
+      walk-forward each, on the rebuilt Phase 5 tensors (55 features, PIT universe).
+      **Verdict: ruled out.** Mean Sharpe by λ (± std across seeds): λ=0 0.532±0.108,
+      λ=1 0.563±0.095, λ=5 0.546±0.107 — differences are a fraction of the seed-to-seed
+      std, same pattern as the earlier `logit_scale` sweep (M2.3). At matched seeds, λ
+      barely moves Sharpe at all (e.g. seed0: 0.656/0.667/0.668 across λ=0/1/5). Turnover
+      (0.468-0.488) and max_weight (0.086-0.088) are also λ-invariant across all 9 runs —
+      confirms again that the 0.10 cap + tilt mapping, not the reward's variance penalty,
+      drive the agent's structural behavior. In aggregate the agent still loses to EW
+      (0.53-0.56 vs EW's 0.660, same tensors); 5/9 individual seeds show HAC-significant
+      *negative* excess, 0/9 show significant positive. Phase 3.2's finding that the
+      penalty is 154% of raw excess was a real measurement of reward composition, but
+      turning it down doesn't help — it isn't the bottleneck. **Do not spend further time
+      tuning risk_aversion.** Raw logs: `artifacts/backtest/sweep_20260710/*.log` (per-run
+      full walk-forward output); provenance sidecars per window in the (deleted, summary-
+      only) run dirs' copied `.json` files record risk_aversion/seed for each config.
 
 **Phase 5 exit criterion — met.** All four items implemented and test-covered (fast group
-passes). No training runs, no tensor rebuild (those are user actions gated on approval).
-None of these changes affect Phase 4's verdict (signal is still weak); they're noise-reduction
-and unblocking infrastructure. Item 2 (feature surgery) + data rebuild will temporarily
-invalidate the current production model/scaler (tensors change → env's staleness check fires)
-but that's expected and documented.
+passes). Item 4's sweep ran to completion (9 full walk-forward runs) and ruled out
+risk_aversion as a lever — doesn't change Phase 4's verdict (signal is still weak; agent
+still loses to EW in aggregate), but is now a measured negative result, not just an
+untested hypothesis. Items 0-3 are noise-reduction/unblocking infrastructure. Item 2
+(feature surgery) + data rebuild temporarily invalidated the production model/scaler
+(tensors changed → env's staleness check fired), already re-rebuilt and in use for the
+Item 4 sweep above. **Next untested lever from this backlog: Item 1's turnover-band
+retrain** (`--tilt-ema-alpha 0.3`) — turnover stayed elevated (~0.47-0.49, ~2.8x EW) across
+all 9 Item-4 runs regardless of reward shaping, making it the most promising remaining
+cheap experiment.
 
 ---
 
