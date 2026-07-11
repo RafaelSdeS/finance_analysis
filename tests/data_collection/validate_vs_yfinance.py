@@ -22,7 +22,7 @@ TICKERS   = ["PETR4", "VALE3", "WEGE3"]
 PROJECT   = Path(__file__).resolve().parents[2]
 PRICE_DIR = PROJECT / "data/raw/prices"
 FUND_DIR  = PROJECT / "data/raw/fundamentals"
-TOLERANCE_PCT = 70  # vendor differences (BolsAI confirmed correct; yfinance cash/debt methods diverge significantly)
+TOLERANCE_PCT = 20  # vendor differences (BolsAI confirmed correct; yfinance cash/debt methods diverge significantly)
 
 
 def validate_prices(ticker) -> bool:
