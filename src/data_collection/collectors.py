@@ -341,6 +341,17 @@ def collect_dividends(tickers: list[str], mode: str):
                     continue
                 df = pd.DataFrame(payments)
                 df["ticker"] = ticker
+                # Announced-but-not-yet-effective dividends have a future ex_date; that's
+                # normal for this endpoint (unlike prices/fundamentals), but validate_dividends'
+                # shared future-date guard would reject the whole batch, so drop just those rows.
+                df["ex_date"] = pd.to_datetime(df["ex_date"])
+                future = df["ex_date"] > pd.Timestamp.now() + pd.Timedelta(days=2)
+                if future.any():
+                    log.info("dividends %s: dropping %d rows with future ex_date", ticker, future.sum())
+                    df = df[~future]
+                if df.empty:
+                    log.warning("dividends %s: no data after dropping future rows", ticker)
+                    continue
                 saved = _merge_save(df, path, "ex_date", validate.validate_dividends, f"dividends/{ticker}")
                 if saved is not None:
                     log.info("dividends %s: %d payments", ticker, len(saved))

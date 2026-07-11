@@ -40,6 +40,7 @@ DATA = [
     "tests/agent/test_online_backtest_daily_granularity.py",
     "tests/agent/test_session_dirs.py",
     "tests/data_collection/test_cagr_calculation.py",
+    "tests/data_collection/test_blue_chip_tickers.py",
 ]
 
 
