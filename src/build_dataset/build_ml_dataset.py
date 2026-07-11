@@ -704,11 +704,11 @@ def compute_fundamental_features(df):
         g["working_capital_ratio"] = (g["current_assets"] - g["current_liabilities"]) / g["total_assets"]
 
         # YoY growth (4 quarters back)
-        g["revenue_growth_yoy"]       = g["net_revenue"].pct_change(4)
-        g["earnings_growth_yoy"]      = g["net_income"].pct_change(4)
-        g["ebitda_growth_yoy"]        = g["ebitda"].pct_change(4)
-        g["total_assets_growth_yoy"]  = g["total_assets"].pct_change(4)
-        g["total_debt_growth_yoy"]    = g["total_debt"].pct_change(4)
+        g["revenue_growth_yoy"]       = g["net_revenue"].pct_change(4, fill_method=None)
+        g["earnings_growth_yoy"]      = g["net_income"].pct_change(4, fill_method=None)
+        g["ebitda_growth_yoy"]        = g["ebitda"].pct_change(4, fill_method=None)
+        g["total_assets_growth_yoy"]  = g["total_assets"].pct_change(4, fill_method=None)
+        g["total_debt_growth_yoy"]    = g["total_debt"].pct_change(4, fill_method=None)
 
         # QoQ trend (sequential quarter diff)
         g["gross_margin_qoq"]  = g["gross_margin"].diff(1)
