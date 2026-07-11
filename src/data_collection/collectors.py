@@ -6,10 +6,13 @@ Each collector: fetch (resilient, resumable) → validate → idempotent save
 genuinely different fetch logic and share nothing worth abstracting.
 
 Sources:
-  - collect_macro          BCB SGS (SELIC/CDI/IPCA), keyless, date-chunked
-  - collect_prices         BolsAI daily OHLCV, date-window paginated
-  - collect_fundamentals   BolsAI quarterly, single call
-  - collect_company_info   BolsAI metadata, fuzzy search
+  - collect_macro             BCB SGS (SELIC/CDI/IPCA), keyless, date-chunked
+  - collect_prices            BolsAI daily OHLCV, date-window paginated
+  - collect_fundamentals      BolsAI quarterly, single call
+  - collect_company_info      BolsAI metadata, fuzzy search
+  - collect_dividends         BolsAI dividend/JCP payment history
+  - collect_corporate_events  BolsAI splits/reverse-splits, market-wide, year-chunked
+  - collect_sectors           BolsAI sector reference table, single call, no history
 """
 
 import logging
@@ -169,6 +172,9 @@ def collect_prices(tickers: list[str], mode: str):
         for ticker in tickers:
             try:
                 path = config.PRICES_DIR / f"{ticker}.parquet"
+                if path.exists():
+                    log.info("prices %s: already collected, skipping", ticker)
+                    continue
                 last = cp.get(ticker, {}).get("last_date")
                 end = datetime.now().strftime("%Y-%m-%d")
 
@@ -216,6 +222,9 @@ def collect_fundamentals(tickers: list[str], mode: str):
         for ticker in tickers:
             try:
                 path = config.FUND_DIR / f"{ticker}.parquet"
+                if path.exists():
+                    log.info("fundamentals %s: already collected, skipping", ticker)
+                    continue
                 d = client.get_json(c, f"/fundamentals/{ticker}/history", {"limit": config.FUND_LIMIT})
                 hist = d.get("history", [])
                 if not hist:
@@ -322,6 +331,9 @@ def collect_dividends(tickers: list[str], mode: str):
         for ticker in tickers:
             try:
                 path = config.DIVIDENDS_DIR / f"{ticker}.parquet"
+                if path.exists():
+                    log.info("dividends %s: already collected, skipping", ticker)
+                    continue
                 d = client.get_json(c, f"/dividends/{ticker}", {"years": config.DIVIDENDS_YEARS})
                 payments = d.get("payments", [])
                 if not payments:
@@ -336,5 +348,61 @@ def collect_dividends(tickers: list[str], mode: str):
                 log.warning("dividends %s: skipping after error: %s", ticker, e)
             finally:
                 sleep(config.RATE_LIMIT_SLEEP)
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# BolsAI corporate events (splits/reverse-splits, market-wide)
+# ---------------------------------------------------------------------------
+
+def collect_corporate_events(mode: str):
+    """All confirmed splits/reverse-splits for all tickers. Endpoint has no
+    offset param, so pagination = one call per calendar year."""
+    c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
+    cp = checkpoint.load("corporate_events", mode)
+    path = config.CORP_EVENTS_DIR / "corporate_events.parquet"
+    try:
+        start_year = cp.get("last_year", int(config.START_DATE[:4]) - 1) + 1
+        end_year = datetime.now().year
+        start_year = min(start_year, end_year)
+
+        rows = []
+        for year in range(start_year, end_year + 1):
+            d = client.get_json(c, "/stocks/corporate-events", {"year": year, "limit": 1000})
+            rows += d.get("events", [])
+        if not rows:
+            log.info("corporate_events: no new rows")
+            return
+
+        df = pd.DataFrame(rows)
+        saved = _merge_save(df, path, "date", validate.validate_corporate_events, "corporate_events")
+        if saved is not None:
+            # leave end_year unlocked: a same-year split can be announced after this run
+            cp["last_year"] = end_year - 1
+            checkpoint.save("corporate_events", mode, cp)
+            log.info("corporate_events: %d total rows", len(saved))
+    finally:
+        c.close()
+
+
+# ---------------------------------------------------------------------------
+# BolsAI sectors (reference table, no history)
+# ---------------------------------------------------------------------------
+
+def collect_sectors():
+    """Canonical sector names + active company counts. Single call, full overwrite."""
+    c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
+    path = config.COMPANY_DIR / "sectors.parquet"
+    try:
+        d = client.get_json(c, "/companies/sectors")
+        df = pd.DataFrame(d.get("sectors", []))
+        vr = validate.validate_sectors(df)
+        if not vr.passed:
+            log.error("sectors validation FAILED: %s", vr.errors)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(path, index=False)
+        log.info("sectors: %d sectors total", len(df))
     finally:
         c.close()

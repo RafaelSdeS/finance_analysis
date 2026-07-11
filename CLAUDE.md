@@ -4,12 +4,11 @@ Guidance for Claude Code working in this repo.
 
 ## Overview
 
-**Project:** Brazilian-equity ML pipeline for RL-based portfolio allocation. See `docs/specification.txt` for system design and RL objective.
+**Project:** Brazilian-equity dataset pipeline for ML applications.
 
-**Three stages** (all scripts run from project root):
+**Two stages** (all scripts run from project root):
 1. **Data Collection** — staged prototype→validation→full-scale pipeline (checkpointing, logging, validation).
 2. **Dataset Build** — merge raw data → derived features (technical, fundamental, macro) → clean → ML-ready parquet, no lookahead bias.
-3. **ML Agent** — PPO RL agent trained on the Stage 2 dataset (`ml_agent` branch).
 
 ## Setup
 
@@ -44,55 +43,12 @@ python -m src.build_dataset.build_ml_dataset            # → data/processed/ml_
 python tests/build_dataset/test_final_dataset.py        # schema, shape, lookahead, NaN, returns
 ```
 
-### Stage 3: Train ML Agent (ml_agent branch)
-
-Prereq: `pip install torch stable-baselines3 gymnasium scikit-learn`. Deep-dive: `docs/STAGE3_ML_AGENT.md`, `docs/ML_AGENT_ROADMAP.md`, `src/agent/README.md`.
-
-```bash
-# One-time data prep: returns from adj_close + env tensors + train-only scaler
-python src/agent/feature_engineering.py
-python -m src.agent.data_pipeline --universe-size 50   # Top-50 by market cap (liquid names, tractable RL problem)
-
-# Train PPO — always anchored rolling windows (8 windows by default, train anchored 2000, ~2y test each);
-# one PPO model per window, 5M timesteps/window by default (smoke: --timesteps 12288)
-# RECOMMENDED: use --bc-pretrain + --universe-size 50 to warm-start from ranker teacher
-python -m src.agent.trainer --universe-size 50 --bc-pretrain  # Standard: BC warm-start on top-50 universe
-python -m src.agent.trainer --timesteps 500000 --learning-rate 1e-4 --device cuda --universe-size 50 --bc-pretrain
-python -m src.agent.trainer --train-years 2 --test-years 1 --timesteps 2048 --universe-size 50 --bc-pretrain  # fast smoke
-
-# Sanity-check the feature set has exploitable signal before trusting the agent to find it
-python -m src.agent.ranker_baseline   # supervised HistGradientBoosting, daily rank-IC on held-out tickers
-
-# Backtest vs equal-weight / market-cap / inv-vol baselines (uses the most recent window's test split)
-python -m src.agent.evaluate --model artifacts/models/agent_best.zip
-
-# Online retraining: continuous rollout with trailing-window fine-tuning every N days
-# Retrain every 63 trading days on the last ~3 years of data, with revert-if-worse guard
-python -m src.agent.rolling_eval --mode online_backtest --resume  # resume from checkpoint if exists
-
-# Daily inference (uses production model from most recent training window)
-python -m src.agent.run_allocation --date 2026-06-29 --format csv
-```
-
-**Note on concentration fixes (July 9, 2026):** (a) **Hard max-position cap** = 0.10 enforced in env's action_to_weights(); its overflow-redistribution had a dead-code bug (all capped overflow silently went to CASH instead of other stocks) fixed later the same day — see M5/M2.3 note above, effective_n is healthier post-fix but not a strict guarantee. (b) **Top-IC features restored**: roe, roic, net_margin, ebitda_margin, ebit_margin added back (IC 0.07–0.097 at 21d); feature count has since moved to 22 (`len(DEFAULT_CONFIG.state_features)`, check there for the current list rather than trusting a count in prose). (c) **Universe shrink to top-50 by market cap** (from 280 illiquid names) for easier RL credit assignment. (d) **BC pretrain on by default** (`--bc-pretrain` flag): warm-starts actor+critic from ranker teacher whose rank-IC is proven (t=24) — see the BC-pretrain instability note below for a critical caveat on this.
-
-**Note on BC-pretrain + PPO instability (2026-07-09):** `pretrain_policy()` (`src/agent/bc_pretrain.py`) fits only the actor's mean-network (masked MSE to teacher logits); `log_std` was left untouched at `config.log_std_init`'s generic value. Diagnosed via a live SB3-verbose smoke test: this leftover tight sigma, paired with the newly-differentiated mean-network BC-pretrain had just fit, made the very first post-BC-pretrain PPO minibatch's KL divergence explode (7.69, ~171x the `target_kl=0.03` break threshold) — PPO's trust-region safety valve aborted before applying a single optimizer step, and kept doing so every rollout: confirmed **zero gradient updates applied across 21 consecutive rollouts (69% of a 1M-timestep window's budget)**. Fixed: `pretrain_policy()` now recalibrates `log_std` to `log(std of the masked target logits)` right after fitting the mean-network, bringing the first-minibatch KL down to ~0.03-0.07 (matching a healthy, non-BC-pretrained run). See `tests/agent/test_bc_pretrain.py` test 2b. **This means every prior BC-pretrain + PPO run's "trained" model may have been functionally unchanged from its BC-pretrained starting point** — worth keeping in mind when interpreting any results generated before this fix.
-
-**Note on throughput optimization (July 9, 2026):** Benchmark (`tools/bench_training_speed.py`) revealed **n_envs=16, batch_size=512, n_epochs=20** is the recommended config on 20-core hardware: 4,454 steps/sec (~41% faster than previous default of n_envs=8, batch_size=64, n_epochs=10). Config change: DummyVecEnv (in-process, shared tensors) beats SubprocVecEnv (multiprocess IPC overhead); batch_size=512 balances GPU launch efficiency with safety margin; n_epochs=20 maintains optimization intensity despite 2× larger rollout buffer. Default `config.py` updated; no CLI changes needed.
-
-**Note on online-backtest day-indexing bug (2026-07-09, fixed):** `rolling_eval.run_online_backtest`'s main loop treated one `env.step()` call as one day, but `env.step()` actually advances by `rebalance_interval_days` (21) per call — silently compressed a ~500-day test span into 24 rows and produced absurd annualized returns (500%+). Fixed to unpack daily-granularity arrays from `info` (matching `evaluate.py`'s `rollout()` convention); baseline policies now use each env's own `_t`, not a mismatched counter. See `tests/agent/test_online_backtest_daily_granularity.py`. Any `online_metrics.json`/`online_results.parquet` generated before this fix is unreliable.
-
-**Note on M5 diagnosis + M2.3 temperature sweep (2026-07-09):** a full diagnostic pass (features carry real signal in every window, IC 0.03–0.10; agent's weights positively correlate with a proven ranker; pre-cap softmax is near-argmax, 83% mean weight on one stock; in-sample excess Sharpe is positive and beats equal-weight while out-of-sample is negative) points at a generalization gap driven by action-space geometry, not missing signal. A follow-up `logit_scale` sweep at {4,5,6} with 3 seeds each found **no value in that range gives a seed-robust improvement** over the default of 10 — the first, single-seed pass suggested `logit_scale=5` helped, but that didn't replicate (seed-to-seed noise on OOS excess Sharpe, std≈0.37, was larger than the whole effect). `tools/policy_diagnostics.py` reproduces this analysis for any model. Full write-up in the (gitignored, local) `TODO.md` roadmap — check there before re-running this experiment.
-
-**Outputs:** each `trainer.py` invocation trains all windows under its own scratch dir `artifacts/models/runs/<session_id>/{window_{id},agent}_{best,final}.zip` (checkpoints deleted once a window finishes); the most recent window's model is then promoted to the stable, unmoving production path `artifacts/models/agent_{best,final}.zip` (what `evaluate.py`/`infer.py`/`run_allocation.py` default to) — unless `--no-promote` is passed (diagnostic/smoke runs), which also skips writing the shared walk-forward artifacts below; scaler `artifacts/models/feature_scaler.pkl` (one per rolling window); online-retraining artifacts `artifacts/models/online/agent_online_*.{zip,pkl}`; env tensors `data/processed/agent_tensors.npz` ([dates × 51 tickers × 22 features] + mask, when using `--universe-size 50`); backtest `artifacts/backtest/{metrics.json,results.parquet}` (viz in `src/visualizations/*.ipynb`); stitched multi-window walk-forward `artifacts/backtest/{walkforward_results.parquet,walkforward_metrics.json}`; daily weights `artifacts/allocations/allocation_YYYY-MM-DD.{csv,json}`.
-
 ### Utilities
 
 ```bash
 python src/build_dataset/cagr_handler.py --ticker PETR4  # CAGR calculator
-python src/visualizations/financial_view.py         # BBAS3 nominal vs inflation-adjusted vs SELIC (live yfinance)
-jupyter notebook src/visualizations/exploration.ipynb   # full dataset validation + insights
-streamlit run tools/explorer/app.py                 # interactive explorer: Data Explorer / Data Quality / Model Explorer / Training Analysis pages
+python src/visualizations/financial_view.py              # BBAS3 nominal vs inflation-adjusted vs SELIC (live yfinance)
+jupyter notebook src/visualizations/exploration.ipynb    # full dataset validation + insights
 ```
 
 ### Tests
@@ -111,8 +67,8 @@ python tests/run_all.py --group all
 ```
 
 **Test groups:**
-- **Fast:** `test_build_dataset_features.py`, `test_ic_analysis.py`, `test_ranker_baseline.py`, `test_bc_pretrain.py`, `test_significance_stats.py`, `test_early_stopping.py`, `test_attribution.py`
-- **Data:** `test_final_dataset.py`, `test_cagr_calculation.py`, `test_backtest_metrics.py`, `test_feature_engineering.py`, `verify_dataset_for_training.py` (gates V1–V7), `test_env_basic.py` (env invariants), `test_excess_sharpe.py`, `test_eval_integrity.py` (leakage/lookahead audit), `test_inference_output.py`, `test_online_backtest_daily_granularity.py`, `test_session_dirs.py`
+- **Fast:** `test_build_dataset_features.py`
+- **Data:** `test_final_dataset.py`, `test_cagr_calculation.py`, validate_vs_yfinance.py
 
 **Linting:**
 ```bash
@@ -123,7 +79,6 @@ ruff check .          # reports undefined names, unused imports/variables, bare-
 
 - **main:** Stages 1–2 (data collection + dataset build). Latest stable.
 - **build_dataset:** Stage 2 focus.
-- **ml_agent:** Stage 3 RL agent. See `docs/ML_AGENT_ROADMAP.md`.
 
 ## Architecture
 
@@ -142,10 +97,6 @@ data/raw/{prices,fundamentals,macro,dividends,company_info}/
   → clean (dupes, NaNs, outliers, sort)
         ↓
 data/processed/ml_dataset.parquet  (one row per ticker+date)
-        ↓ Stage 3
-PortfolioEnv (gymnasium) → PPO trainer → evaluate vs baselines
-        ↓
-artifacts/backtest/results.parquet, artifacts/allocations/*.csv
 ```
 
 ### Key Modules
@@ -158,7 +109,7 @@ artifacts/backtest/results.parquet, artifacts/allocations/*.csv
 | `client.py` | BolsAI HTTP wrapper (retries, backoff): `make_client()`, `get_json()` |
 | `checkpoint.py` | Resume state (JSON per collector) |
 | `validate.py` | Quality gates (schemas, ranges, continuity) → `ValidationResult` |
-| `collectors.py` | BolsAI: `collect_{macro,prices,fundamentals,company_info,dividends}()`; helper `_merge_save()` (idempotent append+dedup+validate+write) |
+| `collectors.py` | BolsAI: `collect_{macro,prices,fundamentals,company_info,dividends,corporate_events,sectors}()`; helper `_merge_save()` (idempotent append+dedup+validate+write) |
 | `yf_collectors.py` | yfinance: `collect_{prices,fundamentals,dividends}_yf()` for `--mode update` |
 | `pipeline.py` | Orchestration; `_collect()` dispatches to BolsAI/yfinance per `DATA_SOURCE` |
 
@@ -169,49 +120,6 @@ artifacts/backtest/results.parquet, artifacts/allocations/*.csv
 | `src/build_dataset/build_ml_dataset.py` | Orchestration: load → merge_asof → features → clean → save. Also defines `load_prices()`, `load_fundamentals()` |
 | `src/build_dataset/cagr_handler.py` | CAGR calc/fill (BolsAI first, backfill from earnings/revenue) |
 
-**Stage 3 (ML Agent)** — `src/agent/`, all implemented:
-
-| File | Purpose |
-|------|---------|
-| `config.py` | Frozen `AgentConfig`: hyperparams, 40-feature list, paths, `generate_windows()`/`window_to_config()`; `DEFAULT_CONFIG` = most recent rolling window |
-| `feature_engineering.py` | Returns from `adj_close` (split-safe), corrupt-observation cleaning |
-| `data_pipeline.py` | Pivot to dense tensors [dates×tickers×features] + activity mask; train-only scaler (fit on the earliest window's train_end — conservative, no lookahead into any window's test) |
-| `env.py` | PortfolioEnv: masked time-varying universe, masked-softmax action, excess-return reward (net of market mean), transaction-cost term; cached load+normalization for online training |
-| `metrics.py` | Sharpe, Sortino, max drawdown, win rate, max_weight, avg_daily_turnover (shared by trainer + evaluator) |
-| `trainer.py` | SB3 PPO per window, val-Sharpe eval callback, JSONL logging, checkpoints, early stopping; `main()` = sole rolling-window training CLI; CLI overrides include `--logit-scale`, `--seed`, `--no-promote` (skip writing to shared production paths — use for diagnostic/smoke runs) |
-| `bc_pretrain.py` | Behavior-cloning warm start: fits a HistGradientBoosting teacher, imitates it into the PPO actor (masked MSE) + critic (discounted returns), recalibrates `log_std` to match the teacher's target spread (see BC-pretrain note below) |
-| `model_provenance.py` | Writes/reads a JSON sidecar next to every saved model (env semantics, window, git SHA); `check_sidecar()` warns on mismatch instead of a blind staleness warning |
-| `attribution.py` | `decompose_returns()`: splits daily return into SELIC carry / market exposure / stock-selection residual — the residual is the actual "does this agent have skill" number |
-| `ic_analysis.py` / `ranker_baseline.py` | Feature signal (rank-IC) analysis and a supervised HistGradientBoosting baseline, independent of the RL agent |
-| `evaluate.py` | Backtest vs baselines (equal-weight, market-cap, inv-vol, SELIC/equity blends, ranker-top-20%), metrics.json, results.parquet (plotting lives in `src/visualizations/*.ipynb`); supports both anchored-window and continuous-rollout backtests |
-| `infer.py` | `predict_weights(date)` reusing env obs pipeline; equal-weight fallback; warns (or `--strict` raises) if the requested date exceeds tensor coverage |
-| `run_allocation.py` | Daily CLI: weights + sector → CSV/JSON |
-| `rolling_eval.py` | Window training/eval orchestration (`trainer.py`); online continuous-rollout backtest with trailing-window fine-tuning; walk-forward stitching; checkpoint resume support |
-
-No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progress_bar=True`.
-
-`tools/policy_diagnostics.py` (not part of the Stage 3 pipeline, a standalone diagnostic): given `--model` and the window scheme it was trained under, reports pre-cap vs post-cap concentration/entropy, in-sample-vs-OOS excess Sharpe (overfit check), and return attribution — reads each model's actual settings from its provenance sidecar rather than assuming defaults.
-
-### Key Design Decisions (Stage 3)
-
-- **Anchored rolling windows, never a fixed split:** training always partitions the dataset into anchored windows (`config.generate_windows()`; default 8 windows, train_years=10, test_years=2, train always starts at `dataset_start`, test slides forward). Each window's train span is tail-carved (`window_val_fraction`, default 15%) into train/val for early stopping; its test span is untouched. The MOST RECENT window is the production model (`agent_best.zip`) and `DEFAULT_CONFIG`'s split; earlier windows are namespaced (`window_{id}_best.zip`) and exist for robustness reporting (`artifacts/backtest/walkforward_*`). There is no flag to opt back into a single fixed split — `python -m src.agent.trainer` always trains this way.
-- **Train-only scaler, one per window:** `data_pipeline.py` fits a separate StandardScaler per rolling window, each on that window's own train span (cutoff = that window's own `train_end`, which always precedes its own `val_start`/`test_start` — verified in `tests/agent/test_eval_integrity.py`). Scalers are keyed by cutoff date in `feature_scaler.pkl`; `env.py` looks up the scaler matching the *current* config's `train_end`, so each window normalizes with contemporaneous statistics instead of a single frozen (e.g. year-2008) distribution applied all the way out to a 2024 test. No cross-window leakage: a window's scaler never sees data at or after that window's own val/test start.
-- **State (current: `--universe-size 50`):** 51 tickers (top-50 by market cap + CASH) × 22 normalized features (stationary/relative only — raw OHLC dropped; incl. `has_fundamentals` flag so the agent can tell "no filing yet" from "average company") + per-ticker activity mask + previous weights (for turnover calculation) concatenated → 51×22 + 51 + 51 = **1,224-dim** (`obs_dim` printed at every `PortfolioEnv` construction). Runtime NaN → 0 (mean imputation); dataset on disk keeps honest NaNs. The full ~280-ticker universe is still supported (`universe_size=None`) but not the recommended path — see "Universe shrink" note below.
-- **Action:** temperature-scaled masked softmax over the active universe: `weights = softmax(action × logit_scale)`, `logit_scale=10` by default (every ticker with ≥252 rows → no survivorship bias). Inactive tickers → −∞ → weight 0; active weights sum to 1. No shorting. The temperature is essential: at scale 1 PPO's trust region (`target_kl`) limits logit drift to ~0.007/update, so the policy stays frozen at the uniform (= equal-weight) softmax init; at scale 10 it collapses to near-argmax instead (mean 83% pre-cap weight on a single stock — see M2.3 sweep note below), so the hard 0.10 cap ends up doing most of the real diversification. Conversion lives in `env.action_to_weights()` (shared by `step()` and `infer.py`); `evaluate.py` baselines pre-divide their log-weights by the scale.
-- **Reward, previous-weight cash-aware benchmark (updated 2026-07-09, roadmap M3.1):** excess-return signal = (portfolio log return) − (benchmark log return) − transaction_cost, where the benchmark = `prev_w_cash · SELIC + (1 − prev_w_cash) · equal-weight-equity`, using the cash weight the agent held **before this decision** (`prev_w_cash`, fixed for the whole rebalance window), NOT the weight it just chose. This replaces two earlier designs, in order: (1) a pure-equity-EW benchmark, under which going 100% CASH during any market downturn earned large positive reward regardless of stock-picking skill; (2) a same-period "agent's own current cash weight" benchmark, which fixed (1) but over-corrected — algebraically, using the SAME period's weight in both the return and the benchmark makes ANY cash decision net to ≈0 reward regardless of whether the timing was good or bad, so it couldn't teach genuine defensive positioning either. The previous-weight design threads this: a **new, well-timed** move into or out of cash is rewarded/penalized based on what actually happened next (verified both directions in `tests/agent/test_env_basic.py` tests 7c/7d via mocked crash/rally scenarios), while a **repeated, unchanged** cash decision nets ≈0 (test 7b) — no free lunch for static positioning, but real credit for correctly timed changes. Cost = `transaction_cost_bps / 10000 × one-way-turnover` (excluding CASH leg which trades free). Shaping (July 9, 2026): daily reward = excess − `risk_aversion`·excess² (mean-variance penalty, λ=5, prefers smooth alpha) and the per-step sum is multiplied by `reward_scale` (100, conditions PPO's value loss; raw reward was ~±0.02/step). Episodes start/reset at 100% CASH (new investor), so the first allocation is scored as a real deploy-or-wait decision against that starting point, not forced to ≈0. Backtest/eval metrics (`metrics.py`) are computed from `info`'s absolute daily returns, independent of this internal reward shaping.
-- **Algorithm:** PPO via stable-baselines3: lr=3e-4 (3e-5 for online fine-tuning), gamma=0.997 (effective horizon ~333 trading days), gae_lambda=0.95, ent_coef=0.001, log_std_init=-2.0 (σ ≈ 0.135; with logit_scale=10 → effective logit noise ~1.35). Total budget raised to 5M timesteps/window (2026-07-09, from 1M): a real training run showed one window still improving monotonically when it hit the old 1M ceiling (val excess Sharpe -0.73→-0.14, no plateau). Early stopping: patience 8 evals, improvement threshold 0.02 val Sharpe (lowered from 0.05 the same day — a different window in that run improved every single eval, 0.283→0.315 over 8 evals, but never once cleared a 0.05 jump in one step, so its patience counter incremented as if it were regressing and cut training off mid-climb; 0.02 matches the observed real per-eval improvement magnitude). Checkpoint saving (`agent_best.zip`) is decoupled from this threshold — it saves on ANY new best val Sharpe, not just jumps big enough to reset the patience clock, so a slow-but-real improving run doesn't silently lose its best model between "big enough" jumps. See `tests/agent/test_early_stopping.py` for a replay of both fixes against the real trajectories that motivated them.
-- **Online retraining:** Post-deployment, fine-tunes every 63 trading days on the last ~3 years of data (not anchored to 2000), with a revert-if-worse guard. Supports continuous-rollout backtest (`--mode online_backtest`) and checkpoint resume (`--resume`). See `STAGE3_ML_AGENT.md` § "Online retraining" for details.
-
-## Dataset Verification (before Stage 3 training)
-
-`tests/agent/verify_dataset_for_training.py` runs gates V1–V7. Fail conditions:
-- **V1 Date coverage:** span < 2 years.
-- **V2 Ticker coverage:** < 20 tickers with full history (≥252 rows).
-- **V3 Feature completeness:** any required column missing (`ticker, trade_date, close, volume, returns, pl, pvp, roe, selic, sector` — Brazilian names: `pl`=P/E, `pvp`=P/B).
-- **V4 NaN rates:** any NaN in critical cols (`ticker, trade_date, close, volume, sector`), or > 10% fundamental-feature NaN on rows at/after each ticker's first filing (NaN before the first filing is structural — CVM digital filings start ~2011 — and not gated).
-- **V5 Distributions:** duplicate (ticker,trade_date) pairs, or `|return_mean|` ≥ 0.05, or ≥1% of ticker-quarters with frozen P/L (stale-valuation regression guard).
-- **V6 Lookahead:** any `reference_date > trade_date`.
-- **V7 Sectors:** < 3 sectors represented.
 
 ## Critical Caveats
 
@@ -225,12 +133,12 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 - **BCB series:** selic=11 (daily), cdi=12, ipca=433 — **NOT 432** (that's the annual meta target).
 - **Benchmark:** BOVA11 (IBOV proxy ETF) collected automatically; prices only.
 - **Company info:** BolsAI-only (CVM metadata, rarely changes); refresh via `--mode full_scale` when new IPOs appear.
-- **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`; Stage 3 training sessions `artifacts/logs/agent/runs/<session_id>/{train.log,{tag}.jsonl}`; standalone `evaluate.py` runs `artifacts/logs/agent/evaluate/evaluate_<run_id>.log`.
+- **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`.
 - **Paths:** absolute via `Path(__file__).resolve().parents[N]`; always run from project root.
 
 ## Data on Disk
 
-- **Raw (git-tracked):** prototype tickers PETR4, VALE3, WEGE3 + benchmark BOVA11 in `data/raw/{prices,fundamentals,macro,company_info,dividends}/`. Prices/macro/dividends current to 2026-06-30; fundamentals to 2026-03-31.
+- **Raw (git-tracked):** prototype tickers PETR4, VALE3, WEGE3 + benchmark BOVA11 in `data/raw/{prices,fundamentals,macro,company_info,dividends,corporate_events}/`. Prices/macro/dividends current to 2026-06-30; fundamentals to 2026-03-31. `company_info/sectors.parquet` and `corporate_events/corporate_events.parquet` are market-wide reference/audit tables (not per-ticker), collected during `full_scale`/`prototype` runs only — skipped in `--mode update` so the free/keyless yfinance refresh path never needs a BolsAI key.
 - **Processed:** `data/processed/ml_dataset.parquet` (created on first build), one row per ticker+date.
 
 ## Technology Stack
@@ -239,5 +147,5 @@ No `policy.py` — SB3's built-in `MlpPolicy` is used. Progress via SB3 `progres
 - **Data:** pandas, numpy, pyarrow.
 - **APIs:** BolsAI REST (`httpx`, backfill), BCB SGS (requests, macro), `yfinance` (incremental).
 - **Config:** stdlib `.env` parser (BolsAI key only).
-- **Viz:** Plotly. **ML/RL:** `torch==2.12.1` (CUDA), `stable-baselines3==2.9.0`, `gymnasium==1.3.0`, `scikit-learn==1.9.0` (older pins broke on numpy 2.x).
+- **Viz:** Plotly.
 - **No test framework:** standalone `python script.py`.

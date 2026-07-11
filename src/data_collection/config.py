@@ -66,6 +66,7 @@ FUND_DIR = RAW_DIR / "fundamentals"
 MACRO_DIR = RAW_DIR / "macro"
 COMPANY_DIR = RAW_DIR / "company_info"
 DIVIDENDS_DIR = RAW_DIR / "dividends"
+CORP_EVENTS_DIR = RAW_DIR / "corporate_events"
 CHECKPOINT_ROOT = PROJECT / "artifacts/checkpoints"
 LOG_DIR = PROJECT / "artifacts/logs/collection"
 

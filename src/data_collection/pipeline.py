@@ -98,7 +98,7 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
     if dry_run:
         log.info("DRY RUN | mode=%s | %d tickers (+%d benchmarks)", mode, len(tickers), len(config.BENCHMARK_TICKERS))
         log.info("tickers: %s", all_tickers[:20] + (["..."] if len(all_tickers) > 20 else []))
-        stage_names = ["macro"] + ([] if mode == "update" else ["company_info"]) + ["prices", "fundamentals", "dividends"]
+        stage_names = ["macro"] + ([] if mode == "update" else ["company_info", "sectors", "corporate_events"]) + ["prices", "fundamentals", "dividends"]
         log.info("would run: %s (source: %s)", ", ".join(stage_names), config.DATA_SOURCE if mode == "update" else "bolsai")
         return True
 
@@ -119,10 +119,14 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
 
     stages = [("macro", lambda: collectors.collect_macro(mode))]
     if mode != "update":
-        # company_info is BolsAI-only and rarely changes; update mode skips it to
-        # minimize BolsAI usage. Run `--mode full_scale`/`prototype` manually to
-        # pick up new IPOs or status changes.
+        # company_info, sectors, corporate_events are BolsAI-only and rarely
+        # change; update mode skips them to minimize BolsAI usage (and to keep
+        # `--mode update` fully usable with no BolsAI key at all). Run
+        # `--mode full_scale`/`prototype` manually to pick up new IPOs, status
+        # changes, or newly announced splits.
         stages.append(("company_info", lambda: collectors.collect_company_info(tickers, mode)))
+        stages.append(("sectors", lambda: collectors.collect_sectors()))
+        stages.append(("corporate_events", lambda: collectors.collect_corporate_events(mode)))
 
     for name, fn in stages:
         log.info("--- stage: %s ---", name)

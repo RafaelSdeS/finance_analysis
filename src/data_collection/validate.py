@@ -19,6 +19,8 @@ FUND_COLS = ["ticker", "reference_date", "net_income", "equity", "net_revenue",
 
 DIVIDEND_COLS = ["ticker", "ex_date", "payment_date", "type", "value_per_share", "adjusted"]
 
+CORP_EVENT_COLS = ["ticker", "date", "type", "ratio_from", "ratio_to", "factor"]
+
 
 @dataclass
 class ValidationResult:
@@ -112,4 +114,24 @@ def validate_dividends(df: pd.DataFrame) -> ValidationResult:
         return r
     if (df["value_per_share"] <= 0).any():
         r.error(f"{(df['value_per_share'] <= 0).sum()} rows with value_per_share <= 0")
+    return r
+
+
+def validate_corporate_events(df: pd.DataFrame) -> ValidationResult:
+    r = _common(df, "date", CORP_EVENT_COLS)
+    if not r.passed:
+        return r
+    if (df["factor"] <= 0).any():
+        r.error(f"{(df['factor'] <= 0).sum()} rows with factor <= 0")
+    return r
+
+
+def validate_sectors(df: pd.DataFrame) -> ValidationResult:
+    r = ValidationResult()
+    if df.empty:
+        r.error("empty dataframe")
+        return r
+    missing = [c for c in ("name", "count") if c not in df.columns]
+    if missing:
+        r.error(f"missing columns: {missing}")
     return r
