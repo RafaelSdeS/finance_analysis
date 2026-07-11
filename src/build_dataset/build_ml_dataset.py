@@ -48,6 +48,7 @@ DIVIDENDS_DIR = ROOT / "data/raw/dividends"
 CORPORATE_EVENTS_PATH = ROOT / "data/raw/corporate_events/corporate_events.parquet"
 FILING_DATES_PATH = ROOT / "data/raw/filing_dates/filing_dates.parquet"
 OUTPUT_PATH = ROOT / "data/processed/ml_dataset.parquet"
+SPLIT_CONFIG_PATH = ROOT / "data/processed/split_config.json"
 
 # Tickers with fewer price rows than this carry no usable history (e.g. EGGY3 has 1 row)
 MIN_PRICE_ROWS = 10
@@ -1055,6 +1056,52 @@ def write_manifest(dataset):
 
 
 # =============================================================================
+# SPLIT CONFIG
+# =============================================================================
+
+def compute_split_dates(dataset, train_frac=0.7, val_frac=0.15):
+    """Walk-forward train/val/test cutoffs, one pair of dates for the whole dataset.
+
+    Split over unique trade_date, not row count: tickers have different history
+    lengths, so a row-count split would let long-history tickers drag the
+    boundary later than a short-history ticker would. Splitting on the calendar
+    keeps the cutoff dates identical regardless of which tickers are in scope.
+    """
+    dates = np.sort(dataset["trade_date"].unique())
+    train_end = pd.Timestamp(dates[int(len(dates) * train_frac) - 1])
+    val_end = pd.Timestamp(dates[int(len(dates) * (train_frac + val_frac)) - 1])
+    return train_end, val_end
+
+
+def write_split_config(dataset, train_frac=0.7, val_frac=0.15):
+    """Leak-safe split boundaries as a small json, not materialized parquet copies.
+
+    Filter ml_dataset.parquet by trade_date against these cutoffs at load time
+    (train: <= train_end, val: train_end < d <= val_end, test: > val_end)
+    instead of keeping three separate parquet files in sync with the source.
+    """
+    train_end, val_end = compute_split_dates(dataset, train_frac, val_frac)
+    is_train = dataset["trade_date"] <= train_end
+    is_val = (dataset["trade_date"] > train_end) & (dataset["trade_date"] <= val_end)
+    is_test = dataset["trade_date"] > val_end
+
+    config = {
+        "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "train_frac": train_frac,
+        "val_frac": val_frac,
+        "train_end": str(train_end.date()),
+        "val_end": str(val_end.date()),
+        "rows": {
+            "train": int(is_train.sum()),
+            "val": int(is_val.sum()),
+            "test": int(is_test.sum()),
+        },
+    }
+    SPLIT_CONFIG_PATH.write_text(json.dumps(config, indent=1))
+    print(f"Split config saved to: {SPLIT_CONFIG_PATH}")
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -1090,6 +1137,7 @@ def main():
 
     dataset.to_parquet(OUTPUT_PATH, index=False)
     write_manifest(dataset)
+    write_split_config(dataset)
 
     print(f"Saved to: {OUTPUT_PATH}")
 
