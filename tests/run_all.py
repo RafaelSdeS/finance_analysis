@@ -29,6 +29,7 @@ DATA = [
     "tests/build_dataset/test_final_dataset.py",
     "tests/data_collection/test_cagr_calculation.py",
     "tests/data_collection/test_blue_chip_tickers.py",
+    "tests/data_collection/validate_vs_yfinance.py",
 ]
 
 

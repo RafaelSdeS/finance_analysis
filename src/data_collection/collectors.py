@@ -261,12 +261,18 @@ COMPANY_FIELDS = ["ticker", "ticker_primary", "corporate_name", "trade_name",
                   "cvm_code", "cnpj", "sector", "status"]
 
 
-def _fetch_all_companies(c):
-    """Paginate through all companies once. Returns dict: ticker_primary -> company_info."""
+def _fetch_all_companies(c, status: str | None = None):
+    """Paginate through all companies once. Returns dict: ticker_primary -> company_info.
+    status=None → ATIVO only (live universe). status="CANCELADA" → delisted/cancelled (1800+ rows).
+    ponytail: called twice (ATIVO, then CANCELADA) to recover survivorship-bias audit trail."""
     all_companies = {}
     offset = 0
+    params = {"offset": offset, "limit": 500}
+    if status:
+        params["status"] = status
+
     while True:
-        d = client.get_json(c, "/companies/", {"offset": offset, "limit": 500})
+        d = client.get_json(c, "/companies/", params)
         batch = d.get("data", [])
         if not batch:
             break
@@ -275,6 +281,7 @@ def _fetch_all_companies(c):
             if ticker:  # only companies with a ticker
                 all_companies[ticker] = co
         offset += len(batch)
+        params["offset"] = offset
         if len(batch) < 500:  # last page
             break
     return all_companies
@@ -290,10 +297,12 @@ def collect_company_info(tickers: list[str], mode: str):
         existing = set(pd.read_parquet(path)["ticker"].dropna().unique())
         done.update(existing)
     try:
-        # Single paginated fetch of all companies (1-2 API calls vs 500+)
-        all_companies = _fetch_all_companies(c)
+        # Fetch all companies: ATIVO (current universe) + CANCELADA (delisted audit trail)
+        all_companies = _fetch_all_companies(c, status=None)  # ATIVO
+        all_companies.update(_fetch_all_companies(c, status="CANCELADA"))  # + CANCELADA (dict.update dedupes by key)
 
         rows = []
+        # First pass: requested tickers (normal path, unchanged)
         for ticker in tickers:
             if ticker in done:
                 log.info("company %s: already collected", ticker)
@@ -307,6 +316,16 @@ def collect_company_info(tickers: list[str], mode: str):
                 log.warning("company %s: not found on B3", ticker)
             done.add(ticker)
             checkpoint.save("company_info", mode, {"done": sorted(done)})
+
+        # Second pass: all companies in all_companies not yet persisted (recovers delisted/non-ATIVO)
+        # ponytail: recovers non-active companies from BolsAI registry at zero marginal API cost
+        for ticker_primary, co in all_companies.items():
+            if ticker_primary in done:
+                continue
+            row = {**{f: co.get(f) for f in COMPANY_FIELDS}, "ticker": ticker_primary}
+            rows.append(row)
+            log.info("company %s: recovered (non-ATIVO: %s)", ticker_primary, co.get("status"))
+            done.add(ticker_primary)
 
         if not rows:
             log.info("company_info: no new companies collected")

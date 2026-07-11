@@ -61,6 +61,22 @@ def validate_prices(df: pd.DataFrame) -> ValidationResult:
         r.error(f"{(df['close'] <= 0).sum()} rows with close <= 0")
     if (df["volume"] < 0).any():
         r.error("negative volume present")
+    for open_c, high_c, low_c, close_c in (
+        ("open", "high", "low", "close"),
+        ("adj_open", "adj_high", "adj_low", "adj_close"),
+    ):
+        non_positive = (df[[open_c, high_c, low_c, close_c]] <= 0).any(axis=1)
+        if non_positive.any():
+            r.error(f"{non_positive.sum()} rows with non-positive {open_c}/{high_c}/{low_c}/{close_c}")
+        bad_hl = df[high_c] < df[low_c]
+        if bad_hl.any():
+            r.error(f"{bad_hl.sum()} rows with {high_c} < {low_c}")
+        bracket_violation = (
+            (df[open_c] < df[low_c]) | (df[open_c] > df[high_c])
+            | (df[close_c] < df[low_c]) | (df[close_c] > df[high_c])
+        )
+        if bracket_violation.any():
+            r.error(f"{bracket_violation.sum()} rows with {open_c}/{close_c} outside [{low_c}, {high_c}]")
     # daily gaps > 5 calendar days that aren't a weekend straddle → flag, don't fail
     gaps = df.sort_values("trade_date")["trade_date"].diff().dt.days
     if (gaps > 5).sum() > 0:
