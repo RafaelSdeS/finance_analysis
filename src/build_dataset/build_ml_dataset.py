@@ -25,6 +25,8 @@ Uso:
 """
 
 import json
+import re
+import shutil
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1053,6 +1055,7 @@ def write_manifest(dataset):
     path = OUTPUT_PATH.with_suffix(".manifest.json")
     path.write_text(json.dumps(manifest, indent=1))
     print(f"Manifest saved to: {path}")
+    return manifest
 
 
 # =============================================================================
@@ -1102,6 +1105,45 @@ def write_split_config(dataset, train_frac=0.7, val_frac=0.15):
 
 
 # =============================================================================
+# DATASET VERSIONING
+# =============================================================================
+
+def _manifest_fingerprint(manifest):
+    """Manifest fields that reflect actual output content (excludes build_at/git_commit)."""
+    return {k: manifest[k] for k in ("rows", "tickers", "date_min", "date_max", "columns", "column_stats")}
+
+
+def sync_dataset_version(manifest):
+    """Snapshot the current build into data/processed/dataset_v{N}/, skipping no-op reruns.
+
+    Copies (doesn't re-serialize) ml_dataset.parquet + its manifest + split_config
+    into an immutable, incrementing folder so an experiment can cite dataset_v{N}
+    by name. N only bumps when the manifest's content fingerprint actually changed
+    vs. the latest existing version -- an unchanged rerun is skipped rather than
+    piling up another 250MB+ copy.
+    """
+    existing = sorted(
+        (int(match.group(1)), path)
+        for path in OUTPUT_PATH.parent.glob("dataset_v*")
+        if (match := re.fullmatch(r"dataset_v(\d+)", path.name))
+    )
+    latest_n, latest_dir = existing[-1] if existing else (0, None)
+
+    if latest_dir is not None:
+        prev_manifest = json.loads((latest_dir / "ml_dataset.manifest.json").read_text())
+        if _manifest_fingerprint(prev_manifest) == _manifest_fingerprint(manifest):
+            print(f"No content change vs {latest_dir.name} -- skipping new version.")
+            return
+
+    version_dir = OUTPUT_PATH.parent / f"dataset_v{latest_n + 1}"
+    version_dir.mkdir()
+    shutil.copy2(OUTPUT_PATH, version_dir / OUTPUT_PATH.name)
+    shutil.copy2(OUTPUT_PATH.with_suffix(".manifest.json"), version_dir / "ml_dataset.manifest.json")
+    shutil.copy2(SPLIT_CONFIG_PATH, version_dir / SPLIT_CONFIG_PATH.name)
+    print(f"Versioned snapshot saved to: {version_dir}")
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -1136,8 +1178,9 @@ def main():
     print("=" * 80)
 
     dataset.to_parquet(OUTPUT_PATH, index=False)
-    write_manifest(dataset)
+    manifest = write_manifest(dataset)
     write_split_config(dataset)
+    sync_dataset_version(manifest)
 
     print(f"Saved to: {OUTPUT_PATH}")
 

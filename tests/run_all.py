@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FAST = [
     "tests/build_dataset/test_build_dataset_features.py",
     "tests/build_dataset/test_split_config.py",
+    "tests/build_dataset/test_dataset_versioning.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
