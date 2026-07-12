@@ -20,6 +20,7 @@ Usage (from project root):
 
 import argparse
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from . import collectors, config
 
@@ -43,6 +44,7 @@ def main():
     p = argparse.ArgumentParser(description="Backfill prices for delisted tickers")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--tickers", nargs="+", help="override candidate list")
+    p.add_argument("--workers", type=int, default=10, help="parallel workers (default 10)")
     args = p.parse_args()
 
     if args.tickers:
@@ -63,9 +65,16 @@ def main():
     if args.dry_run:
         print(" ".join(cands))
         return
-    # collect_prices skips existing files and logs per-ticker failures (many
-    # candidates will 404 — pre-2000 names outside the API's price coverage)
-    collectors.collect_prices(cands, "full_scale")
+
+    # Divide into batches and process in parallel (10 workers by default)
+    batch_size = max(1, len(cands) // args.workers)
+    batches = [cands[i:i + batch_size] for i in range(0, len(cands), batch_size)]
+
+    def process_batch(batch):
+        collectors.collect_prices(batch, "full_scale")
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        executor.map(process_batch, batches)
 
 
 if __name__ == "__main__":

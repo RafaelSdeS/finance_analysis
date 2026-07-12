@@ -6,10 +6,13 @@ only new data, and writes it back after a successful save.
 """
 
 import json
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
+
+_lock = threading.Lock()
 
 
 def _path(name: str, mode: str) -> Path:
@@ -17,14 +20,16 @@ def _path(name: str, mode: str) -> Path:
 
 
 def load(name: str, mode: str) -> dict:
-    p = _path(name, mode)
-    if p.exists():
-        return json.loads(p.read_text())
-    return {}
+    with _lock:
+        p = _path(name, mode)
+        if p.exists():
+            return json.loads(p.read_text())
+        return {}
 
 
 def save(name: str, mode: str, data: dict) -> None:
-    p = _path(name, mode)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    data = {**data, "last_update": datetime.now(timezone.utc).isoformat()}
-    p.write_text(json.dumps(data, indent=2, default=str))
+    with _lock:
+        p = _path(name, mode)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data = {**data, "last_update": datetime.now(timezone.utc).isoformat()}
+        p.write_text(json.dumps(data, indent=2, default=str))
