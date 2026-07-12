@@ -20,12 +20,8 @@ sys.path.insert(0, str(ROOT))
 
 sys.path.insert(0, str(ROOT / "tests"))
 
-from src.build_dataset.build_ml_dataset import (  # noqa: E402
-    FILING_LAG_DAYS_QUARTERLY,
-    MIN_DETECTABLE_JUMP,
-    JUMP_MATCH_TOL,
-    EVENT_WINDOW_DAYS,
-)
+from src.build_dataset.quality_filters import FILING_LAG_DAYS_QUARTERLY  # noqa: E402
+from src.build_dataset.repair import MIN_DETECTABLE_JUMP, JUMP_MATCH_TOL, EVENT_WINDOW_DAYS  # noqa: E402
 from test_utils import print_header, print_check, print_section_start, print_section_end, print_separator  # noqa: E402
 
 DEFAULT_FILE = ROOT / "data/processed/ml_dataset.parquet"

@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.build_dataset.build_ml_dataset import compute_split_dates
+from src.build_dataset.manifest import compute_split_dates
 
 
 def test_split_is_time_ordered_no_overlap() -> None:

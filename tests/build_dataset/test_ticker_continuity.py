@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from src.build_dataset.build_ml_dataset import apply_ticker_continuity  # noqa: E402
+from src.build_dataset.continuity import apply_ticker_continuity  # noqa: E402
 from test_utils import print_check  # noqa: E402
 
 

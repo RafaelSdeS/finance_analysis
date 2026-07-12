@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from src.build_dataset.build_ml_dataset import company_siblings  # noqa: E402
+from src.build_dataset.loaders import company_siblings  # noqa: E402
 from test_utils import print_check  # noqa: E402
 
 

@@ -18,22 +18,24 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.build_dataset.build_ml_dataset import (
+from src.build_dataset.build_ml_dataset import compute_features_chunked
+from src.build_dataset.clean import clean_dataset
+from src.build_dataset.features import (
     compute_price_features,
     compute_fundamental_features,
     compute_advanced_features,
-    compute_cross_sectional_features,
     compute_dividend_features,
     compute_macro_features,
-    compute_features_chunked,
-    clean_dataset,
     recompute_valuation_daily,
+)
+from src.build_dataset.cross_sectional import compute_cross_sectional_features
+from src.build_dataset.merge import (
     merge_prices_and_fundamentals,
     merge_company_info,
     merge_dividends,
-    FILING_LAG_DAYS_QUARTERLY,
     STATUS_INFERENCE_WINDOW_DAYS,
 )
+from src.build_dataset.quality_filters import FILING_LAG_DAYS_QUARTERLY
 
 
 def approx(a: float, b: float, tol: float = 1e-6) -> bool:

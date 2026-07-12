@@ -31,7 +31,7 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import RobustScaler
 
-from .build_ml_dataset import OUTPUT_PATH, SPLIT_CONFIG_PATH
+from .paths import OUTPUT_PATH, SPLIT_CONFIG_PATH
 
 ROOT = Path(__file__).resolve().parents[2]
 SCALER_DIR = ROOT / "data/processed/scalers"

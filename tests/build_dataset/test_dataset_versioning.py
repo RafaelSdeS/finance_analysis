@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.build_dataset import build_ml_dataset as bmd
+from src.build_dataset import manifest as bmd
 
 BASE_MANIFEST = {
     "rows": 100,
