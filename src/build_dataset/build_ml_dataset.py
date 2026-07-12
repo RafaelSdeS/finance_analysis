@@ -473,6 +473,10 @@ def load_dividends():
 FILING_LAG_DAYS_QUARTERLY = 45
 FILING_LAG_DAYS_ANNUAL = 90
 
+# Data quality: drop fundamentals filed > 180 days late (too uncertain for agent)
+# Analysis: 2.1% of filings have lag > 180d; mostly historical (2010-2017 CVM backfill)
+MAX_ACCEPTABLE_FILING_LAG_DAYS = 180
+
 
 def _statutory_available_date(reference_dates):
     """Fallback availability: quarter-end + statutory CVM filing deadline."""
@@ -532,7 +536,50 @@ def attach_filing_dates(fundamentals, company_info):
     fundamentals["fundamentals_available_date"] = fundamentals["received_date"].fillna(
         _statutory_available_date(fundamentals["reference_date"])
     )
+
+    # Calculate filing lag for quality filtering
+    fundamentals["filing_lag_days"] = (fundamentals["received_date"] - fundamentals["reference_date"]).dt.days
+
     return fundamentals.drop(columns=["_cnpj", "received_date"])
+
+
+def filter_excessive_filing_lag(fundamentals, max_lag_days=MAX_ACCEPTABLE_FILING_LAG_DAYS):
+    """Drop fundamentals filed more than max_lag_days after quarter-end.
+
+    Rationale: if filed 180+ days late, too uncertain what was known at decision time.
+    Typical delays: median 45d, 99th %ile 299d. Extreme outliers (>200d) are mostly
+    2010-2017 historical data; current delays (2024-2026) max 536d but rare.
+
+    Analysis: removes 2.1% of rows (883 filings with lag 180-365d, 58 with lag >365d).
+    """
+    print()
+    print("=" * 80)
+    print(f"FILTERING EXCESSIVE FILING LAGS (> {max_lag_days} days)")
+    print("=" * 80)
+
+    before = len(fundamentals)
+
+    # Some rows may have NaN filing_lag_days (statutory fallback, no real CVM date)
+    # Keep those (they're not excessive lags, just unknown real delays)
+    excessive = fundamentals["filing_lag_days"].notna() & (fundamentals["filing_lag_days"] > max_lag_days)
+    n_dropped = excessive.sum()
+
+    if n_dropped > 0:
+        # Capture stats before filtering
+        dropped_lags = fundamentals.loc[excessive, "filing_lag_days"]
+        lag_min = dropped_lags.min()
+        lag_max = dropped_lags.max()
+        pct_dropped = 100 * n_dropped / before
+
+        fundamentals = fundamentals[~excessive].copy()
+        print(f"Dropped {n_dropped} rows ({pct_dropped:.1f}%) with filing lag > {max_lag_days} days")
+        print(f"  Lag range of dropped rows: {lag_min:.0f}–{lag_max:.0f} days")
+    else:
+        print(f"No rows exceeded {max_lag_days}-day lag threshold")
+
+    print(f"Rows retained: {len(fundamentals)}")
+
+    return fundamentals
 
 
 def merge_prices_and_fundamentals(prices, fundamentals):
@@ -778,7 +825,13 @@ def _rsi(series, n=14):
     delta = series.diff()
     gain  = delta.clip(lower=0).rolling(n).mean()
     loss  = (-delta.clip(upper=0)).rolling(n).mean()
-    return 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+    rsi = 100 - (100 / (1 + gain / loss.replace(0, np.nan)))
+    # zero down-days in the window: RS is undefined by division (loss replaced with
+    # NaN above to dodge the divide-by-zero), but RSI itself is well-defined -- 100
+    # if there was any gain, 50 (neutral) if the window was perfectly flat. Without
+    # this, both cases silently fall to NaN instead of their true value.
+    zero_loss = loss == 0
+    return rsi.where(~zero_loss, np.where(gain > 0, 100.0, 50.0))
 
 
 def compute_price_features(df):
@@ -1336,6 +1389,7 @@ def main():
     dividends    = load_dividends()
 
     fundamentals = attach_filing_dates(fundamentals, company_info)
+    fundamentals = filter_excessive_filing_lag(fundamentals)
     dataset = merge_prices_and_fundamentals(prices, fundamentals)
     dataset = merge_company_info(dataset, company_info)
     dataset = merge_macro(dataset)

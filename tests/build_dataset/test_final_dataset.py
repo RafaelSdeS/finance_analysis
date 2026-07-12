@@ -75,6 +75,7 @@ def validate(df):
     print_header("VALIDATION")
 
     checks = []
+    leak_details = []
 
     # No lookahead: every merged fundamental is dated on/before its trade_date
     has_dates = df["reference_date"].notna()
@@ -196,8 +197,10 @@ def validate(df):
             lo = e["date"] + pd.Timedelta(days=EVENT_WINDOW_DAYS[0])
             hi = e["date"] + pd.Timedelta(days=EVENT_WINDOW_DAYS[1])
             w = g[g["trade_date"].between(lo, hi)]
-            leaks += int(((w["log_return"] - expected).abs() < JUMP_MATCH_TOL).any()
-                         or ((w["log_return"] + expected).abs() < JUMP_MATCH_TOL).any())
+            has_leak = ((w["log_return"] - expected).abs() < JUMP_MATCH_TOL).any() or ((w["log_return"] + expected).abs() < JUMP_MATCH_TOL).any()
+            if has_leak:
+                leaks += 1
+                leak_details.append(f"{e['ticker']} on {e['date'].date()} (factor {e['factor']:.4f})")
     checks.append((f"no unadjusted split jumps in log_return [{leaks} events leaking]",
                    leaks == 0))
 
@@ -214,6 +217,10 @@ def validate(df):
     if failed:
         print_section_start("VALIDATION FAILED")
         print(f"  {failed} check(s) failed")
+        if leak_details:
+            print("\n  Leaking corporate events:")
+            for detail in leak_details:
+                print(f"    • {detail}")
         print("└─")
         sys.exit(1)
     print_section_start("VALIDATION PASSED")

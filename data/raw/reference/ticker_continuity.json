@@ -144,6 +144,30 @@
       "type": "rename",
       "ratio": 1.0,
       "notes": "Guararapes renamed to align with Riachuelo retail brand"
+    },
+    {
+      "old": "NTCO3",
+      "new": "NATU3",
+      "date": "2025-06-30",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Natura & Co Holding (NTCO3) wound back into Natura Cosmeticos (NATU3), reversing the 2019 holding-company reorg -- NTCO3 stopped trading in 2025 (its fundamentals stop 2025-06-30 while NATU3's continue to 2026-03-31, and company_info shows NATU3 ATIVO / NTCO3 CANCELADA). Ratio verified empirically: raw prices 100% identical close across the full overlapping history. Exact date NOT independently confirmed (placeholder); harmless since apply_ticker_continuity() derives the real splice boundary from NATU3's own first trade date, not this field -- verify against B3/CVM if the date itself is ever needed."
+    },
+    {
+      "old": "MRFG3",
+      "new": "MBRF3",
+      "date": "2025-06-30",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Marfrig Global Foods ticker refresh. Ratio verified empirically: raw prices 100% identical close across the full overlapping history. Direction verified via company_info: MRFG3 absent from the current registry, MBRF3 is ATIVO -- same signature as EMBR3->EMBJ3/ELET3->AXIA3. Exact rename date NOT independently confirmed (placeholder within the late-2025/early-2026 B3 ticker-refresh wave); harmless since apply_ticker_continuity() derives the real splice boundary from MBRF3's own first trade date, not this field -- verify against B3/CVM if the date itself is ever needed."
+    },
+    {
+      "old": "ODPV3",
+      "new": "SAUD3",
+      "date": "2025-06-30",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Odontoprev ticker refresh (Bradsaude branding). Ratio verified empirically: raw prices 100% identical close across the full overlapping history. Direction verified via company_info: ODPV3 absent from the current registry, SAUD3 is ATIVO -- same signature as EMBR3->EMBJ3/ELET3->AXIA3. Exact rename date NOT independently confirmed (placeholder within the late-2025/early-2026 B3 ticker-refresh wave); harmless since apply_ticker_continuity() derives the real splice boundary from SAUD3's own first trade date, not this field -- verify against B3/CVM if the date itself is ever needed."
     }
   ]
 }

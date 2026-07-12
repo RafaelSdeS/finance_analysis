@@ -163,6 +163,44 @@ def test_rsi_downtrend() -> None:
     assert rsi_14 < 30, f"downtrend should give RSI <30, got {rsi_14:.1f}"
 
 
+def test_rsi_no_down_days() -> None:
+    """Pure uptrend (zero down-days in the window) → RSI = 100, not NaN.
+
+    loss=0 makes gain/loss a division by zero; RSI is still well-defined (100),
+    it just can't be reached by the plain division formula.
+    """
+    prices = np.linspace(100.0, 110.0, 30)  # Monotonic increase, no down days
+    df = pd.DataFrame({
+        "ticker": ["A"] * len(prices),
+        "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
+        "adj_close": prices,
+        "adj_high": prices,
+        "adj_low": prices,
+    })
+    result = compute_price_features(df)
+
+    rsi_14 = result.iloc[15]["rsi_14"]
+    assert not pd.isna(rsi_14), "RSI should not be NaN for a pure uptrend"
+    assert approx(rsi_14, 100.0), f"pure uptrend should give RSI 100, got {rsi_14}"
+
+
+def test_rsi_flat_prices() -> None:
+    """Perfectly flat prices (zero gain, zero loss) → RSI = 50 (neutral), not NaN."""
+    prices = [100.0] * 30
+    df = pd.DataFrame({
+        "ticker": ["A"] * len(prices),
+        "trade_date": pd.date_range("2026-01-01", periods=len(prices)),
+        "adj_close": prices,
+        "adj_high": prices,
+        "adj_low": prices,
+    })
+    result = compute_price_features(df)
+
+    rsi_14 = result.iloc[15]["rsi_14"]
+    assert not pd.isna(rsi_14), "RSI should not be NaN for flat prices"
+    assert approx(rsi_14, 50.0), f"flat prices should give neutral RSI 50, got {rsi_14}"
+
+
 def test_drawdown_calculation() -> None:
     """Drawdown: (price - running_max) / running_max. All-time high → 0, crash → negative."""
     prices = [100.0, 120.0, 110.0, 90.0, 95.0, 105.0]
