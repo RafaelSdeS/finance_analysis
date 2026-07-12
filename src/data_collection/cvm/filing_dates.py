@@ -1,6 +1,5 @@
 """
-CVM filing dates collector
-==========================
+cvm/filing_dates.py — CVM filing dates (real publication date per quarter).
 
 Downloads the CVM open-data filing registers (ITR quarterly, DFP annual) and
 extracts, for every company and fiscal quarter, the date CVM actually
@@ -12,72 +11,42 @@ Stage 2 uses this to make fundamentals visible in the dataset only from their
 true release date (measured Q1-2025: median lag 44 days, but 8.6% of companies
 file late, up to 443 days — a fixed statutory buffer can't cover those).
 
-Source (free, keyless):
-    https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/{ITR,DFP}/DADOS/
 Output:
     data/raw/filing_dates/filing_dates.parquet
         cnpj (digits only), cvm_code, reference_date, received_date, report_type
 
 Run once, then re-run quarterly (only missing/current years are downloaded):
-    python -m src.data_collection.filing_dates
+    python -m src.data_collection.cvm_statements --step filing_dates
 """
 
-import csv
-import io
-import zipfile
 from datetime import date
-from pathlib import Path
 
 import pandas as pd
-import requests
 
-ROOT = Path(__file__).resolve().parents[2]
-OUTPUT_PATH = ROOT / "data/raw/filing_dates/filing_dates.parquet"
+from .. import config
+from . import http
 
-BASE_URL = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/{typ}/DADOS/{typ_l}_cia_aberta_{year}.zip"
-START_YEAR = 2010  # CVM open-data coverage starts ~2010; earlier years 404 and are skipped
-TIMEOUT = 180
-RETRIES = 2
+OUTPUT_PATH = config.RAW_DIR / "filing_dates/filing_dates.parquet"
 
 
 def _fetch_year(report_type: str, year: int) -> pd.DataFrame | None:
-    """Download one year's register; None if the year isn't published (404)."""
-    url = BASE_URL.format(typ=report_type.upper(), typ_l=report_type.lower(), year=year)
+    """One year's ITR/DFP register -> (cnpj, cvm_code, reference_date, received_date)."""
+    zf = http.fetch_zip(report_type.upper(), year)
+    if zf is None:
+        return None
     try:
-        for attempt in range(RETRIES + 1):
-            try:
-                resp = requests.get(url, timeout=TIMEOUT)
-                break
-            except requests.RequestException as e:
-                if attempt == RETRIES:
-                    print(f"  {report_type} {year}: network error after {RETRIES} retries: {e}")
-                    return None
-                continue
-        if resp.status_code == 404:
-            return None
-        resp.raise_for_status()
-
         register_name = f"{report_type.lower()}_cia_aberta_{year}.csv"
-        try:
-            with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-                raw = zf.read(register_name).decode("latin-1")
-        except (zipfile.BadZipFile, KeyError) as e:
-            print(f"  {report_type} {year}: corrupt/missing zip file: {e}")
-            return None
-
-        rows = list(csv.DictReader(io.StringIO(raw), delimiter=";"))
+        rows = http.read_csv(zf, register_name)
         if not rows:
-            print(f"  {report_type} {year}: empty register (0 rows)")
+            print(f"  {report_type} {year}: empty/missing register")
             return None
 
-        df = pd.DataFrame(
-            {
-                "cnpj": [r.get("CNPJ_CIA", "") for r in rows],
-                "cvm_code": [r.get("CD_CVM", "") for r in rows],
-                "reference_date": [r.get("DT_REFER", "") for r in rows],
-                "received_date": [r.get("DT_RECEB", "") for r in rows],
-            }
-        )
+        df = pd.DataFrame({
+            "cnpj": [r.get("CNPJ_CIA", "") for r in rows],
+            "cvm_code": [r.get("CD_CVM", "") for r in rows],
+            "reference_date": [r.get("DT_REFER", "") for r in rows],
+            "received_date": [r.get("DT_RECEB", "") for r in rows],
+        })
         df["cnpj"] = df["cnpj"].str.replace(r"\D", "", regex=True)
         df["reference_date"] = pd.to_datetime(df["reference_date"], errors="coerce")
         df["received_date"] = pd.to_datetime(df["received_date"], errors="coerce")
@@ -116,7 +85,7 @@ def collect_filing_dates() -> pd.DataFrame:
     total_companies = set()
 
     for report_type in ("itr", "dfp"):
-        for year in range(START_YEAR, current_year + 1):
+        for year in range(http.START_YEAR, current_year + 1):
             key = (report_type.upper(), year)
             # current year is always refreshed — new filings arrive all quarter
             if key in covered and year < current_year:
@@ -166,7 +135,3 @@ def collect_filing_dates() -> pd.DataFrame:
           f"{result['reference_date'].min().date()} → {result['reference_date'].max().date()}) "
           f"saved to {OUTPUT_PATH}")
     return result
-
-
-if __name__ == "__main__":
-    collect_filing_dates()

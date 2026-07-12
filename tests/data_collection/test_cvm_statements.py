@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.data_collection import config, validate  # noqa: E402
-from src.data_collection.cvm_statements import compute_ratios, load_statements  # noqa: E402
+from src.data_collection.cvm.ratios import compute_ratios  # noqa: E402
+from src.data_collection.cvm.statements import load_statements  # noqa: E402
 
 TOLERANCE = 0.15  # 15%, consistent with validate_vs_yfinance's loose band
 

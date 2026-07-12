@@ -71,7 +71,7 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
 # `reference_date` from BolsAI is the fiscal quarter-end, not the real filing/
 # disclosure date (verified: BolsAI's /fundamentals history has no filing-date
 # field at all). The real publication date (CVM's DT_RECEB) is collected by
-# src/data_collection/filing_dates.py and attached per quarter; these statutory
+# src/data_collection/cvm/filing_dates.py and attached per quarter; these statutory
 # deadlines (ITR 45d, DFP ~90d) are the fallback for quarters missing from the
 # CVM register.
 FILING_LAG_DAYS_QUARTERLY = 45
