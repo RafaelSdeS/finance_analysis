@@ -560,7 +560,7 @@ python tests/build_dataset/test_dataset_versioning.py     # Snapshot tracking
 
 | Issue | Check | Fix |
 |-------|-------|-----|
-| OOM during build | chunk_size in build_ml_dataset.py | Reduce chunk_size (default 25) |
+| OOM during build | chunk_size in compute_features_chunked() (build_ml_dataset.py) | Reduce chunk_size (default 150, was 25 — raised for parquet compression, see docstring); cross-sectional features run as a separate full-universe pass, not per batch, so this is safe to lower |
 | > 200 valuation warnings | close_price correction applied? | Rebuild with latest code |
 | Missing company_info | Sibling fill logic ran? | Re-run build_ml_dataset.py |
 | Lookahead detected | Filing dates real or statutory? | Check split_config.json, re-validate |

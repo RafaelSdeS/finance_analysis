@@ -33,6 +33,8 @@ from pathlib import Path
 
 import pandas as pd
 import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from .cagr_handler import fill_cagr_columns
 
@@ -298,10 +300,13 @@ def fill_missing_cagr(fundamentals):
     print("=" * 80)
 
     # Group by ticker and apply CAGR filling
+    # ponytail: split by ticker once via groupby instead of re-filtering the
+    # full table on every loop iteration
+    fundamentals_by_ticker = dict(tuple(fundamentals.groupby("ticker", sort=False)))
     dfs = []
     for ticker in sorted(fundamentals["ticker"].unique()):
-        ticker_df = fundamentals[fundamentals["ticker"] == ticker].copy()
-        
+        ticker_df = fundamentals_by_ticker[ticker].copy()
+
         # Track coverage before
         earnings_before = ticker_df["cagr_earnings_5y"].isna().sum() if "cagr_earnings_5y" in ticker_df.columns else 0
         revenue_before = ticker_df["cagr_revenue_5y"].isna().sum() if "cagr_revenue_5y" in ticker_df.columns else 0
@@ -600,21 +605,19 @@ def merge_prices_and_fundamentals(prices, fundamentals):
 
     merged_dfs = []
 
+    # Split once via groupby instead of re-scanning the full frame per ticker
+    # (was O(tickers * total_rows) of repeated boolean filtering).
+    prices_by_ticker = dict(tuple(prices.groupby("ticker", sort=False)))
+    fundamentals_by_ticker = dict(tuple(fundamentals.groupby("ticker", sort=False)))
+
     for ticker in sorted(prices["ticker"].unique()):
 
         print(f"Merging {ticker}")
 
-        p = (
-            prices[prices["ticker"] == ticker]
-            .copy()
-            .sort_values("trade_date")
-        )
+        p = prices_by_ticker[ticker].sort_values("trade_date")
 
-        f = (
-            fundamentals[fundamentals["ticker"] == ticker]
-            .copy()
-            .sort_values("reference_date")
-        )
+        f = fundamentals_by_ticker.get(ticker, fundamentals.iloc[0:0]).copy()
+        f = f.sort_values("reference_date")
 
         # attach_filing_dates() normally sets this (real CVM receipt date with
         # statutory fallback); synthesize the fallback if called standalone
@@ -635,17 +638,23 @@ def merge_prices_and_fundamentals(prices, fundamentals):
 
         # Replace close_price with actual price at fundamentals_available_date
         # (BolsAI's close_price is from reference_date, 45-90 days earlier; comparing
-        # it to today's close gives false >50% jumps; use real close at filing instead)
+        # it to today's close gives false >50% jumps; use real close at filing instead).
+        # Vectorized asof lookup (was a per-row full-frame scan — the main build bottleneck,
+        # O(rows^2) per ticker).
         if "fundamentals_available_date" in merged.columns:
-            # For each row, look up price on or before fundamentals_available_date
-            for idx in merged.index:
-                filing_date = merged.loc[idx, "fundamentals_available_date"]
-                if pd.notna(filing_date):
-                    # Find closest price on or before filing_date
-                    prices_before_filing = p[p["trade_date"] <= filing_date]
-                    if len(prices_before_filing) > 0:
-                        price_at_filing = prices_before_filing.iloc[-1]["close"]
-                        merged.loc[idx, "close_price"] = price_at_filing
+            has_filing = merged["fundamentals_available_date"].notna()
+            if has_filing.any():
+                filing_dates = merged.loc[has_filing, ["fundamentals_available_date"]].sort_values(
+                    "fundamentals_available_date"
+                )
+                price_at_filing = pd.merge_asof(
+                    filing_dates,
+                    p[["trade_date", "close"]].rename(columns={"trade_date": "fundamentals_available_date"}),
+                    on="fundamentals_available_date",
+                    direction="backward",
+                )["close"]
+                price_at_filing.index = filing_dates.index
+                merged.loc[has_filing, "close_price"] = price_at_filing
 
         merged_dfs.append(merged)
 
@@ -692,10 +701,16 @@ def merge_company_info(df, company_info):
             .drop_duplicates("_base")
             .set_index("_base")
         )
-        merged_base = merged["ticker"].str.replace(r"\d+$", "", regex=True)
+        # Compare only the rows that actually need filling (not the whole
+        # dataset) and only loop over base tickers that appear among them —
+        # was O(companies * total_rows), rescanning everything per company
+        # even when nothing of that company's was missing.
+        missing_base = merged.loc[missing_mask, "ticker"].str.replace(r"\d+$", "", regex=True)
+        info_by_base = info_by_base[info_by_base.index.isin(missing_base.unique())]
+
         for b, info_row in info_by_base.iterrows():
-            sel = missing_mask & (merged_base == b)
-            if not sel.any():
+            sel = missing_base.index[missing_base == b]
+            if len(sel) == 0:
                 continue
             # fillna dict values must be non-null: a literal None (from missing
             # object/string columns in the parquet) makes fillna raise instead
@@ -744,6 +759,9 @@ def merge_company_info(df, company_info):
     # ponytail: override stale CANCELADA status when price data is recent. BolsAI
     # company_info can lag behind actual trading (e.g. ITUB3 marked delisted but
     # still trading). If a ticker traded within 30 days of dataset end, it's ATIVO.
+    # ponytail: override stale CANCELADA status when price data is recent. BolsAI
+    # company_info can lag behind actual trading (e.g. ITUB3 marked delisted but
+    # still trading). If a ticker traded within 30 days of dataset end, it's ATIVO.
     dataset_end = merged["trade_date"].max()
     very_recent_cutoff = dataset_end - pd.Timedelta(days=30)
     last_trade_per_ticker = merged.groupby("ticker")["trade_date"].transform("max")
@@ -751,8 +769,8 @@ def merge_company_info(df, company_info):
     incorrectly_delisted = (merged["status"] == "CANCELADA") & still_trading
     if incorrectly_delisted.any():
         merged.loc[incorrectly_delisted, "status"] = "ATIVO"
-        n_corrected = incorrectly_delisted.groupby(merged["ticker"]).any().sum()
-        print(f"Corrected {n_corrected} tickers marked CANCELADA but trading in last 30d to ATIVO")
+        n_corrected = merged.loc[incorrectly_delisted, "ticker"].nunique()
+        print(f"✓ Corrected {n_corrected} tickers marked CANCELADA but trading in last 30d to ATIVO")
 
     return merged
 
@@ -800,18 +818,17 @@ def merge_dividends(dataset, dividends):
     merged_dfs = []
     count = 0
 
-    # ponytail: use groupby instead of repeated filtering for performance
+    # ponytail: split dividends by ticker once via groupby instead of
+    # re-filtering the full table on every loop iteration
+    dividends_by_ticker = dict(tuple(dividends.groupby("ticker", sort=False)))
+
     for ticker, d in dataset.groupby("ticker", sort=False):
 
         if count % 50 == 0:
             print(f"Processing dividends for ticker #{count}")
         count += 1
 
-        div = (
-            dividends[dividends["ticker"] == ticker]
-            .copy()
-            .sort_values("ex_date")
-        )
+        div = dividends_by_ticker.get(ticker, dividends.iloc[0:0]).sort_values("ex_date")
 
         if len(div) == 0:
             # No dividends — set div_value_recent (used downstream); yield/count are
@@ -858,11 +875,15 @@ def compute_dividend_features(dataset, dividends):
 
     window = np.timedelta64(252, "D")
 
+    # ponytail: split dividends by ticker once via groupby instead of
+    # re-filtering the full table on every loop iteration
+    dividends_by_ticker = dict(tuple(dividends.groupby("ticker", sort=False)))
+
     result = []
     for ticker, g in dataset.groupby("ticker", sort=False):
         g = g.sort_values("trade_date").copy()
 
-        div = dividends[dividends["ticker"] == ticker].sort_values("ex_date")
+        div = dividends_by_ticker.get(ticker, dividends.iloc[0:0]).sort_values("ex_date")
 
         if len(div) == 0:
             g["div_yield_12m"] = 0.0
@@ -1155,7 +1176,78 @@ def compute_advanced_features(df):
 
     df = pd.concat(result, ignore_index=True).reset_index(drop=True)
 
-    # --- SECTOR-RELATIVE METRICS (Z-scores, percentiles) ---
+    # --- FUNDAMENTAL TREND SIGNALS (raw, no thresholds) ---
+
+    # diff(4) must run over 4 real fiscal quarters, not 4 rows of this daily
+    # panel — fundamentals are forward-filled for ~63 trading days between
+    # filings, so diffing the daily panel directly is ~0 all quarter with a
+    # 4-row blip right after each filing. Dedup to one row per (ticker,
+    # reference_date), diff there, then map the quarterly trend back onto
+    # every daily row.
+    df = df.sort_values(["ticker", "reference_date"]).reset_index(drop=True)
+
+    trend_cols = {
+        "roe": "roe_trend_4q",
+        "net_margin": "margin_trend_4q",
+        "debt_equity": "debt_trend_4q",
+        "roa": "roa_trend_4q",
+    }
+    result = []
+    for _, g in df.groupby("ticker", sort=False):
+        g = g.copy()
+        q = g.drop_duplicates("reference_date").set_index("reference_date")
+        for col, out in trend_cols.items():
+            g[out] = g["reference_date"].map(q[col].diff(4))
+        result.append(g)
+    df = pd.concat(result, ignore_index=True)
+
+    # --- VALUATION RELATIVE TO FUNDAMENTALS (raw relationships) ---
+
+    # PEG ratio: P/L (P/E) relative to earnings growth
+    df["peg_ratio"] = df["pl"] / (df["earnings_growth_yoy"] * 100 + 1e-8)
+
+    # P/VP (P/B) relative to ROE (value signal: low P/VP + high ROE = cheap quality)
+    df["pvp_to_roe_ratio"] = df["pvp"] / (df["roe"] + 1e-8)
+
+    # Earnings yield (inverse P/L) vs macro rates
+    df["earnings_yield"] = 1.0 / (df["pl"] + 1e-8)
+    df["earnings_yield_vs_selic"] = df["earnings_yield"] - (df["selic"] / 100)
+
+    print(f"Advanced features computed for {len(df)} rows")
+    return df
+
+
+# =============================================================================
+# CROSS-SECTIONAL FEATURES (need the full universe, not per-ticker)
+# =============================================================================
+
+# Inputs compute_cross_sectional_features() needs, and the columns it adds —
+# used to slim the frame down before holding the full universe in memory.
+CROSS_SECTIONAL_INPUT_COLS = [
+    "ticker", "trade_date", "sector", "pl", "pvp", "roe", "debt_equity",
+    "div_yield_12m", "return_1m", "return_3m", "return_12m",
+]
+CROSS_SECTIONAL_OUTPUT_COLS = [
+    "pl_zscore_sector", "pvp_zscore_sector", "roe_zscore_sector", "debt_equity_zscore_sector",
+    "div_yield_sector_percentile",
+    "momentum_vs_market_1m", "momentum_vs_market_3m", "momentum_vs_market_12m",
+    "momentum_vs_sector_1m", "momentum_vs_sector_3m", "momentum_vs_sector_12m",
+]
+
+
+def compute_cross_sectional_features(df):
+    """Sector/market-relative features: how does this stock compare to every
+    OTHER stock trading on the same date. Must run on the full dataset in one
+    shot — computing this per ticker-batch (as an earlier version did) silently
+    compares each stock against whichever handful of tickers landed in its
+    batch instead of the true market/sector, corrupting every one of these
+    columns.
+    """
+
+    print()
+    print("=" * 80)
+    print("COMPUTING CROSS-SECTIONAL (MARKET/SECTOR) FEATURES")
+    print("=" * 80)
 
     # ponytail: vectorized z-score via cython groupby transforms (no Python per-group calls)
     # NaN-sector rows are dropped by groupby and stay NaN, matching the old loop's skip.
@@ -1205,44 +1297,7 @@ def compute_advanced_features(df):
         - df.groupby(["trade_date", "sector"])["return_12m"].transform("mean")
     ).where(sector_size > 1)
 
-    # --- FUNDAMENTAL TREND SIGNALS (raw, no thresholds) ---
-
-    # diff(4) must run over 4 real fiscal quarters, not 4 rows of this daily
-    # panel — fundamentals are forward-filled for ~63 trading days between
-    # filings, so diffing the daily panel directly is ~0 all quarter with a
-    # 4-row blip right after each filing. Dedup to one row per (ticker,
-    # reference_date), diff there, then map the quarterly trend back onto
-    # every daily row.
-    df = df.sort_values(["ticker", "reference_date"]).reset_index(drop=True)
-
-    trend_cols = {
-        "roe": "roe_trend_4q",
-        "net_margin": "margin_trend_4q",
-        "debt_equity": "debt_trend_4q",
-        "roa": "roa_trend_4q",
-    }
-    result = []
-    for _, g in df.groupby("ticker", sort=False):
-        g = g.copy()
-        q = g.drop_duplicates("reference_date").set_index("reference_date")
-        for col, out in trend_cols.items():
-            g[out] = g["reference_date"].map(q[col].diff(4))
-        result.append(g)
-    df = pd.concat(result, ignore_index=True)
-
-    # --- VALUATION RELATIVE TO FUNDAMENTALS (raw relationships) ---
-
-    # PEG ratio: P/L (P/E) relative to earnings growth
-    df["peg_ratio"] = df["pl"] / (df["earnings_growth_yoy"] * 100 + 1e-8)
-
-    # P/VP (P/B) relative to ROE (value signal: low P/VP + high ROE = cheap quality)
-    df["pvp_to_roe_ratio"] = df["pvp"] / (df["roe"] + 1e-8)
-
-    # Earnings yield (inverse P/L) vs macro rates
-    df["earnings_yield"] = 1.0 / (df["pl"] + 1e-8)
-    df["earnings_yield_vs_selic"] = df["earnings_yield"] - (df["selic"] / 100)
-
-    print(f"Advanced features computed for {len(df)} rows")
+    print(f"Cross-sectional features computed for {len(df)} rows")
     return df
 
 
@@ -1411,49 +1466,116 @@ def sync_dataset_version(manifest):
 
 
 # =============================================================================
-# CHUNKED FEATURE COMPUTATION (memory-efficient batch processing)
+# FEATURE COMPUTATION
 # =============================================================================
 
-def compute_features_chunked(dataset, dividends, output_path, chunk_size=25):
-    """Process dataset in ticker batches and write directly to parquet (no full concatenation).
+def compute_features_chunked(dataset, dividends, output_path, chunk_size=150):
+    """Three-pass, memory-bounded feature computation.
 
-    Each batch: compute_price_features → compute_dividend_features →
-    compute_macro_features → recompute_valuation_daily → compute_advanced_features → clean.
-    Appends each batch directly to output parquet to avoid OOM during concatenation.
+    A fully unchunked pass OOM'd in practice — the dataset's dense-numeric
+    size looks like ~1.3-2GB, but clean_dataset's inf->NaN replace() makes a
+    full transient copy of all ~123 numeric columns, and main() keeps
+    prices/fundamentals/company_info resident throughout, so real peak usage
+    is well above the naive estimate. Ticker-batching alone isn't a safe fix
+    either: several features (see compute_cross_sectional_features) compare
+    each stock to the full market on the same date, so computing them on a
+    25-ticker batch silently compares against the wrong universe.
+
+    Pass 1: within-ticker feature functions run per ticker-batch (bounded
+      memory — never holds more than one batch of the wide frame) and stream
+      to a temp parquet. Also accumulates a SLIM projection (11 narrow
+      columns instead of ~130) which is cheap to hold in full.
+    Pass 2: cross-sectional features computed once on the slim full-universe
+      projection.
+    Pass 3: stream the temp file back out batch by batch (one row group at a
+      time), merge in the small cross-sectional result, clean, write final —
+      keeping clean_dataset's memory bounded to one batch too.
+
+    chunk_size also sets the row-group size of both parquet files (one batch
+    = one row group): too small hurts compression badly (dictionary/RLE
+    encoding resets every row group — 25 tickers/batch measured at ~4% size
+    reduction vs. ~75% for a single row group), too large risks OOM again.
+    150 tickers/batch gives ~4-5 row groups for the full universe.
     """
+    tmp_path = output_path.with_suffix(".tmp.parquet")
+
     tickers = dataset["ticker"].unique()
     batches = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
 
     print()
     print("=" * 80)
-    print(f"COMPUTING FEATURES IN {len(batches)} BATCHES (chunk_size={chunk_size})")
+    print(f"PASS 1/3: PER-TICKER FEATURES IN {len(batches)} BATCHES (chunk_size={chunk_size})")
     print("=" * 80)
 
+    slim_parts = []
+    writer = None
+    try:
+        for batch_idx, batch_tickers in enumerate(batches, 1):
+            batch = dataset[dataset["ticker"].isin(batch_tickers)].copy()
+            print(f"Batch {batch_idx}/{len(batches)}: {len(batch_tickers)} tickers, {len(batch)} rows")
+
+            batch = compute_price_features(batch)
+            batch = compute_dividend_features(batch, dividends)
+            batch = compute_macro_features(batch)
+            batch = recompute_valuation_daily(batch)
+            batch = compute_advanced_features(batch)
+
+            slim_cols = [c for c in CROSS_SECTIONAL_INPUT_COLS if c in batch.columns]
+            slim_parts.append(batch[slim_cols].copy())
+
+            table = pa.Table.from_pandas(batch, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(tmp_path, table.schema)
+            else:
+                # later batches can promote e.g. an all-NaN int column to float —
+                # cast to the schema locked in by batch 1 so row groups stay uniform
+                table = table.cast(writer.schema)
+            writer.write_table(table)
+    finally:
+        if writer is not None:
+            writer.close()
+
+    print()
+    print("=" * 80)
+    print("PASS 2/3: CROSS-SECTIONAL (MARKET/SECTOR) FEATURES")
+    print("=" * 80)
+
+    slim = pd.concat(slim_parts, ignore_index=True)
+    del slim_parts
+    slim = compute_cross_sectional_features(slim)
+    slim = slim[["ticker", "trade_date"] + CROSS_SECTIONAL_OUTPUT_COLS].set_index(
+        ["ticker", "trade_date"]
+    )
+
+    print()
+    print("=" * 80)
+    print("PASS 3/3: MERGING CROSS-SECTIONAL FEATURES + CLEANING")
+    print("=" * 80)
+
+    pf = pq.ParquetFile(tmp_path)
     total_rows = 0
-    for batch_idx, batch_tickers in enumerate(batches, 1):
-        batch = dataset[dataset["ticker"].isin(batch_tickers)].copy()
-        print(f"\nBatch {batch_idx}/{len(batches)}: {len(batch_tickers)} tickers, {len(batch)} rows")
+    writer = None
+    try:
+        for rg in range(pf.num_row_groups):
+            batch = pf.read_row_group(rg).to_pandas()
+            batch = batch.join(slim, on=["ticker", "trade_date"])
+            batch = clean_dataset(batch)
 
-        batch = compute_price_features(batch)
-        batch = compute_dividend_features(batch, dividends)
-        batch = compute_macro_features(batch)
-        batch = recompute_valuation_daily(batch)
-        batch = compute_advanced_features(batch)
-        batch = clean_dataset(batch)
+            table = pa.Table.from_pandas(batch, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(output_path, table.schema)
+            else:
+                table = table.cast(writer.schema)
+            writer.write_table(table)
 
-        # Append directly to parquet (not concatenating in memory)
-        if batch_idx == 1:
-            batch.to_parquet(output_path, index=False)
-        else:
-            existing = pd.read_parquet(output_path)
-            combined = pd.concat([existing, batch], ignore_index=True)
-            combined.to_parquet(output_path, index=False)
+            total_rows += len(batch)
+            print(f"Row group {rg + 1}/{pf.num_row_groups}: {len(batch)} rows (total {total_rows})")
+    finally:
+        if writer is not None:
+            writer.close()
 
-        total_rows += len(batch)
-        print(f"  → {len(batch)} rows after cleaning (total: {total_rows})")
-
-    # ponytail: skip full-dataset sort (batches already sorted within tickers, avoid OOM)
-    # Just return True to signal completion; main() will read summary from parquet chunks
+    tmp_path.unlink()
+    print(f"Feature computation complete: {total_rows} rows")
     return True
 
 
@@ -1485,16 +1607,19 @@ def main():
     dataset = merge_company_info(dataset, company_info)
     dataset = merge_macro(dataset)
     dataset = merge_dividends(dataset, dividends)
-    # ponytail: chunk feature computation + write directly to parquet (no full concatenation in RAM)
-    # chunk_size=25: memory-safe for systems with <8GB available (adjust if needed)
-    compute_features_chunked(dataset, dividends, OUTPUT_PATH, chunk_size=25)
+    # free the pre-merge tables before the heavy feature/clean passes — they're
+    # no longer needed but stay resident (still-named locals) otherwise
+    del prices, fundamentals, company_info
+    compute_features_chunked(dataset, dividends, OUTPUT_PATH, chunk_size=150)
+    del dataset
 
     print()
     print("=" * 80)
     print("WRITING MANIFEST & CONFIG")
     print("=" * 80)
 
-    # Read final dataset from parquet for manifest/config (done in chunks to avoid OOM)
+    # single read-back for manifest/split_config (unavoidable — both need the
+    # full date range / column distributions), now with nothing else resident
     dataset = pd.read_parquet(OUTPUT_PATH)
     manifest = write_manifest(dataset)
     write_split_config(dataset)
