@@ -185,9 +185,7 @@ def collect_prices(tickers: list[str], mode: str):
     skip = set(cp.get("_skip", []))
 
     def _mark_skip(ticker):
-        skip.add(ticker)
-        cp["_skip"] = sorted(skip)
-        checkpoint.save("prices", mode, cp)
+        checkpoint.mark_skip("prices", mode, cp, skip, ticker)
 
     try:
         for ticker in tickers:
@@ -250,9 +248,7 @@ def collect_fundamentals(tickers: list[str], mode: str):
     skip = set(cp.get("_skip", []))
 
     def _mark_skip(ticker):
-        skip.add(ticker)
-        cp["_skip"] = sorted(skip)
-        checkpoint.save("fundamentals", mode, cp)
+        checkpoint.mark_skip("fundamentals", mode, cp, skip, ticker)
 
     try:
         for ticker in tickers:
