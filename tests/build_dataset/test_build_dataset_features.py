@@ -24,7 +24,10 @@ from src.build_dataset.build_ml_dataset import (
     compute_advanced_features,
     recompute_valuation_daily,
     merge_prices_and_fundamentals,
+    merge_company_info,
+    merge_dividends,
     FILING_LAG_DAYS_QUARTERLY,
+    STATUS_INFERENCE_WINDOW_DAYS,
 )
 
 
@@ -400,6 +403,54 @@ def test_recompute_valuation_daily_no_fundamentals_flag() -> None:
     assert result.iloc[0]["has_fundamentals"] == 0.0
 
 
+def test_merge_company_info_infers_status_from_price_recency() -> None:
+    """Tickers absent from company_info (and with no sibling match) get status
+    inferred from price recency: still trading near the dataset's last date is
+    ATIVO, a ticker whose last trade is older than the window is CANCELADA."""
+    max_date = pd.Timestamp("2026-07-10")
+    old_last_trade = max_date - pd.Timedelta(days=STATUS_INFERENCE_WINDOW_DAYS + 1)
+
+    df = pd.DataFrame({
+        "ticker": ["RECENT3", "RECENT3", "OLD3", "OLD3"],
+        "trade_date": [
+            max_date - pd.Timedelta(days=30), max_date,
+            old_last_trade - pd.Timedelta(days=10), old_last_trade,
+        ],
+    })
+    company_info = pd.DataFrame({
+        "ticker": ["OTHER3"],
+        "cvm_code": ["1"],
+        "status": ["ATIVO"],
+    })
+
+    result = merge_company_info(df, company_info)
+
+    assert (result.loc[result["ticker"] == "RECENT3", "status"] == "ATIVO").all()
+    assert (result.loc[result["ticker"] == "OLD3", "status"] == "CANCELADA").all()
+
+
+def test_merge_dividends_flags_missing_data() -> None:
+    """A ticker with no dividend rows at all gets has_dividends=0, distinct
+    from a ticker with real (even old, out-of-window) dividend history — so
+    downstream div_yield_12m==0 isn't ambiguous with 'never collected'."""
+    dataset = pd.DataFrame({
+        "ticker": ["HASDIV", "HASDIV", "NODATA", "NODATA"],
+        "trade_date": pd.to_datetime(
+            ["2026-01-01", "2026-06-01", "2026-01-01", "2026-06-01"]
+        ),
+    })
+    dividends = pd.DataFrame({
+        "ticker": ["HASDIV"],
+        "ex_date": pd.to_datetime(["2020-01-01"]),
+        "value_per_share": [1.0],
+    })
+
+    result = merge_dividends(dataset, dividends)
+
+    assert (result.loc[result["ticker"] == "HASDIV", "has_dividends"] == 1).all()
+    assert (result.loc[result["ticker"] == "NODATA", "has_dividends"] == 0).all()
+
+
 def test_merge_applies_filing_lag() -> None:
     """merge_asof only picks up a fundamental once its statutory filing lag has elapsed
     (T31: reference_date is the fiscal quarter-end, not the real filing date)."""
@@ -414,6 +465,7 @@ def test_merge_applies_filing_lag() -> None:
     prices = pd.DataFrame({
         "ticker": ["A", "A", "A"],
         "trade_date": [ref_date, available - pd.Timedelta(days=1), available],
+        "close": [100.0, 100.0, 100.0],
     })
 
     result = merge_prices_and_fundamentals(prices, fundamentals)
@@ -440,6 +492,7 @@ def test_merge_honors_actual_filing_date() -> None:
         "ticker": ["EARLY", "EARLY", "LATE", "LATE"],
         "trade_date": [early - pd.Timedelta(days=1), early,
                        ref_date + pd.Timedelta(days=45), late],
+        "close": [100.0, 100.0, 100.0, 100.0],
     })
 
     result = merge_prices_and_fundamentals(prices, fundamentals).set_index(
@@ -503,6 +556,101 @@ def test_volatility_percentile_no_lookahead() -> None:
             full.iloc[i]["volatility_60d_percentile"],
             truncated.iloc[i]["volatility_60d_percentile"],
         )
+
+
+def _fill_advanced_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Constant-fill every column compute_advanced_features touches but this
+    test doesn't care about, so callers only need to set up the columns
+    relevant to what they're testing."""
+    defaults = {
+        "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0, "shares_outstanding": 1000.0,
+        "net_revenue": 500.0, "net_income": 50.0, "revenue_growth_yoy": 0.05,
+        "earnings_growth_yoy": 0.03, "volatility_20d": 0.1, "volatility_60d": 0.1,
+        "adj_close": 100.0, "pl": 10.0, "drawdown": 0.0, "pvp": 2.0, "roe": 0.15,
+        "debt_equity": 0.5, "div_yield_12m": 0.03, "return_1m": 0.01, "return_3m": 0.02,
+        "return_12m": 0.05, "net_margin": 0.1, "roa": 0.05, "selic": 0.1,
+    }
+    for col, val in defaults.items():
+        if col not in df.columns:
+            df[col] = val
+    return df
+
+
+def test_momentum_vs_sector_nan_for_sector_of_one() -> None:
+    """A ticker alone in its sector (e.g. B3SA3 in "Bolsas de Valores") has no
+    peer to compare against: 'return - mean(return of itself)' trivially gives
+    0.0, which reads as 'moved exactly with its sector' — a lie, since there
+    is no sector. Must be NaN instead, same treatment as *_zscore_sector."""
+    date = pd.Timestamp("2026-01-01")
+    df = pd.DataFrame({
+        "ticker": ["LONE", "PEER1", "PEER2"],
+        "sector": ["Solo", "Multi", "Multi"],
+        "trade_date": [date] * 3,
+        "reference_date": [date] * 3,
+        "return_1m": [0.05, 0.05, 0.03],
+        "return_3m": [0.05, 0.05, 0.03],
+        "return_12m": [0.05, 0.05, 0.03],
+        "div_yield_12m": [0.02, 0.02, 0.04],
+        "pl": [10.0, 12.0, 8.0],
+    })
+    df = _fill_advanced_feature_columns(df)
+    result = compute_advanced_features(df).set_index("ticker")
+
+    lone = result.loc["LONE"]
+    assert pd.isna(lone["momentum_vs_sector_1m"])
+    assert pd.isna(lone["momentum_vs_sector_3m"])
+    assert pd.isna(lone["momentum_vs_sector_12m"])
+    assert pd.isna(lone["div_yield_sector_percentile"])
+    assert pd.isna(lone["pl_zscore_sector"])
+
+    # PEER1/PEER2 share a real sector -> real (non-NaN) relative values
+    peer_mean = (0.05 + 0.03) / 2
+    assert approx(result.loc["PEER1", "momentum_vs_sector_1m"], 0.05 - peer_mean)
+    assert approx(result.loc["PEER2", "momentum_vs_sector_1m"], 0.03 - peer_mean)
+    assert not pd.isna(result.loc["PEER1", "pl_zscore_sector"])
+    assert not pd.isna(result.loc["PEER2", "pl_zscore_sector"])
+
+
+def test_trend_4q_uses_real_quarters_not_daily_rows() -> None:
+    """roe_trend_4q (and friends) must diff over 4 fiscal quarters, not 4 rows
+    of the daily panel. Fundamentals are forward-filled for ~60 trading days
+    between filings, so diffing raw daily rows is 0 almost every day with a
+    spurious blip for the few rows right after a new filing lands."""
+    quarter_ends = pd.to_datetime(
+        ["2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31", "2024-03-31", "2024-06-30"]
+    )
+    roe_by_quarter = [8.0, 9.0, 9.5, 10.0, 12.0, 15.0]
+
+    rows = []
+    for qe, roe in zip(quarter_ends, roe_by_quarter):
+        for d in pd.date_range(qe, periods=60):  # forward-filled daily rows within the quarter
+            rows.append({"trade_date": d, "reference_date": qe, "roe": roe})
+    df = pd.DataFrame(rows)
+    df["ticker"] = "A"
+    df["sector"] = "Tech"
+    df = _fill_advanced_feature_columns(df)
+
+    result = compute_advanced_features(df)
+
+    # First 4 quarters have no filing 4 quarters back yet -> NaN, not 0
+    for qe in quarter_ends[:4]:
+        block = result.loc[result["reference_date"] == qe, "roe_trend_4q"]
+        assert block.isna().all(), f"{qe}: expected NaN (no quarter 4 back yet)"
+
+    # 5th quarter (2024-03-31): 12.0 - 8.0 = 4.0, constant across every daily
+    # row of the quarter -- not just a 4-row blip right after the filing
+    block5 = result.loc[result["reference_date"] == quarter_ends[4], "roe_trend_4q"]
+    assert (block5 == 4.0).all()
+
+    # 6th quarter (2024-06-30): 15.0 - 9.0 = 6.0
+    block6 = result.loc[result["reference_date"] == quarter_ends[5], "roe_trend_4q"]
+    assert (block6 == 6.0).all()
+
+    # Regression guard against the old daily-row bug: every row within a
+    # quarter must share the exact same trend value (dropna=False so an
+    # all-NaN quarter also counts as "consistent").
+    per_quarter_values = result.groupby("reference_date")["roe_trend_4q"].nunique(dropna=False)
+    assert (per_quarter_values <= 1).all(), "trend value must be constant within a quarter"
 
 
 if __name__ == "__main__":

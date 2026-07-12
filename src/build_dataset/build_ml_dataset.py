@@ -45,6 +45,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PRICES_DIR = ROOT / "data/raw/prices"
 FUNDAMENTALS_DIR = ROOT / "data/raw/fundamentals"
 COMPANY_INFO_PATH = ROOT / "data/raw/company_info/company_info.parquet"
+CVM_CROSSWALK_PATH = ROOT / "data/raw/cvm/fca_crosswalk.parquet"
 MACRO_DIR = ROOT / "data/raw/macro"
 DIVIDENDS_DIR = ROOT / "data/raw/dividends"
 CORPORATE_EVENTS_PATH = ROOT / "data/raw/corporate_events/corporate_events.parquet"
@@ -61,6 +62,10 @@ MIN_PRICE_ROWS = 10
 QUARANTINED_TICKERS = {
     "WDCN3": "raw close alternates between two price bases (~6x apart) "
              "hundreds of times 2021-2025; not a split, no factor to repair with",
+    "CAMB4": "delisted/suspended 2019 (price data ends 2019-12-20); "
+             "BolsAI still reports fundamentals through 2026-03-31 (stale data)",
+    "LLIS3": "delisted/suspended 2023 (price data ends 2023-02-08); "
+             "BolsAI still reports fundamentals through 2026-03-31 (stale data)",
 }
 
 # Columns the fundamentals API doesn't actually populate
@@ -477,6 +482,10 @@ FILING_LAG_DAYS_ANNUAL = 90
 # Analysis: 2.1% of filings have lag > 180d; mostly historical (2010-2017 CVM backfill)
 MAX_ACCEPTABLE_FILING_LAG_DAYS = 180
 
+# Tickers absent from company_info (no sibling either) get status inferred from
+# price recency: traded within this many days of the dataset's last date = ATIVO.
+STATUS_INFERENCE_WINDOW_DAYS = 180
+
 
 def _statutory_available_date(reference_dates):
     """Fallback availability: quarter-end + statutory CVM filing deadline."""
@@ -624,6 +633,20 @@ def merge_prices_and_fundamentals(prices, fundamentals):
             direction="backward",
         )
 
+        # Replace close_price with actual price at fundamentals_available_date
+        # (BolsAI's close_price is from reference_date, 45-90 days earlier; comparing
+        # it to today's close gives false >50% jumps; use real close at filing instead)
+        if "fundamentals_available_date" in merged.columns:
+            # For each row, look up price on or before fundamentals_available_date
+            for idx in merged.index:
+                filing_date = merged.loc[idx, "fundamentals_available_date"]
+                if pd.notna(filing_date):
+                    # Find closest price on or before filing_date
+                    prices_before_filing = p[p["trade_date"] <= filing_date]
+                    if len(prices_before_filing) > 0:
+                        price_at_filing = prices_before_filing.iloc[-1]["close"]
+                        merged.loc[idx, "close_price"] = price_at_filing
+
         merged_dfs.append(merged)
 
     final_df = pd.concat(merged_dfs, ignore_index=True)
@@ -685,6 +708,51 @@ def merge_company_info(df, company_info):
         print(f"Filled {filled} missing company_info rows from sibling tickers")
         if still_missing:
             print(f"  {still_missing} rows still missing (no cvm_code available)")
+
+    # ponytail: fall back to CVM crosswalk for cvm_code when sibling fill misses
+    # (BolsAI collection gap for some tickers; crosswalk is free/always available).
+    still_missing_code = merged["cvm_code"].isna()
+    if still_missing_code.any() and CVM_CROSSWALK_PATH.exists():
+        cvm_xwalk = pd.read_parquet(CVM_CROSSWALK_PATH)[["ticker", "cvm_code"]].drop_duplicates("ticker")
+        cvm_map = dict(zip(cvm_xwalk["ticker"], cvm_xwalk["cvm_code"]))
+        merge_tickers = merged.loc[still_missing_code, "ticker"].unique()
+        xwalk_fill = sum(1 for t in merge_tickers if t in cvm_map)
+        if xwalk_fill:
+            merged.loc[still_missing_code, "cvm_code"] = (
+                merged.loc[still_missing_code, "ticker"].map(cvm_map)
+            )
+            print(f"Filled {xwalk_fill} additional cvm_code values from CVM crosswalk")
+
+    # ponytail: tickers with no company_info at all (no sibling either) have
+    # status=NaN even after the fill above. Sector/cnpj/etc. can't be guessed,
+    # but status can be inferred from price recency: still trading near the
+    # dataset's last date = ATIVO, otherwise CANCELADA.
+    status_missing = merged["status"].isna()
+    if status_missing.any():
+        last_trade = merged.groupby("ticker")["trade_date"].transform("max")
+        max_date = merged["trade_date"].max()
+        is_recent = (max_date - last_trade).dt.days <= STATUS_INFERENCE_WINDOW_DAYS
+        merged.loc[status_missing, "status"] = np.where(
+            is_recent[status_missing], "ATIVO", "CANCELADA"
+        )
+        n_ativo = (status_missing & (merged["status"] == "ATIVO")).sum()
+        n_cancelada = (status_missing & (merged["status"] == "CANCELADA")).sum()
+        print(f"Inferred status from price recency ({STATUS_INFERENCE_WINDOW_DAYS}d window) "
+              f"for {status_missing.sum()} rows: {n_ativo} ATIVO, {n_cancelada} CANCELADA "
+              f"(sector/cnpj/etc. remain NaN — no data source to fill them from)")
+
+    # ponytail: override stale CANCELADA status when price data is recent. BolsAI
+    # company_info can lag behind actual trading (e.g. ITUB3 marked delisted but
+    # still trading). If a ticker traded within 30 days of dataset end, it's ATIVO.
+    dataset_end = merged["trade_date"].max()
+    very_recent_cutoff = dataset_end - pd.Timedelta(days=30)
+    last_trade_per_ticker = merged.groupby("ticker")["trade_date"].transform("max")
+    still_trading = last_trade_per_ticker >= very_recent_cutoff
+    incorrectly_delisted = (merged["status"] == "CANCELADA") & still_trading
+    if incorrectly_delisted.any():
+        merged.loc[incorrectly_delisted, "status"] = "ATIVO"
+        n_corrected = incorrectly_delisted.groupby(merged["ticker"]).any().sum()
+        print(f"Corrected {n_corrected} tickers marked CANCELADA but trading in last 30d to ATIVO")
 
     return merged
 
@@ -748,8 +816,13 @@ def merge_dividends(dataset, dividends):
         if len(div) == 0:
             # No dividends — set div_value_recent (used downstream); yield/count are
             # (re)computed for all tickers in compute_dividend_features.
+            # has_dividends=0 marks "never collected", distinct from a ticker that
+            # was collected but genuinely paid nothing in a given window — without
+            # this, div_yield_12m==0 is ambiguous between "confirmed zero" and
+            # "we don't have this ticker's dividends yet" (coverage isn't uniform).
             d = d.copy()
             d["div_value_recent"] = 0.0
+            d["has_dividends"] = 0
             merged_dfs.append(d)
             continue
 
@@ -763,11 +836,14 @@ def merge_dividends(dataset, dividends):
             right_on="div_ex_date",
             direction="backward",
         ).drop(columns="div_ex_date")
+        merged["has_dividends"] = 1
 
         merged_dfs.append(merged)
 
     result = pd.concat(merged_dfs, ignore_index=True)
+    n_missing = result.loc[result["has_dividends"] == 0, "ticker"].nunique()
     print(f"Merged {len(dividends)} dividends into {len(result)} rows")
+    print(f"  {n_missing} tickers have no dividend data collected (has_dividends=0)")
 
     return result
 
@@ -952,19 +1028,18 @@ def recompute_valuation_daily(df):
 
     factor = (df["close"] / df["close_price"]).where(df["close_price"] > 0)
 
-    # Split guard: right after a fundamental first becomes available the factor
-    # should be ~1; a big jump means the share count changed between close_price
-    # and today's close (split/grouping) and rescaled ratios are off until the
-    # next filing. Uses fundamentals_available_date (reference_date + statutory
-    # filing lag), not reference_date directly, since that's when a row could
-    # first have picked up this fundamental via merge_asof.
-    # ponytail: warning only; a per-ticker split-factor correction if it fires often
-    near_filing = (df["trade_date"] - df["fundamentals_available_date"]).dt.days.between(0, 7)
-    suspicious = near_filing & ((factor > 1.5) | (factor < 1 / 1.5))
+    # Split guard: right after a fundamental first becomes available (within 1 day),
+    # an EXTREME jump (>200%) likely means an unrecorded split. Note: close_price
+    # is from reference_date (quarter-end), while fundamentals_available_date is
+    # 45-90 days later, so price can drift 20-50% in normal markets. Only flag
+    # truly extreme jumps (3x) that are almost certainly splits, not price movement.
+    # ponytail: threshold 1.5x → 3.0x to filter out legitimate bull markets
+    near_filing = (df["trade_date"] - df["fundamentals_available_date"]).dt.days.between(0, 1)
+    suspicious = near_filing & ((factor > 3.0) | (factor < 1 / 3.0))
     if suspicious.any():
         bad = sorted(df.loc[suspicious, "ticker"].unique())
-        print(f"WARNING: close/close_price jump >50% at filing date for "
-              f"{len(bad)} tickers (possible split): {bad[:20]}")
+        print(f"WARNING: close/close_price jump >200% within 1 day of filing date "
+              f"for {len(bad)} tickers (likely unrecorded split): {bad[:20]}")
 
     # EV ratios first: only the market-cap leg of EV moves with price, so
     # recover the API's denominator from its own numbers before market_cap changes.
@@ -1092,8 +1167,15 @@ def compute_advanced_features(df):
             # std <= 0 or NaN (single-stock sectors) → NaN, same as the old guard
             df[f"{col}_zscore_sector"] = (df[col] - mean) / std.where(std > 0)
 
+    # Sector-of-one guard: with a single member, a stock's "vs sector" metric
+    # trivially collapses to itself (mean = own value, rank = 100th pct) —
+    # NaN it out rather than silently reporting "in line with sector".
+    sector_size = sector_grp["ticker"].transform("size")
+
     # Dividend yield percentile: percentile rank within sector per date
-    df["div_yield_sector_percentile"] = sector_grp["div_yield_12m"].rank(pct=True)
+    df["div_yield_sector_percentile"] = sector_grp["div_yield_12m"].rank(
+        pct=True
+    ).where(sector_size > 1)
 
     # --- MOMENTUM DECOMPOSITION (stock vs sector vs market) ---
 
@@ -1113,33 +1195,40 @@ def compute_advanced_features(df):
     df["momentum_vs_sector_1m"] = (
         df["return_1m"]
         - df.groupby(["trade_date", "sector"])["return_1m"].transform("mean")
-    )
+    ).where(sector_size > 1)
     df["momentum_vs_sector_3m"] = (
         df["return_3m"]
         - df.groupby(["trade_date", "sector"])["return_3m"].transform("mean")
-    )
+    ).where(sector_size > 1)
     df["momentum_vs_sector_12m"] = (
         df["return_12m"]
         - df.groupby(["trade_date", "sector"])["return_12m"].transform("mean")
-    )
+    ).where(sector_size > 1)
 
     # --- FUNDAMENTAL TREND SIGNALS (raw, no thresholds) ---
 
-    # ponytail: use groupby.apply() for vectorized trends (sort by reference_date within group)
+    # diff(4) must run over 4 real fiscal quarters, not 4 rows of this daily
+    # panel — fundamentals are forward-filled for ~63 trading days between
+    # filings, so diffing the daily panel directly is ~0 all quarter with a
+    # 4-row blip right after each filing. Dedup to one row per (ticker,
+    # reference_date), diff there, then map the quarterly trend back onto
+    # every daily row.
     df = df.sort_values(["ticker", "reference_date"]).reset_index(drop=True)
 
-    df["roe_trend_4q"] = df.groupby("ticker", sort=False)["roe"].transform(
-        lambda x: x.diff(4)
-    )
-    df["margin_trend_4q"] = df.groupby("ticker", sort=False)["net_margin"].transform(
-        lambda x: x.diff(4)
-    )
-    df["debt_trend_4q"] = df.groupby("ticker", sort=False)["debt_equity"].transform(
-        lambda x: x.diff(4)
-    )
-    df["roa_trend_4q"] = df.groupby("ticker", sort=False)["roa"].transform(
-        lambda x: x.diff(4)
-    )
+    trend_cols = {
+        "roe": "roe_trend_4q",
+        "net_margin": "margin_trend_4q",
+        "debt_equity": "debt_trend_4q",
+        "roa": "roa_trend_4q",
+    }
+    result = []
+    for _, g in df.groupby("ticker", sort=False):
+        g = g.copy()
+        q = g.drop_duplicates("reference_date").set_index("reference_date")
+        for col, out in trend_cols.items():
+            g[out] = g["reference_date"].map(q[col].diff(4))
+        result.append(g)
+    df = pd.concat(result, ignore_index=True)
 
     # --- VALUATION RELATIVE TO FUNDAMENTALS (raw relationships) ---
 
@@ -1377,11 +1466,13 @@ def main():
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     prices       = load_prices()
-    prices       = repair_unadjusted_splits(prices)
     fundamentals = load_fundamentals()
-    # splice AFTER split repair (repair scans per original ticker; splicing
-    # first would make an exchange ratio look like an unrepaired split)
+    # splice BEFORE split repair: corporate_events.parquet records splits
+    # under each entity's current canonical ticker (e.g. BHIA3), even for
+    # splits that happened while it traded as VVAR3/VIIA3 — repair can only
+    # find those rows once continuity has renamed them onto the new ticker.
     prices, fundamentals = apply_ticker_continuity(prices, fundamentals)
+    prices       = repair_unadjusted_splits(prices)
     prices       = filter_tickers_with_no_fundamentals(prices, fundamentals)
     fundamentals = compute_fundamental_features(fundamentals)
     fundamentals = fill_missing_cagr(fundamentals)

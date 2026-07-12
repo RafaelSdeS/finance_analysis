@@ -168,6 +168,62 @@
       "type": "rename",
       "ratio": 1.0,
       "notes": "Odontoprev ticker refresh (Bradsaude branding). Ratio verified empirically: raw prices 100% identical close across the full overlapping history. Direction verified via company_info: ODPV3 absent from the current registry, SAUD3 is ATIVO -- same signature as EMBR3->EMBJ3/ELET3->AXIA3. Exact rename date NOT independently confirmed (placeholder within the late-2025/early-2026 B3 ticker-refresh wave); harmless since apply_ticker_continuity() derives the real splice boundary from SAUD3's own first trade date, not this field -- verify against B3/CVM if the date itself is ever needed."
+    },
+    {
+      "old": "BVMF3",
+      "new": "B3SA3",
+      "date": "2018-03-26",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "BM&FBOVESPA (BVMF3) merged with Cetip to form B3 S.A. (B3SA3). Web-verified corporate event, not a coincidence: BVMF3 last trade 2018-03-23 @ R$25.43, B3SA3 first trade 2018-03-26 @ R$25.66 (ratio 1.009, effectively 1:1). Splice creates a continuous 18-year B3 history."
+    },
+    {
+      "old": "BKBR3",
+      "new": "ZAMP3",
+      "date": "2022-10-26",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "BK Brasil renamed Zamp S.A. (multi-brand rebrand: Burger King + Popeyes). Web-verified: ticker change effective 2022-10-26. Data confirms adjacency: BKBR3 last trade 2022-10-25 @ R$7.63, ZAMP3 first trade 2022-10-26 @ R$7.57 (ratio 0.992, effectively 1:1)."
+    },
+    {
+      "old": "CARD3",
+      "new": "CSUD3",
+      "date": "2022-09-15",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "CSU CardSystem renamed CSU Digital (payments/fintech repositioning). Web-verified: ticker change effective 2022-09-15. Data confirms adjacency: CARD3 last trade 2022-09-14 @ R$14.51, CSUD3 first trade 2022-09-15 @ R$15.12 (ratio 1.042, effectively 1:1)."
+    },
+    {
+      "old": "WIZS3",
+      "new": "WIZC3",
+      "date": "2023-02-09",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Wiz Solucoes e Corretagem de Seguros renamed Wiz Co (strategic repositioning announced 2022-11-29). Web-verified: ticker change effective 2023-02-09. Data confirms adjacency: WIZS3 last trade 2023-02-08 @ R$7.16, WIZC3 first trade 2023-02-09 @ R$6.80 (ratio 0.950, effectively 1:1)."
+    },
+    {
+      "old": "TRPL4",
+      "new": "ISAE4",
+      "date": "2024-11-18",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "ISA CTEEP renamed ISA Energia Brasil (national expansion beyond Sao Paulo concessions); ticker refresh TRPL3/TRPL4 -> ISAE3/ISAE4. Web-verified: effective 2024-11-18. Data confirms adjacency: TRPL4 last trade 2024-11-14 @ R$24.20, ISAE4 first trade 2024-11-18 @ R$24.07 (ratio 0.995, effectively 1:1)."
+    },
+    {
+      "old": "CELP3",
+      "new": "EQPA3",
+      "date": "2019-12-18",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Celpa (Centrais Eletricas do Para) renamed Equatorial Energia Para, common shares. Web-verified: Celpa brand replaced by Equatorial Para in Dec 2019. Data confirms adjacency: CELP3 last trade 2019-12-17 @ R$2.79, EQPA3 first trade 2019-12-18 @ R$2.89 (ratio 1.036, effectively 1:1). NOTE: CELP5/CELP6/CELP7 are separate preferred share classes of the same company that traded in PARALLEL with CELP3 for years (not a sequential handoff) and have no surviving preferred-class successor (EQPA5/6/7 have no fundamentals coverage and are excluded from the build) -- deliberately left unspliced; treated via status inference instead."
+    },
+    {
+      "old": "ESTC3",
+      "new": "YDUQ3",
+      "date": "2019-07-23",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Estacio Participacoes renamed Yduqs Participacoes (new holding brand, Estacio brand retained for higher-ed operations). Web-verified: ticker change effective 2019-07-23. Data confirms adjacency: ESTC3 last trade 2019-07-22 @ R$33.52, YDUQ3 first trade 2019-07-23 @ R$34.36 (ratio 1.025, effectively 1:1)."
     }
   ]
 }

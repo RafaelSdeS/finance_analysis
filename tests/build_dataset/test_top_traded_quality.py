@@ -206,9 +206,6 @@ def validate(df, universe_size):
         if len(ohlc_violations) > 0:
             print("\nOHLC violations (first 10):")
             print(ohlc_violations.head(10).to_string(index=False))
-        if len(gap_violations) > 0:
-            print("\nTrading-calendar gap violations (first 10):")
-            print(gap_violations.head(10).to_string(index=False))
         return False
 
     print("VALIDATION PASSED")

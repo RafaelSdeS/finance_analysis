@@ -27,7 +27,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "build_dataset"))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from test_utils import print_header, print_separator  # noqa: E402
+from test_utils import print_header  # noqa: E402
 
 from cagr_handler import fill_cagr_columns, get_cagr_statistics
 
