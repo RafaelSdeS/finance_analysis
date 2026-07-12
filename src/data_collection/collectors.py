@@ -77,10 +77,10 @@ def _merge_save(df_new, path, date_col, validator, ticker_label=""):
 # BolsAI: all tickers (full-scale ticker universe)
 # ---------------------------------------------------------------------------
 
-def get_all_tickers() -> list[str]:
-    import re
+def get_all_tickers_raw() -> list[str]:
+    """Full /stocks/ universe, unfiltered (~5,400 tickers incl. BDRs, funds,
+    and delisted names — the endpoint enumerates everything ever traded)."""
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
-    _standard = re.compile(r"^[A-Z0-9]{4}[3-8]$")
     try:
         tickers, offset = [], 0
         while True:
@@ -92,14 +92,20 @@ def get_all_tickers() -> list[str]:
             offset += len(batch)
             if len(batch) < 500:
                 break
-        # exclude BDRs (34/35), FIIs/ETFs (11), and non-standard suffixes
-        # But explicitly include BOVA11 (iShares Bovespa ETF, used as IBOV benchmark)
-        result = sorted(t for t in tickers if _standard.match(t))
-        if "BOVA11" not in result:
-            result.append("BOVA11")
-        return sorted(result)
+        return tickers
     finally:
         c.close()
+
+
+def get_all_tickers() -> list[str]:
+    import re
+    _standard = re.compile(r"^[A-Z0-9]{4}[3-8]$")
+    # exclude BDRs (34/35), FIIs/ETFs (11), and non-standard suffixes
+    # But explicitly include BOVA11 (iShares Bovespa ETF, used as IBOV benchmark)
+    result = sorted(t for t in get_all_tickers_raw() if _standard.match(t))
+    if "BOVA11" not in result:
+        result.append("BOVA11")
+    return sorted(result)
 
 
 # ---------------------------------------------------------------------------

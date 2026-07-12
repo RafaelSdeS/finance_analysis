@@ -67,6 +67,7 @@ MACRO_DIR = RAW_DIR / "macro"
 COMPANY_DIR = RAW_DIR / "company_info"
 DIVIDENDS_DIR = RAW_DIR / "dividends"
 CORP_EVENTS_DIR = RAW_DIR / "corporate_events"
+CVM_DIR = RAW_DIR / "cvm"           # CVM open-data caches (crosswalk, statements, shares)
 CHECKPOINT_ROOT = PROJECT / "artifacts/checkpoints"
 LOG_DIR = PROJECT / "artifacts/logs/collection"
 
