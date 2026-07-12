@@ -53,7 +53,7 @@ PRICE_CHUNK_YEARS = 10      # ~250 trading days/yr * 10 = 2500 rows < cap
 START_DATE = "2000-01-01"   # backfill floor; API returns what it has
 
 # --- HTTP retry/backoff ---
-MAX_RETRIES = 0             # fail fast on first error; skip-list catches no-data tickers
+MAX_RETRIES = 1             # fail fast on first error; skip-list catches no-data tickers
 BACKOFF_BASE = 1            # seconds; wait = min(BACKOFF_BASE * 2**attempt, BACKOFF_MAX)
 BACKOFF_MAX = 30
 HTTP_TIMEOUT = 60
