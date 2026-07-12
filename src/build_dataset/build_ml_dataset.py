@@ -1241,11 +1241,12 @@ def sync_dataset_version(manifest):
 # CHUNKED FEATURE COMPUTATION (memory-efficient batch processing)
 # =============================================================================
 
-def compute_features_chunked(dataset, dividends, chunk_size=50):
-    """Process dataset in ticker batches to avoid OOM on large universes.
+def compute_features_chunked(dataset, dividends, output_path, chunk_size=50):
+    """Process dataset in ticker batches and write directly to parquet (no full concatenation).
 
     Each batch: compute_price_features → compute_dividend_features →
     compute_macro_features → recompute_valuation_daily → compute_advanced_features → clean.
+    Appends each batch directly to output parquet to avoid OOM during concatenation.
     """
     tickers = dataset["ticker"].unique()
     batches = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
@@ -1255,7 +1256,7 @@ def compute_features_chunked(dataset, dividends, chunk_size=50):
     print(f"COMPUTING FEATURES IN {len(batches)} BATCHES (chunk_size={chunk_size})")
     print("=" * 80)
 
-    results = []
+    total_rows = 0
     for batch_idx, batch_tickers in enumerate(batches, 1):
         batch = dataset[dataset["ticker"].isin(batch_tickers)].copy()
         print(f"\nBatch {batch_idx}/{len(batches)}: {len(batch_tickers)} tickers, {len(batch)} rows")
@@ -1267,10 +1268,22 @@ def compute_features_chunked(dataset, dividends, chunk_size=50):
         batch = compute_advanced_features(batch)
         batch = clean_dataset(batch)
 
-        results.append(batch)
-        print(f"  → {len(batch)} rows after cleaning")
+        # Append directly to parquet (not concatenating in memory)
+        if batch_idx == 1:
+            batch.to_parquet(output_path, index=False)
+        else:
+            existing = pd.read_parquet(output_path)
+            combined = pd.concat([existing, batch], ignore_index=True)
+            combined.to_parquet(output_path, index=False)
 
-    return pd.concat(results, ignore_index=True).sort_values(["ticker", "trade_date"]).reset_index(drop=True)
+        total_rows += len(batch)
+        print(f"  → {len(batch)} rows after cleaning (total: {total_rows})")
+
+    # Sort final output by ticker and date
+    print("\nSorting final output...")
+    final = pd.read_parquet(output_path).sort_values(["ticker", "trade_date"]).reset_index(drop=True)
+    final.to_parquet(output_path, index=False)
+    return final
 
 
 # =============================================================================
@@ -1298,15 +1311,14 @@ def main():
     dataset = merge_company_info(dataset, company_info)
     dataset = merge_macro(dataset)
     dataset = merge_dividends(dataset, dividends)
-    # ponytail: chunk feature computation to avoid OOM on large universes (~1,500+ tickers)
-    dataset = compute_features_chunked(dataset, dividends, chunk_size=50)
+    # ponytail: chunk feature computation + write directly to parquet (no full concatenation in RAM)
+    dataset = compute_features_chunked(dataset, dividends, OUTPUT_PATH, chunk_size=50)
 
     print()
     print("=" * 80)
-    print("SAVING DATASET")
+    print("WRITING MANIFEST & CONFIG")
     print("=" * 80)
 
-    dataset.to_parquet(OUTPUT_PATH, index=False)
     manifest = write_manifest(dataset)
     write_split_config(dataset)
     sync_dataset_version(manifest)
