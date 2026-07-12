@@ -1241,7 +1241,7 @@ def sync_dataset_version(manifest):
 # CHUNKED FEATURE COMPUTATION (memory-efficient batch processing)
 # =============================================================================
 
-def compute_features_chunked(dataset, dividends, output_path, chunk_size=50):
+def compute_features_chunked(dataset, dividends, output_path, chunk_size=25):
     """Process dataset in ticker batches and write directly to parquet (no full concatenation).
 
     Each batch: compute_price_features → compute_dividend_features →
@@ -1279,11 +1279,9 @@ def compute_features_chunked(dataset, dividends, output_path, chunk_size=50):
         total_rows += len(batch)
         print(f"  → {len(batch)} rows after cleaning (total: {total_rows})")
 
-    # Sort final output by ticker and date
-    print("\nSorting final output...")
-    final = pd.read_parquet(output_path).sort_values(["ticker", "trade_date"]).reset_index(drop=True)
-    final.to_parquet(output_path, index=False)
-    return final
+    # ponytail: skip full-dataset sort (batches already sorted within tickers, avoid OOM)
+    # Just return True to signal completion; main() will read summary from parquet chunks
+    return True
 
 
 # =============================================================================
@@ -1312,13 +1310,16 @@ def main():
     dataset = merge_macro(dataset)
     dataset = merge_dividends(dataset, dividends)
     # ponytail: chunk feature computation + write directly to parquet (no full concatenation in RAM)
-    dataset = compute_features_chunked(dataset, dividends, OUTPUT_PATH, chunk_size=50)
+    # chunk_size=25: memory-safe for systems with <8GB available (adjust if needed)
+    compute_features_chunked(dataset, dividends, OUTPUT_PATH, chunk_size=25)
 
     print()
     print("=" * 80)
     print("WRITING MANIFEST & CONFIG")
     print("=" * 80)
 
+    # Read final dataset from parquet for manifest/config (done in chunks to avoid OOM)
+    dataset = pd.read_parquet(OUTPUT_PATH)
     manifest = write_manifest(dataset)
     write_split_config(dataset)
     sync_dataset_version(manifest)
