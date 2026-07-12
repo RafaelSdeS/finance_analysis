@@ -179,8 +179,21 @@ def _fetch_price_window(c, ticker, start, end):
 def collect_prices(tickers: list[str], mode: str):
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
     cp = checkpoint.load("prices", mode)
+    # tickers the API has no data for (persistent 500s/404s on dead names, or
+    # empty history): recorded once, skipped on every rerun without burning the
+    # retry/backoff budget again. Delete "_skip" from the checkpoint to force retry.
+    skip = set(cp.get("_skip", []))
+
+    def _mark_skip(ticker):
+        skip.add(ticker)
+        cp["_skip"] = sorted(skip)
+        checkpoint.save("prices", mode, cp)
+
     try:
         for ticker in tickers:
+            if ticker in skip:
+                log.info("prices %s: in skip list (no data on previous run)", ticker)
+                continue
             try:
                 path = config.PRICES_DIR / f"{ticker}.parquet"
                 if path.exists():
@@ -203,6 +216,8 @@ def collect_prices(tickers: list[str], mode: str):
                     records += _fetch_price_window(c, ticker, s, e)
                 if not records:
                     log.info("prices %s: no new rows", ticker)
+                    if not last:  # full-history fetch came back empty = API has nothing
+                        _mark_skip(ticker)
                     continue
 
                 df = pd.DataFrame(records).rename(columns=PRICE_RENAME)
@@ -216,6 +231,7 @@ def collect_prices(tickers: list[str], mode: str):
                     log.info("prices %s: %d total rows", ticker, len(saved))
             except Exception as e:
                 log.warning("prices %s: skipping after error: %s", ticker, e)
+                _mark_skip(ticker)
             finally:
                 sleep(config.RATE_LIMIT_SLEEP)
     finally:
@@ -229,8 +245,20 @@ def collect_prices(tickers: list[str], mode: str):
 def collect_fundamentals(tickers: list[str], mode: str):
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
     cp = checkpoint.load("fundamentals", mode)
+    # same negative cache as collect_prices: BolsAI 404s fundamentals for
+    # delisted/BDR names — remember and skip on rerun (delete "_skip" to force retry)
+    skip = set(cp.get("_skip", []))
+
+    def _mark_skip(ticker):
+        skip.add(ticker)
+        cp["_skip"] = sorted(skip)
+        checkpoint.save("fundamentals", mode, cp)
+
     try:
         for ticker in tickers:
+            if ticker in skip:
+                log.info("fundamentals %s: in skip list (no data on previous run)", ticker)
+                continue
             try:
                 path = config.FUND_DIR / f"{ticker}.parquet"
                 if path.exists():
@@ -240,6 +268,7 @@ def collect_fundamentals(tickers: list[str], mode: str):
                 hist = d.get("history", [])
                 if not hist:
                     log.warning("fundamentals %s: no data", ticker)
+                    _mark_skip(ticker)
                     continue
 
                 df = pd.DataFrame(hist)
@@ -253,6 +282,7 @@ def collect_fundamentals(tickers: list[str], mode: str):
                     log.info("fundamentals %s: %d quarters", ticker, len(saved))
             except Exception as e:
                 log.warning("fundamentals %s: skipping after error: %s", ticker, e)
+                _mark_skip(ticker)
             finally:
                 sleep(config.RATE_LIMIT_SLEEP)
     finally:

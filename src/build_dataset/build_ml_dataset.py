@@ -390,14 +390,19 @@ def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
                               "adj_open", "adj_high", "adj_low", "adj_close")
                   if c in prices.columns]
 
+    # boundaries from the PRISTINE input: a leg spliced by an earlier event must
+    # not shift a later event's boundary (two legs onto one ticker would silently
+    # swallow the second leg instead of tripping the duplicate guard below)
+    first_trade = prices.groupby("ticker")["trade_date"].min()
+    first_fund = fundamentals.groupby("ticker")["reference_date"].min()
+
     for ev in events:
         old, new, kind = ev["old"], ev["new"], ev["type"]
         ratio = float(ev.get("ratio", 1.0))
         if kind == "tender" or not (prices["ticker"] == old).any():
             continue
 
-        new_dates = prices.loc[prices["ticker"] == new, "trade_date"]
-        boundary = new_dates.min() if not new_dates.empty else None
+        boundary = first_trade.get(new)
         if boundary is not None:
             # no date overlap: past the boundary the new ticker is the record
             prices = prices[~((prices["ticker"] == old) & (prices["trade_date"] >= boundary))]
@@ -409,8 +414,8 @@ def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
 
         f_old = fundamentals["ticker"] == old
         if kind == "rename":
-            f_boundary = fundamentals.loc[fundamentals["ticker"] == new, "reference_date"].min()
-            if pd.notna(f_boundary):
+            f_boundary = first_fund.get(new)
+            if f_boundary is not None and pd.notna(f_boundary):
                 fundamentals = fundamentals[~(f_old & (fundamentals["reference_date"] >= f_boundary))]
                 f_old = fundamentals["ticker"] == old
             fundamentals.loc[f_old, "ticker"] = new
