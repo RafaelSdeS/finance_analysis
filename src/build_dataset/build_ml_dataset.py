@@ -1238,6 +1238,42 @@ def sync_dataset_version(manifest):
 
 
 # =============================================================================
+# CHUNKED FEATURE COMPUTATION (memory-efficient batch processing)
+# =============================================================================
+
+def compute_features_chunked(dataset, dividends, chunk_size=50):
+    """Process dataset in ticker batches to avoid OOM on large universes.
+
+    Each batch: compute_price_features → compute_dividend_features →
+    compute_macro_features → recompute_valuation_daily → compute_advanced_features → clean.
+    """
+    tickers = dataset["ticker"].unique()
+    batches = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
+
+    print()
+    print("=" * 80)
+    print(f"COMPUTING FEATURES IN {len(batches)} BATCHES (chunk_size={chunk_size})")
+    print("=" * 80)
+
+    results = []
+    for batch_idx, batch_tickers in enumerate(batches, 1):
+        batch = dataset[dataset["ticker"].isin(batch_tickers)].copy()
+        print(f"\nBatch {batch_idx}/{len(batches)}: {len(batch_tickers)} tickers, {len(batch)} rows")
+
+        batch = compute_price_features(batch)
+        batch = compute_dividend_features(batch, dividends)
+        batch = compute_macro_features(batch)
+        batch = recompute_valuation_daily(batch)
+        batch = compute_advanced_features(batch)
+        batch = clean_dataset(batch)
+
+        results.append(batch)
+        print(f"  → {len(batch)} rows after cleaning")
+
+    return pd.concat(results, ignore_index=True).sort_values(["ticker", "trade_date"]).reset_index(drop=True)
+
+
+# =============================================================================
 # MAIN
 # =============================================================================
 
@@ -1262,12 +1298,8 @@ def main():
     dataset = merge_company_info(dataset, company_info)
     dataset = merge_macro(dataset)
     dataset = merge_dividends(dataset, dividends)
-    dataset = compute_price_features(dataset)
-    dataset = compute_dividend_features(dataset, dividends)
-    dataset = compute_macro_features(dataset)
-    dataset = recompute_valuation_daily(dataset)
-    dataset = compute_advanced_features(dataset)
-    dataset = clean_dataset(dataset)
+    # ponytail: chunk feature computation to avoid OOM on large universes (~1,500+ tickers)
+    dataset = compute_features_chunked(dataset, dividends, chunk_size=50)
 
     print()
     print("=" * 80)
