@@ -608,6 +608,26 @@ def merge_company_info(df, company_info):
         how="left",
     )
 
+    # ponytail: fill missing company_info from sibling tickers (same cvm_code).
+    # BolsAI returns only one ticker_primary per company, so ALPA3 exists in dataset
+    # but only ALPA4 is in company_info. Use sibling lookup to fill the gap.
+    missing_mask = merged["cvm_code"].isna()
+    if missing_mask.any():
+        siblings = company_siblings(company_info)
+        for cvm_code, tickers in siblings.items():
+            # Find any ticker from this company in company_info
+            info_row = company_info[company_info["cvm_code"] == cvm_code].iloc[0]
+            # Fill all rows with this cvm_code (including tickers not in company_info)
+            merged.loc[merged["cvm_code"] == cvm_code] = merged.loc[
+                merged["cvm_code"] == cvm_code
+            ].fillna(info_row)
+
+        still_missing = merged["cvm_code"].isna().sum()
+        filled = missing_mask.sum() - still_missing
+        print(f"Filled {filled} missing company_info rows from sibling tickers")
+        if still_missing:
+            print(f"  {still_missing} rows still missing (no cvm_code available)")
+
     return merged
 
 
