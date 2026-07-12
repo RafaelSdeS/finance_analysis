@@ -620,7 +620,7 @@ def merge_company_info(df, company_info):
             # Fill all rows with this cvm_code (including tickers not in company_info)
             merged.loc[merged["cvm_code"] == cvm_code] = merged.loc[
                 merged["cvm_code"] == cvm_code
-            ].fillna(info_row)
+            ].fillna(info_row.to_dict())
 
         still_missing = merged["cvm_code"].isna().sum()
         filled = missing_mask.sum() - still_missing
