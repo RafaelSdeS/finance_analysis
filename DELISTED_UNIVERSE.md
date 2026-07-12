@@ -20,7 +20,10 @@ company metadata.
 **CVM open-data spikes (2026-07-11, both PASS):**
 - FCA `valor_mobiliario` register carries `Codigo_Negociacao` (ticker) + CNPJ per filer —
   resolved 3/3 delisted anchors (SMLS3, LAME4, HGTX3). This is the ticker↔cvm_code crosswalk
-  BolsAI can't provide.
+  BolsAI can't provide. **Coverage ceiling:** CVM left `Codigo_Negociacao` empty before FCA
+  2018 (verified 2010–2017 all zero), so the crosswalk (677 tickers, 676 with cvm_code) only
+  reaches companies that filed FCA in 2018+ — pre-2018 delistings stay prices-only unless a
+  second crosswalk source (e.g. B3 InstrumentsConsolidatedFile) is added later.
 - FRE `capital_social` carries `Quantidade_Total_Acoes` per company/date → shares outstanding
   for market_cap/pl/pvp on delisted names. ITR/DFP zips confirmed to contain
   `DRE/BPA/BPP_{con,ind}` statement CSVs.

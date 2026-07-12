@@ -42,8 +42,10 @@ from . import client, collectors, config, validate
 log = logging.getLogger("cvm_statements")
 
 CVM_DOC = "https://dados.cvm.gov.br/dados/CIA_ABERTA/DOC/{doc}/DADOS/{doc_l}_cia_aberta_{year}.zip"
-START_YEAR = 2010  # CVM open-data coverage floor (same as filing_dates.py)
-TIMEOUT = 300
+START_YEAR = 2010  # CVM open-data coverage floor (same as filing_dates.py).
+                   # Note: FCA Codigo_Negociacao is empty in 2010 — "FCA 2010:
+                   # 0 ticker rows" is the data, not a bug; coverage starts 2011+.
+TIMEOUT = (15, 120)  # (connect, read) — fail fast on a stalled CVM connection
 RETRIES = 2
 
 CROSSWALK_PATH = config.CVM_DIR / "fca_crosswalk.parquet"
@@ -83,14 +85,18 @@ FLOW_COLS = list(DRE_ACCOUNTS.values())  # per-quarter; balances are point-in-ti
 def _fetch_zip(doc: str, year: int) -> zipfile.ZipFile | None:
     """One CVM yearly zip; None when the year isn't published (404)."""
     url = CVM_DOC.format(doc=doc.upper(), doc_l=doc.lower(), year=year)
+    log.info("%s %d: downloading...", doc, year)
     for attempt in range(RETRIES + 1):
         try:
             resp = requests.get(url, timeout=TIMEOUT)
             break
         except requests.RequestException as e:
             if attempt == RETRIES:
-                log.warning("%s %d: network error: %s", doc, year, e)
+                log.warning("%s %d: network error after %d attempts: %s",
+                            doc, year, RETRIES + 1, e)
                 return None
+            log.warning("%s %d: %s — retrying (%d/%d)", doc, year,
+                        type(e).__name__, attempt + 1, RETRIES)
     if resp.status_code == 404:
         return None
     resp.raise_for_status()
@@ -117,15 +123,25 @@ def _digits(s: str) -> str:
 # step: crosswalk (FCA valor_mobiliario -> ticker/cnpj/cvm_code)
 # ---------------------------------------------------------------------------
 
+_FCA_COLS = ["ticker", "cnpj", "corporate_name", "end_trading", "year"]
+
+
 def build_crosswalk() -> pd.DataFrame:
-    """ticker -> cnpj, cvm_code, corporate_name, end_trading. Latest FCA wins per ticker."""
+    """ticker -> cnpj, cvm_code, corporate_name, end_trading. Latest FCA wins per ticker.
+    Per-year FCA rows cached to data/raw/cvm/fca_{year}.parquet; only the current
+    year is re-downloaded on rerun (new filings arrive all year)."""
     config.CVM_DIR.mkdir(parents=True, exist_ok=True)
-    rows = []
-    for year in range(START_YEAR, date.today().year + 1):
+    current = date.today().year
+    frames = []
+    for year in range(START_YEAR, current + 1):
+        cache = config.CVM_DIR / f"fca_{year}.parquet"
+        if cache.exists() and year < current:
+            frames.append(pd.read_parquet(cache))
+            continue
         zf = _fetch_zip("FCA", year)
         if zf is None:
             continue
-        n = 0
+        rows = []
         for r in _read_csv(zf, f"fca_cia_aberta_valor_mobiliario_{year}.csv"):
             ticker = (r.get("Codigo_Negociacao") or "").strip().upper()
             if not _TICKER.match(ticker):
@@ -137,12 +153,15 @@ def build_crosswalk() -> pd.DataFrame:
                 "end_trading": (r.get("Data_Fim_Negociacao") or "").strip() or None,
                 "year": year,
             })
-            n += 1
-        log.info("FCA %d: %d ticker rows", year, n)
+        df_y = pd.DataFrame(rows, columns=_FCA_COLS)  # empty years cached too (2010 has no codes)
+        df_y.to_parquet(cache, index=False)
+        frames.append(df_y)
+        log.info("FCA %d: %d ticker rows", year, len(df_y))
 
-    if not rows:
+    all_rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_FCA_COLS)
+    if all_rows.empty:
         raise RuntimeError("no FCA data downloaded — CVM portal unreachable?")
-    df = (pd.DataFrame(rows)
+    df = (all_rows
           .sort_values("year")
           .drop_duplicates("ticker", keep="last")
           .drop(columns="year"))
@@ -284,14 +303,25 @@ def load_statements() -> pd.DataFrame:
 # step: shares outstanding (FRE capital_social)
 # ---------------------------------------------------------------------------
 
+_FRE_COLS = ["cnpj", "effective_date", "shares"]
+
+
 def collect_shares() -> pd.DataFrame:
-    """Per-cnpj timeline of total shares: (cnpj, effective_date, shares)."""
+    """Per-cnpj timeline of total shares: (cnpj, effective_date, shares).
+    Per-year FRE rows cached to data/raw/cvm/fre_{year}.parquet (zips are ~10 MB
+    each); only the current year is re-downloaded on rerun."""
     config.CVM_DIR.mkdir(parents=True, exist_ok=True)
-    rows = []
-    for year in range(START_YEAR, date.today().year + 1):
+    current = date.today().year
+    frames = []
+    for year in range(START_YEAR, current + 1):
+        cache = config.CVM_DIR / f"fre_{year}.parquet"
+        if cache.exists() and year < current:
+            frames.append(pd.read_parquet(cache))
+            continue
         zf = _fetch_zip("FRE", year)
         if zf is None:
             continue
+        rows = []
         for r in _read_csv(zf, f"fre_cia_aberta_capital_social_{year}.csv"):
             if r.get("Tipo_Capital") != "Capital Integralizado":
                 continue
@@ -306,8 +336,11 @@ def collect_shares() -> pd.DataFrame:
                 "effective_date": r.get("Data_Autorizacao_Aprovacao") or r.get("Data_Referencia"),
                 "shares": shares,
             })
-        log.info("FRE %d done", year)
-    df = pd.DataFrame(rows)
+        df_y = pd.DataFrame(rows, columns=_FRE_COLS)
+        df_y.to_parquet(cache, index=False)
+        frames.append(df_y)
+        log.info("FRE %d: %d rows", year, len(df_y))
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=_FRE_COLS)
     df["effective_date"] = pd.to_datetime(df["effective_date"], errors="coerce")
     df = (df.dropna(subset=["effective_date"])
             .sort_values("effective_date")
