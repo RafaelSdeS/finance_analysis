@@ -608,19 +608,30 @@ def merge_company_info(df, company_info):
         how="left",
     )
 
-    # ponytail: fill missing company_info from sibling tickers (same cvm_code).
-    # BolsAI returns only one ticker_primary per company, so ALPA3 exists in dataset
-    # but only ALPA4 is in company_info. Use sibling lookup to fill the gap.
+    # ponytail: fill missing company_info from sibling tickers (share classes,
+    # e.g. ALPA3/ALPA4). BolsAI only lists one ticker per company, so a sibling
+    # class can be entirely absent from company_info -- match by base ticker
+    # (trailing share-class digits stripped) rather than cvm_code, since a row
+    # missing company_info has no cvm_code of its own to match on.
     missing_mask = merged["cvm_code"].isna()
     if missing_mask.any():
-        siblings = company_siblings(company_info)
-        for cvm_code, tickers in siblings.items():
-            # Find any ticker from this company in company_info
-            info_row = company_info[company_info["cvm_code"] == cvm_code].iloc[0]
-            # Fill all rows with this cvm_code (including tickers not in company_info)
-            merged.loc[merged["cvm_code"] == cvm_code] = merged.loc[
-                merged["cvm_code"] == cvm_code
-            ].fillna(info_row.to_dict())
+        base = company_info["ticker"].str.replace(r"\d+$", "", regex=True)
+        info_by_base = (
+            company_info.assign(_base=base)
+            .dropna(subset=["cvm_code"])
+            .drop_duplicates("_base")
+            .set_index("_base")
+        )
+        merged_base = merged["ticker"].str.replace(r"\d+$", "", regex=True)
+        for b, info_row in info_by_base.iterrows():
+            sel = missing_mask & (merged_base == b)
+            if not sel.any():
+                continue
+            # fillna dict values must be non-null: a literal None (from missing
+            # object/string columns in the parquet) makes fillna raise instead
+            # of being treated as "nothing to fill".
+            fill_values = {k: v for k, v in info_row.to_dict().items() if pd.notna(v)}
+            merged.loc[sel] = merged.loc[sel].fillna(fill_values)
 
         still_missing = merged["cvm_code"].isna().sum()
         filled = missing_mask.sum() - still_missing

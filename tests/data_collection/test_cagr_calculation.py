@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "build_dataset"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from test_utils import print_header, print_separator  # noqa: E402
 
 from cagr_handler import fill_cagr_columns, get_cagr_statistics
 
@@ -111,9 +113,7 @@ def main():
     # ── Null summary ──────────────────────────────────────────────────────────
     total = len(df)
 
-    print("=" * 70)
-    print("NULL COVERAGE")
-    print("=" * 70)
+    print_header("NULL COVERAGE")
     print(f"{'':40} {'earnings':>10} {'revenue':>10}")
     print(f"{'Bolsai nulls':40} {df['cagr_earnings_5y'].isna().sum():>10} {df['cagr_revenue_5y'].isna().sum():>10}")
     print(f"{'After filling with calc':40} {df['cagr_earnings_5y_final'].isna().sum():>10} {df['cagr_revenue_5y_final'].isna().sum():>10}")
@@ -124,19 +124,15 @@ def main():
     # Note: cagr_*_calc columns are cleaned up in fill_cagr_columns,
     # but we can still check internal consistency via statistics
     print()
-    print("=" * 70)
-    print("INTERNAL CONSISTENCY CHECK")
-    print("=" * 70)
+    print_header("INTERNAL CONSISTENCY CHECK")
     print("(Comparing internal calculations with Bolsai where available)")
 
 
     # ── Statistics ────────────────────────────────────────────────────────────
     stats = get_cagr_statistics(df)
-    
+
     print()
-    print("=" * 70)
-    print("STATISTICS")
-    print("=" * 70)
+    print_header("STATISTICS")
     
     if "earnings_sanity" in stats:
         s = stats["earnings_sanity"]
@@ -162,9 +158,7 @@ def main():
     pd.set_option("display.max_rows", 100)
 
     print()
-    print("=" * 140)
-    print("FULL TABLE")
-    print("=" * 140)
+    print_header("FULL TABLE")
 
     display_cols = [
         "reference_date",

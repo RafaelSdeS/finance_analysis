@@ -42,12 +42,108 @@
       "notes": "BR Distribuidora renamed Vibra Energia"
     },
     {
+      "old": "CCPR3",
+      "new": "SYNE3",
+      "date": "2021-10-04",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Cyrela Commercial Properties renamed Syn Propriedades e Servicos Estruturados"
+    },
+    {
+      "old": "HGTX3",
+      "new": "SOMA3",
+      "date": "2021-09-20",
+      "type": "merger",
+      "ratio": 0.5833,
+      "notes": "Cia. Hering incorporated into Grupo de Moda Soma. Each HGTX3 share received 0.5833 SOMA3 shares plus a cash parcel of R$ 9.66. Price splice requires cash-component adjustment depending on model choice."
+    },
+    {
+      "old": "CESP6",
+      "new": "AURE3",
+      "date": "2022-03-28",
+      "type": "merger",
+      "ratio": 0.3314,
+      "notes": "CESP incorporated into Auren Energia. Each CESP6 share converted to 0.3314 AURE3 common shares plus R$ 14.67 cash component."
+    },
+    {
+      "old": "SULA11",
+      "new": "RDOR3",
+      "date": "2022-12-23",
+      "type": "merger",
+      "ratio": 0.6961,
+      "notes": "SulAmérica incorporated by Rede D'Or São Luiz. Each SULA11 Unit swapped into 0.696135 RDOR3 common shares."
+    },
+    {
+      "old": "BRML3",
+      "new": "ALOS3",
+      "date": "2023-01-09",
+      "type": "merger",
+      "ratio": 0.0404,
+      "notes": "BR Malls merged into Aliansce Sonae. Each BRML3 share received 0.04046162985854 ALOS3 shares plus R$ 1.34 cash fraction. Entity renamed later to Allos."
+    },
+    {
       "old": "VIIA3",
       "new": "BHIA3",
       "date": "2023-10-02",
       "type": "rename",
       "ratio": 1.0,
       "notes": "Via renamed Grupo Casas Bahia (chain: VVAR3 -> VIIA3 -> BHIA3)"
+    },
+    {
+      "old": "SOMA3",
+      "new": "AZZA3",
+      "date": "2024-08-01",
+      "type": "merger",
+      "ratio": 0.1205,
+      "notes": "Grupo Soma fully merged into Arezzo&Co, entity renamed to Azzas 2154 S.A. Each SOMA3 share converted to 0.120516471946 AZZA3 shares. Slices price backward safely into AZZA3 core data series."
+    },
+    {
+      "old": "ENAT3",
+      "new": "BRAV3",
+      "date": "2024-08-30",
+      "type": "merger",
+      "ratio": 1.0,
+      "notes": "Enauta merged with 3R Petroleum to form Brava Energia. Transition structured via corporate consolidation; ticker mapped 1:1 on equivalent base terms."
+    },
+    {
+      "old": "EMBR3",
+      "new": "EMBJ3",
+      "date": "2025-11-03",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Embraer ticker refresh (global brand alignment with NYSE ERJ->EMBJ); no change to share count or rights"
+    },
+    {
+      "old": "ELET3",
+      "new": "AXIA3",
+      "date": "2025-11-10",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Eletrobras renamed Axia Energia, 3 years post-privatization; common shares"
+    },
+    {
+      "old": "ELET5",
+      "new": "AXIA5",
+      "date": "2025-11-10",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Eletrobras renamed Axia Energia; preferred A shares"
+    },
+    {
+      "old": "ELET6",
+      "new": "AXIA6",
+      "date": "2025-11-10",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Eletrobras renamed Axia Energia; preferred B shares"
+    },
+    {
+      "old": "GUAR3",
+      "new": "RIAA3",
+      "date": "2026-02-05",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Guararapes renamed to align with Riachuelo retail brand"
     }
   ]
 }

@@ -19,8 +19,10 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from src.build_dataset.build_ml_dataset import apply_ticker_continuity  # noqa: E402
+from test_utils import print_check  # noqa: E402
 
 
 def _prices(ticker, dates, close):
@@ -71,7 +73,7 @@ def test_rename_splice():
     assert new_p.iloc[0]["close"] == 10.0, "rename must not rescale prices"
     new_f = f[f["ticker"] == "NEW3"]
     assert len(new_f) == 2, "rename splices fundamentals too"
-    print("PASS  rename splice")
+    print_check("rename splice", True)
     return True
 
 
@@ -99,7 +101,7 @@ def test_merger_splice():
     f_srv = f[f["ticker"] == "SRV3"]
     assert len(f_srv) == 1 and f_srv.iloc[0]["net_income"] == 700.0, \
         "acquired entity's fundamentals must be dropped, survivor's kept"
-    print("PASS  merger splice")
+    print_check("merger splice", True)
     return True
 
 
@@ -119,9 +121,9 @@ def test_duplicate_guard():
         apply_ticker_continuity(prices, fund, path=path)
     except ValueError as e:
         assert "duplicate" in str(e), e
-        print("PASS  duplicate guard")
+        print_check("duplicate guard", True)
         return True
-    print("FAIL  duplicate guard: bad map did not raise")
+    print_check("duplicate guard: bad map did not raise", False)
     return False
 
 
@@ -130,7 +132,7 @@ def test_missing_map_is_noop():
     fund = _fund("PETR4", ["2020-12-31"], [1.0])
     p, f = apply_ticker_continuity(prices, fund, path=Path("/nonexistent/map.json"))
     assert len(p) == 1 and len(f) == 1
-    print("PASS  missing map no-op")
+    print_check("missing map no-op", True)
     return True
 
 

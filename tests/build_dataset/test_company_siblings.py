@@ -14,8 +14,10 @@ import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
 
 from src.build_dataset.build_ml_dataset import company_siblings  # noqa: E402
+from test_utils import print_check  # noqa: E402
 
 
 def test_company_siblings():
@@ -28,7 +30,7 @@ def test_company_siblings():
     assert got["4170"] == ["VALE3"], got
     assert None not in got and "" not in got, "null/blank cvm_code must be excluded"
     assert len(got) == 2, got
-    print("PASS  company_siblings")
+    print_check("company_siblings groups by cvm_code", True)
     return True
 
 

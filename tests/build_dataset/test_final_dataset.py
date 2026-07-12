@@ -18,20 +18,19 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+sys.path.insert(0, str(ROOT / "tests"))
+
 from src.build_dataset.build_ml_dataset import (  # noqa: E402
     FILING_LAG_DAYS_QUARTERLY,
     MIN_DETECTABLE_JUMP,
     JUMP_MATCH_TOL,
     EVENT_WINDOW_DAYS,
 )
+from test_utils import print_header, print_check, print_section_start, print_section_end, print_separator  # noqa: E402
 
 DEFAULT_FILE = ROOT / "data/processed/ml_dataset.parquet"
 CORPORATE_EVENTS_FILE = ROOT / "data/raw/corporate_events/corporate_events.parquet"
 FUNDAMENTALS_DIR = ROOT / "data/raw/fundamentals"
-
-
-def print_separator():
-    print("-" * 80)
 
 
 def check_stale_prices(df, price_col="close", run_len=5):
@@ -72,10 +71,8 @@ def check_outliers_zscore(df, feature_cols, threshold=8.0):
 def validate(df):
     """Golden gate: collect failures, exit(1) if any. Inspector runs first."""
 
-    print("\n")
-    print("=" * 80)
-    print("VALIDATION")
-    print("=" * 80)
+    print()
+    print_header("VALIDATION")
 
     checks = []
 
@@ -205,15 +202,22 @@ def validate(df):
                    leaks == 0))
 
     failed = 0
+    passed = 0
     for label, ok in checks:
-        print(f"  [{'PASS' if ok else 'FAIL'}] {label}")
-        failed += not ok
+        print_check(label, ok)
+        if ok:
+            passed += 1
+        else:
+            failed += 1
 
     print()
     if failed:
-        print(f"VALIDATION FAILED: {failed} check(s)")
+        print_section_start("VALIDATION FAILED")
+        print(f"  {failed} check(s) failed")
+        print("└─")
         sys.exit(1)
-    print("VALIDATION PASSED")
+    print_section_start("VALIDATION PASSED")
+    print_section_end(passed, failed)
 
 
 def main():
@@ -244,9 +248,7 @@ def main():
 
     file_path = Path(args.file)
 
-    print("=" * 80)
-    print("FINAL DATASET INSPECTION")
-    print("=" * 80)
+    print_header("FINAL DATASET INSPECTION")
 
     if not file_path.exists():
         print(f"\nERROR: arquivo não encontrado:\n{file_path}")

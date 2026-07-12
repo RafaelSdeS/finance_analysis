@@ -18,6 +18,9 @@ from pathlib import Path
 import pandas as pd
 import yfinance as yf
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from test_utils import print_header  # noqa: E402
+
 TICKERS   = ["PETR4", "VALE3", "WEGE3"]
 PROJECT   = Path(__file__).resolve().parents[2]
 PRICE_DIR = PROJECT / "data/raw/prices"
@@ -173,9 +176,8 @@ def check_internal_consistency(ticker) -> bool:
 def main():
     results = []
     for ticker in TICKERS:
-        print("\n" + "=" * 70)
-        print(f"TICKER: {ticker}")
-        print("=" * 70)
+        print()
+        print_header(f"TICKER: {ticker}")
         print("\n[PRICES — BolsAI close vs yfinance Close, unadjusted, post-split]")
         results.append(validate_prices(ticker))
         print("\n[FUNDAMENTALS — BolsAI vs yfinance (income TTM, balance point-in-time)]")

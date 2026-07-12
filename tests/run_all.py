@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Single entry point for the test suite: runs each test script and prints
-one PASS/FAIL summary line per script instead of 8 separate transcripts.
+Single entry point for the test suite: runs each test script, captures its
+output, and prints a clean, colored, aligned report instead of dumping N
+scripts' raw transcripts back to back.
 
 Run from project root:
     python tests/run_all.py                # fast group (pure code, no data files needed)
@@ -10,14 +11,20 @@ Run from project root:
 """
 
 import argparse
+import os
+import re
 import subprocess
 import sys
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from shutil import get_terminal_size
 
 ROOT = Path(__file__).resolve().parent.parent
 
 # Pure-code tests: synthetic data only, run anywhere (used by CI).
 FAST = [
+    "tests/test_run_all_report.py",
     "tests/build_dataset/test_build_dataset_features.py",
     "tests/build_dataset/test_split_config.py",
     "tests/build_dataset/test_dataset_versioning.py",
@@ -29,6 +36,7 @@ FAST = [
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
 DATA = [
     "tests/build_dataset/test_final_dataset.py",
+    "tests/build_dataset/test_top_traded_quality.py",
     "tests/data_collection/test_cagr_calculation.py",
     "tests/data_collection/test_blue_chip_tickers.py",
     "tests/data_collection/validate_vs_yfinance.py",
@@ -36,9 +44,120 @@ DATA = [
     "tests/data_collection/test_cvm_statements.py",
 ]
 
+# --- color -------------------------------------------------------------
 
-def run(script: str) -> bool:
-    return subprocess.run([sys.executable, script], cwd=ROOT).returncode == 0
+COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
+_CODES = {"green": "32", "red": "31", "yellow": "33", "cyan": "36", "dim": "2", "bold": "1"}
+
+
+def c(color: str, text: str) -> str:
+    return f"\033[{_CODES[color]}m{text}\033[0m" if COLOR else text
+
+
+WIDTH = max(60, min(get_terminal_size((100, 24)).columns, 100))
+
+PASS, FAIL, SKIP = "PASSED", "FAILED", "SKIPPED"
+_GLYPH = {PASS: c("green", "✓"), FAIL: c("red", "✗"), SKIP: c("yellow", "⚠")}
+
+_PYTEST_LINE = re.compile(r"^\S+::(\S+)\s+(PASSED|FAILED|SKIPPED|ERROR)\s+\[")
+
+
+@dataclass
+class ScriptResult:
+    script: str
+    ok: bool
+    duration: float
+    output: str
+    subtests: list[tuple[str, str]] = field(default_factory=list)
+
+
+def parse_subtests(output: str) -> list[tuple[str, str]]:
+    """Best-effort extraction of pytest -v per-test lines; empty for plain scripts."""
+    subtests = []
+    for line in output.splitlines():
+        m = _PYTEST_LINE.match(line)
+        if m:
+            status = m.group(2)
+            subtests.append((m.group(1), FAIL if status == "ERROR" else status))
+    return subtests
+
+
+def run(script: str) -> ScriptResult:
+    print(c("cyan", f"▶ running {script}..."))
+    start = time.monotonic()
+    proc = subprocess.Popen(
+        [sys.executable, script],
+        cwd=ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    output_lines = []
+    for line in proc.stdout:
+        output_lines.append(line)
+        print(c("dim", line), end="")
+    proc.wait()
+    duration = time.monotonic() - start
+    output = "".join(output_lines)
+    return ScriptResult(
+        script=script,
+        ok=proc.returncode == 0,
+        duration=duration,
+        output=output,
+        subtests=parse_subtests(output),
+    )
+
+
+def print_section(result: ScriptResult) -> None:
+    header = f"┌─ {result.script} "
+    print(c("bold", header + "─" * max(0, WIDTH - len(header))))
+
+    if result.subtests:
+        for name, status in result.subtests:
+            print(f"│ {_GLYPH[status]} {name}")
+        passed = sum(1 for _, s in result.subtests if s == PASS)
+        skipped = sum(1 for _, s in result.subtests if s == SKIP)
+        failed = len(result.subtests) - passed - skipped
+        tail = f"{passed} passed"
+        if failed:
+            tail += f", {failed} failed"
+        if skipped:
+            tail += f", {skipped} skipped"
+        print(f"└─ {tail} · {result.duration:.2f}s")
+    else:
+        status = PASS if result.ok else FAIL
+        print(f"└─ {_GLYPH[status]} {'passed' if result.ok else 'failed'} · {result.duration:.2f}s")
+
+    if not result.ok:
+        print(c("dim", "  │ output (last 25 lines):"))
+        tail_lines = result.output.strip().splitlines()[-25:]
+        for line in tail_lines:
+            print(c("red", f"  │ {line}"))
+    print()
+
+
+def print_summary(results: list[ScriptResult]) -> None:
+    title = " SUMMARY "
+    pad = (WIDTH - len(title)) // 2
+    print(c("bold", "═" * pad + title + "═" * (WIDTH - pad - len(title))))
+
+    name_width = max(len(r.script) for r in results)
+    for r in results:
+        badge = c("green", " PASS ") if r.ok else c("red", " FAIL ")
+        glyph = _GLYPH[PASS] if r.ok else _GLYPH[FAIL]
+        print(f"  {glyph} {badge} {r.script.ljust(name_width)}  {r.duration:6.2f}s")
+
+    print("─" * WIDTH)
+
+    total = len(results)
+    failed = sum(not r.ok for r in results)
+    passed = total - failed
+    skipped = sum(1 for r in results for _, s in r.subtests if s == SKIP)
+
+    failed_str = c("red", f"Failed: {failed}") if failed else f"Failed: {failed}"
+    skipped_str = c("yellow", f"Skipped: {skipped}") if skipped else f"Skipped: {skipped}"
+    print(f"  Total: {total}    {c('green', f'Passed: {passed}')}    {failed_str}    {skipped_str}")
 
 
 def main() -> int:
@@ -47,16 +166,14 @@ def main() -> int:
     args = parser.parse_args()
 
     scripts = {"fast": FAST, "data": DATA, "all": FAST + DATA}[args.group]
-    results = [(script, run(script)) for script in scripts]
+    results = [run(script) for script in scripts]
 
-    print("\n" + "=" * 60)
-    print("SUMMARY")
-    print("=" * 60)
-    for script, ok in results:
-        print(f"  {'PASS' if ok else 'FAIL'}  {script}")
+    print()
+    for result in results:
+        print_section(result)
+    print_summary(results)
 
-    failed = sum(not ok for _, ok in results)
-    print(f"\n{len(results) - failed}/{len(results)} passed")
+    failed = sum(not r.ok for r in results)
     return 1 if failed else 0
 
 
