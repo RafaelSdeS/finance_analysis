@@ -49,6 +49,7 @@ MACRO_DIR = ROOT / "data/raw/macro"
 DIVIDENDS_DIR = ROOT / "data/raw/dividends"
 CORPORATE_EVENTS_PATH = ROOT / "data/raw/corporate_events/corporate_events.parquet"
 FILING_DATES_PATH = ROOT / "data/raw/filing_dates/filing_dates.parquet"
+CONTINUITY_PATH = ROOT / "data/raw/reference/ticker_continuity.json"
 OUTPUT_PATH = ROOT / "data/processed/ml_dataset.parquet"
 SPLIT_CONFIG_PATH = ROOT / "data/processed/split_config.json"
 
@@ -336,6 +337,94 @@ def load_company_info():
     print(f"Company rows: {len(df)}")
 
     return df
+
+
+def company_siblings(company_info):
+    """cvm_code -> sorted tickers of the same company (PETR3/PETR4-style classes).
+
+    Fundamentals are per-company, tickers are per-share-class; anything that
+    counts "companies" (diversification, IC universes, merger-leg resolution)
+    should group by this instead of treating each ticker as a separate firm.
+    """
+    ok = company_info.dropna(subset=["cvm_code", "ticker"])
+    ok = ok[ok["cvm_code"].astype(str).str.strip() != ""]
+    return {code: sorted(g["ticker"].dropna().unique().tolist())
+            for code, g in ok.groupby("cvm_code")}
+
+
+# =============================================================================
+# TICKER CONTINUITY (renames / mergers)
+# =============================================================================
+
+def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
+    """Splice renamed/merged tickers into their surviving series.
+
+    Event types (data/raw/reference/ticker_continuity.json, hand-maintained):
+      rename: same legal entity under a new ticker — splice prices AND
+              fundamentals (history is genuinely continuous).
+      merger: the old ticker's entity ceased to exist — splice prices only
+              (shareholder-return continuity via the exchange ratio); its
+              fundamentals are dropped, so pre-boundary rows show
+              has_fundamentals=0 downstream like any early-history gap.
+      tender: cash-out, nothing to splice (terminal-event payoff handling is
+              a separate planned task — see DELISTED_UNIVERSE.md).
+
+    Events apply in date order so chains (VVAR3->VIIA3->BHIA3) resolve. The
+    splice boundary is the NEW ticker's actual first trade date (ground
+    truth), not the documented event date — approximate dates in the map are
+    harmless.
+    """
+    if not path.exists():
+        return prices, fundamentals
+
+    events = sorted(json.loads(path.read_text())["events"], key=lambda e: e["date"])
+
+    print()
+    print("=" * 80)
+    print("TICKER CONTINUITY (renames / mergers)")
+    print("=" * 80)
+
+    prices = prices.copy()
+    fundamentals = fundamentals.copy()
+    price_cols = [c for c in ("open", "high", "low", "close",
+                              "adj_open", "adj_high", "adj_low", "adj_close")
+                  if c in prices.columns]
+
+    for ev in events:
+        old, new, kind = ev["old"], ev["new"], ev["type"]
+        ratio = float(ev.get("ratio", 1.0))
+        if kind == "tender" or not (prices["ticker"] == old).any():
+            continue
+
+        new_dates = prices.loc[prices["ticker"] == new, "trade_date"]
+        boundary = new_dates.min() if not new_dates.empty else None
+        if boundary is not None:
+            # no date overlap: past the boundary the new ticker is the record
+            prices = prices[~((prices["ticker"] == old) & (prices["trade_date"] >= boundary))]
+        old_rows = prices["ticker"] == old
+        prices.loc[old_rows, price_cols] = prices.loc[old_rows, price_cols] * ratio
+        prices.loc[old_rows, "ticker"] = new
+        # volume stays unscaled: share counts change meaning across an exchange
+        # ratio, and all volume features downstream are per-ticker relative
+
+        f_old = fundamentals["ticker"] == old
+        if kind == "rename":
+            f_boundary = fundamentals.loc[fundamentals["ticker"] == new, "reference_date"].min()
+            if pd.notna(f_boundary):
+                fundamentals = fundamentals[~(f_old & (fundamentals["reference_date"] >= f_boundary))]
+                f_old = fundamentals["ticker"] == old
+            fundamentals.loc[f_old, "ticker"] = new
+        else:  # merger: the acquired entity's books are not the survivor's
+            fundamentals = fundamentals[~f_old]
+        print(f"  {kind}: {old} -> {new}" + (f" (ratio {ratio})" if ratio != 1.0 else ""))
+
+    dup = prices.duplicated(subset=["ticker", "trade_date"]).sum()
+    if dup:
+        raise ValueError(f"ticker continuity produced {dup} duplicate ticker+date "
+                         f"price rows — two legs mapped to the same ticker? Check the map.")
+    prices = prices.sort_values(["ticker", "trade_date"]).reset_index(drop=True)
+    fundamentals = fundamentals.sort_values(["ticker", "reference_date"]).reset_index(drop=True)
+    return prices, fundamentals
 
 
 # =============================================================================
@@ -1154,6 +1243,9 @@ def main():
     prices       = load_prices()
     prices       = repair_unadjusted_splits(prices)
     fundamentals = load_fundamentals()
+    # splice AFTER split repair (repair scans per original ticker; splicing
+    # first would make an exchange ratio look like an unrepaired split)
+    prices, fundamentals = apply_ticker_continuity(prices, fundamentals)
     prices       = filter_tickers_with_no_fundamentals(prices, fundamentals)
     fundamentals = compute_fundamental_features(fundamentals)
     fundamentals = fill_missing_cagr(fundamentals)

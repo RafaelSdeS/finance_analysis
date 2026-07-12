@@ -1,0 +1,53 @@
+{
+  "_doc": "Hand-maintained B3 ticker rename/merger map, consumed by build_ml_dataset.apply_ticker_continuity(). Types: rename (same legal entity, splice prices+fundamentals), merger (entity ceased, splice prices only via exchange ratio), tender (cash-out, no splice — terminal-event task). 'date' is documentation; the splice boundary is the new ticker's actual first trade date. Only add entries whose ratio is verified — a wrong ratio corrupts the series, while an absent entry just leaves two clean separate series (LAME3/LAME4 -> AMER3 legs are deliberately absent for exactly that reason: their exchange ratios need verification before entry).",
+  "events": [
+    {
+      "old": "TIMP3",
+      "new": "TIMS3",
+      "date": "2020-08-31",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "TIM Participacoes incorporated into TIM S.A., 1:1"
+    },
+    {
+      "old": "BTOW3",
+      "new": "AMER3",
+      "date": "2021-06-07",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "B2W Digital renamed Americanas S.A. after combination with Lojas Americanas ops; B2W is the surviving listed entity, shares 1:1. Fundamentals step at the boundary is a real corporate event, not a data error."
+    },
+    {
+      "old": "DTEX3",
+      "new": "DXCO3",
+      "date": "2021-07-26",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Duratex renamed Dexco"
+    },
+    {
+      "old": "VVAR3",
+      "new": "VIIA3",
+      "date": "2021-08-02",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Via Varejo renamed Via"
+    },
+    {
+      "old": "BRDT3",
+      "new": "VBBR3",
+      "date": "2021-08-09",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "BR Distribuidora renamed Vibra Energia"
+    },
+    {
+      "old": "VIIA3",
+      "new": "BHIA3",
+      "date": "2023-10-02",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Via renamed Grupo Casas Bahia (chain: VVAR3 -> VIIA3 -> BHIA3)"
+    }
+  ]
+}

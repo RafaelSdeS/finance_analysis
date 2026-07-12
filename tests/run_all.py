@@ -22,6 +22,8 @@ FAST = [
     "tests/build_dataset/test_split_config.py",
     "tests/build_dataset/test_dataset_versioning.py",
     "tests/build_dataset/test_scale_features.py",
+    "tests/build_dataset/test_company_siblings.py",
+    "tests/build_dataset/test_ticker_continuity.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
@@ -30,6 +32,8 @@ DATA = [
     "tests/data_collection/test_cagr_calculation.py",
     "tests/data_collection/test_blue_chip_tickers.py",
     "tests/data_collection/validate_vs_yfinance.py",
+    "tests/data_collection/test_collect_delisted.py",
+    "tests/data_collection/test_cvm_statements.py",
 ]
 
 
