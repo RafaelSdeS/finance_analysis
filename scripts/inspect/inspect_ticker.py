@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 
 """
-test_ticker_data.py
-==============
+inspect_ticker.py
+=================
 
 Inspeciona um ticker específico dentro do dataset processado.
 
 Uso:
-    python test_ticker.py
-    python test_ticker.py --ticker VALE3
-    python test_ticker.py --ticker PETR4
+    python scripts/inspect/inspect_ticker.py
+    python scripts/inspect/inspect_ticker.py --ticker VALE3
+    python scripts/inspect/inspect_ticker.py --ticker PETR4
 """
 
 from pathlib import Path
