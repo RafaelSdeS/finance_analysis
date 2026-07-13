@@ -25,7 +25,10 @@ ROOT = Path(__file__).resolve().parent.parent
 # Pure-code tests: synthetic data only, run anywhere (used by CI).
 FAST = [
     "tests/test_run_all_report.py",
-    "tests/build_dataset/test_build_dataset_features.py",
+    "tests/build_dataset/test_features.py",
+    "tests/build_dataset/test_merge.py",
+    "tests/build_dataset/test_cross_sectional.py",
+    "tests/build_dataset/test_compute_features_chunked.py",
     "tests/build_dataset/test_split_config.py",
     "tests/build_dataset/test_dataset_versioning.py",
     "tests/build_dataset/test_scale_features.py",
