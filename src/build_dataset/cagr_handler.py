@@ -45,13 +45,22 @@ def cagr_standard(v_now: float, v_ago: float, years: int = 5) -> float:
     return ((v_now / v_ago) ** (1 / years) - 1) * 100
 
 
+def _december_periods(df: pd.DataFrame) -> pd.Series:
+    """Group id that increments at each December row: the December row and
+    every quarter up to (excluding) the next December share one id. Group 0
+    is whatever comes before the first December (no anchor yet)."""
+    is_december = df["reference_date"].dt.month == 12
+    return is_december.cumsum()
+
+
 def calc_annual_cagr(df: pd.DataFrame, col: str, lookback: int = 20) -> pd.Series:
     """
-    Calculate CAGR using December values only (annual anchors),
-    then forward-fill Q1/Q2/Q3 within each year.
+    Calculate CAGR at December rows only (annual anchors), then broadcast
+    each anchor's own value across itself and the following Q1-Q3.
 
     This matches Bolsai's reported methodology where CAGR is anchored
-    to fiscal year ends.
+    to fiscal year ends: the value updates once a year, at December,
+    and holds constant through the following Q1-Q3.
 
     Parameters:
         df: DataFrame with 'reference_date' and a data column
@@ -59,35 +68,49 @@ def calc_annual_cagr(df: pd.DataFrame, col: str, lookback: int = 20) -> pd.Serie
         lookback: Number of quarters to look back (default 20 = 5 years)
 
     Returns:
-        Series with CAGR values and annual forward-fill applied
+        Series with CAGR values, held constant from each December anchor
+        through the following Q1-Q3 (NaN if that anchor's own base year
+        was invalid — never silently reused from an older anchor)
     """
     values = df[col].to_numpy()
     result = np.full(len(values), np.nan, dtype=np.float64)
+    is_december = (df["reference_date"].dt.month == 12).to_numpy()
 
     # ponytail: vectorized CAGR calculation using numpy shift
     # Avoid loop over .iloc[], use numpy slicing instead
     v_now = values[lookback:]
     v_ago = values[:-lookback]
 
-    # Apply CAGR formula element-wise: only where both values are positive.
+    # Apply CAGR formula element-wise: only at December rows (the annual
+    # anchor) where both values are positive. A non-December row must never
+    # produce its own value here — that would let an unrelated quarter's
+    # computation leak into December's slot, silently overriding an anchor
+    # whose own base year was negative/zero (see had_negative_base) with an
+    # earlier, unrelated quarter's number.
     # lookback is in quarters; CAGR exponent is per-year → years = lookback / 4
     years = lookback / 4
-    valid = (v_now > 0) & (v_ago > 0) & (~np.isnan(v_now)) & (~np.isnan(v_ago))
+    valid = ((v_now > 0) & (v_ago > 0) & (~np.isnan(v_now)) & (~np.isnan(v_ago))
+             & is_december[lookback:])
     result[lookback:][valid] = ((v_now[valid] / v_ago[valid]) ** (1 / years) - 1) * 100
 
-    # Forward-fill within each calendar year
-    df_temp = df.copy()
-    df_temp["_cagr"] = result
-    df_temp["_year"] = df_temp["reference_date"].dt.year
-    df_temp["_cagr"] = df_temp.groupby("_year")["_cagr"].ffill()
-
-    return df_temp["_cagr"]
+    # Broadcast each December's own raw value (a number, or NaN if its base
+    # year was invalid) across itself and the following Q1-Q3. A plain
+    # ffill() would instead skip an invalid December and reach back to an
+    # older, stale anchor — wrong: an invalid anchor must read as "undefined
+    # this year," not "same as last year." Safe because within a period only
+    # the December row (the group's first member) can ever be non-NaN, so
+    # "first" is exactly that anchor's value, whether a number or NaN.
+    period = _december_periods(df)
+    return pd.Series(result, index=df.index).groupby(period).transform("first")
 
 
 def had_negative_base(df: pd.DataFrame, col: str, lookback: int = 20) -> pd.Series:
     """
-    Binary flag indicating whether base year (lookback quarters ago)
-    had negative or zero value, making standard CAGR undefined.
+    Binary flag indicating whether the currently-active annual anchor's base
+    year (December, lookback quarters back) had negative or zero value,
+    making standard CAGR undefined. Anchored to December and broadcast the
+    same way as calc_annual_cagr, so the two never disagree about which
+    quarter's base year they're describing.
 
     This is important for earnings: negative earnings 5 years ago
     means we can't compute a meaningful CAGR.
@@ -96,19 +119,17 @@ def had_negative_base(df: pd.DataFrame, col: str, lookback: int = 20) -> pd.Seri
         Series with 1 where base was negative/zero, 0 otherwise
     """
     values = df[col].to_numpy()
-    result = np.zeros(len(values), dtype=np.int32)
+    is_december = (df["reference_date"].dt.month == 12).to_numpy()
+    flag = np.full(len(values), np.nan)
 
     # ponytail: vectorized flag check using numpy slicing
     v_ago = values[:-lookback]
-    result[lookback:] = (v_ago <= 0) | np.isnan(v_ago)
+    at_december = is_december[lookback:]
+    flag[lookback:][at_december] = ((v_ago <= 0) | np.isnan(v_ago))[at_december]
 
-    # Forward-fill within year (same logic as CAGR)
-    df_temp = df.copy()
-    df_temp["_flag"] = result
-    df_temp["_year"] = df_temp["reference_date"].dt.year
-    df_temp["_flag"] = df_temp.groupby("_year")["_flag"].ffill()
-
-    return df_temp["_flag"].astype(int)
+    period = _december_periods(df)
+    result = pd.Series(flag, index=df.index).groupby(period).transform("first")
+    return result.fillna(0).astype(int)
 
 
 def fill_cagr_columns(df: pd.DataFrame) -> pd.DataFrame:
