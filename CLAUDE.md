@@ -160,13 +160,13 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
   - Split repair: Detect and rescale unrecorded splits (53 events) — prevents fake negative returns up to −99.99%
   - Sibling fill: Forward-fill missing company_info from same-CVM-company tickers (168,783 rows) — ensures all rows have sector/status metadata
   - Quarantine list: WDCN3 (raw close oscillates 6x, no repair), CAMB4 (delisted 2019, stale fundamentals), LLIS3 (delisted 2023, stale fundamentals) — eliminates data quality outliers.
-- **NaN & extreme-value policy (decided 2026-07-12, NOT yet implemented in code):**
-  - Classify every NaN: **structural** (warm-up windows, pre-first-filing — predictable by rule), **informative** (a real-world fact, e.g. CAGR NaN from negative earnings, `has_dividends`), or **error** (NaN where the rule says none can exist → fail the build).
-  - RL agent must never see a NaN or an extreme raw ratio: resolve everything before the env boundary; env asserts `np.isfinite(obs).all()`.
-  - Top-50 universe: one **global start date** = max over tickers of (first filing date, warm-up end) → trim rows before it; kills structural NaNs and era-correlated missingness flags in one move.
-  - Informative NaNs → flag + neutral fill (e.g. `cagr_earnings_defined` 0/1, fill CAGR NaN with 0). Never drop those rows (deletes loss-makers → survivorship bias). Never interpolate/backfill (lookahead by construction); ffill-via-`merge_asof` is the only honest imputation.
-  - Fail-don't-fix: OHLCV NaN in-universe, interior fundamental gap (post-`merge_asof` NaNs per ticker must be prefix-shaped), macro gap, NaN-count regression vs previous manifest, any NaN reaching the env.
-  - Extreme ratios (e.g. 2 rows with `pl` > 400,000 — denominator artifact, earnings ≈ 0): keep the rows, fix the encoding. Prefer `earnings_yield` over `pl` as a model feature; RobustScaler's *fit* ignores these outliers (median/IQR) but its transform is linear and unclipped — a 400k input still exits as ~26k. Check the full tail (`|pl| > 100`), not just the headline rows.
+- **NaN & extreme-value policy (implemented):**
+  - Data quality filters (Stage 2):
+    - Structural NaN (warm-up, pre-first-filing) trimmed by global start-date rule per universe.
+    - Informative NaN (CAGR undefined from negative earnings/insufficient history) flagged: `cagr_earnings_defined`, `cagr_revenue_defined` (0/1); also tracks `n_quarters_available` (cumulative filing count) explaining all window-based NaNs.
+    - Error NaN: prefix-shaped (no interior holes per ticker in merged fundamentals), detected via test `test_final_dataset.py::T_prefix_rule`. NaN-count regression vs previous build warned via `nan_regressions()` in `manifest.py` (logged but non-fatal, allows legitimate coverage changes).
+    - Extreme ratio (144 rows |pl| > 400,000 dataset-wide, 95 in-universe, top-50): kept intact — denominators near zero are valid distress signals. No filled or clipped in the dataset; scaler's fit is robust (median/IQR) but transform is linear, so raw 400k → ~26k after scaling (still extreme, intentionally preserved). Model training handles via loss functions / clipping in the env.
+  - Consumer-side (ml_agent env, not this repo): flags + neutral fills (e.g. fill CAGR NaN with 0), any NaN→0 transformation, hard `assert np.isfinite(obs).all()` before agent sees state, global start-date trim for the top-50 universe to drop pre-full-history rows.
 - **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`.
 - **Paths:** absolute via `Path(__file__).resolve().parents[N]`; always run from project root.
 - **FutureWarnings suppressed:** `pct_change(fill_method=None)` for YoY growth; dropped all-NA columns per-file before concat.
