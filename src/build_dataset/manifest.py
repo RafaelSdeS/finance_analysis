@@ -122,6 +122,30 @@ def _manifest_fingerprint(manifest):
     return {k: manifest[k] for k in ("rows", "tickers", "date_min", "date_max", "columns", "column_stats")}
 
 
+def nan_regressions(prev_manifest, manifest, threshold=2.0):
+    """Report columns whose NaN% rose by >threshold percentage points.
+
+    Args:
+        prev_manifest: previous build's manifest dict
+        manifest: current build's manifest dict
+        threshold: pp rise to flag (default 2.0)
+
+    Returns:
+        list of column names that regressed, or empty list.
+    """
+    regressions = []
+    prev_stats = {col: stats.get("nan_pct", 0) for col, stats in prev_manifest.get("column_stats", {}).items()}
+    curr_stats = {col: stats.get("nan_pct", 0) for col, stats in manifest.get("column_stats", {}).items()}
+
+    for col in prev_stats:
+        if col in curr_stats:
+            rise = curr_stats[col] - prev_stats[col]
+            if rise > threshold:
+                regressions.append(f"{col} ({prev_stats[col]:.2f}% → {curr_stats[col]:.2f}%)")
+
+    return regressions
+
+
 def sync_dataset_version(manifest):
     """Snapshot the current build into data/processed/dataset_v{N}/, skipping no-op reruns.
 
@@ -143,6 +167,11 @@ def sync_dataset_version(manifest):
         if _manifest_fingerprint(prev_manifest) == _manifest_fingerprint(manifest):
             print(f"No content change vs {latest_dir.name} -- skipping new version.")
             return
+        regressions = nan_regressions(prev_manifest, manifest)
+        if regressions:
+            print("WARNING: NaN% regression vs previous version:")
+            for col in regressions:
+                print(f"  • {col}")
 
     version_dir = OUTPUT_PATH.parent / f"dataset_v{latest_n + 1}"
     version_dir.mkdir()
