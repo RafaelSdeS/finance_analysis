@@ -399,8 +399,17 @@ def compute_advanced_features(df):
         q = g.drop_duplicates("reference_date").set_index("reference_date")
         for col, out in trend_cols.items():
             g[out] = g["reference_date"].map(q[col].diff(4))
+
+        # Cumulative quarterly filing count per ticker. Explains all window-based
+        # NaNs (CAGR history, YoY, QoQ, trends). Never NaN, non-decreasing.
+        g["n_quarters_available"] = g["reference_date"].notna().astype(int).cumsum()
+
         result.append(g)
     df = pd.concat(result, ignore_index=True)
+
+    # Flag columns: CAGR defined iff the *_final column is not NaN.
+    df["cagr_earnings_defined"] = df["cagr_earnings_5y_final"].notna().astype(float)
+    df["cagr_revenue_defined"] = df["cagr_revenue_5y_final"].notna().astype(float)
 
     # --- VALUATION RELATIVE TO FUNDAMENTALS (raw relationships) ---
 
