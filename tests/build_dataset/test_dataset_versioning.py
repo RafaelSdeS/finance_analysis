@@ -68,5 +68,47 @@ def test_content_change_creates_v2(tmp_path, monkeypatch) -> None:
     assert versions == ["dataset_v1", "dataset_v2"]
 
 
+def test_nan_regressions_detects_increase() -> None:
+    """nan_regressions reports columns whose nan_pct rose by >threshold."""
+    prev = {
+        "column_stats": {
+            "col_a": {"nan_pct": 10.0},
+            "col_b": {"nan_pct": 5.0},
+            "col_c": {"nan_pct": 20.0},
+        }
+    }
+    curr = {
+        "column_stats": {
+            "col_a": {"nan_pct": 11.5},  # +1.5 pp, below threshold
+            "col_b": {"nan_pct": 8.0},   # +3.0 pp, exceeds threshold (2.0)
+            "col_c": {"nan_pct": 20.0},  # no change
+        }
+    }
+    regressions = bmd.nan_regressions(prev, curr, threshold=2.0)
+    assert len(regressions) == 1
+    assert "col_b" in regressions[0]
+
+
+def test_nan_regressions_ignores_new_columns() -> None:
+    """nan_regressions doesn't report columns only in the new manifest (not a regression)."""
+    prev = {"column_stats": {"col_a": {"nan_pct": 10.0}}}
+    curr = {
+        "column_stats": {
+            "col_a": {"nan_pct": 10.0},
+            "col_b": {"nan_pct": 99.0},  # new column, shouldn't be reported
+        }
+    }
+    regressions = bmd.nan_regressions(prev, curr, threshold=2.0)
+    assert len(regressions) == 0
+
+
+def test_nan_regressions_empty_when_no_increase() -> None:
+    """nan_regressions returns empty list when no column exceeds threshold."""
+    prev = {"column_stats": {"col_a": {"nan_pct": 10.0}}}
+    curr = {"column_stats": {"col_a": {"nan_pct": 11.0}}}  # +1.0 pp
+    regressions = bmd.nan_regressions(prev, curr, threshold=2.0)
+    assert regressions == []
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
