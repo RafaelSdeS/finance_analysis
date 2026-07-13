@@ -70,8 +70,8 @@ python tests/run_all.py --group all
 ```
 
 **Test groups:**
-- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`
-- **Data:** `test_final_dataset.py`, `test_cagr_calculation.py`, validate_vs_yfinance.py
+- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`
+- **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`
 
 **Linting:**
 ```bash
@@ -160,6 +160,13 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
   - Split repair: Detect and rescale unrecorded splits (53 events) — prevents fake negative returns up to −99.99%
   - Sibling fill: Forward-fill missing company_info from same-CVM-company tickers (168,783 rows) — ensures all rows have sector/status metadata
   - Quarantine list: WDCN3 (raw close oscillates 6x, no repair), CAMB4 (delisted 2019, stale fundamentals), LLIS3 (delisted 2023, stale fundamentals) — eliminates data quality outliers.
+- **NaN & extreme-value policy (decided 2026-07-12, NOT yet implemented in code):**
+  - Classify every NaN: **structural** (warm-up windows, pre-first-filing — predictable by rule), **informative** (a real-world fact, e.g. CAGR NaN from negative earnings, `has_dividends`), or **error** (NaN where the rule says none can exist → fail the build).
+  - RL agent must never see a NaN or an extreme raw ratio: resolve everything before the env boundary; env asserts `np.isfinite(obs).all()`.
+  - Top-50 universe: one **global start date** = max over tickers of (first filing date, warm-up end) → trim rows before it; kills structural NaNs and era-correlated missingness flags in one move.
+  - Informative NaNs → flag + neutral fill (e.g. `cagr_earnings_defined` 0/1, fill CAGR NaN with 0). Never drop those rows (deletes loss-makers → survivorship bias). Never interpolate/backfill (lookahead by construction); ffill-via-`merge_asof` is the only honest imputation.
+  - Fail-don't-fix: OHLCV NaN in-universe, interior fundamental gap (post-`merge_asof` NaNs per ticker must be prefix-shaped), macro gap, NaN-count regression vs previous manifest, any NaN reaching the env.
+  - Extreme ratios (e.g. 2 rows with `pl` > 400,000 — denominator artifact, earnings ≈ 0): keep the rows, fix the encoding. Prefer `earnings_yield` over `pl` as a model feature; RobustScaler's *fit* ignores these outliers (median/IQR) but its transform is linear and unclipped — a 400k input still exits as ~26k. Check the full tail (`|pl| > 100`), not just the headline rows.
 - **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`.
 - **Paths:** absolute via `Path(__file__).resolve().parents[N]`; always run from project root.
 - **FutureWarnings suppressed:** `pct_change(fill_method=None)` for YoY growth; dropped all-NA columns per-file before concat.
