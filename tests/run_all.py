@@ -41,6 +41,7 @@ FAST = [
     "tests/data_collection/test_prices_concat_dtype.py",
     "tests/data_collection/test_ratios_no_inf.py",
     "tests/data_collection/test_skip_existing.py",
+    "tests/data_collection/test_yf_collectors_demo.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
