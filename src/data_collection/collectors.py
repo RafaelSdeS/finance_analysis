@@ -51,23 +51,33 @@ def _chunk_dates(start: str, end: str, years: int):
 
 
 def _merge_save(df_new, path, date_col, validator, ticker_label=""):
-    """Append to existing parquet, dedup on date_col, validate, write. Idempotent."""
-    if path.exists():
-        df_old = pd.read_parquet(path)
-        df = pd.concat([df_old, df_new], ignore_index=True)
-    else:
-        df = df_new
-    df[date_col] = pd.to_datetime(df[date_col])
-    df = (df.drop_duplicates(subset=["ticker", date_col] if "ticker" in df.columns else [date_col],
-                             keep="last")
-            .sort_values(date_col)
-            .reset_index(drop=True))
-    vr = validator(df)
+    """Append to existing parquet, dedup on date_col, validate, write. Idempotent.
+
+    Validates only the newly-fetched batch, not the full merged history: a row
+    already accepted onto disk in a previous run must not block ingestion of new,
+    valid rows forever (e.g. a known vendor data glitch from years ago).
+    """
+    df_new = df_new.copy()
+    df_new[date_col] = pd.to_datetime(df_new[date_col])
+    dedup_cols = ["ticker", date_col] if "ticker" in df_new.columns else [date_col]
+    df_new = df_new.drop_duplicates(subset=dedup_cols, keep="last")
+
+    vr = validator(df_new)
     if not vr.passed:
         log.error("%s validation FAILED: %s", ticker_label, vr.errors)
         return None
     for w in vr.warnings:
         log.warning("%s: %s", ticker_label, w)
+
+    if path.exists():
+        df_old = pd.read_parquet(path)
+        df_old[date_col] = pd.to_datetime(df_old[date_col])
+        df = pd.concat([df_old, df_new], ignore_index=True)
+    else:
+        df = df_new
+    df = (df.drop_duplicates(subset=dedup_cols, keep="last")
+            .sort_values(date_col)
+            .reset_index(drop=True))
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(path, index=False)
     return df

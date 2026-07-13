@@ -4,6 +4,8 @@ import os
 import sys
 from shutil import get_terminal_size
 
+import pandas as pd
+
 COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
 _CODES = {"green": "32", "red": "31", "yellow": "33", "cyan": "36", "dim": "2", "bold": "1"}
 
@@ -53,3 +55,9 @@ def print_section_end(passed: int, failed: int, skipped: int = 0) -> None:
 def print_separator() -> None:
     """Print a simple separator line."""
     print("─" * WIDTH)
+
+
+def numeric_columns(df) -> list:
+    """Numeric column names, dtype-only — df.select_dtypes() copies every
+    matching column's data just to build the list, which OOMs on wide frames."""
+    return [c for c, dt in df.dtypes.items() if pd.api.types.is_numeric_dtype(dt)]

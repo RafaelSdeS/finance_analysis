@@ -34,6 +34,7 @@ FAST = [
     "tests/build_dataset/test_scale_features.py",
     "tests/build_dataset/test_company_siblings.py",
     "tests/build_dataset/test_ticker_continuity.py",
+    "tests/data_collection/test_merge_save_new_rows_only.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.

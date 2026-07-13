@@ -71,9 +71,10 @@ def validate_prices(df: pd.DataFrame) -> ValidationResult:
         bad_hl = df[high_c] < df[low_c]
         if bad_hl.any():
             r.error(f"{bad_hl.sum()} rows with {high_c} < {low_c}")
+        eps = 1e-6  # float noise from independent adj_* computations, not a real violation
         bracket_violation = (
-            (df[open_c] < df[low_c]) | (df[open_c] > df[high_c])
-            | (df[close_c] < df[low_c]) | (df[close_c] > df[high_c])
+            (df[open_c] < df[low_c] - eps) | (df[open_c] > df[high_c] + eps)
+            | (df[close_c] < df[low_c] - eps) | (df[close_c] > df[high_c] + eps)
         )
         if bracket_violation.any():
             r.error(f"{bracket_violation.sum()} rows with {open_c}/{close_c} outside [{low_c}, {high_c}]")

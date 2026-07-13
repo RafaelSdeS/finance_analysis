@@ -71,6 +71,49 @@ def _seed_last_date(cp: dict, ticker: str, path, col: str) -> str | None:
     return None
 
 
+def _prices_fetch_start(cp: dict, ticker: str, path) -> str:
+    """Where to start the prices fetch from.
+
+    yfinance's auto_adjust=True back-adjusts adj_close relative to whatever "now"
+    is at fetch time. If each --mode update run only fetched rows after the last
+    checkpoint (like every other collector here), each quarterly batch would be
+    anchored to its own fetch date and never revisited — a dividend paid after one
+    quarter's fetch would permanently fail to propagate back into that quarter's
+    already-stored adj_close. So prices is the one collector that re-fetches its
+    entire yfinance-sourced span every run: once any yfinance row exists on disk
+    (marked by NaN num_trades, a BolsAI-only field), refetch from the EARLIEST
+    such row (not the latest) so the whole yfinance era gets recomputed together
+    and stays internally consistent. Before that (no yfinance rows yet), behave
+    like every other collector: start the day after the last row on disk.
+    """
+    if path.exists():
+        yf_start = pd.read_parquet(path, columns=["trade_date", "num_trades"])
+        yf_start = yf_start[yf_start["num_trades"].isna()]
+        if len(yf_start):
+            return str(yf_start["trade_date"].min().date())
+    last = _seed_last_date(cp, ticker, path, "trade_date")
+    return (pd.to_datetime(last) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") \
+        if last else config.START_DATE
+
+
+def _repair_nonpositive_ohlc(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """Collapse rows with a non-positive Open/High/Low to their Close.
+
+    Known yfinance glitch: occasional non-positive Open on an otherwise-valid
+    trading day (e.g. BOVA11 has 13 such rows from 2009). Left alone, these
+    permanently fail validate_prices on tickers whose whole span gets
+    re-fetched every run (see _prices_fetch_start), blocking new data forever.
+    """
+    bad = (raw[["Open", "High", "Low", "Close"]] <= 0).any(axis=1) & (raw["Close"] > 0)
+    if bad.any():
+        log.warning("prices %s: %d rows with non-positive Open/High/Low from yfinance — "
+                    "collapsing to Close (known vendor glitch)", ticker, bad.sum())
+        close_fill = raw.loc[bad, "Close"]
+        for col in ("Open", "High", "Low", "Close"):
+            raw.loc[bad, col] = close_fill
+    return raw
+
+
 # ---------------------------------------------------------------------------
 # prices
 # ---------------------------------------------------------------------------
@@ -80,9 +123,7 @@ def collect_prices_yf(tickers: list[str], mode: str):
     for ticker in tickers:
         try:
             path = config.PRICES_DIR / f"{ticker}.parquet"
-            start = _seed_last_date(cp, ticker, path, "trade_date")
-            fetch_start = (pd.to_datetime(start) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") \
-                if start else config.START_DATE
+            fetch_start = _prices_fetch_start(cp, ticker, path)
 
             t = yf.Ticker(_yf_symbol(ticker))
             raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False), f"prices/{ticker}")
@@ -90,14 +131,17 @@ def collect_prices_yf(tickers: list[str], mode: str):
                 log.info("prices %s: no new rows (delisted/renamed/no yfinance coverage?)", ticker)
                 continue
 
+            raw = _repair_nonpositive_ohlc(raw, ticker)
+
             adj_close = _retry(lambda: t.history(start=fetch_start, auto_adjust=True)["Close"],
                                f"prices/{ticker} adj_close")
 
-            # Split-boundary fix: only the newly-fetched batch is touched, old rows on
-            # disk are never rewritten. Always logged loudly so it can be spot-checked.
+            # Split-boundary fix: reverse-adjust any pre-split rows within THIS fetch
+            # (which may re-span multiple quarters now, see _prices_fetch_start) back to
+            # BolsAI's unadjusted convention. Always logged loudly so it can be spot-checked.
             splits = t.splits
-            if start and len(splits):
-                affected = splits[splits.index > pd.Timestamp(start, tz=splits.index.tz)]
+            if len(splits):
+                affected = splits[splits.index >= pd.Timestamp(fetch_start, tz=splits.index.tz)]
                 if len(affected):
                     log.warning("prices %s: split(s) in update window %s — reverse-adjusting "
                                "pre-split rows to BolsAI's unadjusted convention",
@@ -361,13 +405,52 @@ def _demo():
     assert out["net_debt"] == 250.0
     assert abs(out["debt_equity"] - 0.6) < 1e-9
     assert abs(out["current_ratio"] - 2.0) < 1e-9
-    assert np.isinf(_compute_ratios({**r, "equity": 0.0})["roe"])  # 100/0 -> inf, no crash
+    assert np.isnan(_compute_ratios({**r, "equity": 0.0})["roe"])  # 100/0 -> inf -> cleaned to NaN
     assert np.isnan(_compute_ratios({k: v for k, v in r.items() if k != "ebitda"})["ev_ebitda"])
     print("_compute_ratios: OK")
 
     cp = {"PETR4": {"last_date": "2026-01-01"}}
     assert _seed_last_date(cp, "PETR4", None, "trade_date") == "2026-01-01"
     print("_seed_last_date: OK")
+
+    import tempfile
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "TEST3.parquet"
+
+        # No file on disk yet: falls back to checkpoint's last_date + 1 day.
+        cp2 = {"TEST3": {"last_date": "2026-01-01"}}
+        assert _prices_fetch_start(cp2, "TEST3", path) == "2026-01-02"
+
+        # BolsAI-only rows on disk (num_trades populated): same fallback, day after
+        # the last row — no yfinance era started yet.
+        bolsai_only = pd.DataFrame({
+            "trade_date": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "num_trades": [100.0, 120.0],
+        })
+        bolsai_only.to_parquet(path)
+        assert _prices_fetch_start({}, "TEST3", path) == "2026-01-03"
+
+        # A yfinance era already exists (NaN num_trades): re-anchor to its EARLIEST
+        # date, not the latest — this is the fix, re-fetching the whole yfinance
+        # span every run instead of only appending past the last checkpoint.
+        mixed = pd.DataFrame({
+            "trade_date": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-06"]),
+            "num_trades": [100.0, 120.0, np.nan, np.nan],
+        })
+        mixed.to_parquet(path)
+        assert _prices_fetch_start({}, "TEST3", path) == "2026-01-03"
+    print("_prices_fetch_start: OK")
+
+    raw = pd.DataFrame({
+        "Open": [10.0, 0.0, 5.0], "High": [11.0, 6.0, 5.5],
+        "Low": [9.5, 5.0, 4.5], "Close": [10.5, 5.5, 5.0],
+    })
+    fixed = _repair_nonpositive_ohlc(raw.copy(), "TEST3")
+    assert (fixed.loc[1, ["Open", "High", "Low", "Close"]] == 5.5).all()  # glitch row collapsed to Close
+    assert list(fixed.loc[0]) == list(raw.loc[0])  # untouched otherwise
+    assert list(fixed.loc[2]) == list(raw.loc[2])
+    print("_repair_nonpositive_ohlc: OK")
 
 
 if __name__ == "__main__":

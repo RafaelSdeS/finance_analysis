@@ -396,13 +396,14 @@ def compute_advanced_features(df):
     result = []
     for _, g in df.groupby("ticker", sort=False):
         g = g.copy()
-        q = g.drop_duplicates("reference_date").set_index("reference_date")
+        q = g.drop_duplicates("reference_date").set_index("reference_date").sort_index()
         for col, out in trend_cols.items():
             g[out] = g["reference_date"].map(q[col].diff(4))
 
         # Cumulative quarterly filing count per ticker: number of distinct
         # reference_date values seen so far (expanding count). Explains all
-        # window-based NaNs (CAGR history, YoY, QoQ, trends). Never NaN, non-decreasing.
+        # window-based NaNs (CAGR history, YoY, QoQ, trends). Non-decreasing by reference_date order.
+        # Only assign where reference_date is not NaN (rows without fundamentals get NaN).
         q["n_quarters_cumulative"] = range(1, len(q) + 1)
         g["n_quarters_available"] = g["reference_date"].map(q["n_quarters_cumulative"])
 

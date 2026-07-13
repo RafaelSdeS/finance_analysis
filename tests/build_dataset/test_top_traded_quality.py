@@ -28,7 +28,7 @@ from tests.build_dataset.test_final_dataset import (  # noqa: E402
     check_stale_prices,
     check_outliers_zscore,
 )
-from test_utils import print_header, print_check, print_separator  # noqa: E402
+from test_utils import print_header, print_check, print_separator, numeric_columns  # noqa: E402
 
 DEFAULT_FILE = ROOT / "data/processed/ml_dataset.parquet"
 
@@ -177,8 +177,8 @@ def validate(df, universe_size):
     checks.append((f"no duplicate (ticker, trade_date) [{dupes} found]", dupes == 0))
 
     # No inf in numeric columns
-    numeric_cols = df.select_dtypes(include="number").columns
-    n_inf = np.isinf(df[numeric_cols]).sum().sum()
+    numeric_cols = numeric_columns(df)
+    n_inf = sum(int(np.isinf(df[col]).sum()) for col in numeric_cols)
     checks.append((f"no inf values [{n_inf} found]", n_inf == 0))
 
     # No weekend trade_date
@@ -275,17 +275,14 @@ def main():
     print("ANOMALY REPORT (informational)")
     print_separator()
 
-    sub_dated = sub.rename(columns={"trade_date": "date"})
-
-    stale = check_stale_prices(sub_dated)
+    stale = check_stale_prices(sub, date_col="trade_date")
     print(f"\nStale price runs (>=5 identical closes, volume>0): {len(stale)}")
     if len(stale):
         print(stale.head(10).to_string(index=False))
 
     macro_cols = {"selic", "cdi", "ipca", "selic_trend_20d"}
-    numeric_cols = [c for c in sub.select_dtypes(include="number").columns
-                    if c not in macro_cols]
-    outliers = check_outliers_zscore(sub_dated, numeric_cols)
+    numeric_cols = [c for c in numeric_columns(sub) if c not in macro_cols]
+    outliers = check_outliers_zscore(sub, numeric_cols, date_col="trade_date")
     print(f"\nOutliers (robust z-score > 8): {len(outliers)}")
     if len(outliers):
         print("Top outlier columns:")
