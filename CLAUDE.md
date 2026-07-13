@@ -70,7 +70,7 @@ python tests/run_all.py --group all
 ```
 
 **Test groups:**
-- **Fast:** `test_build_dataset_features.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`
+- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`
 - **Data:** `test_final_dataset.py`, `test_cagr_calculation.py`, validate_vs_yfinance.py
 
 **Linting:**
@@ -118,21 +118,32 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 | `collectors.py` | BolsAI: `collect_{macro,prices,fundamentals,company_info,dividends,corporate_events,sectors}()`; helper `_merge_save()` (idempotent append+dedup+validate+write) |
 | `yf_collectors.py` | yfinance: `collect_{prices,fundamentals,dividends}_yf()` for `--mode update` |
 | `pipeline.py` | Orchestration; `_collect()` dispatches to BolsAI/yfinance per `DATA_SOURCE` |
+| `cvm_statements.py` + `cvm/` | CVM open-data collection (delisted fundamentals + real filing dates); thin `--step` CLI dispatching to `cvm/{http,crosswalk,statements,shares,ratios,company_info,filing_dates}.py`. `cvm/http.py` holds the one shared zip-download/retry implementation |
 
-**Stage 2 (Dataset Build):**
+**Stage 2 (Dataset Build)** — `src/build_dataset/`, split by pipeline stage (each module below mirrors a section of the old monolithic `build_ml_dataset.py`):
 
 | File | Purpose |
 |------|---------|
-| `src/build_dataset/build_ml_dataset.py` | Orchestration: load → merge_asof → features → clean → save. Also writes `split_config.json` (walk-forward train/val/test cutoffs) and `dataset_v{N}/` snapshots. Also defines `load_prices()`, `load_fundamentals()` |
-| `src/build_dataset/cagr_handler.py` | CAGR calc/fill (BolsAI first, backfill from earnings/revenue) |
-| `src/build_dataset/scale_features.py` | Fits `ColumnTransformer` (RobustScaler on ratio columns, passthrough elsewhere) train-only, per `split_config.json`; saves `feature_scaler.joblib` + `scaler_metadata.json` |
+| `build_ml_dataset.py` | Orchestration only: `main()` + the memory-bounded `compute_features_chunked()` (3-pass: per-ticker features → cross-sectional → clean+write) |
+| `paths.py` | Shared path constants (avoids circular imports across the split modules) |
+| `loaders.py` | `load_prices()`, `load_fundamentals()`, `load_company_info()`, `load_dividends()`, `company_siblings()` |
+| `repair.py` | `repair_unadjusted_splits()` — rescales `adj_*` history where a split was left unadjusted |
+| `continuity.py` | `apply_ticker_continuity()` — splices renamed/merged tickers |
+| `quality_filters.py` | Coverage + filing-lag gates: `filter_tickers_with_no_fundamentals()`, `attach_filing_dates()`, `filter_excessive_filing_lag()` |
+| `merge.py` | The 4 `merge_*` functions (prices+fundamentals, company_info, macro, dividends) |
+| `features.py` | Per-ticker feature engineering: CAGR backfill, dividend yield, price technicals, fundamental ratios/trends, valuation re-anchoring, "advanced" contextual features |
+| `cross_sectional.py` | `compute_cross_sectional_features()` — sector/market-relative features; needs the full universe at once, unlike everything in `features.py` |
+| `clean.py` | `clean_dataset()` — final dedupe/inf-to-NaN pass |
+| `manifest.py` | `write_manifest()`, `compute_split_dates()`, `write_split_config()`, `sync_dataset_version()` |
+| `cagr_handler.py` | CAGR calc/fill (BolsAI first, backfill from earnings/revenue) |
+| `scale_features.py` | Fits `ColumnTransformer` (RobustScaler on ratio columns, passthrough elsewhere) train-only, per `split_config.json`; saves `feature_scaler.joblib` + `scaler_metadata.json` |
 
 
 ## Critical Caveats
 
 - **CAGR backfill is ON:** `fill_missing_cagr()` (which calls `fill_cagr_columns()` per ticker) runs unconditionally in `build_ml_dataset.py`'s main pipeline → dataset has `cagr_{earnings,revenue}_5y_final` populated. Coverage is ~60% from BolsAI; the backfill recovers an additional ~7%.
 - **No lookahead (Stage 2) — ENFORCED:** `merge_asof(..., direction='backward')` on real CVM `fundamentals_available_date` (not fiscal period-end) — a price never sees a future fundamental. `volatility_*_percentile` use rolling-window rank, not global rank. Tests: `test_merge_honors_actual_filing_date`, `test_volatility_percentile_no_lookahead`. ✅ VERIFIED 2026-07-11.
-- **Real filing dates (July 2026):** Fundamentals visible via CVM's `DT_RECEB` (received date), not fiscal `reference_date`. 41,530 filings from 1,223 companies, 100% coverage of 293-ticker universe; 4,657 rows (0.7%) would have violated a fixed 45/90-day buffer. Sourced from free, keyless CVM open-data portal; integrated via `src/data_collection/filing_dates.py`.
+- **Real filing dates (July 2026):** Fundamentals visible via CVM's `DT_RECEB` (received date), not fiscal `reference_date`. 41,530 filings from 1,223 companies, 100% coverage of 293-ticker universe; 4,657 rows (0.7%) would have violated a fixed 45/90-day buffer. Sourced from free, keyless CVM open-data portal; integrated via `src/data_collection/cvm/filing_dates.py` (`python -m src.data_collection.cvm_statements --step filing_dates`).
 - **Unadjusted splits REPAIRED:** 53 corporate events in BolsAI's `adj_*` columns were never back-adjusted, causing fake returns up to −99.99%. `repair_unadjusted_splits()` detects and rescales all pre-event rows. `hl_ratio` uses `adj_high/adj_low` (not raw scales). WDCN3 quarantined (unfixable data corruption). ✅ VERIFIED 2026-07-11.
 - **Valuation ratios re-anchored daily:** BolsAI computes `pl/pvp/market_cap/p_*/ev_*` at filing date; `recompute_valuation_daily()` rescales to current close (keeps `fundamentals_available_date` in output for agent state). Known ceiling: mid-quarter splits skew ratios until next filing (build warns).
 - **All feature engineering is in Stage 2**, not deferred to the agent (technicals, fundamental ratios, macro-adjusted, CAGR backfill, split repair, volatility rolling rank).
