@@ -432,6 +432,8 @@ def _advanced_features_fixture(n_rows: int) -> pd.DataFrame:
         "net_margin": [0.1] * n_rows,
         "roa": [0.05] * n_rows,
         "selic": [0.1] * n_rows,
+        "cagr_earnings_5y_final": [5.0] * n_rows,
+        "cagr_revenue_5y_final": [3.0] * n_rows,
     })
 
 
@@ -532,6 +534,7 @@ def test_n_quarters_available_counts_real_filings() -> None:
                 "pl": 10.0, "drawdown": 0.0, "pvp": 2.0, "roe": 0.15, "debt_equity": 0.5,
                 "div_yield_12m": 0.03, "return_1m": 0.01, "return_3m": 0.02,
                 "return_12m": 0.05, "net_margin": 0.1, "roa": 0.05, "selic": 0.1,
+                "cagr_earnings_5y_final": 5.0, "cagr_revenue_5y_final": 3.0,
             })
     df = pd.DataFrame(rows)
 
@@ -564,6 +567,7 @@ def test_n_quarters_available_separate_tickers() -> None:
                     "pl": 10.0, "drawdown": 0.0, "pvp": 2.0, "roe": 0.15, "debt_equity": 0.5,
                     "div_yield_12m": 0.03, "return_1m": 0.01, "return_3m": 0.02,
                     "return_12m": 0.05, "net_margin": 0.1, "roa": 0.05, "selic": 0.1,
+                    "cagr_earnings_5y_final": 5.0, "cagr_revenue_5y_final": 3.0,
                 })
     df = pd.DataFrame(rows)
 

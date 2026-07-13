@@ -70,6 +70,7 @@ def _chunked_pipeline_fixture(n_days: int = 260) -> tuple[pd.DataFrame, pd.DataF
                 "net_revenue": 500.0, "net_income": 50.0,
                 "revenue_growth_yoy": 0.05, "earnings_growth_yoy": 0.03,
                 "selic": 0.1, "ipca": 0.04,
+                "cagr_earnings_5y_final": 5.0, "cagr_revenue_5y_final": 3.0,
             })
     dataset = pd.DataFrame(rows)
     dividends = pd.DataFrame({

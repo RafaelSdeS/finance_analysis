@@ -407,10 +407,6 @@ def compute_advanced_features(df):
         result.append(g)
     df = pd.concat(result, ignore_index=True)
 
-    # Flag columns: CAGR defined iff the *_final column is not NaN.
-    df["cagr_earnings_defined"] = df["cagr_earnings_5y_final"].notna().astype(float)
-    df["cagr_revenue_defined"] = df["cagr_revenue_5y_final"].notna().astype(float)
-
     # --- VALUATION RELATIVE TO FUNDAMENTALS (raw relationships) ---
 
     # PEG ratio: P/L (P/E) relative to earnings growth
@@ -422,6 +418,13 @@ def compute_advanced_features(df):
     # Earnings yield (inverse P/L) vs macro rates
     df["earnings_yield"] = 1.0 / (df["pl"] + 1e-8)
     df["earnings_yield_vs_selic"] = df["earnings_yield"] - (df["selic"] / 100)
+
+    # Flag columns: CAGR defined (only if *_final columns exist; they're populated
+    # by fill_missing_cagr before this pipeline in production, but test fixtures may omit them)
+    if "cagr_earnings_5y_final" in df.columns:
+        df["cagr_earnings_defined"] = df["cagr_earnings_5y_final"].notna().astype(float)
+    if "cagr_revenue_5y_final" in df.columns:
+        df["cagr_revenue_defined"] = df["cagr_revenue_5y_final"].notna().astype(float)
 
     print(f"Advanced features computed for {len(df)} rows")
     return df
