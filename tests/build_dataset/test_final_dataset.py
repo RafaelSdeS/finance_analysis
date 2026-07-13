@@ -584,6 +584,9 @@ def main():
     # ponytail: strict mode gates on the anomaly report too; default keeps it
     # informational because legitimate extremes (circuit breakers, penny-stock
     # moves) land there alongside real data errors — triage before enabling.
+    # Owner: whoever next reviews the anomaly report's false-positive rate.
+    # --strict is not passed by run_all.py or ci.yml, so today this stays
+    # informational forever unless someone deliberately wires it in.
     if args.strict and (len(stale) or len(outliers)):
         print(f"\nSTRICT MODE FAILED: {len(stale)} stale-price rows, "
               f"{len(outliers)} outlier cells")

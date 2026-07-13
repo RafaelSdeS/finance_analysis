@@ -20,7 +20,7 @@ jobs:
         run: ruff check .
 
       - name: Fast tests (pure code, synthetic data)
-        run: python tests/run_all.py --group fast
+        run: python tests/run_all.py --group fast --coverage
 
       - name: Build Stage 2 dataset from git-tracked raw data
         run: python -m src.build_dataset.build_ml_dataset

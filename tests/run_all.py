@@ -58,6 +58,13 @@ DATA = [
     "tests/data_collection/test_cvm_statements.py",
 ]
 
+# Hits a live external vendor (yfinance) rather than only local/synthetic
+# data. Vendor flakiness, rate-limits, or yfinance recomputing historical
+# adjustments shouldn't fail CI for reasons unrelated to code correctness --
+# still runs and its result is printed normally, it just doesn't flip the
+# overall exit code.
+NON_BLOCKING = {"tests/data_collection/validate_vs_yfinance.py"}
+
 # --- color -------------------------------------------------------------
 
 COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
@@ -96,11 +103,17 @@ def parse_subtests(output: str) -> list[tuple[str, str]]:
     return subtests
 
 
-def run(script: str) -> ScriptResult:
+def run(script: str, coverage: bool = False) -> ScriptResult:
     print(c("cyan", f"▶ running {script}..."))
     start = time.monotonic()
+    # --coverage: run under `coverage run --parallel-mode` instead of bare
+    # python so each subprocess's .coverage.* file can be combined afterward
+    # (each test script is its own subprocess, so plain `coverage run` on
+    # run_all.py itself would only ever measure run_all.py, not src/).
+    cmd = ([sys.executable, "-m", "coverage", "run", "--parallel-mode", script]
+           if coverage else [sys.executable, script])
     proc = subprocess.Popen(
-        [sys.executable, script],
+        cmd,
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -158,36 +171,65 @@ def print_summary(results: list[ScriptResult]) -> None:
 
     name_width = max(len(r.script) for r in results)
     for r in results:
-        badge = c("green", " PASS ") if r.ok else c("red", " FAIL ")
-        glyph = _GLYPH[PASS] if r.ok else _GLYPH[FAIL]
-        print(f"  {glyph} {badge} {r.script.ljust(name_width)}  {r.duration:6.2f}s")
+        non_blocking = r.script in NON_BLOCKING
+        if non_blocking and not r.ok:
+            badge, glyph = c("yellow", " WARN "), _GLYPH[SKIP]
+        else:
+            badge = c("green", " PASS ") if r.ok else c("red", " FAIL ")
+            glyph = _GLYPH[PASS] if r.ok else _GLYPH[FAIL]
+        suffix = c("dim", "  (non-blocking: live vendor check)") if non_blocking else ""
+        print(f"  {glyph} {badge} {r.script.ljust(name_width)}  {r.duration:6.2f}s{suffix}")
 
     print("─" * WIDTH)
 
     total = len(results)
-    failed = sum(not r.ok for r in results)
-    passed = total - failed
+    blocking_failed = sum(not r.ok for r in results if r.script not in NON_BLOCKING)
+    non_blocking_failed = sum(not r.ok for r in results if r.script in NON_BLOCKING)
+    passed = total - blocking_failed - non_blocking_failed
     skipped = sum(1 for r in results for _, s in r.subtests if s == SKIP)
 
-    failed_str = c("red", f"Failed: {failed}") if failed else f"Failed: {failed}"
+    failed_str = c("red", f"Failed: {blocking_failed}") if blocking_failed else f"Failed: {blocking_failed}"
     skipped_str = c("yellow", f"Skipped: {skipped}") if skipped else f"Skipped: {skipped}"
-    print(f"  Total: {total}    {c('green', f'Passed: {passed}')}    {failed_str}    {skipped_str}")
+    print(f"  Total: {total}    {c('green', f'Passed: {passed}')}    {failed_str}    {skipped_str}", end="")
+    if non_blocking_failed:
+        print(f"    {c('yellow', f'Non-blocking warnings: {non_blocking_failed}')}")
+    else:
+        print()
+
+
+def _print_coverage_report() -> None:
+    print()
+    print(c("bold", "COVERAGE (src/)"))
+    # subprocess.run() below writes directly to the inherited stdout fd; when
+    # stdout isn't a TTY (piped, redirected, or any CI log) Python's own
+    # print() calls above are block-buffered and would otherwise land AFTER
+    # the subprocess's already-flushed output -- garbling the log order.
+    sys.stdout.flush()
+    subprocess.run([sys.executable, "-m", "coverage", "combine", "--quiet"], cwd=ROOT, check=False)
+    subprocess.run([sys.executable, "-m", "coverage", "report", "--include=src/*", "-m"],
+                   cwd=ROOT, check=False)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--group", choices=["fast", "data", "all"], default="fast")
+    parser.add_argument("--coverage", action="store_true",
+                         help="print a src/ coverage report after running (informational, "
+                              "requires the `coverage` package)")
     args = parser.parse_args()
 
     scripts = {"fast": FAST, "data": DATA, "all": FAST + DATA}[args.group]
-    results = [run(script) for script in scripts]
+    results = [run(script, coverage=args.coverage) for script in scripts]
 
     print()
     for result in results:
         print_section(result)
     print_summary(results)
 
-    failed = sum(not r.ok for r in results)
+    if args.coverage:
+        _print_coverage_report()
+
+    failed = sum(not r.ok for r in results if r.script not in NON_BLOCKING)
     return 1 if failed else 0
 
 

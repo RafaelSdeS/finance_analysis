@@ -20,5 +20,6 @@ joblib==1.5.3
 # Testing
 pytest==8.3.4
 ruff==0.15.20
+coverage==7.6.9  # `python tests/run_all.py --coverage` -- informational src/ coverage report
 # Data explorer
 streamlit==1.51.0

@@ -29,6 +29,11 @@ dist/
 *.bak
 *.swp
 
+# Coverage reports (tests/run_all.py --coverage)
+.coverage
+.coverage.*
+htmlcov/
+
 # OS files
 .DS_Store
 Thumbs.db

@@ -74,8 +74,11 @@ def validate_prices(ticker) -> bool:
 def validate_fundamentals(ticker) -> bool:
     """Returns False only on a real mismatch (>TOLERANCE_PCT% and <=200%).
     Diffs >200% are a known currency/units-reporting quirk (see _print_fund_rows'
-    note), not treated as a failure here. TOLERANCE_PCT=70% accommodates vendor
-    differences (BolsAI confirmed correct, yfinance uses different calc/reporting methods)."""
+    note), not treated as a failure here. Uses the same TOLERANCE_PCT=25 as
+    validate_prices (BolsAI confirmed correct, yfinance uses different
+    calc/reporting methods) -- this docstring previously said 70%, which no
+    longer matched the module-level constant; see TOLERANCES catalog in
+    test_utils.py if this value needs revisiting."""
     fund = pd.read_parquet(FUND_DIR / f"{ticker}.parquet")
     yt = yf.Ticker(ticker + ".SA")
     ok = True

@@ -130,5 +130,36 @@ def test_chunked_matches_unchunked_cross_sectional(tmp_path) -> None:
         )
 
 
+def test_chunked_pipeline_stays_within_coarse_memory_and_time_ceiling(tmp_path) -> None:
+    """Tripwire, not a precise benchmark. Memory is an explicit, recurring
+    design concern throughout this pipeline (chunk_size exists specifically
+    to avoid OOM; several helpers elsewhere are written the way they are
+    only to avoid materializing full-width copies -- see numeric_columns()
+    in test_utils.py) -- yet nothing asserted a ceiling. A future change that
+    silently reintroduces an O(n^2) memory/time pattern should fail this
+    test long before it OOMs a real build."""
+    import resource
+    import time
+
+    dataset, dividends = _chunked_pipeline_fixture(n_days=500)
+    out_path = tmp_path / "chunked.parquet"
+
+    mem_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KB on Linux
+    start = time.monotonic()
+    compute_features_chunked(dataset.copy(), dividends, out_path, chunk_size=2)
+    elapsed = time.monotonic() - start
+    mem_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    assert elapsed < 30.0, (
+        f"chunked pipeline took {elapsed:.1f}s on a tiny 6-ticker/500-day fixture "
+        f"-- investigate a runtime regression"
+    )
+    assert (mem_after - mem_before) < 500_000, (  # 500 MB, deliberately generous
+        f"chunked pipeline grew peak RSS by {(mem_after - mem_before) / 1024:.0f} MB on a "
+        f"tiny synthetic fixture -- investigate a memory regression (full-frame copy, "
+        f"chunking bypassed, etc.)"
+    )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -319,6 +319,8 @@ def main():
         print_separator()
         sys.exit(1)
 
+    # --strict is not passed by run_all.py or ci.yml (see test_final_dataset.py's
+    # matching note) -- stays informational until someone deliberately wires it in.
     if args.strict and (len(stale) or len(outliers)):
         print("\n" + "=" * 80)
         print(f"STRICT MODE FAILED: {len(stale)} stale-price rows, "

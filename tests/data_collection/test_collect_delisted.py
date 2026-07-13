@@ -20,7 +20,11 @@ sys.path.insert(0, str(ROOT))
 
 from src.data_collection.collect_delisted import candidate_tickers  # noqa: E402
 
-# Known true last-trade dates, verified live against /stocks/{t}/history 2026-07-11
+# Known true last-trade dates, verified live against /stocks/{t}/history 2026-07-11.
+# These are point-in-time facts, not derived from code -- if a vendor later
+# backfills more history for one of these tickers, this test starts failing
+# with no corresponding code change nearby. That's the signal to re-verify
+# the anchor live (not to widen the tolerance or delete the check).
 DELISTING_ANCHORS = {
     "SMLS3": "2021-06-04",   # Smiles: incorporated into GOL
     "LAME4": "2022-01-21",   # Lojas Americanas: combination into AMER3
