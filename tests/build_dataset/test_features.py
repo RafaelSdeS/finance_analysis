@@ -514,5 +514,86 @@ def test_trend_4q_uses_real_quarters_not_daily_rows() -> None:
     assert (per_quarter_values <= 1).all(), "trend value must be constant within a quarter"
 
 
+def test_n_quarters_available_counts_real_filings() -> None:
+    """n_quarters_available: cumulative count of distinct reference_date (quarterly filings)
+    per ticker, expanding/non-decreasing, 0 before first filing."""
+    quarter_ends = pd.to_datetime(
+        ["2023-03-31", "2023-06-30", "2023-09-30", "2023-12-31"]
+    )
+    rows = []
+    for qe in quarter_ends:
+        for d in pd.date_range(qe, periods=60):
+            rows.append({
+                "ticker": "A", "trade_date": d, "reference_date": qe,
+                "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0,
+                "shares_outstanding": 1000.0, "net_revenue": 500.0, "net_income": 50.0,
+                "revenue_growth_yoy": 0.05, "earnings_growth_yoy": 0.03,
+                "volatility_20d": 0.1, "volatility_60d": 0.1, "adj_close": 100.0,
+                "pl": 10.0, "drawdown": 0.0, "pvp": 2.0, "roe": 0.15, "debt_equity": 0.5,
+                "div_yield_12m": 0.03, "return_1m": 0.01, "return_3m": 0.02,
+                "return_12m": 0.05, "net_margin": 0.1, "roa": 0.05, "selic": 0.1,
+            })
+    df = pd.DataFrame(rows)
+
+    result = compute_advanced_features(df)
+
+    # Within each quarter block (reference_date), n_quarters_available must be constant
+    for i, qe in enumerate(quarter_ends):
+        block = result.loc[result["reference_date"] == qe, "n_quarters_available"]
+        assert (block == i + 1).all(), f"quarter {i} should have count {i+1}"
+
+    # Non-decreasing within ticker
+    assert (result.sort_values("trade_date").groupby("ticker")["n_quarters_available"].diff().fillna(0) >= 0).all()
+
+    # No NaN
+    assert result["n_quarters_available"].notna().all()
+
+
+def test_n_quarters_available_separate_tickers() -> None:
+    """n_quarters_available counts per ticker independently (no bleed)."""
+    rows = []
+    for ticker in ("A", "B"):
+        for qe in pd.to_datetime(["2023-03-31", "2023-06-30"]):
+            for d in pd.date_range(qe, periods=20):
+                rows.append({
+                    "ticker": ticker, "trade_date": d, "reference_date": qe,
+                    "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0,
+                    "shares_outstanding": 1000.0, "net_revenue": 500.0, "net_income": 50.0,
+                    "revenue_growth_yoy": 0.05, "earnings_growth_yoy": 0.03,
+                    "volatility_20d": 0.1, "volatility_60d": 0.1, "adj_close": 100.0,
+                    "pl": 10.0, "drawdown": 0.0, "pvp": 2.0, "roe": 0.15, "debt_equity": 0.5,
+                    "div_yield_12m": 0.03, "return_1m": 0.01, "return_3m": 0.02,
+                    "return_12m": 0.05, "net_margin": 0.1, "roa": 0.05, "selic": 0.1,
+                })
+    df = pd.DataFrame(rows)
+
+    result = compute_advanced_features(df)
+
+    # Both tickers should have count 1 in their first quarter, count 2 in second
+    a1 = result[(result["ticker"] == "A") & (result["reference_date"] == pd.Timestamp("2023-03-31"))]["n_quarters_available"]
+    b1 = result[(result["ticker"] == "B") & (result["reference_date"] == pd.Timestamp("2023-03-31"))]["n_quarters_available"]
+    assert (a1 == 1).all()
+    assert (b1 == 1).all()
+
+    a2 = result[(result["ticker"] == "A") & (result["reference_date"] == pd.Timestamp("2023-06-30"))]["n_quarters_available"]
+    b2 = result[(result["ticker"] == "B") & (result["reference_date"] == pd.Timestamp("2023-06-30"))]["n_quarters_available"]
+    assert (a2 == 2).all()
+    assert (b2 == 2).all()
+
+
+def test_cagr_defined_flags() -> None:
+    """cagr_earnings_defined and cagr_revenue_defined equal notna() of their *_final columns."""
+    df = _advanced_features_fixture(6)
+    df["cagr_earnings_5y_final"] = [np.nan, 5.0, np.nan, 3.0, np.nan, 2.0]
+    df["cagr_revenue_5y_final"] = [1.0, np.nan, 3.0, np.nan, 5.0, np.nan]
+
+    result = compute_advanced_features(df)
+
+    assert (result["cagr_earnings_defined"] == df["cagr_earnings_5y_final"].notna().astype(float)).all()
+    assert (result["cagr_revenue_defined"] == df["cagr_revenue_5y_final"].notna().astype(float)).all()
+    assert result["cagr_earnings_defined"].isin([0, 1]).all()
+    assert result["cagr_revenue_defined"].isin([0, 1]).all()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
