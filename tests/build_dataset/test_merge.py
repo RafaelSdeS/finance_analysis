@@ -15,9 +15,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.build_dataset import merge
 from src.build_dataset.merge import (
     merge_prices_and_fundamentals,
     merge_company_info,
+    merge_macro,
     merge_dividends,
     STATUS_INFERENCE_WINDOW_DAYS,
 )
@@ -132,6 +134,50 @@ def test_merge_honors_actual_filing_date() -> None:
     assert approx(result.loc[("EARLY", early), "pl"], 10.0)   # visible at day 20 < statutory 45
     assert pd.isna(result.loc[("LATE", ref_date + pd.Timedelta(days=45)), "pl"])  # statutory day, not yet filed
     assert approx(result.loc[("LATE", late), "pl"], 20.0)
+
+
+def test_merge_macro_aligns_by_date_no_lookahead(tmp_path, monkeypatch) -> None:
+    """merge_macro is ticker-independent (one calendar-date series applies to
+    every ticker) and must never look ahead: a trade_date before the series'
+    first published date gets NaN, and a trade_date between two publications
+    holds the most recent one, never the next (no lookahead) and never stale
+    beyond the next update (forward-fill applied, not left at the old value
+    forever)."""
+    monkeypatch.setattr(merge, "MACRO_DIR", tmp_path)
+
+    pd.DataFrame({"reference_date": pd.to_datetime(["2026-01-01", "2026-01-08"]),
+                  "selic": [0.10, 0.11]}).to_parquet(tmp_path / "selic.parquet")
+    pd.DataFrame({"reference_date": pd.to_datetime(["2026-01-02"]),
+                  "cdi": [0.09]}).to_parquet(tmp_path / "cdi.parquet")
+    pd.DataFrame({"reference_date": pd.to_datetime(["2026-01-01"]),
+                  "ipca": [0.005]}).to_parquet(tmp_path / "ipca.parquet")
+
+    dataset = pd.DataFrame({
+        "ticker": ["A", "A", "A", "A", "B", "B"],
+        "trade_date": pd.to_datetime(
+            ["2025-12-31", "2026-01-01", "2026-01-05", "2026-01-08",
+             "2025-12-31", "2026-01-05"]
+        ),
+    })
+
+    result = merge_macro(dataset).set_index(["ticker", "trade_date"])
+
+    # Before the series' first publication: no lookahead into the future value
+    assert pd.isna(result.loc[("A", pd.Timestamp("2025-12-31")), "selic"])
+    assert pd.isna(result.loc[("B", pd.Timestamp("2025-12-31")), "selic"])
+    # Exact publication date
+    assert approx(result.loc[("A", pd.Timestamp("2026-01-01")), "selic"], 0.10)
+    # Between two publications: holds the earlier one, not the later
+    assert approx(result.loc[("A", pd.Timestamp("2026-01-05")), "selic"], 0.10)
+    # On/after the second publication: updated
+    assert approx(result.loc[("A", pd.Timestamp("2026-01-08")), "selic"], 0.11)
+    # Same date, independent ticker "B": identical macro value (ticker-independent)
+    assert approx(result.loc[("B", pd.Timestamp("2026-01-05")), "selic"], 0.10)
+
+    # cdi/ipca merged independently, correct column names, no cross-contamination
+    assert pd.isna(result.loc[("A", pd.Timestamp("2025-12-31")), "cdi"])
+    assert approx(result.loc[("A", pd.Timestamp("2026-01-05")), "cdi"], 0.09)
+    assert approx(result.loc[("A", pd.Timestamp("2026-01-01")), "ipca"], 0.005)
 
 
 if __name__ == "__main__":
