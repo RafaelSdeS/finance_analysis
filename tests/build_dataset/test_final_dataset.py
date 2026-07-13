@@ -149,6 +149,59 @@ def validate(df):
     checks.append((f"has_fundamentals=0 rows have NaN fundamentals {leaked}",
                    sum(leaked.values()) == 0))
 
+    # Prefix-shaped NaN rule: fundamentals forward-filled via merge_asof backward,
+    # so interior NaN (NaN after first non-NaN) per ticker = merge bug.
+    prefix_ok = True
+    for col in ("equity", "net_income", "total_assets"):
+        if col not in df.columns:
+            continue
+        for ticker in df["ticker"].unique():
+            g = df[df["ticker"] == ticker][col].dropna()
+            if len(g) > 0:
+                idx_first_nonnull = g.index[0]
+                after_first = df.loc[df["ticker"] == ticker].loc[idx_first_nonnull:, col]
+                if (after_first[1:].isna() & after_first.shift(1)[1:].notna()).any():
+                    prefix_ok = False
+                    break
+    checks.append((f"NaN shapes are prefix per ticker (no interior holes)", prefix_ok))
+
+    # CAGR known-cause: any NaN in cagr_earnings_5y_final must have a reason.
+    # Threshold = 20 quarters (5 years * 4), same as cagr_handler.py lookback.
+    cagr_ok = True
+    if "cagr_earnings_5y_final" in df.columns and "n_quarters_available" in df.columns:
+        has_fund = df["has_fundamentals"] == 1
+        cagr_nan = has_fund & df["cagr_earnings_5y_final"].isna()
+        reasons = (
+            (df[cagr_nan]["had_negative_earnings_5y"] == 1) |
+            (df[cagr_nan]["n_quarters_available"] < 20)
+        )
+        unexplained = (~reasons).sum()
+        cagr_ok = unexplained == 0
+        checks.append((f"cagr_earnings NaN has known cause [{unexplained} unexplained]", cagr_ok))
+
+        if "cagr_revenue_5y_final" in df.columns:
+            cagr_rev_nan = has_fund & df["cagr_revenue_5y_final"].isna()
+            reasons_rev = (df[cagr_rev_nan]["n_quarters_available"] < 20)
+            unexplained_rev = (~reasons_rev).sum()
+            checks.append((f"cagr_revenue NaN has known cause [{unexplained_rev} unexplained]",
+                          unexplained_rev == 0))
+
+    # New flag columns: well-formed (0/1 for flags, valid count for n_quarters).
+    if "cagr_earnings_defined" in df.columns:
+        ok = df["cagr_earnings_defined"].isin([0, 1, 0.0, 1.0]).all()
+        checks.append((f"cagr_earnings_defined ∈ {{0,1}}, no NaN", ok))
+    if "cagr_revenue_defined" in df.columns:
+        ok = df["cagr_revenue_defined"].isin([0, 1, 0.0, 1.0]).all()
+        checks.append((f"cagr_revenue_defined ∈ {{0,1}}, no NaN", ok))
+    if "n_quarters_available" in df.columns:
+        no_nan = df["n_quarters_available"].notna().all()
+        non_dec = all(
+            df[df["ticker"] == t].sort_values("trade_date")["n_quarters_available"].diff().fillna(0) >= 0
+            for t in df["ticker"].unique()
+        )
+        checks.append((f"n_quarters_available: no NaN, non-decreasing per ticker",
+                      no_nan and non_dec))
+
     # asof merge correctness (T5): the merged quarter is the MOST RECENT one
     # available by each trade_date — the per-quarter availability calendar is
     # reconstructed from the dataset's own (reference_date, available_date)
