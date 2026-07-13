@@ -11,7 +11,7 @@ def clean_dataset(df):
     print("=" * 80)
 
     before = len(df)
-    df = df.drop_duplicates()
+    df = df.drop_duplicates().copy()  # avoid SettingWithCopyWarning on the inf-replacement below
     print(f"Removed duplicates: {before - len(df)}")
 
     # Growth rates (pct_change from a zero base) and ratios (zero denominator,

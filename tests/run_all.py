@@ -29,6 +29,7 @@ FAST = [
     "tests/build_dataset/test_merge.py",
     "tests/build_dataset/test_repair.py",
     "tests/build_dataset/test_quality_filters.py",
+    "tests/build_dataset/test_clean.py",
     "tests/build_dataset/test_cross_sectional.py",
     "tests/build_dataset/test_compute_features_chunked.py",
     "tests/build_dataset/test_split_config.py",
@@ -42,6 +43,8 @@ FAST = [
     "tests/data_collection/test_ratios_no_inf.py",
     "tests/data_collection/test_skip_existing.py",
     "tests/data_collection/test_yf_collectors_demo.py",
+    "tests/data_collection/test_pipeline_dispatch.py",
+    "tests/data_collection/test_cvm_filing_dates.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
