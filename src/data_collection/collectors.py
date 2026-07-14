@@ -327,7 +327,9 @@ def _fetch_all_companies(c, status: str | None = None):
             break
         for co in batch:
             ticker = str(co.get("ticker_primary", "")).strip().upper()
-            if ticker:  # only companies with a ticker
+            # skip companies with no real ticker (BolsAI falls back to the
+            # numeric CVM code in ticker_primary for never-listed holding cos)
+            if ticker and not ticker.isdigit():
                 all_companies[ticker] = co
         offset += len(batch)
         params["offset"] = offset

@@ -6,6 +6,18 @@ import pandas as pd
 
 from .paths import CONTINUITY_PATH
 
+# Beyond the announced share-exchange ratio, the old and new ticker are often
+# two independent vendor series each dividend-adjusted from their own anchor
+# (e.g. one never got a dividend adjustment applied at all, the other is
+# adjusted from "today" back to day one) -- splicing them at `ratio` alone
+# leaves a fake jump in adj_close sitting exactly at the boundary that
+# silently poisons every return/momentum feature computed across it
+# (confirmed 2026-07-14: B3SA3, BHIA3, TIMS3 -- see TOP50_ML_READINESS_AUDIT.md
+# §4). Reconcile with an empirical factor from the boundary values themselves;
+# skip when the mismatch is within normal 1-trading-day return noise so a
+# clean splice isn't perturbed by rounding.
+ADJ_RECONCILE_TOL = 0.10
+
 
 def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
     """Splice renamed/merged tickers into their surviving series.
@@ -37,9 +49,8 @@ def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
 
     prices = prices.copy()
     fundamentals = fundamentals.copy()
-    price_cols = [c for c in ("open", "high", "low", "close",
-                              "adj_open", "adj_high", "adj_low", "adj_close")
-                  if c in prices.columns]
+    adj_cols = [c for c in ("adj_open", "adj_high", "adj_low", "adj_close") if c in prices.columns]
+    price_cols = [c for c in ("open", "high", "low", "close") if c in prices.columns] + adj_cols
 
     # boundaries from the PRISTINE input: a leg spliced by an earlier event must
     # not shift a later event's boundary (two legs onto one ticker would silently
@@ -59,9 +70,21 @@ def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
             prices = prices[~((prices["ticker"] == old) & (prices["trade_date"] >= boundary))]
         old_rows = prices["ticker"] == old
         prices.loc[old_rows, price_cols] = prices.loc[old_rows, price_cols] * ratio
-        prices.loc[old_rows, "ticker"] = new
         # volume stays unscaled: share counts change meaning across an exchange
         # ratio, and all volume features downstream are per-ticker relative
+
+        # adj_close basis reconciliation (see ADJ_RECONCILE_TOL docstring above)
+        if boundary is not None and pd.notna(boundary) and adj_cols and old_rows.any():
+            old_last = prices.loc[old_rows].sort_values("trade_date").iloc[-1]
+            new_first_rows = prices.loc[(prices["ticker"] == new) & (prices["trade_date"] == boundary), "adj_close"]
+            old_last_adj = old_last["adj_close"]
+            if len(new_first_rows) and pd.notna(old_last_adj) and old_last_adj != 0 and pd.notna(new_first_rows.iloc[0]):
+                adj_factor = new_first_rows.iloc[0] / old_last_adj
+                if abs(adj_factor - 1.0) > ADJ_RECONCILE_TOL:
+                    prices.loc[old_rows, adj_cols] = prices.loc[old_rows, adj_cols] * adj_factor
+                    print(f"    adj_close basis reconciled: {old}->{new} factor={adj_factor:.4f}")
+
+        prices.loc[old_rows, "ticker"] = new
 
         f_old = fundamentals["ticker"] == old
         if kind == "rename":

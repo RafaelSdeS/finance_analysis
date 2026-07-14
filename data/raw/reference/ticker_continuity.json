@@ -224,6 +224,14 @@
       "type": "rename",
       "ratio": 1.0,
       "notes": "Estacio Participacoes renamed Yduqs Participacoes (new holding brand, Estacio brand retained for higher-ed operations). Web-verified: ticker change effective 2019-07-23. Data confirms adjacency: ESTC3 last trade 2019-07-22 @ R$33.52, YDUQ3 first trade 2019-07-23 @ R$34.36 (ratio 1.025, effectively 1:1)."
+    },
+    {
+      "old": "CCRO3",
+      "new": "MOTV3",
+      "date": "2025-05-02",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "CCR S.A. renamed Motiva Infraestrutura de Mobilidade (brand refresh announced 2025-03-21). Web-verified across multiple independent BR financial news sources: ticker change effective the 2025-05-02 session, replacing CCRO3. Data confirms: company_info's cvm_code for MOTV3 (18821) matches CCRO3's; CCRO3 last real-volume trade 2025-04-28 @ R$13.15 (volume ~9.3M), MOTV3 first trade 2025-05-02 @ R$13.98 (volume ~6.1M, ratio 1.063, small 2-day drift, not an exchange ratio). Without this entry, CCRO3's raw file continues past the rename with near-zero volume (100-2000 shares/day) and wildly erratic thin-market prices (e.g. R$0.63 -> R$39.99 within two weeks) that are NOT a data error but an orphaned/dead ticker code still nominally listed -- confirmed independently via yfinance, which reports CCRO3.SA as delisted from this date. 2026-07-14 top-50 ML-readiness audit (TOP50_ML_READINESS_AUDIT.md) originally flagged this as a 52-day trading-calendar gap and treated CCRO3 as a live top-50 name through today; this splice corrects that."
     }
   ]
 }

@@ -105,6 +105,54 @@ def test_merger_splice():
     return True
 
 
+def test_adj_close_reconciliation():
+    # OLD3's vendor series never dividend-adjusted (adj_close == close); NEW3's
+    # starts already discounted -- same real-world pattern as BVMF3->B3SA3.
+    prices = pd.concat([
+        _prices("OLD3", ["2021-01-04", "2021-01-05"], [10.0, 20.0]),
+    ], ignore_index=True)
+    new_rows = _prices("NEW3", ["2021-02-01", "2021-02-02"], [21.0, 21.5])
+    new_rows["adj_close"] = [5.25, 5.375]  # 4x below close, unlike OLD3
+    prices = pd.concat([prices, new_rows], ignore_index=True)
+    fund = pd.concat([
+        _fund("OLD3", ["2020-12-31"], [100.0]),
+        _fund("NEW3", ["2021-03-31"], [110.0]),
+    ], ignore_index=True)
+    path = _map([{"old": "OLD3", "new": "NEW3", "date": "2021-02-01",
+                  "type": "rename", "ratio": 1.0}])
+
+    p, _ = apply_ticker_continuity(prices, fund, path=path)
+    new_p = p[p["ticker"] == "NEW3"].sort_values("trade_date")
+
+    # factor = 5.25 / 20.0 = 0.2625; OLD3's adj_close rescaled, raw close untouched
+    assert new_p.iloc[0]["close"] == 10.0, "raw close must never be touched by reconciliation"
+    assert abs(new_p.iloc[0]["adj_close"] - 10.0 * 0.2625) < 1e-9, new_p.iloc[0]["adj_close"]
+    assert new_p.iloc[1]["adj_close"] == 20.0 * 0.2625, "old ticker's every adj_close row rescaled"
+    assert new_p.iloc[2]["adj_close"] == 5.25, "new ticker's own rows untouched"
+    print_check("adj_close basis reconciliation", True)
+    return True
+
+
+def test_adj_close_reconciliation_skips_within_tolerance():
+    # 5% boundary mismatch is normal 1-day return noise -- must not be "fixed"
+    prices = pd.concat([
+        _prices("OLD3", ["2021-01-04", "2021-01-05"], [10.0, 20.0]),
+        _prices("NEW3", ["2021-02-01"], [20.9]),  # 4.5% above OLD3's last close
+    ], ignore_index=True)
+    fund = pd.concat([
+        _fund("OLD3", ["2020-12-31"], [100.0]),
+        _fund("NEW3", ["2021-03-31"], [110.0]),
+    ], ignore_index=True)
+    path = _map([{"old": "OLD3", "new": "NEW3", "date": "2021-02-01",
+                  "type": "rename", "ratio": 1.0}])
+
+    p, _ = apply_ticker_continuity(prices, fund, path=path)
+    new_p = p[p["ticker"] == "NEW3"].sort_values("trade_date")
+    assert new_p.iloc[1]["adj_close"] == 20.0, "within-tolerance mismatch must not be rescaled"
+    print_check("adj_close reconciliation skips within-tolerance mismatch", True)
+    return True
+
+
 def test_duplicate_guard():
     # two old legs mapped onto the same surviving ticker with overlapping dates
     prices = pd.concat([
@@ -138,5 +186,6 @@ def test_missing_map_is_noop():
 
 if __name__ == "__main__":
     ok = (test_rename_splice() & test_merger_splice()
+          & test_adj_close_reconciliation() & test_adj_close_reconciliation_skips_within_tolerance()
           & test_duplicate_guard() & test_missing_map_is_noop())
     sys.exit(0 if ok else 1)

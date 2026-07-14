@@ -21,6 +21,11 @@ QUARANTINED_TICKERS = {
              "BolsAI still reports fundamentals through 2026-03-31 (stale data)",
     "LLIS3": "delisted/suspended 2023 (price data ends 2023-02-08); "
              "BolsAI still reports fundamentals through 2026-03-31 (stale data)",
+    "CCTY3": "raw price feed is not real trading data for this company (cvm_code 27570, "
+             "Belora RDVC City Desenvolvimento Imobiliario S.A.) -- confirmed identical to "
+             "CCRO3/Motiva's (cvm_code 18821) orphaned post-rename stub across BOTH BolsAI's "
+             "live API and yfinance independently (2026-07-14 audit); no reliable source found "
+             "for this ticker's true price history",
 }
 
 # Tickers with genuinely zero fundamental coverage everywhere (not delisted,
