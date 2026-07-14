@@ -23,6 +23,22 @@ QUARANTINED_TICKERS = {
              "BolsAI still reports fundamentals through 2026-03-31 (stale data)",
 }
 
+# Tickers with genuinely zero fundamental coverage everywhere (not delisted,
+# not redundant with a sibling class), but excludable for a documented reason
+# other than "missing data" — e.g. an ETF, not an operating company.
+KNOWN_NO_FUNDAMENTALS = {
+    "BOVA11": "benchmark ETF (IBOV proxy), not an operating company — fundamentals not applicable",
+}
+
+# Ticker stopped trading this many days before the dataset's last observed
+# date is treated as delisted/renamed rather than a live coverage gap.
+STALE_TICKER_DAYS = 730
+
+
+def _ticker_root(ticker: str) -> str:
+    """Strip the trailing share-class digits (PETR4 -> PETR, ALUP11 -> ALUP)."""
+    return ticker.rstrip("0123456789")
+
 
 def filter_tickers_with_no_fundamentals(prices, fundamentals):
     """Drop any ticker from prices that has zero fundamental rows.
@@ -49,9 +65,37 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
     covered = tickers_with_prices & tickers_with_fundamentals
 
     if missing:
-        print(f"EXCLUDED (no fundamentals): {sorted(missing)}")
-        print("  These tickers have price data but zero fundamental coverage.")
-        print("  A conservative long-term agent requires fundamental quality signals.")
+        last_trade = prices.groupby("ticker")["trade_date"].max()
+        dataset_max_date = prices["trade_date"].max()
+        covered_roots = {_ticker_root(t): t for t in covered}
+
+        known, dead, redundant, gap = [], [], [], []
+        for t in sorted(missing):
+            if t in KNOWN_NO_FUNDAMENTALS:
+                known.append(t)
+            elif (dataset_max_date - last_trade[t]).days > STALE_TICKER_DAYS:
+                dead.append(t)
+            elif _ticker_root(t) in covered_roots:
+                redundant.append((t, covered_roots[_ticker_root(t)]))
+            else:
+                gap.append(t)
+
+        print(f"EXCLUDED (no fundamentals): {len(missing)} tickers — safe to exclude "
+              f"unless flagged as a GAP below")
+        if known:
+            print(f"  known non-company ({len(known)}):")
+            for t in known:
+                print(f"    {t}: {KNOWN_NO_FUNDAMENTALS[t]}")
+        if dead:
+            print(f"  delisted/renamed, last traded >{STALE_TICKER_DAYS}d before dataset end "
+                  f"({len(dead)}): {dead}")
+        if redundant:
+            print(f"  redundant, company already covered via sibling ticker ({len(redundant)}):")
+            for t, sib in redundant:
+                print(f"    {t} -> {sib}")
+        if gap:
+            print(f"  ⚠ GAP — recent price data but zero fundamentals anywhere, "
+                  f"needs investigation ({len(gap)}): {gap}")
         prices = prices[prices["ticker"].isin(covered)]
 
     # Drop tickers with almost no price history — nothing to learn from them

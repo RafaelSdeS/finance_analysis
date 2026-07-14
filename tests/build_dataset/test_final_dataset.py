@@ -44,23 +44,82 @@ def check_stale_prices(df, price_col="close", run_len=5, date_col="date"):
     return pd.DataFrame(findings)
 
 
+# Columns whose LEVEL trends with company growth or price appreciation over
+# a ticker's multi-year (sometimes multi-decade) history: a single
+# whole-history median/MAD conflates a ticker's cheapest and most expensive
+# eras, so any long-lived trending name gets its earliest or latest years
+# flagged as "outlier" purely from drift, not from anything anomalous on
+# that date. Confirmed directly (2026-07-14 anomaly investigation): 60% of
+# flagged adj_close outliers cluster in the first/last 15% of their own
+# ticker's date range. Compare within (ticker, year) instead of the
+# ticker's whole lifetime — cheap, fixes the drift without a slow rolling
+# window.
+_TREND_LEVEL_COLS = {
+    "open", "high", "low", "close",
+    "adj_open", "adj_high", "adj_low", "adj_close",
+    "ma_20", "ma_60", "market_cap", "shares_outstanding",
+    "equity", "total_assets", "cash", "current_assets", "current_liabilities",
+    "total_debt", "net_debt", "ebit", "ebitda", "net_income", "net_revenue",
+}
+
+# Already bounded, already normalized (percentile/sector-z-score), boolean
+# flags, or identifiers: a whole-history MAD z-score on these is either
+# meaningless (re-z-scoring an already-computed z-score/percentile) or
+# duplicates a dedicated, more meaningful gate that already exists elsewhere
+# (filing_lag_days -> quality_filters.filter_excessive_filing_lag,
+# n_quarters_available -> the monotonicity check above in validate()).
+_EXCLUDE_FROM_OUTLIER_CHECK = {
+    "cagr_earnings_defined", "cagr_revenue_defined", "had_negative_earnings_5y",
+    "has_dividends", "has_fundamentals", "f_score", "adj_close_precision_degraded",
+    "f_leverage_decreasing", "f_liquidity_improving", "f_margin_improving",
+    "f_roa_improving", "f_roa_positive",
+    "n_quarters_available", "filing_lag_days", "days_since_fundamental",
+    "rsi_14", "cvm_code",
+    "drawdown_percentile", "price_percentile_5y", "pl_percentile_5y",
+    "div_yield_sector_percentile", "volatility_20d_percentile", "volatility_60d_percentile",
+    "debt_equity_zscore_sector", "pl_zscore_sector", "pvp_zscore_sector", "roe_zscore_sector",
+}
+
+
 def check_outliers_zscore(df, feature_cols, threshold=8.0, date_col="date"):
-    """Robust (median/MAD) z-score outlier flagging, computed within each
-    ticker's own history — a global z-score would flag every large-cap as an
-    outlier on absolute-scale columns (market_cap, volume, ...) just for
-    being large, since company size varies by orders of magnitude."""
+    """Robust (median/MAD) z-score outlier flagging.
+
+    Two regimes, chosen per-column to avoid two confirmed false-positive
+    sources (2026-07-14 anomaly investigation — see ANOMALY_INVESTIGATION.md):
+
+    - _TREND_LEVEL_COLS: compared within (ticker, year) rather than the
+      ticker's whole history — see docstring above the constant.
+    - everything else: z-scored on a signed-log1p transform
+      (sign(x) * log1p(|x|)) instead of the raw value. Ratio/growth-rate
+      columns diverge as their denominator nears zero by construction
+      (e.g. peg_ratio hit 2e9 — CLAUDE.md already documents this as an
+      intentional, kept-intact distress signal, not an error), and
+      volume/trade-count columns are naturally fat-tailed (volume skew ~92,
+      kurtosis ~11,000). log1p compresses those extremes while leaving
+      already-modest-range columns (returns, momentum) essentially
+      unchanged, since log1p(x) ~= x for small x.
+    """
     findings = []
-    by_ticker = df.groupby("ticker")
+    ticker = df["ticker"]
+    year = df[date_col].dt.year
     for col in feature_cols:
-        s = df[col]
-        med = by_ticker[col].transform("median")
-        mad = (s - med).abs().groupby(df["ticker"]).transform("median")
+        if col in _EXCLUDE_FROM_OUTLIER_CHECK:
+            continue
+        raw = df[col]
+        if col in _TREND_LEVEL_COLS:
+            s = raw
+            group_keys = [ticker, year]
+        else:
+            s = np.sign(raw) * np.log1p(raw.abs())
+            group_keys = [ticker]
+        med = s.groupby(group_keys).transform("median")
+        mad = (s - med).abs().groupby(group_keys).transform("median")
         z = 0.6745 * (s - med) / mad.replace(0, float("nan"))
         mask = z.abs() > threshold
         if mask.any():
             sub = df.loc[mask, ["ticker", date_col]].rename(columns={date_col: "date"}).copy()
             sub["column"] = col
-            sub["value"] = s[mask].values
+            sub["value"] = raw[mask].values
             findings.append(sub)
     if not findings:
         return pd.DataFrame(columns=["ticker", "date", "column", "value"])
@@ -113,7 +172,8 @@ def validate(df):
     min_rows = row_counts.min()
     n_short = (row_counts < 252).sum()
     checks.append((f"all tickers >= 10 rows [min {min_rows}] "
-                    f"({n_short} tickers < 252 rows, dropped later by data_pipeline.py)",
+                    f"({n_short} tickers < 252 rows — thin/recent listings, kept here on purpose; "
+                    f"only trimmed downstream by ml_agent's data_pipeline.py, not by this repo)",
                    min_rows >= 10))
 
     # Valuation staleness regression guard: P/L must be re-anchored to the
@@ -224,6 +284,9 @@ def validate(df):
     if "cagr_revenue_defined" in df.columns:
         ok = df["cagr_revenue_defined"].isin([0, 1, 0.0, 1.0]).all()
         checks.append((f"cagr_revenue_defined ∈ {{0,1}}, no NaN", ok))
+    if "adj_close_precision_degraded" in df.columns:
+        ok = df["adj_close_precision_degraded"].isin([0, 1, 0.0, 1.0]).all()
+        checks.append((f"adj_close_precision_degraded ∈ {{0,1}}, no NaN", ok))
     if "n_quarters_available" in df.columns:
         # Check: when sorted by trade_date, n_quarters_available should be non-decreasing
         # for rows with valid reference_date. Minor edge cases (rows with NaT ref but filled n_quarters)

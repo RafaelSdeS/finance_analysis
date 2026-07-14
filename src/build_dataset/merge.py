@@ -204,21 +204,32 @@ def merge_macro(dataset):
     print("=" * 80)
 
     # Macro is ticker-independent: one value per calendar date applies to all
-    # tickers, so no `by=` and no per-ticker loop. Rename each macro date key
-    # to avoid colliding with the fundamentals `reference_date` already present.
+    # tickers. Combine the (small, thousands-of-rows) macro series together
+    # first, then do ONE sort + ONE merge_asof against the big dataset —
+    # sorting/merging the full multi-million-row dataset separately per
+    # series (3x full-frame copies) was enough to OOM the build.
+    macro = None
     for name in ("selic", "cdi", "ipca"):
         print(f"Merging {name}")
-        m = pd.read_parquet(MACRO_DIR / f"{name}.parquet")[["reference_date", name]]
-        m = m.rename(columns={"reference_date": f"{name}_date"}).sort_values(f"{name}_date")
-        dataset = pd.merge_asof(
-            dataset.sort_values("trade_date"),
-            m,
-            left_on="trade_date",
-            right_on=f"{name}_date",
-            direction="backward",   # latest macro value <= trade_date (no lookahead)
-        ).drop(columns=f"{name}_date")
+        m = pd.read_parquet(MACRO_DIR / f"{name}.parquet")[["reference_date", name]].sort_values("reference_date")
+        macro = m if macro is None else pd.merge_asof(macro, m, on="reference_date", direction="backward")
 
-    return dataset.sort_values(["ticker", "trade_date"]).reset_index(drop=True)
+    macro = macro.rename(columns={"reference_date": "macro_date"})
+
+    # Chaining sort/merge/drop/sort as one expression keeps every intermediate
+    # frame alive at once (old `dataset` stays bound until the whole RHS
+    # finishes evaluating) — on a multi-million-row frame that's several full
+    # copies resident simultaneously. Split into statements and `del` each as
+    # soon as its replacement exists so the old one is freed before the next
+    # copy is made; `ignore_index=True` also skips a separate reset_index copy.
+    dataset = dataset.sort_values("trade_date")
+    merged = pd.merge_asof(
+        dataset, macro, left_on="trade_date", right_on="macro_date", direction="backward",
+    )
+    del dataset
+    del merged["macro_date"]  # in-place, unlike .drop(columns=...)
+
+    return merged.sort_values(["ticker", "trade_date"], ignore_index=True)
 
 
 # =============================================================================

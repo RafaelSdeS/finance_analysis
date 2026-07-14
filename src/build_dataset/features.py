@@ -137,6 +137,25 @@ def compute_price_features(df):
         # Mask non-positive prices to NaN before log to avoid divide-by-zero warnings
         adj = g["adj_close"].where(g["adj_close"] > 0)
         g["log_return"]     = np.log(adj / adj.shift(1))
+        # Vendor (BolsAI) stores adj_close at 2-decimal precision. For
+        # deep-history microcaps with a large cumulative split/dividend
+        # adjustment factor, the true adjusted price underflows toward that
+        # precision floor: adj_close either rounds to exactly 0.00 (already
+        # masked to NaN above) or gets pinned at a tiny nonzero constant
+        # (e.g. 0.03) across several consecutive days while the real,
+        # unrounded price keeps moving -- producing a spurious log_return of
+        # exactly 0.0 for a real move (confirmed on BIOM3 and 27 others,
+        # 2026-07-14 anomaly investigation). Flag rather than fix: there's no
+        # way to recover the lost precision, and CLAUDE.md already documents
+        # why adj_close must not be reconstructed from other sources.
+        #
+        # Must require exact 2dp quantization, not just magnitude < 0.05:
+        # some tickers (e.g. TIMS3, down to 0.000568) are genuinely
+        # low-priced with full float precision preserved -- a real number,
+        # not a rounding artifact -- and must NOT be flagged.
+        near_floor = (g["adj_close"] > 0) & (g["adj_close"] < 0.05)
+        quantized = np.isclose(g["adj_close"], g["adj_close"].round(2))
+        g["adj_close_precision_degraded"] = (near_floor & quantized).astype(int)
         g["volatility_20d"] = g["log_return"].rolling(20).std()
         g["volatility_60d"] = g["log_return"].rolling(60).std()
         g["ma_20"]          = g["adj_close"].rolling(20).mean()

@@ -599,5 +599,26 @@ def test_cagr_defined_flags() -> None:
     assert result["cagr_revenue_defined"].isin([0, 1]).all()
 
 
+def test_adj_close_precision_degraded_flag() -> None:
+    """Flags rows where adj_close is quantized to the 2-decimal vendor
+    precision floor (e.g. 0.03) -- the case where a real price move gets
+    silently rounded away into a spurious flat log_return. Must NOT flag:
+    adj_close == 0 (masked to NaN log_return already), nor a genuinely tiny
+    but full-precision value (e.g. TIMS3-style 0.000568 -- a real number,
+    not a rounding artifact, confirmed 2026-07-14 by checking it's never
+    exactly equal to its own 2-decimal rounding)."""
+    df = pd.DataFrame({
+        "ticker": ["A"] * 6,
+        "trade_date": pd.date_range("2026-01-01", periods=6),
+        "adj_close": [0.0, 0.03, 0.04, 0.000568, 6.20, 100.0],
+        "adj_high": [0.0, 0.03, 0.04, 0.000568, 6.20, 100.0],
+        "adj_low": [0.0, 0.03, 0.04, 0.000568, 6.20, 100.0],
+    })
+    result = compute_price_features(df)
+
+    assert list(result["adj_close_precision_degraded"]) == [0, 1, 1, 0, 0, 0]
+    assert result["adj_close_precision_degraded"].isin([0, 1]).all()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

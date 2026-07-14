@@ -199,12 +199,12 @@ def main():
     fundamentals = attach_filing_dates(fundamentals, company_info)
     fundamentals = filter_excessive_filing_lag(fundamentals)
     dataset = merge_prices_and_fundamentals(prices, fundamentals)
+    del prices, fundamentals  # dead from here on; keeping them resident during
+    # the macro/dividends merges below was inflating peak memory for nothing
     dataset = merge_company_info(dataset, company_info)
+    del company_info
     dataset = merge_macro(dataset)
     dataset = merge_dividends(dataset, dividends)
-    # free the pre-merge tables before the heavy feature/clean passes — they're
-    # no longer needed but stay resident (still-named locals) otherwise
-    del prices, fundamentals, company_info
     compute_features_chunked(dataset, dividends, OUTPUT_PATH, chunk_size=150)
     del dataset
 

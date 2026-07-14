@@ -61,15 +61,34 @@ def test_yfinance_only_tickers_bypass_data_source_and_split_from_batch(monkeypat
 
 
 def test_defaults_to_bolsai_when_data_type_unconfigured(monkeypatch) -> None:
-    """A data type missing from config.DATA_SOURCE entirely falls back to
-    bolsai (the dict.get default inside _collect), not a KeyError."""
+    """During `--mode update`, a data type missing from config.DATA_SOURCE
+    entirely falls back to bolsai (the dict.get default inside _collect),
+    not a KeyError. Uses mode="update" specifically so this exercises the
+    dict.get fallback rather than the mode-forces-bolsai path below."""
     monkeypatch.setattr(config, "DATA_SOURCE", {})
     monkeypatch.setattr(config, "YFINANCE_ONLY_TICKERS", set())
     with mock.patch.object(pipeline.collectors, "collect_dividends") as bolsai_fn, \
          mock.patch.object(pipeline.yf_collectors, "collect_dividends_yf") as yf_fn:
-        pipeline._collect("dividends", ["PETR4"], "prototype")
+        pipeline._collect("dividends", ["PETR4"], "update")
 
-    bolsai_fn.assert_called_once_with(["PETR4"], "prototype")
+    bolsai_fn.assert_called_once_with(["PETR4"], "update")
+    yf_fn.assert_not_called()
+
+
+def test_non_update_modes_force_bolsai_regardless_of_data_source(monkeypatch) -> None:
+    """Regression test: full_scale/prototype are the one-time historical
+    backfill and must always use BolsAI's deep history, even if
+    config.DATA_SOURCE says yfinance (which governs `--mode update` only).
+    This bug previously routed full_scale silently through yfinance's
+    shallow ~5-quarter fundamentals depth instead of BolsAI's ~80-quarter
+    backfill (caught via BPAC11 getting incomplete fundamentals)."""
+    monkeypatch.setitem(config.DATA_SOURCE, "fundamentals", "yfinance")
+    monkeypatch.setattr(config, "YFINANCE_ONLY_TICKERS", set())
+    with mock.patch.object(pipeline.collectors, "collect_fundamentals") as bolsai_fn, \
+         mock.patch.object(pipeline.yf_collectors, "collect_fundamentals_yf") as yf_fn:
+        pipeline._collect("fundamentals", ["PETR4"], "full_scale")
+
+    bolsai_fn.assert_called_once_with(["PETR4"], "full_scale")
     yf_fn.assert_not_called()
 
 

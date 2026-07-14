@@ -118,6 +118,61 @@ def _repair_nonpositive_ohlc(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
 # prices
 # ---------------------------------------------------------------------------
 
+def _fetch_and_shape_prices(ticker: str, fetch_start: str) -> pd.DataFrame | None:
+    """Fetch one ticker's yfinance OHLCV from fetch_start through now and shape
+    it into the on-disk raw-prices schema. Shared by collect_prices_yf (auto-
+    computed incremental range) and backfill_price_gap (explicit historical
+    range) so the split-boundary fix and non-positive-OHLC repair below live
+    in exactly one place. Returns None if yfinance has no rows for this span.
+    """
+    t = yf.Ticker(_yf_symbol(ticker))
+    raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False), f"prices/{ticker}")
+    if raw.empty:
+        return None
+
+    raw = _repair_nonpositive_ohlc(raw, ticker)
+
+    adj_close = _retry(lambda: t.history(start=fetch_start, auto_adjust=True)["Close"],
+                       f"prices/{ticker} adj_close")
+
+    # Split-boundary fix: reverse-adjust any pre-split rows within THIS fetch
+    # (which may re-span multiple quarters now, see _prices_fetch_start) back to
+    # BolsAI's unadjusted convention. Always logged loudly so it can be spot-checked.
+    splits = t.splits
+    if len(splits):
+        affected = splits[splits.index >= pd.Timestamp(fetch_start, tz=splits.index.tz)]
+        if len(affected):
+            log.warning("prices %s: split(s) in fetch window %s — reverse-adjusting "
+                       "pre-split rows to BolsAI's unadjusted convention",
+                       ticker, dict(affected))
+            for split_date, ratio in affected.items():
+                mask = raw.index < split_date
+                raw.loc[mask, ["Open", "High", "Low", "Close"]] *= ratio
+
+    close = raw["Close"]
+    ratio = adj_close / close
+
+    return pd.DataFrame({
+        "ticker": ticker,
+        "trade_date": raw.index.tz_localize(None),
+        "open": raw["Open"].values,
+        "high": raw["High"].values,
+        "low": raw["Low"].values,
+        "close": close.values,
+        "adj_open": (raw["Open"] * ratio).values,
+        "adj_high": (raw["High"] * ratio).values,
+        "adj_low": (raw["Low"] * ratio).values,
+        "adj_close": adj_close.values,
+        "volume": raw["Volume"].values,
+        "volume_adjusted": raw["Volume"].values,  # ponytail: yfinance doesn't split-adjust
+        # volume; BolsAI does. Documented divergence, not worth reconstructing from splits.
+        "traded_amount": (close * raw["Volume"]).values,  # approximation, no yfinance equivalent
+        "num_trades": np.nan,  # no yfinance equivalent at all; nan keeps it float64,
+                                # matching the on-disk BolsAI dtype (None -> object dtype
+                                # triggers pd.concat's all-NA FutureWarning)
+    })
+
+
 def collect_prices_yf(tickers: list[str], mode: str):
     cp = checkpoint.load("yf_prices", mode)
     for ticker in tickers:
@@ -125,53 +180,10 @@ def collect_prices_yf(tickers: list[str], mode: str):
             path = config.PRICES_DIR / f"{ticker}.parquet"
             fetch_start = _prices_fetch_start(cp, ticker, path)
 
-            t = yf.Ticker(_yf_symbol(ticker))
-            raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False), f"prices/{ticker}")
-            if raw.empty:
+            df = _fetch_and_shape_prices(ticker, fetch_start)
+            if df is None:
                 log.info("prices %s: no new rows (delisted/renamed/no yfinance coverage?)", ticker)
                 continue
-
-            raw = _repair_nonpositive_ohlc(raw, ticker)
-
-            adj_close = _retry(lambda: t.history(start=fetch_start, auto_adjust=True)["Close"],
-                               f"prices/{ticker} adj_close")
-
-            # Split-boundary fix: reverse-adjust any pre-split rows within THIS fetch
-            # (which may re-span multiple quarters now, see _prices_fetch_start) back to
-            # BolsAI's unadjusted convention. Always logged loudly so it can be spot-checked.
-            splits = t.splits
-            if len(splits):
-                affected = splits[splits.index >= pd.Timestamp(fetch_start, tz=splits.index.tz)]
-                if len(affected):
-                    log.warning("prices %s: split(s) in update window %s — reverse-adjusting "
-                               "pre-split rows to BolsAI's unadjusted convention",
-                               ticker, dict(affected))
-                    for split_date, ratio in affected.items():
-                        mask = raw.index < split_date
-                        raw.loc[mask, ["Open", "High", "Low", "Close"]] *= ratio
-
-            close = raw["Close"]
-            ratio = adj_close / close
-
-            df = pd.DataFrame({
-                "ticker": ticker,
-                "trade_date": raw.index.tz_localize(None),
-                "open": raw["Open"].values,
-                "high": raw["High"].values,
-                "low": raw["Low"].values,
-                "close": close.values,
-                "adj_open": (raw["Open"] * ratio).values,
-                "adj_high": (raw["High"] * ratio).values,
-                "adj_low": (raw["Low"] * ratio).values,
-                "adj_close": adj_close.values,
-                "volume": raw["Volume"].values,
-                "volume_adjusted": raw["Volume"].values,  # ponytail: yfinance doesn't split-adjust
-                # volume; BolsAI does. Documented divergence, not worth reconstructing from splits.
-                "traded_amount": (close * raw["Volume"]).values,  # approximation, no yfinance equivalent
-                "num_trades": np.nan,  # no yfinance equivalent at all; nan keeps it float64,
-                                        # matching the on-disk BolsAI dtype (None -> object dtype
-                                        # triggers pd.concat's all-NA FutureWarning)
-            })
 
             saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"prices/{ticker}")
             if saved is not None:
@@ -182,6 +194,75 @@ def collect_prices_yf(tickers: list[str], mode: str):
             log.warning("prices %s: skipping after error: %s", ticker, e)
         finally:
             sleep(config.RATE_LIMIT_SLEEP)
+
+
+def _flat_run_fraction(close: pd.Series, min_run: int = 10) -> float:
+    """Fraction of rows sitting inside a run of >= min_run consecutive
+    identical values.
+
+    yfinance was found (2026-07-14, see ANOMALY_INVESTIGATION.md) to pad
+    holes in its OWN historical coverage with a carried-forward stale price
+    instead of leaving the date absent — e.g. LREN3's 2002-2005 gap got
+    "filled" with a dense, correctly-dated row count that was actually 98%
+    a single repeated close, confirmed directly against yfinance's raw feed
+    with zero transformation applied on our side. A dense row count alone
+    is NOT evidence of real trading; this catches what a row-count check
+    misses. 24 of the first 40 candidate tickers hit this before the guard
+    below existed and had to be reverted from data/raw/prices/ by hand.
+    """
+    if len(close) == 0:
+        return 0.0
+    same = close.diff() == 0
+    run = same.groupby((~same).cumsum()).cumsum()
+    return float((run >= min_run).sum() / len(close))
+
+
+# Above this fraction of the fetched batch sitting in a flat run, treat it as
+# yfinance coverage-padding rather than real data. Calibrated against the
+# 2026-07-14 audit: genuinely clean backfills topped out at 12.6% flat,
+# contaminated ones started at 48% — 0.2 sits with margin on both sides.
+_MAX_FLAT_RUN_FRACTION = 0.2
+
+
+def backfill_price_gap(ticker: str, gap_start: str, gap_end: str) -> pd.DataFrame | None:
+    """One-off historical backfill for a confirmed BolsAI vendor data gap
+    (see ANOMALY_INVESTIGATION.md): fetch yfinance data spanning
+    [gap_start, gap_end] and merge in ONLY the dates genuinely missing from
+    the existing raw file. Never touches/overwrites an existing row —
+    _merge_save's dedup keeps "last" on a date collision, which would let
+    yfinance silently replace a good BolsAI row if the fetch window ever
+    strayed past the gap's true edges; filtering to missing dates first
+    makes that impossible regardless of how loosely gap_start/gap_end are
+    specified. Also rejects the whole fetch if it looks like yfinance
+    coverage-padding rather than real data — see _flat_run_fraction.
+    """
+    path = config.PRICES_DIR / f"{ticker}.parquet"
+    df = _fetch_and_shape_prices(ticker, gap_start)
+    if df is None:
+        log.warning("backfill %s: no yfinance data for gap window [%s, %s]", ticker, gap_start, gap_end)
+        return None
+
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df = df[df["trade_date"] <= pd.Timestamp(gap_end)]
+    if path.exists():
+        existing_dates = set(pd.read_parquet(path, columns=["trade_date"])["trade_date"])
+        df = df[~df["trade_date"].isin(existing_dates)]
+    if df.empty:
+        log.info("backfill %s: no missing dates in [%s, %s] (already filled?)", ticker, gap_start, gap_end)
+        return None
+
+    flat_frac = _flat_run_fraction(df["close"])
+    if flat_frac > _MAX_FLAT_RUN_FRACTION:
+        log.error("backfill %s: REJECTED — %.0f%% of the %d fetched rows sit in runs of "
+                  ">=10 identical closes (yfinance padding a coverage hole with a stale "
+                  "carried-forward price, not real data). Not merged.",
+                  ticker, flat_frac * 100, len(df))
+        return None
+
+    saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"backfill/{ticker}")
+    if saved is not None:
+        log.info("backfill %s: filled %d missing rows in [%s, %s]", ticker, len(df), gap_start, gap_end)
+    return saved
 
 
 # ---------------------------------------------------------------------------
@@ -451,6 +532,61 @@ def _demo():
     assert list(fixed.loc[0]) == list(raw.loc[0])  # untouched otherwise
     assert list(fixed.loc[2]) == list(raw.loc[2])
     print("_repair_nonpositive_ohlc: OK")
+
+    # _flat_run_fraction must flag yfinance's coverage-padding signature
+    # (mostly one repeated value) and pass real, varying data through clean.
+    stale = pd.Series([5.0] * 100)
+    assert abs(_flat_run_fraction(stale) - 0.9) < 1e-9  # 90 of 100 cross the >=10-run threshold
+    varying = pd.Series([1.0, 2.0, 3.0, 2.0, 4.0, 1.0, 5.0, 2.0, 3.0, 6.0])
+    assert _flat_run_fraction(varying) == 0.0  # no repeat ever forms a run at all
+    mixed = pd.Series([5.0] * 100 + list(range(1, 11)))  # 100 flat + 10 varying
+    assert abs(_flat_run_fraction(mixed) - (90 / 110)) < 1e-9
+    assert _flat_run_fraction(stale) > _MAX_FLAT_RUN_FRACTION  # would trip the guard
+    assert _flat_run_fraction(varying) < _MAX_FLAT_RUN_FRACTION  # would NOT trip the guard
+    print("_flat_run_fraction: OK")
+
+    # backfill_price_gap must never let a yfinance row replace an existing
+    # on-disk row, even if the fetch window overlaps real data at the edges —
+    # only genuinely-missing dates may be written. No network: monkeypatch
+    # _fetch_and_shape_prices to return a synthetic fetch spanning both a
+    # pre-existing date (should be dropped) and two real gap dates (should
+    # be kept).
+    import src.data_collection.yf_collectors as _mod
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "GAPTEST.parquet"
+        existing = pd.DataFrame({
+            "ticker": "GAPTEST",
+            "trade_date": pd.to_datetime(["2002-01-01", "2002-01-10"]),
+            "open": [1.0, 1.0], "high": [1.0, 1.0], "low": [1.0, 1.0], "close": [1.0, 1.0],
+            "adj_open": [1.0, 1.0], "adj_high": [1.0, 1.0], "adj_low": [1.0, 1.0], "adj_close": [1.0, 1.0],
+            "volume": [100, 100], "volume_adjusted": [100, 100], "traded_amount": [100.0, 100.0],
+            "num_trades": [10.0, 10.0],
+        })
+        existing.to_parquet(path)
+        _orig_prices_dir = config.PRICES_DIR
+        config.PRICES_DIR = Path(tmp)  # redirect for this check only
+
+        fetched = pd.DataFrame({
+            "ticker": "GAPTEST",
+            "trade_date": pd.to_datetime(["2002-01-01", "2002-01-05", "2002-01-08"]),
+            "open": [999.0, 2.0, 3.0], "high": [999.0, 2.0, 3.0],
+            "low": [999.0, 2.0, 3.0], "close": [999.0, 2.0, 3.0],
+            "adj_open": [999.0, 2.0, 3.0], "adj_high": [999.0, 2.0, 3.0],
+            "adj_low": [999.0, 2.0, 3.0], "adj_close": [999.0, 2.0, 3.0],
+            "volume": [1, 1, 1], "volume_adjusted": [1, 1, 1], "traded_amount": [1.0, 1.0, 1.0],
+            "num_trades": [np.nan, np.nan, np.nan],
+        })
+        _orig = _mod._fetch_and_shape_prices
+        _mod._fetch_and_shape_prices = lambda ticker, fetch_start: fetched
+        try:
+            saved = _mod.backfill_price_gap("GAPTEST", "2002-01-01", "2002-01-10")
+        finally:
+            _mod._fetch_and_shape_prices = _orig
+            config.PRICES_DIR = _orig_prices_dir
+        assert len(saved) == 4  # 2 original + 2 new gap-fill dates (01-05, 01-08)
+        assert saved.loc[saved["trade_date"] == "2002-01-01", "close"].iloc[0] == 1.0  # NOT overwritten by the 999.0 fetch row
+        assert set(saved["trade_date"].dt.strftime("%Y-%m-%d")) == {"2002-01-01", "2002-01-05", "2002-01-08", "2002-01-10"}
+    print("backfill_price_gap: OK")
 
 
 if __name__ == "__main__":

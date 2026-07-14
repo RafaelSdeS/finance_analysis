@@ -107,14 +107,21 @@ def get_all_tickers_raw() -> list[str]:
         c.close()
 
 
+# "11"-suffix tickers are ambiguous: FII/ETF quotas use it, but so do stock
+# *units* (bundled ON+PN of a real operating company, e.g. ALUP11, KLBN11).
+# The regex below can't tell them apart, so it drops the whole suffix and
+# these known operating-company units are added back explicitly.
+# BPAC11 (BTG Pactual) confirmed missing 2026-07-14: no price or fundamentals
+# file existed under any BPAC* ticker — its canonical unit was never collected.
+KNOWN_UNIT_TICKERS = {"BOVA11", "BPAC11"}
+
+
 def get_all_tickers() -> list[str]:
     import re
     _standard = re.compile(r"^[A-Z0-9]{4}[3-8]$")
     # exclude BDRs (34/35), FIIs/ETFs (11), and non-standard suffixes
-    # But explicitly include BOVA11 (iShares Bovespa ETF, used as IBOV benchmark)
-    result = sorted(t for t in get_all_tickers_raw() if _standard.match(t))
-    if "BOVA11" not in result:
-        result.append("BOVA11")
+    result = set(t for t in get_all_tickers_raw() if _standard.match(t))
+    result |= KNOWN_UNIT_TICKERS
     return sorted(result)
 
 

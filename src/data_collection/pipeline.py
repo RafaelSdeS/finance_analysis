@@ -23,7 +23,12 @@ from . import collectors, config, yf_collectors
 
 
 def _collect(name: str, tickers: list[str], mode: str):
-    """Per-data-type source switch. Flip config.DATA_SOURCE[name] to fall back to BolsAI.
+    """Per-data-type source switch. Non-update modes (full_scale, prototype) are
+    the one-time historical backfill and always use BolsAI, regardless of
+    config.DATA_SOURCE — that dict only governs `--mode update`, where it
+    defaults to yfinance (free, keyless, no full history needed for a
+    quarterly top-up). Matches the needs_bolsai check in run() below, which
+    already assumes non-update modes require BolsAI.
 
     Special handling: YFINANCE_ONLY_TICKERS (e.g. BOVA11) always use yfinance.
     """
@@ -40,9 +45,8 @@ def _collect(name: str, tickers: list[str], mode: str):
         ("dividends", "yfinance"): yf_collectors.collect_dividends_yf,
     }
 
-    # Collect from others using global DATA_SOURCE
     if others:
-        source = config.DATA_SOURCE.get(name, "bolsai")
+        source = config.DATA_SOURCE.get(name, "bolsai") if mode == "update" else "bolsai"
         fn = fn_map[(name, source)]
         fn(others, mode)
 

@@ -57,6 +57,39 @@ def test_filter_tickers_with_no_fundamentals() -> None:
     )
 
 
+def test_filter_tickers_with_no_fundamentals_classifies_exclusions(capsys) -> None:
+    """The no-fundamentals report splits exclusions into: known non-company
+    (BOVA11-style), delisted/renamed (stale prices), redundant (a sibling
+    share class already has fundamentals), and unexplained GAP -- so a real
+    coverage hole (like BTG Pactual's BPAC11 never being collected) doesn't
+    get silently lumped in with routine, safe exclusions."""
+    prices = pd.concat([
+        # GOOD has fundamentals and sets the dataset's "current" date
+        pd.DataFrame({"ticker": "GOOD", "trade_date": pd.date_range("2026-01-01", periods=20)}),
+        # ROOT is GOOD's covered sibling class (e.g. GOOD3 vs GOOD11) — redundant
+        pd.DataFrame({"ticker": "GOOD4", "trade_date": pd.date_range("2026-01-01", periods=20)}),
+        # DEAD stopped trading years before the dataset's last date
+        pd.DataFrame({"ticker": "DEAD3", "trade_date": pd.date_range("2015-01-01", periods=20)}),
+        # ETF is in KNOWN_NO_FUNDAMENTALS
+        pd.DataFrame({"ticker": "BOVA11", "trade_date": pd.date_range("2026-01-01", periods=20)}),
+        # GAP trades recently, has no covered sibling, isn't known -- a real hole
+        pd.DataFrame({"ticker": "GAP3", "trade_date": pd.date_range("2026-01-01", periods=20)}),
+    ], ignore_index=True)
+    fundamentals = pd.DataFrame({
+        "ticker": ["GOOD"],
+        "reference_date": pd.to_datetime(["2026-03-31"]),
+    })
+
+    result = qf.filter_tickers_with_no_fundamentals(prices, fundamentals)
+    out = capsys.readouterr().out
+
+    assert set(result["ticker"].unique()) == {"GOOD"}
+    assert "BOVA11: benchmark ETF" in out
+    assert "delisted/renamed" in out and "['DEAD3']" in out
+    assert "redundant" in out and "GOOD4 -> GOOD" in out
+    assert "⚠ GAP" in out and "['GAP3']" in out
+
+
 def test_attach_filing_dates_uses_real_cvm_date(tmp_path, monkeypatch) -> None:
     """When a (cnpj, quarter) pair exists in filing_dates.parquet, its real
     received_date is used, not the statutory fallback."""
