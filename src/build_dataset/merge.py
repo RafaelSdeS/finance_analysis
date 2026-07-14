@@ -208,13 +208,17 @@ def merge_macro(dataset):
     # first, then do ONE sort + ONE merge_asof against the big dataset —
     # sorting/merging the full multi-million-row dataset separately per
     # series (3x full-frame copies) was enough to OOM the build.
+    # Outer-join on the union of each series' own publication dates, then
+    # ffill — chaining merge_asof series-onto-series instead would collapse
+    # everything onto the first series' date grid, silently dropping any
+    # other series' publication dates that fall between them.
     macro = None
     for name in ("selic", "cdi", "ipca"):
         print(f"Merging {name}")
-        m = pd.read_parquet(MACRO_DIR / f"{name}.parquet")[["reference_date", name]].sort_values("reference_date")
-        macro = m if macro is None else pd.merge_asof(macro, m, on="reference_date", direction="backward")
+        m = pd.read_parquet(MACRO_DIR / f"{name}.parquet")[["reference_date", name]]
+        macro = m if macro is None else macro.merge(m, on="reference_date", how="outer")
 
-    macro = macro.rename(columns={"reference_date": "macro_date"})
+    macro = macro.sort_values("reference_date").ffill().rename(columns={"reference_date": "macro_date"})
 
     # Chaining sort/merge/drop/sort as one expression keeps every intermediate
     # frame alive at once (old `dataset` stays bound until the whole RHS
