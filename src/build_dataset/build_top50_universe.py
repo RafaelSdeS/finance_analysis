@@ -67,18 +67,67 @@ def filter_to_top50_universe(df: pd.DataFrame, membership: pd.DataFrame) -> pd.D
     return df.loc[in_universe].reset_index(drop=True)
 
 
-def main():
-    df = pd.read_parquet(OUTPUT_PATH)
-    membership = build_top50_membership(df)
-    universe_df = filter_to_top50_universe(df, membership)
+def zero_fill_missing_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
+    """ponytail: zero-fill fundamental columns where has_fundamentals=0. Deliberate choice:
+    when a ticker hasn't reported yet, its fundamentals are unknown (not zero earnings).
+    Replace NaN with 0 to signal this to the agent explicitly — the has_fundamentals
+    flag provides context ("coverage started here"). Alternative: drop rows/tickers
+    lacking coverage (simpler but introduces survivorship bias, defeats the point of
+    keeping delisted names). This preserves the full time series while making it clear
+    to the agent: zero fundamentals + has_fundamentals=0 means "not yet reported",
+    not "confirmed zero earnings". In-place mutation to avoid OOM."""
+    fundamental_cols = [
+        'pl', 'pvp', 'ev_ebitda', 'ev_ebit', 'p_ebitda', 'p_ebit', 'p_sr',
+        'lpa', 'vpa', 'gross_margin', 'net_margin', 'ebitda_margin', 'ebit_margin',
+        'roe', 'roa', 'roic', 'ebit_over_assets', 'asset_turnover', 'p_assets',
+        'current_ratio', 'debt_equity', 'net_debt_equity', 'net_debt_ebitda', 'net_debt_ebit',
+        'cagr_revenue_5y', 'cagr_earnings_5y', 'net_income', 'equity', 'net_revenue',
+        'total_debt', 'ebitda', 'ebit', 'net_debt', 'cash', 'total_assets',
+        'current_assets', 'current_liabilities', 'book_to_market', 'cash_ratio',
+        'net_debt_to_assets', 'working_capital_ratio', 'revenue_growth_yoy',
+        'earnings_growth_yoy', 'ebitda_growth_yoy', 'total_assets_growth_yoy',
+        'total_debt_growth_yoy', 'gross_margin_qoq', 'net_margin_qoq', 'roe_qoq',
+        'debt_equity_qoq', 'current_ratio_qoq', 'cagr_earnings_5y_final',
+        'cagr_revenue_5y_final', 'payout_ratio', 'dividend_coverage_ratio',
+        'revenue_per_earning', 'revenue_vs_earnings_growth_delta',
+        'peg_ratio', 'pvp_to_roe_ratio', 'earnings_yield', 'earnings_yield_vs_selic',
+    ]
+    mask = df['has_fundamentals'] == 0
+    for col in fundamental_cols:
+        if col in df.columns:
+            df.loc[mask, col] = 0
+    return df
 
+
+def main():
+    print("Loading data...")
+    df = pd.read_parquet(OUTPUT_PATH)
+    total_rows = len(df)
+
+    print("Building membership...")
+    membership = build_top50_membership(df[["ticker", "trade_date", "traded_amount"]])
+
+    print("Filtering to top-50 universe...")
+    universe_df = filter_to_top50_universe(df, membership)
+    del df  # Free memory immediately after filtering
+
+    print("Zero-filling missing fundamentals...")
+    universe_df = zero_fill_missing_fundamentals(universe_df)
+
+    # ponytail: trim to earliest date with any fundamentals (no pre-fundamental noise)
+    earliest_fund = universe_df[universe_df['has_fundamentals'] == 1]['trade_date'].min()
+    rows_before = len(universe_df[universe_df['trade_date'] < earliest_fund])
+    universe_df = universe_df[universe_df['trade_date'] >= earliest_fund].reset_index(drop=True)
+
+    print("Writing outputs...")
     universe_df.to_parquet(TOP50_UNIVERSE_PATH, index=False)
     membership.to_parquet(TOP50_MEMBERSHIP_PATH, index=False)
 
-    print(f"tickers ever in top-{TOP_N}: {membership['ticker'].nunique()}")
-    print(f"rows: {len(universe_df)} / {len(df)} ({len(universe_df) / len(df):.1%})")
-    print(f"wrote {TOP50_UNIVERSE_PATH}")
-    print(f"wrote {TOP50_MEMBERSHIP_PATH}")
+    print(f"\n✓ tickers ever in top-{TOP_N}: {membership['ticker'].nunique()}")
+    print(f"✓ rows after trim to earliest fundamental: {len(universe_df)} (removed {rows_before} pre-fundamental rows)")
+    print(f"✓ coverage vs original full dataset: {len(universe_df) / total_rows:.1%}")
+    print(f"✓ wrote {TOP50_UNIVERSE_PATH}")
+    print(f"✓ wrote {TOP50_MEMBERSHIP_PATH}")
 
 
 if __name__ == "__main__":
