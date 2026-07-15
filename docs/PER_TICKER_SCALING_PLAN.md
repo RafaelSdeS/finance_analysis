@@ -1,6 +1,6 @@
 # Per-Ticker Feature Scaling: Investigation + Implementation Plan
 
-**Status:** design only — no code changed, nothing executed. Written 2026-07-15 against `dataset_v4` (152 columns, 1,319,349 rows, 515 tickers, 2000-01-03 → 2026-07-14) and the scaler artifacts of the same date. Revised same day: added the evaluation-methodology-agnosticism requirement (§3.5) — no design element may assume the current fixed `train_end` split.
+**Status:** Phase 0/1 (R1 + the split-window seam + versioning fix) **implemented, tested, and built** — see the Summary Lists' checkboxes for exactly what's done vs. still open. R2 and R4 remain design-only (see below for why). Originally written 2026-07-15 as a design-only investigation against `dataset_v4` (152 columns, 1,319,349 rows, 515 tickers, 2000-01-03 → 2026-07-14); revised same day to add the evaluation-methodology-agnosticism requirement (§3.5); implemented and rebuilt same day into `dataset_v5` (165 columns — the 13 new `*_zhist_5y` columns — same row/ticker counts) with a matching scaler refit (`scaler_metadata.json` now records the `fit_window` it was produced from).
 
 **Question investigated:** should each ticker be normalized against its own historical distribution instead of the single global scaler in `src/build_dataset/scale_features.py`? PETR4 and a small-cap have incomparable distributions for P/E, margins, market cap, etc.; a pooled `RobustScaler` maps both onto one median/IQR and hides "this value is unusual *for this company*."
 
