@@ -546,3 +546,86 @@ def compute_advanced_features(df):
 
     print(f"Advanced features computed for {len(df)} rows")
     return df
+
+
+# =============================================================================
+# HISTORY-RELATIVE (PER-TICKER OWN-HISTORY) FEATURES
+# =============================================================================
+
+# "How unusual is this value relative to THIS company's own trailing
+# distribution" (docs/PER_TICKER_SCALING_PLAN.md, R1) -- distinct from the
+# global RobustScaler's cross-sectional level view and from
+# cross_sectional.py's peer-relative view. A plain trailing rolling stat, not
+# a fitted transform: no train/test split to manage, and valid unchanged
+# under any evaluation methodology (re-cutting the split never requires
+# recomputing these columns).
+FUND_ZHIST_COLS = [
+    "pl", "pvp", "roe", "net_margin", "ebitda_margin", "debt_equity",
+    "net_debt_ebitda", "earnings_yield", "book_to_market", "current_ratio",
+    "asset_turnover",
+]
+FUND_ZHIST_WINDOW_QUARTERS = 20   # 5y of quarterly filings
+FUND_ZHIST_MIN_QUARTERS = 8       # below this a per-ticker median/IQR is too noisy -> NaN
+
+DAILY_ZHIST_COLS = ["amihud_illiquidity", "turnover_ratio"]
+DAILY_ZHIST_WINDOW_DAYS = 1260    # 5y of trading days
+DAILY_ZHIST_MIN_DAYS = 252        # 1y warm-up
+
+
+def _rolling_robust_zscore(s: pd.Series, window: int, min_periods: int) -> pd.Series:
+    """(x - rolling_median) / rolling_IQR over a trailing window ending at
+    each row (inclusive) -- causal by construction, can never see future
+    rows. A perfectly constant window (IQR == 0) yields NaN, not +-inf.
+    """
+    roll = s.rolling(window=window, min_periods=min_periods)
+    median = roll.median()
+    iqr = roll.quantile(0.75) - roll.quantile(0.25)
+    z = (s - median) / iqr
+    return z.where(iqr != 0)
+
+
+def compute_history_relative_features(df):
+    """Per-ticker own-history z-scores (R1, docs/PER_TICKER_SCALING_PLAN.md).
+
+    Fundamental columns are quarterly step functions forward-filled across
+    ~63 daily rows between filings -- rolling directly on the daily panel
+    would be ~63x redundant and give degenerate windows for short histories.
+    Dedup to one row per (ticker, reference_date), roll there, then map each
+    quarter's own z-score back onto every daily row of that quarter -- same
+    pattern as roe_trend_4q/n_quarters_available above.
+
+    Daily (liquidity) columns roll directly over daily rows -- no such
+    redundancy.
+
+    Must run after compute_advanced_features: that's what computes
+    amihud_illiquidity/turnover_ratio/earnings_yield, and re-anchors
+    pl/pvp/book_to_market to their final, correct values.
+    """
+
+    print()
+    print("=" * 80)
+    print("COMPUTING HISTORY-RELATIVE (PER-TICKER) FEATURES")
+    print("=" * 80)
+
+    fund_cols = [c for c in FUND_ZHIST_COLS if c in df.columns]
+    daily_cols = [c for c in DAILY_ZHIST_COLS if c in df.columns]
+
+    result = []
+    for _, g in df.groupby("ticker", sort=False):
+        g = g.sort_values("trade_date").copy()
+
+        for col in daily_cols:
+            g[f"{col}_zhist_5y"] = _rolling_robust_zscore(
+                g[col], DAILY_ZHIST_WINDOW_DAYS, DAILY_ZHIST_MIN_DAYS
+            )
+
+        q = g.drop_duplicates("reference_date").set_index("reference_date").sort_index()
+        for col in fund_cols:
+            q_zhist = _rolling_robust_zscore(q[col], FUND_ZHIST_WINDOW_QUARTERS, FUND_ZHIST_MIN_QUARTERS)
+            g[f"{col}_zhist_5y"] = g["reference_date"].map(q_zhist)
+
+        result.append(g)
+
+    df = pd.concat(result, ignore_index=True)
+    print(f"History-relative features added for {df['ticker'].nunique()} tickers")
+    return df

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 FAST = [
     "tests/test_run_all_report.py",
     "tests/build_dataset/test_features.py",
+    "tests/build_dataset/test_history_relative.py",
     "tests/build_dataset/test_merge.py",
     "tests/build_dataset/test_repair.py",
     "tests/build_dataset/test_quality_filters.py",

@@ -21,6 +21,7 @@ from src.build_dataset.clean import clean_dataset
 from src.build_dataset.cross_sectional import compute_cross_sectional_features
 from src.build_dataset.features import (
     compute_dividend_features,
+    compute_history_relative_features,
     compute_macro_features,
     compute_price_features,
     compute_advanced_features,
@@ -102,6 +103,7 @@ def test_chunked_matches_unchunked_cross_sectional(tmp_path) -> None:
     reference = compute_macro_features(reference)
     reference = recompute_valuation_daily(reference)
     reference = compute_advanced_features(reference)
+    reference = compute_history_relative_features(reference)
     reference = compute_cross_sectional_features(reference)
     reference = clean_dataset(reference)
 

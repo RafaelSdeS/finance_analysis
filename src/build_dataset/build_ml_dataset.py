@@ -43,6 +43,7 @@ from .features import (
     compute_advanced_features,
     compute_dividend_features,
     compute_fundamental_features,
+    compute_history_relative_features,
     compute_macro_features,
     compute_price_features,
     fill_missing_cagr,
@@ -115,6 +116,7 @@ def compute_features_chunked(dataset, dividends, output_path, chunk_size=150):
             batch = compute_macro_features(batch)
             batch = recompute_valuation_daily(batch)
             batch = compute_advanced_features(batch)
+            batch = compute_history_relative_features(batch)
 
             slim_cols = [c for c in CROSS_SECTIONAL_INPUT_COLS if c in batch.columns]
             slim_parts.append(batch[slim_cols].copy())
