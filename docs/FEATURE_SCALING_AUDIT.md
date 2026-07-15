@@ -156,6 +156,17 @@ already flagged, not something this audit needs to re-litigate.
 
 ---
 
+## 9. Own-history z-scores (`features.py::compute_history_relative_features`, `*_zhist_5y`)
+
+**Added 2026-07-15** per `docs/PER_TICKER_SCALING_PLAN.md` (R1) — a causal rolling robust
+z-score (`(x - rolling_median) / rolling_IQR`, 5y window) of each value against *this ticker's
+own trailing history*, for 11 fundamental ratios and 2 daily liquidity ratios. Distinct from
+both mechanisms above: §3's `RobustScaler` answers "cheap/expensive vs. every stock, all time,"
+this answers "cheap/expensive vs. this specific company's own regime." Stateless — a rolling
+stat, not a fitted transform — so no scaling question applies to these columns themselves;
+**passthrough**, same as the existing percentile family (§5). Warm-up (< 8 quarters / 252 days
+of history) is NaN, a leading prefix like every other rolling-window feature in this pipeline.
+
 ## Missing features
 
 Ranked by expected impact vs. cost, using the ratio-not-level principle established this session
@@ -332,6 +343,8 @@ everything above.
 - [x] `amihud_illiquidity` — implemented (added outside this list's original scope, second
       follow-up round)
 - [x] `beta_1y` — implemented (`cross_sectional.py`), highest implementation cost on this list
+- [x] `*_zhist_5y` (11 fundamental + 2 liquidity own-history z-scores) — implemented 2026-07-15,
+      `compute_history_relative_features`, per `docs/PER_TICKER_SCALING_PLAN.md` R1 — see §9
 - [ ] `pl_zscore_market`/`roe_zscore_market` — not implemented, only after sector-granularity check
 
 ### 4. Remove

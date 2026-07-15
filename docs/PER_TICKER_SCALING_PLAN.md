@@ -263,20 +263,20 @@ House pattern per `docs/TOP50_UNIVERSE_VALIDATION.md` §2/§3. All new tests bel
 | # | Risk | Test | Status |
 |---|---|---|---|
 | 1 | Global scaler behavior regresses (column order, NaN, scope, determinism, train-only fit) | `test_scale_features.py` (5 tests, `tests/build_dataset/test_scale_features.py:35-93`) | EXISTS |
-| 2 | R1 feature peeks at future rows | `test_history_relative.py::test_zhist_truncation_invariance` — recompute on data truncated at sampled dates, compare last rows (pattern: `test_volatility_percentile_no_lookahead`) | **CREATE** |
-| 3 | R1 warm-up NaN not prefix-shaped | `::test_zhist_warmup_is_prefix_nan` — first non-NaN appears exactly at `min_periods`, none before, no interior holes introduced | **CREATE** |
-| 4 | R1 computed on daily-repeated fundamentals (63× redundancy bug) | `::test_zhist_uses_quarterly_observations` — synthetic ticker with constant-within-quarter values; window count advances per quarter, not per day | **CREATE** |
-| 5 | R1 NaN imputed or inf emitted | `::test_zhist_nan_preserved_and_iqr_zero_is_nan` | **CREATE** |
-| 6 | R1 broken across a rename splice | `::test_zhist_continuous_across_splice` — synthetic rename via `apply_ticker_continuity`, assert no artificial jump at boundary; plus a *data*-group spot check on TIMS3/BHIA3 | **CREATE** |
+| 2 | R1 feature peeks at future rows | `test_history_relative.py::test_zhist_truncation_invariance` — recompute on data truncated at sampled dates, compare last rows (pattern: `test_volatility_percentile_no_lookahead`) | **DONE** |
+| 3 | R1 warm-up NaN not prefix-shaped | `::test_zhist_warmup_is_prefix_nan` — first non-NaN appears exactly at `min_periods`, none before, no interior holes introduced | **DONE** |
+| 4 | R1 computed on daily-repeated fundamentals (63× redundancy bug) | `::test_zhist_uses_quarterly_observations_not_daily_rows` — every daily row within one quarter shares the same value | **DONE** |
+| 5 | R1 NaN imputed or inf emitted | `::test_zhist_nan_preserved_and_iqr_zero_is_nan` | **DONE** |
+| 6 | R1 broken across a rename splice | `::test_zhist_continuous_across_ticker_history_boundary` — two concatenated history blocks under one ticker label (what continuity splicing produces), assert no cold-restart at the boundary. Real TIMS3/BHIA3 spot check (data-group) not yet added — folded into row 14 | **DONE** (lighter form; data-group spot check still open) |
 | 7 | R2 rank computed inside a ticker batch (wrong universe) | rank columns declared in `CROSS_SECTIONAL_OUTPUT_COLS` → existing `test_compute_features_chunked` Pass-2 discipline covers placement; add `test_cross_sectional.py::test_rank_cs_is_per_date_uniform` | EXISTS (placement) / **CREATE** (values) |
 | 8 | R4 params ≠ sklearn RobustScaler per ticker | `test_scaler_params.py::test_params_match_sklearn_per_ticker` | **CREATE** (if R4) |
 | 9 | R4 fallback hierarchy wrong (new ticker / short history / all-NaN → sector → global) | `::test_fallback_levels` incl. a zero-train-row ticker (the RDOR3 case) | **CREATE** (if R4) |
 | 10 | R4 sector/global fallback fit leaks rows outside the fit window | `::test_all_levels_fit_inside_window_only` | **CREATE** (if R4) |
 | 11 | R4 file round-trip / corruption / column drift | `::test_params_roundtrip`, `::test_corrupt_or_missing_raises_loudly`, `::test_column_mismatch_raises` | **CREATE** (if R4) |
-| 12 | Scaler artifacts not reproducible per dataset version | extend `test_dataset_versioning.py` — `dataset_v{N}` snapshot includes `scalers/` | **CREATE** |
+| 12 | Scaler artifacts not reproducible per dataset version | extend `test_dataset_versioning.py` — `dataset_v{N}` snapshot includes `scalers/` | **DONE** |
 | 13 | Schema/dtype contract with `ml_agent` breaks | existing contract test (`TOP50_UNIVERSE_VALIDATION.md` §3.2) — new columns extend, never mutate, existing dtypes | EXISTS (verify covers additions) |
 | 14 | Built-dataset sanity of new columns (bounds, NaN rates, extreme counts) | extend `test_final_dataset.py` (*data* group) with zhist/rank column checks | **CREATE** |
-| 15 | Fit boundary hardcoded / window not honored (any methodology) | `test_scale_features.py::test_fit_honors_arbitrary_window` — fit at several synthetic `(fit_start, fit_end)` windows, including the one that reproduces today's config; assert params depend only on in-window rows | **CREATE** |
+| 15 | Fit boundary hardcoded / window not honored (any methodology) | `test_scale_features.py::test_fit_honors_arbitrary_window` — fit at several synthetic `(fit_start, fit_end)` windows, including the one that reproduces today's config; assert params depend only on in-window rows | **DONE** |
 | 16 | Multi-window artifacts cross-contaminate or get implicitly selected | `::test_per_window_artifacts_independent_and_explicitly_selected` — two windows → two artifacts with distinct params; loading without naming a window raises | **CREATE** |
 
 Phase 0 of the migration = rows 2–6, 12, 14 written and green before any pipeline code merges; row 15 lands with the Phase 3 refactor; rows 8–11 and 16 with Phase 4, if R4 proceeds.
@@ -309,13 +309,18 @@ One honest caveat: R1 columns are *derived* from columns the model already sees,
 - [x] `build_top50_universe.py`, quality filters, continuity, quarantine machinery
 - [x] NaN policy (no imputation; prefix rule; flags + consumer-side fills)
 
-### 2. New — Phase 0/1 (R1 + split seam + versioning fix)
-- [ ] Tests: rows 2–6, 12, 14–15 of §9 (written before implementation)
-- [ ] `features.py::compute_history_relative_features()` — 13 `*_zhist_5y` columns (11 quarterly-based, 2 daily-based)
-- [ ] Wire into Pass 1 of `compute_features_chunked()`
-- [ ] `iter_fit_windows()` split adapter in `manifest.py` (§3.5) + pure `fit_scaler(dataset, window)` refactor in `scale_features.py` — scaler output verified identical under the current single-split config
-- [ ] `sync_dataset_version()` snapshots `scalers/` into `dataset_v{N}/`
-- [ ] Docs: CLAUDE.md, `DATA_PIPELINE.md`, `FEATURE_SCALING_AUDIT.md` summary lists
+### 2. New — Phase 0/1 (R1 + split seam + versioning fix) — IMPLEMENTED 2026-07-15
+- [x] Tests: rows 2–6, 12, 15 of §9 (written before implementation, all green under `tests/run_all.py --group fast`)
+- [ ] Row 14 (real TIMS3/BHIA3 splice spot check + built-dataset sanity, *data* group) — needs a
+      rebuilt `ml_dataset.parquet`; not run this pass (build execution deliberately not triggered)
+- [x] `features.py::compute_history_relative_features()` — 13 `*_zhist_5y` columns (11 quarterly-based, 2 daily-based)
+- [x] Wire into Pass 1 of `compute_features_chunked()`
+- [x] `iter_fit_windows()` split adapter in `manifest.py` (§3.5) + pure `fit_scaler(dataset, window)` refactor in `scale_features.py` — verified byte-identical to the old behavior under the current single-split config (`test_fit_honors_arbitrary_window`)
+- [x] `sync_dataset_version()` snapshots `scalers/` into `dataset_v{N}/`
+- [x] Docs: CLAUDE.md, `DATA_PIPELINE.md`, `FEATURE_SCALING_AUDIT.md` summary lists
+- [ ] **Not yet done:** an actual dataset rebuild + scaler refit to produce the real `*_zhist_5y`
+      columns and versioned `dataset_v{N+1}` on disk — all code/tests are in place, but no build
+      was executed this pass (per standing instruction not to run pipelines without an explicit ask)
 
 ### 3. New — Phase 2 (R2, gated on M5 diagnosis per `docs/TODO.md` §6.2)
 - [ ] `cross_sectional.py`: 7 `*_rank_cs` columns (6 ratios + `market_cap` size rank); extend input/output col lists

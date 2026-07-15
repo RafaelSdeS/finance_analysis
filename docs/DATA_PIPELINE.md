@@ -451,17 +451,26 @@ Computed on quarterly grid, **before** merge_asof (carried forward to daily).
 **Why:** Fit scaler on train split only to prevent leakage of train statistics into val/test.
 
 **How:**
-1. Load split_config.json (train_end date)
-2. Filter dataset to rows with trade_date ≤ train_end
-3. Fit ColumnTransformer:
+1. Load split_config.json, resolve fit window(s) via `manifest.iter_fit_windows()` (today's
+   config resolves to one window: `fit_start=None` through `train_end` — the fit boundary is
+   never hardcoded, so this step is unaffected if the split methodology later changes to
+   rolling/expanding/multi-fold; see `docs/PER_TICKER_SCALING_PLAN.md`)
+2. Filter dataset to rows inside that window
+3. Fit ColumnTransformer (one per window):
    - **RobustScaler** on RATIO_COLUMNS (P/E, P/B, margins, leverage, growth rates)
      - Median/IQR scaling (robust to outliers)
      - Ignores NaN (preserves missing data)
    - **Passthrough** on all other columns (already normalized or identifiers)
-4. Save: `feature_scaler.joblib`, `scaler_metadata.json`
+4. Save: `feature_scaler.joblib`, `scaler_metadata.json` (metadata records the fit window used)
 5. Apply to all rows (train/val/test) using train-fit statistics
 
 **Command:** `python -m src.build_dataset.scale_features`
+
+**Per-ticker own-history features (not this step):** `*_zhist_5y` columns (rolling per-ticker
+robust z-score against each ticker's own trailing distribution) are computed earlier, inside
+the dataset build itself (`features.py::compute_history_relative_features`, Pass 1 of
+`compute_features_chunked`) — stateless, so they need no separate scaling step at all. See
+`docs/PER_TICKER_SCALING_PLAN.md`.
 
 ---
 
