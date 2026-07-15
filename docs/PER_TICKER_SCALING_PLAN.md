@@ -311,16 +311,20 @@ One honest caveat: R1 columns are *derived* from columns the model already sees,
 
 ### 2. New — Phase 0/1 (R1 + split seam + versioning fix) — IMPLEMENTED 2026-07-15
 - [x] Tests: rows 2–6, 12, 15 of §9 (written before implementation, all green under `tests/run_all.py --group fast`)
-- [ ] Row 14 (real TIMS3/BHIA3 splice spot check + built-dataset sanity, *data* group) — needs a
-      rebuilt `ml_dataset.parquet`; not run this pass (build execution deliberately not triggered)
+- [x] Row 14 (built-dataset sanity, *data* group) — `test_final_dataset.py`,
+      `test_top_traded_quality.py`, `test_universe_integrity.py` all pass against the rebuilt
+      165-column dataset (2026-07-15). A dedicated TIMS3/BHIA3 zhist-continuity spot check
+      (beyond the synthetic splice test) is still not written — low priority, the synthetic
+      test already exercises the same code path.
 - [x] `features.py::compute_history_relative_features()` — 13 `*_zhist_5y` columns (11 quarterly-based, 2 daily-based)
 - [x] Wire into Pass 1 of `compute_features_chunked()`
 - [x] `iter_fit_windows()` split adapter in `manifest.py` (§3.5) + pure `fit_scaler(dataset, window)` refactor in `scale_features.py` — verified byte-identical to the old behavior under the current single-split config (`test_fit_honors_arbitrary_window`)
 - [x] `sync_dataset_version()` snapshots `scalers/` into `dataset_v{N}/`
 - [x] Docs: CLAUDE.md, `DATA_PIPELINE.md`, `FEATURE_SCALING_AUDIT.md` summary lists
-- [ ] **Not yet done:** an actual dataset rebuild + scaler refit to produce the real `*_zhist_5y`
-      columns and versioned `dataset_v{N+1}` on disk — all code/tests are in place, but no build
-      was executed this pass (per standing instruction not to run pipelines without an explicit ask)
+- [x] Dataset rebuild + scaler refit — done 2026-07-15: `dataset_v5` (1,319,349 rows × 165
+      columns, 13 real `*_zhist_5y` columns), `scaler_metadata.json` records
+      `fit_window={fold_id: full, fit_start: null, fit_end: 2018-07-30}`, `dataset_v5/scalers/`
+      confirms the versioning fix. Full data-group suite (8/8) green against the rebuild.
 
 ### 3. New — Phase 2 (R2, gated on M5 diagnosis per `docs/TODO.md` §6.2)
 - [ ] `cross_sectional.py`: 7 `*_rank_cs` columns (6 ratios + `market_cap` size rank); extend input/output col lists
