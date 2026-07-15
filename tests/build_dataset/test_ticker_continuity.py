@@ -25,8 +25,8 @@ from src.build_dataset.continuity import apply_ticker_continuity  # noqa: E402
 from test_utils import print_check  # noqa: E402
 
 
-def _prices(ticker, dates, close):
-    return pd.DataFrame({
+def _prices(ticker, dates, close, volume=None):
+    df = pd.DataFrame({
         "ticker": ticker,
         "trade_date": pd.to_datetime(dates),
         "open": close, "high": [c * 1.01 for c in close],
@@ -34,6 +34,9 @@ def _prices(ticker, dates, close):
         "adj_open": close, "adj_high": [c * 1.01 for c in close],
         "adj_low": [c * 0.99 for c in close], "adj_close": close,
     })
+    if volume is not None:
+        df["volume"] = volume
+    return df
 
 
 def _fund(ticker, dates, net_income):
@@ -54,9 +57,11 @@ def _map(events):
 def test_rename_splice():
     # OLD3 trades through Jan, NEW3 (same entity) starts Feb; one Jan date overlaps
     prices = pd.concat([
-        _prices("OLD3", ["2021-01-04", "2021-01-05", "2021-02-01"], [10.0, 11.0, 99.0]),
-        _prices("NEW3", ["2021-02-01", "2021-02-02"], [12.0, 12.5]),
+        _prices("OLD3", ["2021-01-04", "2021-01-05", "2021-02-01"], [10.0, 11.0, 99.0],
+                volume=[1000, 1100, 1200]),
+        _prices("NEW3", ["2021-02-01", "2021-02-02"], [12.0, 12.5], volume=[1300, 1400]),
     ], ignore_index=True)
+    prices["volume"] = prices["volume"].astype("int64")
     fund = pd.concat([
         _fund("OLD3", ["2020-12-31"], [100.0]),
         _fund("NEW3", ["2021-03-31"], [110.0]),
@@ -71,6 +76,9 @@ def test_rename_splice():
     assert len(new_p) == 4, new_p  # 2 old (pre-boundary) + 2 new; overlap row dropped
     assert not new_p.duplicated("trade_date").any(), "no duplicate dates at boundary"
     assert new_p.iloc[0]["close"] == 10.0, "rename must not rescale prices"
+    assert new_p["volume"].dtype == "int64", \
+        "rename (ratio=1.0) must not touch volume or upcast its dtype to float"
+    assert list(new_p["volume"]) == [1000, 1100, 1300, 1400], "rename must not rescale volume"
     new_f = f[f["ticker"] == "NEW3"]
     assert len(new_f) == 2, "rename splices fundamentals too"
     print_check("rename splice", True)
@@ -79,8 +87,8 @@ def test_rename_splice():
 
 def test_merger_splice():
     prices = pd.concat([
-        _prices("ACQ3", ["2021-01-04", "2021-01-05"], [20.0, 22.0]),
-        _prices("SRV3", ["2021-02-01", "2021-02-02"], [11.0, 11.5]),
+        _prices("ACQ3", ["2021-01-04", "2021-01-05"], [20.0, 22.0], volume=[1000.0, 1100.0]),
+        _prices("SRV3", ["2021-02-01", "2021-02-02"], [11.0, 11.5], volume=[500.0, 550.0]),
     ], ignore_index=True)
     fund = pd.concat([
         _fund("ACQ3", ["2020-12-31"], [500.0]),
@@ -98,6 +106,11 @@ def test_merger_splice():
     assert srv.iloc[0]["high"] == 20.0 * 1.01 * 0.5, "all OHLC columns must scale"
     # continuity at the boundary: 22*0.5=11 vs SRV3's 11 open — no artificial jump
     assert abs(srv.iloc[1]["close"] - 11.0) < 1e-9
+    # dollar volume (volume*price) must stay invariant across the splice:
+    # price*ratio and volume/ratio cancel out, matching the split-repair fix
+    assert abs(srv.iloc[0]["volume"] - 1000.0 / 0.5) < 1e-9, "volume must scale inversely to ratio"
+    assert abs(srv.iloc[0]["volume"] * srv.iloc[0]["close"] - 1000.0 * 20.0) < 1e-6, \
+        "dollar volume must be preserved across the merger splice"
     f_srv = f[f["ticker"] == "SRV3"]
     assert len(f_srv) == 1 and f_srv.iloc[0]["net_income"] == 700.0, \
         "acquired entity's fundamentals must be dropped, survivor's kept"

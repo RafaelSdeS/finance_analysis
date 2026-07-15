@@ -134,5 +134,12 @@ def repair_unadjusted_splits(prices):
             print(f"  {ticker} {pd.Timestamp(dates[jump]).date()}: rescaled "
                   f"{jump} rows before factor-{factor:g} basis change")
 
+    # volume is a share count -- round back to int so the /factor divisions
+    # above don't silently upcast the whole column to float (share counts
+    # round-trip exactly; the /factor is always a clean split ratio).
+    for c in VOLUME_COLS:
+        if c in prices.columns:
+            prices[c] = prices[c].round().astype("int64")
+
     print(f"Repaired {n_fixed} unadjusted events")
     return prices

@@ -82,8 +82,18 @@ def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
             prices = prices[~((prices["ticker"] == old) & (prices["trade_date"] >= boundary))]
         old_rows = prices["ticker"] == old
         prices.loc[old_rows, price_cols] = prices.loc[old_rows, price_cols] * ratio
-        # volume stays unscaled: share counts change meaning across an exchange
-        # ratio, and all volume features downstream are per-ticker relative
+        # volume scales inversely so dollar volume (volume*price) stays invariant
+        # across the splice -- same reasoning as repair.py's split-volume fix.
+        # Without this, amihud_illiquidity (volume*adj_close in the denominator)
+        # jumps by `ratio` right at the merger boundary.
+        if kind == "merger" and ratio != 0:
+            vol_cols_present = [c for c in ("volume", "volume_adjusted") if c in prices.columns]
+            if vol_cols_present:
+                # round back to int -- volume is a share count, and dividing
+                # an int64 column produces float which upcasts the WHOLE
+                # column (not just these rows) once assigned back via .loc
+                scaled = (prices.loc[old_rows, vol_cols_present] / ratio).round()
+                prices.loc[old_rows, vol_cols_present] = scaled.astype("int64")
 
         # adj_close basis reconciliation (see ADJ_RECONCILE_TOL docstring above)
         if boundary is not None and pd.notna(boundary) and adj_cols and old_rows.any():
