@@ -8,12 +8,14 @@ import json
 import re
 import shutil
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-from .paths import OUTPUT_PATH, ROOT, SPLIT_CONFIG_PATH
+from .paths import OUTPUT_PATH, ROOT, SCALER_DIR, SPLIT_CONFIG_PATH
 
 
 # =============================================================================
@@ -114,6 +116,38 @@ def write_split_config(dataset, train_frac=0.7, val_frac=0.15):
 
 
 # =============================================================================
+# FIT WINDOWS (evaluation-methodology-agnostic scaler boundaries)
+# =============================================================================
+
+@dataclass(frozen=True)
+class FitWindow:
+    """A boundary a fitted scaler should train on: rows with
+    fit_start < trade_date <= fit_end (fit_start=None means "from the
+    beginning of history" -- expanding). fold_id names the artifact
+    directory when a config resolves to more than one window.
+    """
+    fold_id: str
+    fit_start: Optional[pd.Timestamp]
+    fit_end: pd.Timestamp
+
+
+def iter_fit_windows(split_config: dict) -> list[FitWindow]:
+    """Resolve the fit window(s) a scaler should train on, from the active
+    split configuration -- the one seam between evaluation methodology and
+    scaler fitting (docs/PER_TICKER_SCALING_PLAN.md §3.5). Callers (R3/R4
+    fitting code) never read train_end directly; they iterate the windows
+    this returns, so a future change to the split config format (rolling
+    windows, expanding folds, multiple folds) only ever touches this function.
+
+    Today's split_config.json (train_end/val_end) is the single-window,
+    expanding-from-start case. A future multi-fold/rolling format would add
+    a branch here (e.g. split_config["folds"]) and nowhere else.
+    """
+    train_end = pd.Timestamp(split_config["train_end"])
+    return [FitWindow(fold_id="full", fit_start=None, fit_end=train_end)]
+
+
+# =============================================================================
 # DATASET VERSIONING
 # =============================================================================
 
@@ -150,10 +184,12 @@ def sync_dataset_version(manifest):
     """Snapshot the current build into data/processed/dataset_v{N}/, skipping no-op reruns.
 
     Copies (doesn't re-serialize) ml_dataset.parquet + its manifest + split_config
-    into an immutable, incrementing folder so an experiment can cite dataset_v{N}
-    by name. N only bumps when the manifest's content fingerprint actually changed
-    vs. the latest existing version -- an unchanged rerun is skipped rather than
-    piling up another 250MB+ copy.
+    + the scalers/ directory (if any were fit for this build) into an immutable,
+    incrementing folder so an experiment can cite dataset_v{N} by name -- including
+    exactly which fitted scaler it used, not just which parquet. N only bumps when
+    the manifest's content fingerprint actually changed vs. the latest existing
+    version -- an unchanged rerun is skipped rather than piling up another 250MB+
+    copy.
     """
     existing = sorted(
         (int(match.group(1)), path)
@@ -178,4 +214,6 @@ def sync_dataset_version(manifest):
     shutil.copy2(OUTPUT_PATH, version_dir / OUTPUT_PATH.name)
     shutil.copy2(OUTPUT_PATH.with_suffix(".manifest.json"), version_dir / "ml_dataset.manifest.json")
     shutil.copy2(SPLIT_CONFIG_PATH, version_dir / SPLIT_CONFIG_PATH.name)
+    if SCALER_DIR.exists():
+        shutil.copytree(SCALER_DIR, version_dir / SCALER_DIR.name)
     print(f"Versioned snapshot saved to: {version_dir}")

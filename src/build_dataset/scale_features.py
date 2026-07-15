@@ -2,9 +2,13 @@
 scale_features.py
 ==================
 
-Fits a leak-safe feature scaler on the train split only (per split_config.json,
-built by build_ml_dataset.py) and persists it for reuse at training/inference
-time.
+Fits a leak-safe feature scaler and persists it for reuse at training/inference
+time. The fit boundary is never a hardcoded date: it's injected as a FitWindow
+(manifest.py, resolved from split_config.json via iter_fit_windows) so this
+module works unchanged whether the active evaluation methodology is a single
+fixed split, rolling windows, or multiple folds (docs/PER_TICKER_SCALING_PLAN.md
+§3.3/§3.5) -- a config that resolves to more than one window fits one artifact
+per window instead of one global fit.
 
 Ratio-style fundamentals (P/E, P/B, margins, leverage, growth rates - unitless,
 fat-tailed) get RobustScaler (median/IQR - robust to the extreme outliers this
@@ -15,26 +19,26 @@ prices, identifiers) passes through unscaled via ColumnTransformer's
 remainder="passthrough" - scaling an already-[0,1] or already-z-scored column
 doesn't help and just makes the audit harder to read.
 
-Output:
+Output (single-window config -- today's default):
     data/processed/scalers/feature_scaler.joblib
     data/processed/scalers/scaler_metadata.json
+Output (multi-window config): one subdirectory per fold_id under scalers/,
+    each holding its own feature_scaler.joblib + scaler_metadata.json.
 
 Usage:
     python -m src.build_dataset.scale_features
 """
 
 import json
-from pathlib import Path
 
 import joblib
 import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import RobustScaler
 
-from .paths import OUTPUT_PATH, SPLIT_CONFIG_PATH
+from .manifest import FitWindow, iter_fit_windows
+from .paths import OUTPUT_PATH, SCALER_DIR, SPLIT_CONFIG_PATH
 
-ROOT = Path(__file__).resolve().parents[2]
-SCALER_DIR = ROOT / "data/processed/scalers"
 SCALER_PATH = SCALER_DIR / "feature_scaler.joblib"
 METADATA_PATH = SCALER_DIR / "scaler_metadata.json"
 
@@ -82,42 +86,82 @@ def transform_features(ct: ColumnTransformer, df: pd.DataFrame) -> pd.DataFrame:
     return scaled[df.columns]
 
 
-def fit_scaler_on_train_split(dataset: pd.DataFrame) -> ColumnTransformer:
-    """Fit RATIO_COLUMNS' scaler on rows at/before split_config.json's train_end."""
-    split_config = json.loads(SPLIT_CONFIG_PATH.read_text())
-    train_end = pd.Timestamp(split_config["train_end"])
-    train = dataset[dataset["trade_date"] <= train_end]
+def fit_scaler(dataset: pd.DataFrame, window: FitWindow, ratio_columns=RATIO_COLUMNS) -> ColumnTransformer:
+    """Fit RATIO_COLUMNS' scaler on rows inside `window` (fit_start < trade_date
+    <= fit_end; fit_start=None means "from the beginning of history").
 
-    ct = build_scaler()
+    Pure: no file I/O, no read of split_config.json -- the boundary is always
+    injected via `window` (see iter_fit_windows in manifest.py), so this works
+    unchanged under any evaluation methodology (single split, rolling,
+    expanding, multi-fold): re-cutting the split never requires touching this
+    function, only how the caller resolves `window`.
+    """
+    in_window = dataset["trade_date"] <= window.fit_end
+    if window.fit_start is not None:
+        in_window &= dataset["trade_date"] > window.fit_start
+    train = dataset[in_window]
+
+    ct = build_scaler(ratio_columns)
     ct.fit(train)
     return ct
 
 
-def write_scaler_metadata(ct: ColumnTransformer) -> None:
+def fit_scaler_on_train_split(dataset: pd.DataFrame) -> ColumnTransformer:
+    """Back-compat convenience: resolves the single window from
+    split_config.json (today's fixed-split config) and fits on it. Code that
+    needs to handle a multi-window split config should call
+    iter_fit_windows() + fit_scaler() directly instead.
+    """
+    split_config = json.loads(SPLIT_CONFIG_PATH.read_text())
+    window = iter_fit_windows(split_config)[0]
+    return fit_scaler(dataset, window)
+
+
+def _window_to_json(window: FitWindow) -> dict:
+    return {
+        "fold_id": window.fold_id,
+        "fit_start": str(window.fit_start.date()) if window.fit_start is not None else None,
+        "fit_end": str(window.fit_end.date()),
+    }
+
+
+def write_scaler_metadata(ct: ColumnTransformer, window: FitWindow, metadata_path=METADATA_PATH) -> None:
     """Audit file, derived from the fitted transformer itself (not hand-copied)
-    so it can't drift from what was actually fit.
+    so it can't drift from what was actually fit. Records the FitWindow that
+    produced it so a params/split mismatch is detectable at load time instead
+    of silently transforming with stale boundaries.
     """
     robust = ct.named_transformers_["robust"]
     metadata = {
         "method": "RobustScaler",
+        "fit_window": _window_to_json(window),
         "scaled_columns": list(RATIO_COLUMNS),
         "center": dict(zip(RATIO_COLUMNS, robust.center_.tolist())),
         "scale": dict(zip(RATIO_COLUMNS, robust.scale_.tolist())),
         "passthrough_columns": [c for c in ct.feature_names_in_ if c not in RATIO_COLUMNS],
     }
-    METADATA_PATH.write_text(json.dumps(metadata, indent=1))
-    print(f"Scaler metadata saved to: {METADATA_PATH}")
+    metadata_path.write_text(json.dumps(metadata, indent=1))
+    print(f"Scaler metadata saved to: {metadata_path}")
 
 
 def main():
-    SCALER_DIR.mkdir(parents=True, exist_ok=True)
     dataset = pd.read_parquet(OUTPUT_PATH)
+    split_config = json.loads(SPLIT_CONFIG_PATH.read_text())
+    windows = iter_fit_windows(split_config)
 
-    ct = fit_scaler_on_train_split(dataset)
-    joblib.dump(ct, SCALER_PATH)
-    print(f"Scaler saved to: {SCALER_PATH}")
+    # Single window (today's default): flat scalers/ layout, unchanged from
+    # before. Multiple windows: one subdirectory per fold_id (§3.5 layout) --
+    # no implicit "latest", callers must name the window they want.
+    for window in windows:
+        scaler_dir = SCALER_DIR if len(windows) == 1 else SCALER_DIR / window.fold_id
+        scaler_dir.mkdir(parents=True, exist_ok=True)
 
-    write_scaler_metadata(ct)
+        ct = fit_scaler(dataset, window)
+        scaler_path = scaler_dir / "feature_scaler.joblib"
+        joblib.dump(ct, scaler_path)
+        print(f"Scaler saved to: {scaler_path}")
+
+        write_scaler_metadata(ct, window, scaler_dir / "scaler_metadata.json")
 
 
 if __name__ == "__main__":

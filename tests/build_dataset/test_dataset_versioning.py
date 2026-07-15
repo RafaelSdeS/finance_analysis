@@ -34,6 +34,15 @@ def _write_current_build(tmp_path, manifest):
     return output_path
 
 
+@pytest.fixture(autouse=True)
+def _isolate_scaler_dir(tmp_path, monkeypatch):
+    # Points at a directory that doesn't exist by default (sync_dataset_version
+    # must skip it, not error) -- isolates tests from this machine's real
+    # data/processed/scalers/ (paths.SCALER_DIR), which would otherwise get
+    # silently copied into every test's tmp_path version dir.
+    monkeypatch.setattr(bmd, "SCALER_DIR", tmp_path / "scalers")
+
+
 def test_first_build_creates_v1(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(bmd, "OUTPUT_PATH", _write_current_build(tmp_path, BASE_MANIFEST))
     monkeypatch.setattr(bmd, "SPLIT_CONFIG_PATH", tmp_path / "split_config.json")
@@ -66,6 +75,24 @@ def test_content_change_creates_v2(tmp_path, monkeypatch) -> None:
 
     versions = sorted(p.name for p in tmp_path.glob("dataset_v*"))
     assert versions == ["dataset_v1", "dataset_v2"]
+
+
+def test_scalers_snapshotted_into_version_dir(tmp_path, monkeypatch) -> None:
+    """sync_dataset_version must copy scalers/ into dataset_v{N}/ too -- so an
+    experiment citing dataset_v{N} gets the scaler it actually used, not just
+    the parquet (previously a gap: scalers were never versioned)."""
+    monkeypatch.setattr(bmd, "OUTPUT_PATH", _write_current_build(tmp_path, BASE_MANIFEST))
+    monkeypatch.setattr(bmd, "SPLIT_CONFIG_PATH", tmp_path / "split_config.json")
+    scaler_dir = tmp_path / "scalers"
+    scaler_dir.mkdir()
+    (scaler_dir / "feature_scaler.joblib").write_text("fake scaler bytes")
+    (scaler_dir / "scaler_metadata.json").write_text("{}")
+    monkeypatch.setattr(bmd, "SCALER_DIR", scaler_dir)
+
+    bmd.sync_dataset_version(dict(BASE_MANIFEST, built_at="t1", git_commit="a"))
+
+    assert (tmp_path / "dataset_v1" / "scalers" / "feature_scaler.joblib").read_text() == "fake scaler bytes"
+    assert (tmp_path / "dataset_v1" / "scalers" / "scaler_metadata.json").exists()
 
 
 def test_nan_regressions_detects_increase() -> None:

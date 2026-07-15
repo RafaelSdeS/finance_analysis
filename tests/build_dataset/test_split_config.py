@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.build_dataset.manifest import compute_split_dates
+from src.build_dataset.manifest import compute_split_dates, iter_fit_windows
 
 
 def test_split_is_time_ordered_no_overlap() -> None:
@@ -42,6 +42,19 @@ def test_split_robust_to_uneven_ticker_history() -> None:
 
     assert train_end_a == train_end_both
     assert val_end_a == val_end_both
+
+
+def test_iter_fit_windows_resolves_todays_config_to_one_expanding_window() -> None:
+    """Today's split_config.json shape (train_end/val_end) must resolve to a
+    single expanding-from-start window ending at train_end -- the seam a
+    future rolling/multi-fold config format would extend without touching any
+    scaler-fitting code (docs/PER_TICKER_SCALING_PLAN.md §3.5)."""
+    windows = iter_fit_windows({"train_end": "2018-07-30", "val_end": "2022-07-26"})
+
+    assert len(windows) == 1
+    assert windows[0].fold_id == "full"
+    assert windows[0].fit_start is None
+    assert windows[0].fit_end == pd.Timestamp("2018-07-30")
 
 
 if __name__ == "__main__":
