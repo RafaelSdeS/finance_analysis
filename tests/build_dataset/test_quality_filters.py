@@ -172,6 +172,24 @@ def test_attach_filing_dates_no_file_uses_statutory_only(tmp_path, monkeypatch) 
     assert "filing_lag_days" not in result.columns
 
 
+def test_drop_orphan_prefix_rows() -> None:
+    """Rows before ORPHAN_PREFIX_TICKERS[ticker]['drop_before'] are removed;
+    everything else (other tickers, later rows of the same ticker) is
+    untouched."""
+    prices = pd.concat([
+        pd.DataFrame({"ticker": "BRDT3", "trade_date": pd.to_datetime(
+            ["2001-12-03", "2003-01-07", "2017-12-15", "2017-12-18"]
+        )}),
+        pd.DataFrame({"ticker": "OTHER3", "trade_date": pd.to_datetime(["2001-12-03"])}),
+    ], ignore_index=True)
+
+    result = qf.drop_orphan_prefix_rows(prices)
+
+    brdt3_dates = set(result.loc[result["ticker"] == "BRDT3", "trade_date"])
+    assert brdt3_dates == {pd.Timestamp("2017-12-15"), pd.Timestamp("2017-12-18")}
+    assert (result["ticker"] == "OTHER3").sum() == 1, "unrelated ticker must be untouched"
+
+
 def test_filter_excessive_filing_lag_drops_only_over_threshold() -> None:
     """Rows filed more than max_lag_days late are dropped; rows within the
     threshold and rows with unknown (NaN) lag -- statutory fallback, no real

@@ -64,6 +64,18 @@ def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
         if kind == "tender" or not (prices["ticker"] == old).any():
             continue
 
+        # Optional: the old ticker's raw feed can keep emitting near-zero-
+        # volume dead-stub noise for a few days after its REAL last trade but
+        # before the new ticker's first trade (see CCRO3->MOTV3's notes) --
+        # the boundary-only logic below would relabel that stub as the new
+        # ticker's own history. Drop it outright instead of splicing it in.
+        old_last_date = ev.get("old_last_date")
+        if old_last_date is not None:
+            stub = (prices["ticker"] == old) & (prices["trade_date"] > pd.Timestamp(old_last_date))
+            if stub.any():
+                print(f"    dropping {stub.sum()} dead-stub row(s) for {old} after {old_last_date}")
+                prices = prices[~stub]
+
         boundary = first_trade.get(new)
         if boundary is not None:
             # no date overlap: past the boundary the new ticker is the record

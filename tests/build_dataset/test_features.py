@@ -54,6 +54,34 @@ def test_log_return_basic() -> None:
     assert approx(result.iloc[2]["log_return"], np.log(101.0 / 102.0), tol=1e-9)
 
 
+def test_log_return_nan_across_large_calendar_gap() -> None:
+    """log_return must be NaN across a raw-data gap wider than
+    MAX_RETURN_GAP_DAYS -- otherwise a multi-year collection hole (e.g. a
+    ticker delisted then relisted under a recycled code, or an unfillable
+    vendor gap) reads as a fake single-day return spanning years (confirmed:
+    VBBR3/BRDT3 -95.6% across a 14.9-year hole). A normal weekend/holiday gap
+    (well under the threshold) must be computed as usual."""
+    from src.build_dataset.features import MAX_RETURN_GAP_DAYS
+
+    dates = pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03",
+                            "2025-06-01", "2025-06-02"])  # ~5.4-year gap after row 2
+    df = pd.DataFrame({
+        "ticker": ["A"] * 5,
+        "trade_date": dates,
+        "adj_close": [10.0, 10.5, 11.0, 50.0, 51.0],
+        "adj_high": [10.0, 10.5, 11.0, 50.0, 51.0],
+        "adj_low": [10.0, 10.5, 11.0, 50.0, 51.0],
+    })
+    result = compute_price_features(df)
+
+    assert pd.isna(result.iloc[0]["log_return"])  # no prior row
+    assert approx(result.iloc[1]["log_return"], np.log(10.5 / 10.0))  # normal 1-day gap
+    assert approx(result.iloc[2]["log_return"], np.log(11.0 / 10.5))
+    assert pd.isna(result.iloc[3]["log_return"]), "gap far exceeding MAX_RETURN_GAP_DAYS must be NaN"
+    assert approx(result.iloc[4]["log_return"], np.log(51.0 / 50.0))  # normal again after the gap
+    assert MAX_RETURN_GAP_DAYS < (dates[3] - dates[2]).days
+
+
 def test_moving_averages() -> None:
     """MA20/60: rolling mean of prices. First 19/59 rows should be NaN."""
     prices = [100.0 + i * 0.5 for i in range(100)]  # Linear increase

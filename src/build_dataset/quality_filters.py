@@ -28,6 +28,45 @@ QUARANTINED_TICKERS = {
              "for this ticker's true price history",
 }
 
+# Tickers whose raw price file's EARLIEST rows are stale data from an
+# unrelated, long-dead earlier holder of the same (recycled) B3 ticker code
+# -- not real history of the CURRENT listing. Confirmed per-ticker via
+# company_info/fundamentals cross-checks (not a blanket heuristic): a dataset-
+# wide scan (2026-07-15) found 118 tickers with a similar >=2-year internal
+# price-history gap, but only entries below have been individually verified
+# enough to act on -- see ORPHAN_FRAGMENT_TICKERS.md for the rest, flagged
+# but not fixed.
+ORPHAN_PREFIX_TICKERS = {
+    "BRDT3": {  # -> VBBR3 via ticker_continuity.json
+        "drop_before": "2003-06-01",
+        "reason": "6 sparse trades 2001-12-03..2003-01-07 (1-2 trades/session, round-number "
+                  "volumes), then a 14.9-year silence before real IPO-era trading resumes "
+                  "2017-12-15 (49M-share volume day). BRDT3/Vibra Energia (cnpj 34274233000102 "
+                  "per company_info) was a wholly-owned Petrobras subsidiary with no independent "
+                  "listing before its Dec-2017 IPO -- fundamentals for this ticker only start "
+                  "2016-12-31, confirming no real filings exist for the 2001-2003 window either. "
+                  "These rows belong to an unrelated, long-dead earlier holder of the recycled "
+                  "BRDT3 ticker code (confirmed 2026-07-15).",
+    },
+}
+
+
+def drop_orphan_prefix_rows(prices):
+    """Drop the hand-verified orphan-prefix rows in ORPHAN_PREFIX_TICKERS.
+
+    Must run before apply_ticker_continuity() so the garbage never reaches
+    first-trade-date boundary computation, MIN_PRICE_ROWS counting, or any
+    feature/rolling-window logic.
+    """
+    for ticker, info in ORPHAN_PREFIX_TICKERS.items():
+        mask = (prices["ticker"] == ticker) & (prices["trade_date"] < pd.Timestamp(info["drop_before"]))
+        n = int(mask.sum())
+        if n:
+            print(f"Dropping {n} orphan-prefix row(s) for {ticker} (before {info['drop_before']}): "
+                  f"{info['reason']}")
+            prices = prices[~mask]
+    return prices
+
 # Tickers with genuinely zero fundamental coverage everywhere (not delisted,
 # not redundant with a sibling class), but excludable for a documented reason
 # other than "missing data" — e.g. an ETF, not an operating company.

@@ -175,6 +175,31 @@ def test_duplicate_guard():
     return False
 
 
+def test_old_last_date_drops_dead_stub_rows():
+    # OLD3's real trading stops 01-04, but its raw feed keeps emitting
+    # near-zero-volume noise through 01-06 before NEW3 starts trading 01-08
+    # (mirrors CCRO3->MOTV3): without old_last_date, 01-05/01-06 would be
+    # relabeled as NEW3 history instead of dropped.
+    prices = pd.concat([
+        _prices("OLD3", ["2021-01-04", "2021-01-05", "2021-01-06"], [10.0, 0.63, 0.77]),
+        _prices("NEW3", ["2021-01-08", "2021-01-11"], [10.5, 10.6]),
+    ], ignore_index=True)
+    fund = pd.concat([
+        _fund("OLD3", ["2020-12-31"], [100.0]),
+        _fund("NEW3", ["2021-03-31"], [110.0]),
+    ], ignore_index=True)
+    path = _map([{"old": "OLD3", "new": "NEW3", "date": "2021-01-08",
+                  "type": "rename", "ratio": 1.0, "old_last_date": "2021-01-04"}])
+
+    p, _ = apply_ticker_continuity(prices, fund, path=path)
+
+    new_p = p[p["ticker"] == "NEW3"].sort_values("trade_date")
+    assert len(new_p) == 3, new_p  # OLD3's 01-04 + NEW3's own 2 rows; stub dropped, not relabeled
+    assert list(new_p["close"]) == [10.0, 10.5, 10.6], "dead-stub rows (0.63, 0.77) must be dropped, not spliced"
+    print_check("old_last_date drops dead-stub rows", True)
+    return True
+
+
 def test_missing_map_is_noop():
     prices = _prices("PETR4", ["2021-01-04"], [30.0])
     fund = _fund("PETR4", ["2020-12-31"], [1.0])
@@ -187,5 +212,6 @@ def test_missing_map_is_noop():
 if __name__ == "__main__":
     ok = (test_rename_splice() & test_merger_splice()
           & test_adj_close_reconciliation() & test_adj_close_reconciliation_skips_within_tolerance()
+          & test_old_last_date_drops_dead_stub_rows()
           & test_duplicate_guard() & test_missing_map_is_noop())
     sys.exit(0 if ok else 1)

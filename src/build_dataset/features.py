@@ -117,6 +117,19 @@ def compute_dividend_features(dataset, dividends):
 # PRICE FEATURES
 # =============================================================================
 
+# log_return is computed by ROW adjacency (.shift(1)), not calendar-date
+# adjacency. A ticker with a genuine raw-data hole (delisted/relisted under a
+# recycled code, or an unfillable vendor collection gap -- e.g. UGPA3's
+# confirmed 2010-2011 gap, in yf_collectors.FLAT_RUN_PADDING because yfinance
+# has no real data for it either) would otherwise silently produce a fake
+# multi-day/multi-year "single-day" return (confirmed: VBBR3/BRDT3 read
+# -95.6% across a 14.9-year hole, UGPA3 +46.8% across a 499-day one,
+# 2026-07-15 audit). Anything below this threshold is real trading-calendar
+# noise already confirmed legitimate elsewhere (BHIA3/CCRO3 gaps up to
+# 47-53 days for illiquid micro-caps) and must not be touched.
+MAX_RETURN_GAP_DAYS = 120
+
+
 def _rsi(series, n=14):
     delta = series.diff()
     gain  = delta.clip(lower=0).rolling(n).mean()
@@ -143,6 +156,8 @@ def compute_price_features(df):
         # Mask non-positive prices to NaN before log to avoid divide-by-zero warnings
         adj = g["adj_close"].where(g["adj_close"] > 0)
         g["log_return"]     = np.log(adj / adj.shift(1))
+        gap_days = g["trade_date"].diff().dt.days
+        g.loc[gap_days > MAX_RETURN_GAP_DAYS, "log_return"] = np.nan
         # Vendor (BolsAI) stores adj_close at 2-decimal precision. For
         # deep-history microcaps with a large cumulative split/dividend
         # adjustment factor, the true adjusted price underflows toward that

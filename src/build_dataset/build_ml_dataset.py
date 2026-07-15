@@ -54,6 +54,7 @@ from .merge import merge_company_info, merge_dividends, merge_macro, merge_price
 from .paths import OUTPUT_PATH
 from .quality_filters import (
     attach_filing_dates,
+    drop_orphan_prefix_rows,
     filter_excessive_filing_lag,
     filter_tickers_with_no_fundamentals,
 )
@@ -184,6 +185,10 @@ def main():
 
     prices       = load_prices()
     fundamentals = load_fundamentals()
+    # drop orphan-prefix rows BEFORE continuity: garbage from an unrelated
+    # earlier holder of a recycled ticker code must never reach first-trade
+    # boundary computation, MIN_PRICE_ROWS counting, or feature/rolling logic.
+    prices       = drop_orphan_prefix_rows(prices)
     # splice BEFORE split repair: corporate_events.parquet records splits
     # under each entity's current canonical ticker (e.g. BHIA3), even for
     # splits that happened while it traded as VVAR3/VIIA3 — repair can only
