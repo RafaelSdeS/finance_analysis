@@ -2,8 +2,11 @@
 Universe integrity checks for ml_dataset.parquet — see
 TOP50_UNIVERSE_VALIDATION.md §3 for the why/how/threshold behind each check.
 
-Not part of the pipeline's regression suite (run_all.py) by design: these are
-one-off audits of already-collected data, not gates on future rebuilds.
+Wired into run_all.py's DATA group: 3.1 (survivorship) is explicitly a
+regression guard per its own docstring below ("silently reintroduces the
+exact bias this whole analysis is about") -- that only holds if this file
+actually runs on every build, not just when someone remembers to invoke it
+by hand.
 
 Run from project root:
     python tests/build_dataset/test_universe_integrity.py
@@ -126,6 +129,33 @@ def check_sibling_correlation(df, company_info):
     return "\n".join(lines) if lines else "  None below threshold."
 
 
+def check_status_is_static(df):
+    """Informational: confirm `status` (and `sector`) are collection-time
+    snapshots held constant across a ticker's entire history, not real
+    point-in-time state -- merge_company_info() joins company_info.parquet's
+    CURRENT status onto every historical row.
+
+    This means `status` deterministically reveals whether a company is still
+    listed TODAY on every row, including rows from a decade before that was
+    knowable -- a feature-level survivorship/lookahead trap distinct from the
+    universe-selection-level bias 3.1 guards against. Not fixable here
+    (downstream point-in-time universe construction, per
+    TOP50_UNIVERSE_VALIDATION.md §1, needs this exact current-status column
+    to identify delisted names) -- must not be fed to a model as a raw
+    per-row feature. Not a hard gate: this documents the property (and
+    catches it if a future change makes status genuinely time-varying,
+    which would be a welcome improvement, not a regression)."""
+    nunique = df.groupby("ticker")["status"].nunique()
+    varying = nunique[nunique > 1]
+    if len(varying):
+        return (f"  {len(varying)}/{len(nunique)} tickers now have time-varying status "
+                f"(status is no longer a pure current-snapshot join -- update this note "
+                f"and CLAUDE.md's caveat if this is a deliberate improvement).")
+    return (f"  status is constant across history for all {len(nunique)} tickers, as expected "
+            f"for a current-snapshot join. Do not use `status`/`sector` as a raw per-row "
+            f"training feature -- see CLAUDE.md caveat.")
+
+
 def main():
     print_separator()
     print("UNIVERSE INTEGRITY TEST (survivorship, schema, sibling consistency)")
@@ -164,6 +194,10 @@ def main():
     print()
     print_header("3.4 SIBLING-CORRELATION CHECK (informational)")
     print(check_sibling_correlation(df, company_info))
+
+    print()
+    print_header("3.5 STATUS/SECTOR STATIC-SNAPSHOT CHECK (informational)")
+    print(check_status_is_static(df))
 
     print()
     if failed:

@@ -71,7 +71,7 @@ python tests/run_all.py --group all
 
 **Test groups:**
 - **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`
-- **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`
+- **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_universe_integrity.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`
 
 **Linting:**
 ```bash
@@ -156,6 +156,7 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 - **BCB series:** selic=11 (daily), cdi=12, ipca=433 — **NOT 432** (that's the annual meta target).
 - **Benchmark:** BOVA11 (IBOV proxy ETF) collected automatically; prices only.
 - **Company info:** BolsAI-only (CVM metadata, rarely changes); refresh via `--mode full_scale` when new IPOs appear. Current dataset: 523 tickers total (373 ATIVO active + 85 CANCELADA delisted + 65 missing status); 4 quarantined (WDCN3 unadjusted splits unfixable, CAMB4 delisted 2019, LLIS3 delisted 2023, CCTY3 raw feed is not real trading data — mirrors CCRO3/Motiva's dead post-rename ticker across both BolsAI and yfinance).
+- **`status` is a current-day snapshot, not point-in-time — do not use as a raw training feature:** `merge_company_info()` joins company_info's *today's* status (ATIVO/CANCELADA) onto every historical row of a ticker; confirmed 100% constant per ticker across its full history in the built dataset (2026-07-14 audit, `test_universe_integrity.py` §3.5). A model conditioned on `status` at a 2012 row would be seeing 2026 knowledge of whether that company survived — a feature-level lookahead trap, distinct from (and in addition to) the universe-selection-level survivorship bias in `TOP50_UNIVERSE_VALIDATION.md`. Left in the dataset deliberately (downstream point-in-time universe construction needs it to identify delisted names) — the burden is on any consumer training a model to exclude it from the point-in-time feature set. `sector` is the same kind of static join but carries far less outcome information, so it's lower-risk as a feature.
 - **Data quality filters (Stage 2, enforced automatically):**
   - Filing lag filter: Drop fundamentals filed >180 days after quarter-end (0.9% of rows) — prevents lookahead from unreliable late filings
   - Close-price lookup: Replace BolsAI's stale close_price with actual close from `fundamentals_available_date` — prevents false >50% valuation jumps

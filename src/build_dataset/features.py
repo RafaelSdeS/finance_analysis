@@ -66,7 +66,13 @@ def compute_dividend_features(dataset, dividends):
     print("COMPUTING DIVIDEND FEATURES")
     print("=" * 80)
 
-    window = np.timedelta64(252, "D")
+    # Calendar days, not trading-day rows (unlike return_12m's .rolling(252) —
+    # this window is a date-based searchsorted over ex_date, so it needs a
+    # true calendar year (365d), not the 252-trading-day row count used
+    # elsewhere. Using 252 here previously dropped ~113 days (2.7-3.7 months)
+    # of real trailing dividends -- e.g. an annual-payer would read a false
+    # div_yield_12m=0 for that whole window every year (confirmed 2026-07-14).
+    window = np.timedelta64(365, "D")
 
     # ponytail: split dividends by ticker once via groupby instead of
     # re-filtering the full table on every loop iteration
@@ -334,10 +340,16 @@ def compute_advanced_features(df):
 
     # Dividend coverage: can EBITDA support annual dividend?
     # annual_dividend = div_value_recent * shares_outstanding
-    df["dividend_coverage_ratio"] = (
-        df["ebitda"] /
-        (df["div_value_recent"] * df["shares_outstanding"] + 1e-8)
-    )
+    #
+    # NOT a "+1e-8 near-zero denominator" case like the other ratios below --
+    # div_value_recent==0 (no dividend paid, ever) is the ORDINARY case for
+    # ~27% of rows / 213 tickers (confirmed 2026-07-14), not rare distress.
+    # A +1e-8 epsilon there computes ebitda/1e-8 -- a ~1e8x-inflated, finite
+    # (so clean_dataset's inf->NaN pass never catches it) number as extreme as
+    # 2.3e15, poisoning any scaler/model that touches this column. "Coverage"
+    # is undefined, not infinite, when there's no dividend to cover -- NaN.
+    annual_dividend = df["div_value_recent"] * df["shares_outstanding"]
+    df["dividend_coverage_ratio"] = df["ebitda"] / annual_dividend.where(annual_dividend > 0)
 
     # --- EARNINGS QUALITY (raw signals, no classification) ---
 

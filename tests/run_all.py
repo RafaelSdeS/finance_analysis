@@ -51,6 +51,7 @@ FAST = [
 DATA = [
     "tests/build_dataset/test_final_dataset.py",
     "tests/build_dataset/test_top_traded_quality.py",
+    "tests/build_dataset/test_universe_integrity.py",
     "tests/data_collection/test_cagr_calculation.py",
     "tests/data_collection/test_blue_chip_tickers.py",
     "tests/data_collection/validate_vs_yfinance.py",

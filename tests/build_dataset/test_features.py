@@ -24,6 +24,7 @@ from src.build_dataset.features import (
     compute_price_features,
     compute_fundamental_features,
     compute_advanced_features,
+    compute_dividend_features,
     recompute_valuation_daily,
 )
 
@@ -599,6 +600,27 @@ def test_cagr_defined_flags() -> None:
     assert result["cagr_revenue_defined"].isin([0, 1]).all()
 
 
+def test_dividend_coverage_ratio_nan_when_no_dividend() -> None:
+    """dividend_coverage_ratio must be NaN, not an astronomically large finite
+    number, when a ticker pays no dividend (div_value_recent == 0 -- the
+    ordinary case for ~27% of the real dataset's rows, not rare distress).
+
+    Regression test: the old `ebitda / (div_value_recent * shares_outstanding
+    + 1e-8)` formula computed ebitda/1e-8 in that case -- a finite value up to
+    ~1e8x inflated (confirmed up to 2.3e15 in the real dataset), which
+    clean_dataset's inf->NaN pass can never catch because it's never literally
+    inf. "Coverage" is undefined without a dividend to cover, not infinite.
+    """
+    df = _advanced_features_fixture(2)
+    df["div_value_recent"] = [0.0, 0.5]  # row 0: no dividend, row 1: real dividend
+
+    result = compute_advanced_features(df)
+
+    assert pd.isna(result.iloc[0]["dividend_coverage_ratio"])
+    expected = 100.0 / (0.5 * 1000.0)  # ebitda / (div_value_recent * shares_outstanding)
+    assert approx(result.iloc[1]["dividend_coverage_ratio"], expected)
+
+
 def test_adj_close_precision_degraded_flag() -> None:
     """Flags rows where adj_close is quantized to the 2-decimal vendor
     precision floor (e.g. 0.03) -- the case where a real price move gets
@@ -618,6 +640,36 @@ def test_adj_close_precision_degraded_flag() -> None:
 
     assert list(result["adj_close_precision_degraded"]) == [0, 1, 1, 0, 0, 0]
     assert result["adj_close_precision_degraded"].isin([0, 1]).all()
+
+
+def test_div_yield_12m_window_is_calendar_year_not_252_days() -> None:
+    """div_yield_12m must cover a true trailing calendar year (365d).
+
+    Regression test: the window used to be np.timedelta64(252, "D") — a
+    number carried over from the 252-trading-day-ROW windows used elsewhere
+    in this file (return_12m etc.), but this function windows by calendar
+    date (searchsorted over ex_date), not row count. 252 calendar days is
+    ~8.3 months, so an annual dividend payer would silently read
+    div_yield_12m=0 for the last ~3.7 months of every year. A dividend paid
+    300 days ago (within a real 12-month window, outside the old 252d one)
+    must still be counted.
+    """
+    dates = pd.date_range("2020-01-01", periods=370, freq="D")
+    dataset = pd.DataFrame({"ticker": "A", "trade_date": dates, "adj_close": 10.0})
+    dividends = pd.DataFrame({
+        "ticker": ["A"], "ex_date": [pd.Timestamp("2020-01-01")], "value_per_share": [1.0],
+    })
+
+    result = compute_dividend_features(dataset, dividends)
+
+    row_300d = result[result["trade_date"] == pd.Timestamp("2020-01-01") + pd.Timedelta(days=300)]
+    assert row_300d["div_count_12m"].iloc[0] == 1
+    assert approx(row_300d["div_yield_12m"].iloc[0], 0.1)
+
+    # past a real 365-day year, the dividend correctly rolls off the window
+    row_366d = result[result["trade_date"] == pd.Timestamp("2020-01-01") + pd.Timedelta(days=366)]
+    assert row_366d["div_count_12m"].iloc[0] == 0
+    assert approx(row_366d["div_yield_12m"].iloc[0], 0.0)
 
 
 if __name__ == "__main__":
