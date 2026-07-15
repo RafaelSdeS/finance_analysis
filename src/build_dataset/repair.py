@@ -7,6 +7,7 @@ import pandas as pd
 from .paths import CORPORATE_EVENTS_PATH, CONTINUITY_PATH
 
 ADJ_PRICE_COLS = ["adj_open", "adj_high", "adj_low", "adj_close"]
+VOLUME_COLS = ["volume", "volume_adjusted"]
 
 # An event is only detectable when its raw jump ln(1/factor) stands out from
 # normal market moves (0.3 ≈ ±35%); the observed return must match it within
@@ -27,9 +28,12 @@ def repair_unadjusted_splits(prices):
     them). Detect that jump near each recorded event date and divide all
     adj_* history before it by the factor, making the series continuous.
 
+    Also rescales volume and volume_adjusted by the same factor (a 1:4 split
+    divides prices by 4 and multiplies volume by 4 — same economic activity,
+    more shares). Used by amihud_illiquidity and turnover_ratio features.
+
     ponytail: events with |ln(1/factor)| < 0.3 can't be told apart from
-    market moves and are left alone; volume is not rescaled (only raw volume
-    reaches the dataset, no cross-scale volume features exist yet).
+    market moves and are left alone.
 
     Events are keyed under each company's ticker at the time of the split.
     Rekey through the continuity map to translate old-name events to new names,
@@ -120,6 +124,11 @@ def repair_unadjusted_splits(prices):
             jump, factor = best
             applied.add(dates[jump])
             prices.loc[g_idx[:jump], ADJ_PRICE_COLS] /= factor
+            # volume scales same direction as prices: 1:4 split divides price by 4,
+            # multiplies volume by 4 (more shares trading same economic activity).
+            vol_cols_present = [c for c in VOLUME_COLS if c in prices.columns]
+            if vol_cols_present:
+                prices.loc[g_idx[:jump], vol_cols_present] /= factor
             adj[:jump] /= factor
             n_fixed += 1
             print(f"  {ticker} {pd.Timestamp(dates[jump]).date()}: rescaled "
