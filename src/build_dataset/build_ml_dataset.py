@@ -185,16 +185,17 @@ def main():
 
     prices       = load_prices()
     fundamentals = load_fundamentals()
-    # drop orphan-prefix rows BEFORE continuity: garbage from an unrelated
-    # earlier holder of a recycled ticker code must never reach first-trade
-    # boundary computation, MIN_PRICE_ROWS counting, or feature/rolling logic.
+    # drop orphan-prefix rows BEFORE anything else: garbage from an unrelated
+    # earlier holder of a recycled ticker code must never reach any logic downstream.
     prices       = drop_orphan_prefix_rows(prices)
-    # splice BEFORE split repair: corporate_events.parquet records splits
-    # under each entity's current canonical ticker (e.g. BHIA3), even for
-    # splits that happened while it traded as VVAR3/VIIA3 — repair can only
-    # find those rows once continuity has renamed them onto the new ticker.
-    prices, fundamentals = apply_ticker_continuity(prices, fundamentals)
+    # repair BEFORE continuity: events are keyed under each entity's original
+    # ticker name at the time of the split; repair them in place under those names
+    # so the factor math runs on the pre-splice data. Continuity then renames both
+    # the repaired old leg and its associated rows onto the new ticker.
     prices       = repair_unadjusted_splits(prices)
+    # splice AFTER split repair: each leg is now internally continuous; splicing
+    # them together preserves that invariant.
+    prices, fundamentals = apply_ticker_continuity(prices, fundamentals)
     prices       = filter_tickers_with_no_fundamentals(prices, fundamentals)
     fundamentals = compute_fundamental_features(fundamentals)
     fundamentals = fill_missing_cagr(fundamentals)

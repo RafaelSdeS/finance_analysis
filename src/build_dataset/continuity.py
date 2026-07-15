@@ -61,7 +61,7 @@ def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
     for ev in events:
         old, new, kind = ev["old"], ev["new"], ev["type"]
         ratio = float(ev.get("ratio", 1.0))
-        if kind == "tender" or not (prices["ticker"] == old).any():
+        if kind in ("tender", "keep_separate") or not (prices["ticker"] == old).any():
             continue
 
         # Optional: the old ticker's raw feed can keep emitting near-zero-
@@ -92,9 +92,13 @@ def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
             old_last_adj = old_last["adj_close"]
             if len(new_first_rows) and pd.notna(old_last_adj) and old_last_adj != 0 and pd.notna(new_first_rows.iloc[0]):
                 adj_factor = new_first_rows.iloc[0] / old_last_adj
+                # sanity check: factors >50x or <1/50x indicate unrepaired vendor corruption, not a real splice
                 if abs(adj_factor - 1.0) > ADJ_RECONCILE_TOL:
-                    prices.loc[old_rows, adj_cols] = prices.loc[old_rows, adj_cols] * adj_factor
-                    print(f"    adj_close basis reconciled: {old}->{new} factor={adj_factor:.4f}")
+                    if adj_factor > 50.0 or adj_factor < 0.02:
+                        print(f"    WARNING: adj_close factor {adj_factor:.4f} outside [1/50, 50] — likely unrepaired split basis, skipping")
+                    else:
+                        prices.loc[old_rows, adj_cols] = prices.loc[old_rows, adj_cols] * adj_factor
+                        print(f"    adj_close basis reconciled: {old}->{new} factor={adj_factor:.4f}")
 
         prices.loc[old_rows, "ticker"] = new
 

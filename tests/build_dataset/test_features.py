@@ -46,6 +46,8 @@ def test_log_return_basic() -> None:
         "adj_close": [100.0, 102.0, 101.0],
         "adj_high": [100.0, 102.0, 101.0],
         "adj_low": [100.0, 102.0, 101.0],
+        "adj_open": [100.0, 102.0, 101.0],
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -71,6 +73,8 @@ def test_log_return_nan_across_large_calendar_gap() -> None:
         "adj_close": [10.0, 10.5, 11.0, 50.0, 51.0],
         "adj_high": [10.0, 10.5, 11.0, 50.0, 51.0],
         "adj_low": [10.0, 10.5, 11.0, 50.0, 51.0],
+        "adj_open": [10.0, 10.5, 11.0, 50.0, 51.0],
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -91,6 +95,8 @@ def test_moving_averages() -> None:
         "adj_close": prices,
         "adj_high": prices,
         "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -120,6 +126,8 @@ def test_volatility() -> None:
         "adj_close": [100.0] * 30,
         "adj_high": [100.0] * 30,
         "adj_low": [100.0] * 30,
+        "adj_open": [100.0] * 30,
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -137,6 +145,8 @@ def test_rsi_calculation() -> None:
         "adj_close": prices,
         "adj_high": prices,
         "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -165,6 +175,8 @@ def test_rsi_mixed_trend() -> None:
         "adj_close": prices,
         "adj_high": prices,
         "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -184,6 +196,8 @@ def test_rsi_downtrend() -> None:
         "adj_close": prices,
         "adj_high": prices,
         "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -205,6 +219,8 @@ def test_rsi_no_down_days() -> None:
         "adj_close": prices,
         "adj_high": prices,
         "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -222,6 +238,8 @@ def test_rsi_flat_prices() -> None:
         "adj_close": prices,
         "adj_high": prices,
         "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -239,6 +257,8 @@ def test_drawdown_calculation() -> None:
         "adj_close": prices,
         "adj_high": prices,
         "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -263,6 +283,8 @@ def test_hl_ratio() -> None:
         "adj_close": [100.0, 102.0, 101.0],
         "adj_high": [105.0, 106.0, 104.0],
         "adj_low": [95.0, 98.0, 99.0],
+        "adj_open": [100.0, 102.0, 101.0],
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -284,6 +306,8 @@ def test_return_windows() -> None:
         "adj_close": prices,
         "adj_high": prices,
         "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -306,6 +330,8 @@ def test_ticker_grouping_isolation() -> None:
         "adj_close": [100.0, 102.0, 50.0, 52.0],
         "adj_high": [100.0, 102.0, 50.0, 52.0],
         "adj_low": [100.0, 102.0, 50.0, 52.0],
+        "adj_open": [100.0, 102.0, 50.0, 52.0],
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -326,6 +352,8 @@ def test_non_positive_prices_masked() -> None:
         "adj_close": [100.0, 0.0, -50.0, 101.0],
         "adj_high": [100.0, 1.0, 1.0, 101.0],
         "adj_low": [100.0, 0.0, 0.0, 101.0],
+        "adj_open": [100.0, 0.0, -50.0, 101.0],
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -337,7 +365,12 @@ def test_non_positive_prices_masked() -> None:
 
 
 def test_fundamental_features_ratios() -> None:
-    """Fundamental derived ratios: book_to_market, earnings_yield, etc."""
+    """Fundamental derived ratios: book_to_market, cash_ratio, etc.
+
+    earnings_yield is deliberately NOT asserted here: compute_fundamental_features
+    no longer computes it (see features.py comment) -- the only surviving
+    definition is compute_advanced_features's post-re-anchoring 1/pl, covered
+    by test_earnings_yield_recomputed_from_reanchored_pl below."""
     df = pd.DataFrame({
         "ticker": ["A"],
         "reference_date": pd.to_datetime(["2026-01-01"]),
@@ -363,9 +396,7 @@ def test_fundamental_features_ratios() -> None:
 
     # book_to_market = equity / market_cap = 500 / 1000 = 0.5
     assert approx(result.iloc[0]["book_to_market"], 0.5)
-
-    # earnings_yield = net_income / market_cap = 100 / 1000 = 0.1
-    assert approx(result.iloc[0]["earnings_yield"], 0.1)
+    assert "earnings_yield" not in result.columns
 
     # cash_ratio = cash / current_liabilities = 200 / 400 = 0.5
     assert approx(result.iloc[0]["cash_ratio"], 0.5)
@@ -442,6 +473,7 @@ def _advanced_features_fixture(n_rows: int) -> pd.DataFrame:
         "lpa": [1.0] * n_rows,
         "ebitda": [100.0] * n_rows,
         "shares_outstanding": [1000.0] * n_rows,
+        "volume": [1_000_000.0] * n_rows,
         "net_revenue": [500.0] * n_rows,
         "net_income": [50.0] * n_rows,
         "revenue_growth_yoy": [0.05] * n_rows,
@@ -491,6 +523,7 @@ def _fill_advanced_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     relevant to what they're testing."""
     defaults = {
         "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0, "shares_outstanding": 1000.0,
+        "volume": 1_000_000.0,
         "net_revenue": 500.0, "net_income": 50.0, "revenue_growth_yoy": 0.05,
         "earnings_growth_yoy": 0.03, "volatility_20d": 0.1, "volatility_60d": 0.1,
         "adj_close": 100.0, "pl": 10.0, "drawdown": 0.0, "pvp": 2.0, "roe": 0.15,
@@ -557,7 +590,8 @@ def test_n_quarters_available_counts_real_filings() -> None:
             rows.append({
                 "ticker": "A", "trade_date": d, "reference_date": qe,
                 "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0,
-                "shares_outstanding": 1000.0, "net_revenue": 500.0, "net_income": 50.0,
+                "shares_outstanding": 1000.0, "volume": 1_000_000.0,
+                "net_revenue": 500.0, "net_income": 50.0,
                 "revenue_growth_yoy": 0.05, "earnings_growth_yoy": 0.03,
                 "volatility_20d": 0.1, "volatility_60d": 0.1, "adj_close": 100.0,
                 "pl": 10.0, "drawdown": 0.0, "pvp": 2.0, "roe": 0.15, "debt_equity": 0.5,
@@ -590,7 +624,8 @@ def test_n_quarters_available_separate_tickers() -> None:
                 rows.append({
                     "ticker": ticker, "trade_date": d, "reference_date": qe,
                     "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0,
-                    "shares_outstanding": 1000.0, "net_revenue": 500.0, "net_income": 50.0,
+                    "shares_outstanding": 1000.0, "volume": 1_000_000.0,
+                    "net_revenue": 500.0, "net_income": 50.0,
                     "revenue_growth_yoy": 0.05, "earnings_growth_yoy": 0.03,
                     "volatility_20d": 0.1, "volatility_60d": 0.1, "adj_close": 100.0,
                     "pl": 10.0, "drawdown": 0.0, "pvp": 2.0, "roe": 0.15, "debt_equity": 0.5,
@@ -663,6 +698,8 @@ def test_adj_close_precision_degraded_flag() -> None:
         "adj_close": [0.0, 0.03, 0.04, 0.000568, 6.20, 100.0],
         "adj_high": [0.0, 0.03, 0.04, 0.000568, 6.20, 100.0],
         "adj_low": [0.0, 0.03, 0.04, 0.000568, 6.20, 100.0],
+        "adj_open": [0.0, 0.03, 0.04, 0.000568, 6.20, 100.0],
+        "volume": 1_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -698,6 +735,240 @@ def test_div_yield_12m_window_is_calendar_year_not_252_days() -> None:
     row_366d = result[result["trade_date"] == pd.Timestamp("2020-01-01") + pd.Timedelta(days=366)]
     assert row_366d["div_count_12m"].iloc[0] == 0
     assert approx(row_366d["div_yield_12m"].iloc[0], 0.0)
+
+
+def test_earnings_yield_recomputed_from_reanchored_pl() -> None:
+    """The only surviving earnings_yield definition (compute_advanced_features,
+    1/(pl + 1e-8)) computes correctly. Regression coverage for the dead-code
+    fix: compute_fundamental_features used to also define earnings_yield as
+    net_income/market_cap, always silently overwritten by this one -- removed
+    2026-07-15 since nothing ever read the first value."""
+    df = _advanced_features_fixture(2)
+    df["pl"] = [10.0, 4.0]
+
+    result = compute_advanced_features(df)
+
+    assert approx(result.iloc[0]["earnings_yield"], 1.0 / 10.0, tol=1e-6)
+    assert approx(result.iloc[1]["earnings_yield"], 1.0 / 4.0, tol=1e-6)
+
+
+def test_overnight_gap_intraday_return_decompose_log_return() -> None:
+    """overnight_gap (prior close -> today's open) + intraday_return (today's
+    open -> today's close) must sum exactly to log_return -- they're a
+    decomposition of the same close-to-close move, not independent signals."""
+    df = pd.DataFrame({
+        "ticker": ["A"] * 3,
+        "trade_date": pd.date_range("2026-01-01", periods=3),
+        "adj_close": [100.0, 102.0, 101.0],
+        "adj_high": [100.0, 103.0, 102.0],
+        "adj_low": [99.0, 101.0, 100.0],
+        "adj_open": [100.0, 99.0, 103.0],
+        "volume": 1_000_000.0,
+    })
+    result = compute_price_features(df)
+
+    # Row 1: overnight_gap = log(open_1/close_0) = log(99/100); intraday_return
+    # = log(close_1/open_1) = log(102/99)
+    assert approx(result.iloc[1]["overnight_gap"], np.log(99.0 / 100.0), tol=1e-9)
+    assert approx(result.iloc[1]["intraday_return"], np.log(102.0 / 99.0), tol=1e-9)
+    assert approx(
+        result.iloc[1]["overnight_gap"] + result.iloc[1]["intraday_return"],
+        result.iloc[1]["log_return"],
+        tol=1e-9,
+    )
+    # Row 2: same identity, different numbers
+    assert approx(
+        result.iloc[2]["overnight_gap"] + result.iloc[2]["intraday_return"],
+        result.iloc[2]["log_return"],
+        tol=1e-9,
+    )
+    # Row 0: no prior close -> overnight_gap NaN; intraday_return is same-day
+    # open->close and doesn't need a prior close, so it's real
+    assert pd.isna(result.iloc[0]["overnight_gap"])
+    assert approx(result.iloc[0]["intraday_return"], np.log(100.0 / 100.0), tol=1e-9)
+
+
+def test_overnight_gap_nan_across_large_calendar_gap() -> None:
+    """overnight_gap shares log_return's prior-close reference, so it needs
+    the identical MAX_RETURN_GAP_DAYS guard -- a raw-data hole would otherwise
+    fake a multi-year gap as a single overnight move, same failure mode as
+    log_return's own gap bug."""
+    from src.build_dataset.features import MAX_RETURN_GAP_DAYS
+
+    dates = pd.to_datetime(["2020-01-01", "2020-01-02", "2025-06-01"])
+    df = pd.DataFrame({
+        "ticker": ["A"] * 3,
+        "trade_date": dates,
+        "adj_close": [10.0, 10.5, 50.0],
+        "adj_high": [10.0, 10.5, 50.0],
+        "adj_low": [10.0, 10.5, 50.0],
+        "adj_open": [10.0, 10.5, 50.0],
+        "volume": 1_000_000.0,
+    })
+    result = compute_price_features(df)
+
+    assert not pd.isna(result.iloc[1]["overnight_gap"])  # normal 1-day gap
+    assert pd.isna(result.iloc[2]["overnight_gap"]), "gap exceeding MAX_RETURN_GAP_DAYS must be NaN"
+    assert MAX_RETURN_GAP_DAYS < (dates[2] - dates[1]).days
+
+
+def test_price_vs_ma_ratios() -> None:
+    """price_vs_ma20/60 = adj_close / ma_20 / ma_60 -- scale-free by
+    construction (R$/R$ cancels), unlike the raw ma_20/ma_60 levels."""
+    prices = [100.0 + i * 0.5 for i in range(100)]
+    df = pd.DataFrame({
+        "ticker": ["A"] * 100,
+        "trade_date": pd.date_range("2026-01-01", periods=100),
+        "adj_close": prices,
+        "adj_high": prices,
+        "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
+    })
+    result = compute_price_features(df)
+
+    assert pd.isna(result.iloc[10]["price_vs_ma20"]), "ma_20 not yet defined"
+    expected = prices[19] / np.mean(prices[0:20])
+    assert approx(result.iloc[19]["price_vs_ma20"], expected, tol=1e-6)
+    expected60 = prices[59] / np.mean(prices[0:60])
+    assert approx(result.iloc[59]["price_vs_ma60"], expected60, tol=1e-6)
+
+
+def test_true_range_ratio() -> None:
+    """True range: max(high-low, |high-prev_close|, |low-prev_close|) / close.
+    Unlike hl_ratio, catches a gap day where the intraday range is tight but
+    price gapped away from the prior close overnight."""
+    df = pd.DataFrame({
+        "ticker": ["A"] * 3,
+        "trade_date": pd.date_range("2026-01-01", periods=3),
+        # Row 0->1: gaps from close=100 up to a 118-120 range (tight intraday
+        # range of 2, but a 18-20pt jump from the prior close) -- hl_ratio
+        # alone would read this as a quiet day.
+        "adj_close": [100.0, 119.0, 119.5],
+        "adj_high": [101.0, 120.0, 120.0],
+        "adj_low": [99.0, 118.0, 119.0],
+        "adj_open": [100.0, 119.0, 119.5],
+        "volume": 1_000_000.0,
+    })
+    result = compute_price_features(df)
+
+    # Row 0: no prior close, true range is just intraday range: (101-99)/100
+    assert approx(result.iloc[0]["true_range_ratio"], 2.0 / 100.0, tol=1e-6)
+
+    # Row 1: max(120-118, |120-100|, |118-100|) = max(2, 20, 18) = 20; /119
+    assert approx(result.iloc[1]["true_range_ratio"], 20.0 / 119.0, tol=1e-6)
+
+    # Row 2: no gap, max(120-119, |120-119|, |119-119|) = 1; /119.5
+    assert approx(result.iloc[2]["true_range_ratio"], 1.0 / 119.5, tol=1e-6)
+
+
+def test_volatility_ratio_20_60() -> None:
+    """volatility_ratio_20_60 = volatility_20d / volatility_60d -- a regime
+    signal (expanding vs. contracting vol), independent of the raw formulas
+    already covered by test_volatility."""
+    rng = np.random.default_rng(0)
+    prices = 100.0 * np.exp(np.cumsum(rng.normal(0, 0.01, 100)))
+    df = pd.DataFrame({
+        "ticker": ["A"] * 100,
+        "trade_date": pd.date_range("2026-01-01", periods=100),
+        "adj_close": prices,
+        "adj_high": prices,
+        "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
+    })
+    result = compute_price_features(df)
+
+    row = 80
+    expected = result.iloc[row]["volatility_20d"] / result.iloc[row]["volatility_60d"]
+    assert approx(result.iloc[row]["volatility_ratio_20_60"], expected, tol=1e-9)
+
+
+def test_volume_ratio_20d() -> None:
+    """volume_ratio_20d = volume / volume.rolling(20).mean() -- flags unusual
+    volume relative to a ticker's own recent norm, scale-free across tickers
+    of very different absolute liquidity."""
+    volumes = [1_000_000.0] * 25 + [5_000_000.0]  # a spike on the last day
+    prices = [100.0] * 26
+    df = pd.DataFrame({
+        "ticker": ["A"] * 26,
+        "trade_date": pd.date_range("2026-01-01", periods=26),
+        "adj_close": prices,
+        "adj_high": prices,
+        "adj_low": prices,
+        "adj_open": prices,
+        "volume": volumes,
+    })
+    result = compute_price_features(df)
+
+    assert pd.isna(result.iloc[10]["volume_ratio_20d"]), "window (20) not yet filled"
+    assert not pd.isna(result.iloc[19]["volume_ratio_20d"]), "window filled from row 19 on"
+    assert approx(result.iloc[24]["volume_ratio_20d"], 1.0, tol=1e-6), "steady volume -> ratio ~1"
+    assert result.iloc[25]["volume_ratio_20d"] > 4.0, "5x spike day should read clearly > 1"
+
+
+def test_price_percentile_1y_no_lookahead() -> None:
+    """price_percentile_1y must not depend on rows after it -- same
+    no-lookahead guard as test_volatility_percentile_no_lookahead, and it
+    must use its own 1-year window, not silently alias price_percentile_5y."""
+    df = _advanced_features_fixture(6)
+
+    full = compute_advanced_features(df.copy())
+    truncated = compute_advanced_features(df.iloc[:3].copy())
+
+    for i in range(3):
+        assert approx(
+            full.iloc[i]["price_percentile_1y"],
+            truncated.iloc[i]["price_percentile_1y"],
+        )
+    # adj_close is monotonically increasing in the fixture -> percentile
+    # should be monotonically non-decreasing too, and distinct from the 5y
+    # column isn't asserted (both legitimately hit 1.0 on a 6-row monotonic
+    # fixture) -- the no-lookahead property above is the meaningful check.
+    assert full["price_percentile_1y"].is_monotonic_increasing
+
+
+def test_turnover_ratio() -> None:
+    """turnover_ratio = volume / shares_outstanding -- % of the float traded,
+    lives in compute_advanced_features (not compute_price_features) since
+    shares_outstanding is a fundamentals column."""
+    df = _advanced_features_fixture(2)
+    df["volume"] = [50_000.0, 250_000.0]
+    df["shares_outstanding"] = [1_000_000.0, 1_000_000.0]
+
+    result = compute_advanced_features(df)
+
+    assert approx(result.iloc[0]["turnover_ratio"], 0.05)
+    assert approx(result.iloc[1]["turnover_ratio"], 0.25)
+
+
+def test_amihud_illiquidity() -> None:
+    """amihud_illiquidity = |log_return| / (volume * adj_close) -- price
+    impact per unit of currency traded, distinct from volume_ratio_20d
+    (which only flags unusual volume, not price sensitivity to volume)."""
+    df = pd.DataFrame({
+        "ticker": ["A"] * 3,
+        "trade_date": pd.date_range("2026-01-01", periods=3),
+        "adj_close": [100.0, 110.0, 108.0],
+        "adj_high": [100.0, 110.0, 108.0],
+        "adj_low": [100.0, 110.0, 108.0],
+        "adj_open": [100.0, 110.0, 108.0],
+        "volume": [1_000.0, 2_000.0, 500.0],
+    })
+    result = compute_price_features(df)
+
+    # Row 0: no prior close -> log_return NaN -> amihud NaN
+    assert pd.isna(result.iloc[0]["amihud_illiquidity"])
+
+    # Row 1: |log(110/100)| / (2000 * 110)
+    expected1 = abs(np.log(110.0 / 100.0)) / (2_000.0 * 110.0)
+    assert approx(result.iloc[1]["amihud_illiquidity"], expected1, tol=1e-9)
+
+    # Row 2: same formula, independent numbers (different sign/magnitude move,
+    # different volume) -- proves the formula isn't accidentally right only
+    # for row 1's specific inputs
+    expected2 = abs(np.log(108.0 / 110.0)) / (500.0 * 108.0)
+    assert approx(result.iloc[2]["amihud_illiquidity"], expected2, tol=1e-9)
 
 
 if __name__ == "__main__":

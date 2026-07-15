@@ -209,9 +209,54 @@ def test_missing_map_is_noop():
     return True
 
 
+def test_vendor_alias_rename_drops_duplicate():
+    # Two files (vendor aliases) with identical closes, consolidated via rename.
+    # The new ticker's file contains both entities' history under its own name.
+    prices = pd.concat([
+        _prices("OLD3", ["2021-01-04", "2021-01-05"], [10.0, 11.0]),
+        _prices("NEW3", ["2021-01-04", "2021-01-05", "2021-02-01"], [10.0, 11.0, 12.0]),
+    ], ignore_index=True)
+    fund = _fund("NEW3", ["2020-12-31"], [100.0])
+    path = _map([{"old": "OLD3", "new": "NEW3", "date": "2021-02-01",
+                  "type": "rename", "ratio": 1.0}])
+
+    p, _ = apply_ticker_continuity(prices, fund, path=path)
+
+    assert "OLD3" not in p["ticker"], "vendor alias old leg must be dropped"
+    new_p = p[p["ticker"] == "NEW3"].sort_values("trade_date")
+    assert len(new_p) == 3, f"expected 3 rows (no dupes), got {len(new_p)}"
+    assert list(new_p["close"]) == [10.0, 11.0, 12.0]
+    assert not new_p.duplicated("trade_date").any(), "no duplicate dates after alias consolidation"
+    print_check("vendor alias rename drops duplicate", True)
+    return True
+
+
+def test_keep_separate_ignores_merger():
+    # Parallel-trading acquirer: both legs stay untouched, no splice.
+    prices = pd.concat([
+        _prices("ACQ3", ["2021-02-01", "2021-02-02"], [20.0, 22.0]),
+        _prices("SRV3", ["2020-01-01", "2021-02-01", "2021-02-02"], [10.0, 11.0, 11.5]),
+    ], ignore_index=True)
+    fund = _fund("SRV3", ["2020-12-31"], [700.0])
+    # SRV3 acquired by ACQ3, but ACQ3 traded before the acquisition — keep separate
+    path = _map([{"old": "SRV3", "new": "ACQ3", "date": "2021-02-01",
+                  "type": "keep_separate", "ratio": 0.5}])
+
+    p, f = apply_ticker_continuity(prices, fund, path=path)
+
+    acq = p[p["ticker"] == "ACQ3"].sort_values("trade_date")
+    srv = p[p["ticker"] == "SRV3"].sort_values("trade_date")
+    assert len(acq) == 2 and acq.iloc[0]["close"] == 20.0, "ACQ3 untouched"
+    assert len(srv) == 3 and srv.iloc[0]["close"] == 10.0, "SRV3 untouched"
+    assert not acq.duplicated("trade_date").any() and not srv.duplicated("trade_date").any()
+    print_check("keep_separate ignores parallel-trading merger", True)
+    return True
+
+
 if __name__ == "__main__":
     ok = (test_rename_splice() & test_merger_splice()
           & test_adj_close_reconciliation() & test_adj_close_reconciliation_skips_within_tolerance()
           & test_old_last_date_drops_dead_stub_rows()
-          & test_duplicate_guard() & test_missing_map_is_noop())
+          & test_duplicate_guard() & test_missing_map_is_noop()
+          & test_vendor_alias_rename_drops_duplicate() & test_keep_separate_ignores_merger())
     sys.exit(0 if ok else 1)

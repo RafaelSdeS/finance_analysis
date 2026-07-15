@@ -9,6 +9,7 @@ or: pytest tests/build_dataset/test_cross_sectional.py -v
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -28,6 +29,7 @@ def _fill_advanced_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
         "adj_close": 100.0, "pl": 10.0, "drawdown": 0.0, "pvp": 2.0, "roe": 0.15,
         "debt_equity": 0.5, "div_yield_12m": 0.03, "return_1m": 0.01, "return_3m": 0.02,
         "return_12m": 0.05, "net_margin": 0.1, "roa": 0.05, "selic": 0.1,
+        "log_return": 0.001,
     }
     for col, val in defaults.items():
         if col not in df.columns:
@@ -107,6 +109,7 @@ def test_cross_sectional_values_hand_computed_multi_peer() -> None:
         "return_1m": [0.02, 0.04, -0.01, 0.03],
         "return_3m": [0.05, 0.09, -0.02, 0.06],
         "return_12m": [0.02, 0.04, -0.01, 0.03],
+        "log_return": [0.001, 0.002, -0.0005, 0.0015],
     })
     result = compute_cross_sectional_features(df).set_index("ticker")
 
@@ -140,6 +143,88 @@ def test_cross_sectional_values_hand_computed_multi_peer() -> None:
     sector_x_mean_3m = (0.05 + 0.09) / 2
     assert approx(result.loc["T2", "momentum_vs_market_3m"], 0.09 - market_mean_3m)
     assert approx(result.loc["T2", "momentum_vs_sector_3m"], 0.09 - sector_x_mean_3m)
+
+
+def _beta_fixture(n_days: int = 80, seed: int = 0):
+    """3 tickers, n_days of independent log_return, one sector (sector isn't
+    relevant to beta -- only market_log_return, the mean across ALL tickers
+    on each date, is)."""
+    dates = pd.date_range("2026-01-01", periods=n_days)
+    rng = np.random.default_rng(seed)
+    returns = {
+        "A": rng.normal(0, 0.010, n_days),
+        "B": rng.normal(0, 0.015, n_days),
+        "C": rng.normal(0, 0.008, n_days),
+    }
+    rows = []
+    for t, ret in returns.items():
+        for i, d in enumerate(dates):
+            rows.append({
+                "ticker": t, "sector": "X", "trade_date": d, "reference_date": d,
+                "log_return": ret[i],
+            })
+    df = pd.DataFrame(rows)
+    return _fill_advanced_feature_columns(df), returns, dates
+
+
+def test_beta_vs_market_matches_direct_computation() -> None:
+    """beta_1y = rolling_cov(ticker_return, market_return) / rolling_var(market_return),
+    market_return = mean log_return across the full universe per date (same
+    self-inclusive convention already used by momentum_vs_market_*). Checked
+    against an independently-built reference market series and pandas
+    rolling cov/var call -- not the same code path as the per-ticker
+    groupby/index-alignment loop in the implementation, so this catches
+    misalignment/windowing bugs a purely-internal check couldn't."""
+    df, returns, dates = _beta_fixture()
+
+    result = compute_cross_sectional_features(df)
+
+    market = (pd.Series(returns["A"]) + pd.Series(returns["B"]) + pd.Series(returns["C"])) / 3
+    for t in ("A", "B", "C"):
+        s = pd.Series(returns[t])
+        expected = (
+            s.rolling(252, min_periods=60).cov(market)
+            / market.rolling(252, min_periods=60).var()
+        ).to_numpy()
+
+        actual = (
+            result[result["ticker"] == t].sort_values("trade_date")["beta_1y"].to_numpy()
+        )
+        np.testing.assert_allclose(actual, expected, rtol=1e-9, equal_nan=True)
+
+
+def test_beta_nan_before_min_periods_then_no_lookahead() -> None:
+    """Two properties in one: (1) beta_1y is NaN until BETA_MIN_PERIODS rows
+    exist for a ticker -- an unstable 2-5 point covariance shouldn't be
+    reported as a real beta; (2) once past that point, a row's beta must not
+    depend on any later row (truncating the dataframe to an earlier date
+    range must not change earlier rows' beta) -- the standard no-lookahead
+    guard already applied to price_percentile_1y/volatility_*_percentile,
+    now needed here too since this is the first rolling window inside the
+    full-universe cross-sectional pass."""
+    from src.build_dataset.cross_sectional import BETA_MIN_PERIODS
+
+    df, returns, dates = _beta_fixture(n_days=80)
+
+    full = compute_cross_sectional_features(df.copy())
+    a_full = full[full["ticker"] == "A"].sort_values("trade_date").reset_index(drop=True)
+
+    assert a_full.loc[: BETA_MIN_PERIODS - 2, "beta_1y"].isna().all(), (
+        "beta must be NaN before BETA_MIN_PERIODS rows are available"
+    )
+    assert not pd.isna(a_full.loc[BETA_MIN_PERIODS - 1, "beta_1y"]), (
+        "beta must be defined from BETA_MIN_PERIODS rows on"
+    )
+
+    cutoff = dates[60]  # keep the first 61 dates only
+    truncated_df = df[df["trade_date"] <= cutoff].copy()
+    truncated = compute_cross_sectional_features(truncated_df)
+    a_trunc = truncated[truncated["ticker"] == "A"].sort_values("trade_date").reset_index(drop=True)
+
+    pd.testing.assert_series_equal(
+        a_trunc["beta_1y"], a_full.loc[: len(a_trunc) - 1, "beta_1y"],
+        check_names=False, obj="beta_1y differs between full and truncated date ranges",
+    )
 
 
 if __name__ == "__main__":

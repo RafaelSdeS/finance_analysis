@@ -1,9 +1,10 @@
 """repair.py — rescale adj_* price history where a split/inplit was left unadjusted."""
 
+import json
 import numpy as np
 import pandas as pd
 
-from .paths import CORPORATE_EVENTS_PATH
+from .paths import CORPORATE_EVENTS_PATH, CONTINUITY_PATH
 
 ADJ_PRICE_COLS = ["adj_open", "adj_high", "adj_low", "adj_close"]
 
@@ -29,6 +30,10 @@ def repair_unadjusted_splits(prices):
     ponytail: events with |ln(1/factor)| < 0.3 can't be told apart from
     market moves and are left alone; volume is not rescaled (only raw volume
     reaches the dataset, no cross-scale volume features exist yet).
+
+    Events are keyed under each company's ticker at the time of the split.
+    Rekey through the continuity map to translate old-name events to new names,
+    so that splits recorded under VVAR3 still match BHIA3 rows (after rename chains).
     """
     if not CORPORATE_EVENTS_PATH.exists():
         print("corporate_events.parquet missing — skipping split repair")
@@ -38,6 +43,38 @@ def repair_unadjusted_splits(prices):
     ev = ev[ev["factor"] > 0].copy()
     ev["date"] = pd.to_datetime(ev["date"])
     ev = ev[np.abs(np.log(1.0 / ev["factor"])) >= MIN_DETECTABLE_JUMP]
+
+    # Rekey events through continuity map: if a split is recorded under an old ticker
+    # (e.g. VVAR3 has a split), add a copy keyed under the new ticker (BHIA3, eventually)
+    # so the repair logic can match rows regardless of which name they're under in prices.
+    if CONTINUITY_PATH.exists():
+        events_map = json.loads(CONTINUITY_PATH.read_text()).get("events", [])
+        # Build a ticker-to-all-descendants map: VVAR3 -> [VVAR3, VIIA3, BHIA3]
+        # (resolve chains via repeated application)
+        descendants = {}
+        for e in events_map:
+            if e.get("type") not in ("tender", "keep_separate"):
+                old, new = e.get("old"), e.get("new")
+                if old and new:
+                    # VVAR3 -> VIIA3: if VVAR3 had descendants, they now belong to VIIA3
+                    if old in descendants:
+                        descendants[new] = descendants[old] | {new}
+                        del descendants[old]
+                    else:
+                        descendants[old] = {old}
+                    descendants[new] = descendants.get(new, {new}) | {new, old}
+        # Duplicate each event keyed under old names to new names
+        new_rows = []
+        for _, e in ev.iterrows():
+            ticker = e.get("ticker")
+            if ticker and ticker in descendants:
+                for desc_ticker in descendants[ticker]:
+                    if desc_ticker != ticker:
+                        e_copy = e.copy()
+                        e_copy["ticker"] = desc_ticker
+                        new_rows.append(e_copy)
+        if new_rows:
+            ev = pd.concat([ev, pd.DataFrame(new_rows)], ignore_index=True)
 
     print()
     print("=" * 80)

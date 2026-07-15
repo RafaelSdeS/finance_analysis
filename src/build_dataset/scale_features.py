@@ -57,6 +57,7 @@ RATIO_COLUMNS = [
     "payout_ratio", "dividend_coverage_ratio", "revenue_per_earning",
     "revenue_vs_earnings_growth_delta",
     "roe_trend_4q", "margin_trend_4q", "debt_trend_4q", "roa_trend_4q",
+    "volatility_ratio_20_60", "volume_ratio_20d", "amihud_illiquidity", "turnover_ratio",
 ]
 
 

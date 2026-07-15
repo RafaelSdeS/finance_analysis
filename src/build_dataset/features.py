@@ -155,9 +155,11 @@ def compute_price_features(df):
         g = g.sort_values("trade_date")
         # Mask non-positive prices to NaN before log to avoid divide-by-zero warnings
         adj = g["adj_close"].where(g["adj_close"] > 0)
-        g["log_return"]     = np.log(adj / adj.shift(1))
+        prev_adj_close = adj.shift(1)
+        g["log_return"]     = np.log(adj / prev_adj_close)
         gap_days = g["trade_date"].diff().dt.days
-        g.loc[gap_days > MAX_RETURN_GAP_DAYS, "log_return"] = np.nan
+        large_gap = gap_days > MAX_RETURN_GAP_DAYS
+        g.loc[large_gap, "log_return"] = np.nan
         # Vendor (BolsAI) stores adj_close at 2-decimal precision. For
         # deep-history microcaps with a large cumulative split/dividend
         # adjustment factor, the true adjusted price underflows toward that
@@ -177,16 +179,59 @@ def compute_price_features(df):
         near_floor = (g["adj_close"] > 0) & (g["adj_close"] < 0.05)
         quantized = np.isclose(g["adj_close"], g["adj_close"].round(2))
         g["adj_close_precision_degraded"] = (near_floor & quantized).astype(int)
+
+        # Overnight gap / intraday return: log_return decomposed into the
+        # portion that accrued outside trading hours (today's open vs. prior
+        # close) and the portion that accrued during the session (today's
+        # close vs. today's open) -- overnight_gap + intraday_return ==
+        # log_return by construction. adj_open (not raw open), same reasoning
+        # as hl_ratio using adj_high/adj_low. overnight_gap spans the same
+        # prior-close reference as log_return, so it needs the identical
+        # MAX_RETURN_GAP_DAYS guard; intraday_return is same-day open->close
+        # and can't straddle a collection gap, so it doesn't.
+        adj_open = g["adj_open"].where(g["adj_open"] > 0)
+        g["overnight_gap"]    = np.log(adj_open / prev_adj_close)
+        g["intraday_return"]  = np.log(adj / adj_open)
+        g.loc[large_gap, "overnight_gap"] = np.nan
+
         g["volatility_20d"] = g["log_return"].rolling(20).std()
         g["volatility_60d"] = g["log_return"].rolling(60).std()
+        # Short-vs-long vol regime ratio: expanding (>1) or contracting (<1)
+        # volatility, independent of any ticker's absolute vol level.
+        g["volatility_ratio_20_60"] = g["volatility_20d"] / g["volatility_60d"]
         g["ma_20"]          = g["adj_close"].rolling(20).mean()
         g["ma_60"]          = g["adj_close"].rolling(60).mean()
+        # Price relative to its own trend, not the raw MA level (which is an
+        # absolute price and not comparable across tickers) -- same pattern
+        # as hl_ratio below.
+        g["price_vs_ma20"]  = g["adj_close"] / g["ma_20"]
+        g["price_vs_ma60"]  = g["adj_close"] / g["ma_60"]
         # adj_high/adj_low, not raw high/low: raw and adjusted prices live on
         # different scales whenever the cumulative split adjustment != 1, and
         # mixing them made hl_ratio meaningless around splits.
         g["hl_ratio"]       = (g["adj_high"] - g["adj_low"]) / g["adj_close"]
+        # True range: hl_ratio's blind spot is a gap day (price gaps overnight
+        # then trades in a tight intraday range) -- true range also counts the
+        # distance from the prior close, same guard as overnight_gap since it
+        # shares the same prior-close reference.
+        true_range = pd.concat([
+            g["adj_high"] - g["adj_low"],
+            (g["adj_high"] - prev_adj_close).abs(),
+            (g["adj_low"] - prev_adj_close).abs(),
+        ], axis=1).max(axis=1)
+        g["true_range_ratio"] = true_range / g["adj_close"]
+        g.loc[large_gap, "true_range_ratio"] = np.nan
         g["drawdown"]       = (g["adj_close"] - g["adj_close"].cummax()) / g["adj_close"].cummax()
         g["rsi_14"]         = _rsi(g["adj_close"], 14)
+        # Volume relative to its own trailing average -- raw volume spans
+        # orders of magnitude across the universe (blue chip vs. microcap)
+        # and isn't comparable across tickers; this ratio is.
+        g["volume_ratio_20d"] = g["volume"] / g["volume"].rolling(20).mean()
+        # Amihud illiquidity: price impact per unit of currency traded -- a
+        # liquidity measure, distinct from volume_ratio_20d (which only asks
+        # whether today's volume is unusual for this ticker, not how much
+        # price moves per unit traded).
+        g["amihud_illiquidity"] = g["log_return"].abs() / (g["volume"] * g["adj_close"])
         g["return_1m"]      = g["log_return"].rolling(21).sum()
         g["return_3m"]      = g["log_return"].rolling(63).sum()
         g["return_6m"]      = g["log_return"].rolling(126).sum()
@@ -213,9 +258,16 @@ def compute_fundamental_features(df):
     for ticker, g in df.groupby("ticker", sort=False):
         g = g.sort_values("reference_date")
 
-        # Value signals (inverse/normalized forms not pre-computed by API)
+        # Value signals (inverse/normalized forms not pre-computed by API).
+        # earnings_yield is NOT computed here: recompute_valuation_daily()
+        # runs after this (re-anchoring market_cap to the daily close), so a
+        # net_income/market_cap computed at this stage would be stale the
+        # moment that re-anchoring happens. compute_advanced_features()
+        # computes it once, correctly, as 1/pl (post-re-anchoring) -- this
+        # function used to also define it as net_income/market_cap, silently
+        # overwritten by the later definition every time; removed as dead
+        # code (confirmed 2026-07-15, no code path ever read this value).
         g["book_to_market"]        = g["equity"] / g["market_cap"]
-        g["earnings_yield"]        = g["net_income"] / g["market_cap"]
         g["cash_ratio"]            = g["cash"] / g["current_liabilities"]
         g["net_debt_to_assets"]    = g["net_debt"] / g["total_assets"]
         g["working_capital_ratio"] = (g["current_assets"] - g["current_liabilities"]) / g["total_assets"]
@@ -379,6 +431,15 @@ def compute_advanced_features(df):
     # EBITDA margin as quality proxy (higher = better operational efficiency, but let model learn)
     df["ebitda_margin"] = df["ebitda"] / (df["net_revenue"] + 1e-8)
 
+    # --- LIQUIDITY (raw volume vs. float -- lives here, not compute_price_features,
+    # since shares_outstanding is a fundamentals column) ---
+
+    # Turnover: % of the float traded today. Comparable across tickers of very
+    # different sizes in a way raw volume never is -- distinct from
+    # volume_ratio_20d (compute_price_features), which only asks whether
+    # today's volume is unusual for THIS ticker's own recent norm.
+    df["turnover_ratio"] = df["volume"] / df["shares_outstanding"]
+
     # --- FUNDAMENTAL FRESHNESS (raw days, model learns staleness impact) ---
 
     df["days_since_fundamental"] = (df["trade_date"] - df["reference_date"]).dt.days
@@ -407,6 +468,14 @@ def compute_advanced_features(df):
         # Price percentile: is price high/low vs own history (last 5 years)?
         g["price_percentile_5y"] = g["adj_close"].rolling(
             window=window_252, min_periods=1
+        ).rank(method="max", pct=True)
+
+        # 1-year version: the standard "52-week high/low" framing, a distinct
+        # signal from the 5y version for younger listings or a recent regime
+        # change that 5 years of history would dilute. Same window as
+        # drawdown_percentile below, for consistency.
+        g["price_percentile_1y"] = g["adj_close"].rolling(
+            window=252, min_periods=1
         ).rank(method="max", pct=True)
 
         # P/L (P/E) percentile within stock's history

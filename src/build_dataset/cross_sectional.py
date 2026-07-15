@@ -3,18 +3,29 @@ compute_features_chunked). Unlike features.py, these need the full universe
 on the same date at once, so they can't run on a ticker-batch in isolation.
 """
 
+import pandas as pd
+
 # Inputs compute_cross_sectional_features() needs, and the columns it adds —
 # used to slim the frame down before holding the full universe in memory.
 CROSS_SECTIONAL_INPUT_COLS = [
     "ticker", "trade_date", "sector", "pl", "pvp", "roe", "debt_equity",
-    "div_yield_12m", "return_1m", "return_3m", "return_12m",
+    "div_yield_12m", "return_1m", "return_3m", "return_12m", "log_return",
 ]
 CROSS_SECTIONAL_OUTPUT_COLS = [
     "pl_zscore_sector", "pvp_zscore_sector", "roe_zscore_sector", "debt_equity_zscore_sector",
     "div_yield_sector_percentile",
     "momentum_vs_market_1m", "momentum_vs_market_3m", "momentum_vs_market_12m",
     "momentum_vs_sector_1m", "momentum_vs_sector_3m", "momentum_vs_sector_12m",
+    "beta_1y",
 ]
+
+# Rolling window for beta vs. market, in trading days (~1 calendar year,
+# matching return_12m/price_percentile_1y's convention elsewhere). min_periods
+# is deliberately less than the full window (unlike a fixed-length sum like
+# return_12m) so beta isn't NaN for a ticker's entire first year -- but not so
+# low that a 5-10 day window produces a wildly unstable covariance estimate.
+BETA_WINDOW = 252
+BETA_MIN_PERIODS = 60
 
 
 def compute_cross_sectional_features(df):
@@ -78,6 +89,26 @@ def compute_cross_sectional_features(df):
         df["return_12m"]
         - df.groupby(["trade_date", "sector"])["return_12m"].transform("mean")
     ).where(sector_size > 1)
+
+    # --- ROLLING BETA VS MARKET ---
+
+    # Market return: equal-weighted mean log_return across the full universe,
+    # per date. This reuses the same full-universe requirement as the
+    # momentum/zscore features above, but beta then needs a per-ticker
+    # rolling window over TIME (not a same-date snapshot), so unlike
+    # everything above it can't stay a single groupby(date).transform() —
+    # needs one groupby("ticker") pass, same shape as compute_price_features.
+    market_log_return = df.groupby("trade_date")["log_return"].transform("mean")
+
+    result = []
+    for ticker, g in df.groupby("ticker", sort=False):
+        g = g.sort_values("trade_date")
+        mkt = market_log_return.loc[g.index]
+        cov = g["log_return"].rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).cov(mkt)
+        var = mkt.rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).var()
+        g["beta_1y"] = cov / var
+        result.append(g)
+    df = pd.concat(result, ignore_index=True)
 
     print(f"Cross-sectional features computed for {len(df)} rows")
     return df

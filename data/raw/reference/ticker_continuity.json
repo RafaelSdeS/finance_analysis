@@ -1,5 +1,5 @@
 {
-  "_doc": "Hand-maintained B3 ticker rename/merger map, consumed by build_ml_dataset.apply_ticker_continuity(). Types: rename (same legal entity, splice prices+fundamentals), merger (entity ceased, splice prices only via exchange ratio), tender (cash-out, no splice — terminal-event task). 'date' is documentation; the splice boundary is the new ticker's actual first trade date. Only add entries whose ratio is verified — a wrong ratio corrupts the series, while an absent entry just leaves two clean separate series (LAME3/LAME4 -> AMER3 legs are deliberately absent for exactly that reason: their exchange ratios need verification before entry).",
+  "_doc": "Hand-maintained B3 ticker rename/merger map, consumed by build_ml_dataset.apply_ticker_continuity(). Types: rename (same legal entity, splice prices+fundamentals), merger (entity ceased, splice prices only via exchange ratio), keep_separate (parallel-trading acquirer, no splice — both legs stay standalone and old is treated as delisted), tender (cash-out, no splice — terminal-event task). 'date' is documentation; the splice boundary is the new ticker's actual first trade date. Only add entries whose ratio is verified — a wrong ratio corrupts the series, while an absent entry just leaves two clean separate series (LAME3/LAME4 -> AMER3 legs are deliberately absent for exactly that reason: their exchange ratios need verification before entry).",
   "events": [
     {
       "old": "TIMP3",
@@ -50,12 +50,28 @@
       "notes": "Cyrela Commercial Properties renamed Syn Propriedades e Servicos Estruturados"
     },
     {
+      "old": "ARZZ3",
+      "new": "AZZA3",
+      "date": "2024-08-01",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Arezzo&Co (ARZZ3 alias) consolidated into AZZA3 ticker. Vendor alias: same company, same CNPJ, raw closes 100% identical 2011–2026. Data collection obtained both tickers as separate entities; continuity consolidates them. The AZZA3 parquet file is the canonical source; ARZZ3 is dropped."
+    },
+    {
+      "old": "RRRP3",
+      "new": "BRAV3",
+      "date": "2024-08-30",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "3R Petroleum (RRRP3) renamed Brava Energia (BRAV3) after merger with Enauta. Vendor alias: same company, same CNPJ, raw closes 100% identical 2020–2026. The BRAV3 parquet file is the canonical source; RRRP3 is dropped."
+    },
+    {
       "old": "HGTX3",
       "new": "SOMA3",
       "date": "2021-09-20",
-      "type": "merger",
+      "type": "keep_separate",
       "ratio": 0.5833,
-      "notes": "Cia. Hering incorporated into Grupo de Moda Soma. Each HGTX3 share received 0.5833 SOMA3 shares plus a cash parcel of R$ 9.66. Price splice requires cash-component adjustment depending on model choice."
+      "notes": "Cia. Hering (HGTX3) incorporated into Grupo de Moda Soma (SOMA3). Acquirer SOMA3 traded in parallel with HGTX3, making a sequential splice impossible — the entity that obtained shares at the acquisition date is not the same as SOMA3's pre-acquisition entity. Both legs kept separate; HGTX3 treated as delisted at the acquisition date."
     },
     {
       "old": "CESP6",
@@ -69,17 +85,17 @@
       "old": "SULA11",
       "new": "RDOR3",
       "date": "2022-12-23",
-      "type": "merger",
+      "type": "keep_separate",
       "ratio": 0.6961,
-      "notes": "SulAmérica incorporated by Rede D'Or São Luiz. Each SULA11 Unit swapped into 0.696135 RDOR3 common shares."
+      "notes": "SulAmérica (SULA11) incorporated by Rede D'Or São Luiz (RDOR3). Acquirer RDOR3 had an IPO on 2020-12-10, two years before the acquisition, making it a parallel-trading entity not a successor. Both legs kept separate; SULA11 treated as delisted at the acquisition date."
     },
     {
       "old": "BRML3",
       "new": "ALOS3",
       "date": "2023-01-09",
-      "type": "merger",
+      "type": "keep_separate",
       "ratio": 0.0404,
-      "notes": "BR Malls merged into Aliansce Sonae. Each BRML3 share received 0.04046162985854 ALOS3 shares plus R$ 1.34 cash fraction. Entity renamed later to Allos."
+      "notes": "BR Malls (BRML3) merged into Aliansce Sonae (ALOS3). Acquirer ALOS3 traded in parallel with BRML3 during the acquisition period — no historical link to the pre-acquisition entity. Both legs kept separate; BRML3 treated as delisted."
     },
     {
       "old": "VIIA3",
@@ -93,17 +109,17 @@
       "old": "SOMA3",
       "new": "AZZA3",
       "date": "2024-08-01",
-      "type": "merger",
+      "type": "keep_separate",
       "ratio": 0.1205,
-      "notes": "Grupo Soma fully merged into Arezzo&Co, entity renamed to Azzas 2154 S.A. Each SOMA3 share converted to 0.120516471946 AZZA3 shares. Slices price backward safely into AZZA3 core data series."
+      "notes": "Grupo Soma (SOMA3) fully merged into Arezzo&Co (AZZA3). Arezzo&Co (AZZA3) traded under its own ticker long before the acquisition, making it a parallel-trading acquirer, not a successor entity. AZZA3 entered the dataset from ~2011 IPO, independently of Soma. Both legs kept separate; SOMA3 treated as delisted at the acquisition date."
     },
     {
       "old": "ENAT3",
       "new": "BRAV3",
       "date": "2024-08-30",
-      "type": "merger",
+      "type": "keep_separate",
       "ratio": 1.0,
-      "notes": "Enauta merged with 3R Petroleum to form Brava Energia. Transition structured via corporate consolidation; ticker mapped 1:1 on equivalent base terms."
+      "notes": "Enauta (ENAT3) merged with 3R Petroleum (RRRP3) to form Brava Energia (BRAV3). The surviving entity BRAV3 traded independently as 3R Petroleum (RRRP3) before the merger, making it a parallel-trading acquirer. RRRP3->BRAV3 is the actual rename; both ENAT3 and the pre-merger RRRP3 leg are kept separate and treated as delisted."
     },
     {
       "old": "EMBR3",
