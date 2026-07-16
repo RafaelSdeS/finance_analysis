@@ -32,6 +32,14 @@ def drift_weights(y_t: np.ndarray, w_prev: np.ndarray) -> np.ndarray:
     return unnorm / unnorm.sum()
 
 
+def drift_weights_torch(y_t: torch.Tensor, w_prev: torch.Tensor) -> torch.Tensor:
+    """Batched, differentiable version of drift_weights (eq. 7), for
+    train.py's loss (w_prev comes from a detached PVM read, but the
+    normalization stays a plain differentiable op for consistency/testing)."""
+    unnorm = y_t * w_prev
+    return unnorm / unnorm.sum(dim=1, keepdim=True)
+
+
 def solve_mu(w_prime: np.ndarray, w_target: np.ndarray, c_sell: float, c_buy: float,
              tol: float = 1e-10, max_iter: int = 100) -> float:
     """Transaction remainder factor mu_t (eq. 14), converged fixed-point
@@ -105,7 +113,8 @@ WeightFn = Callable[[int, np.ndarray, np.ndarray, PricePanel], np.ndarray]
 
 def run_backtest(panel: PricePanel, weight_fn: WeightFn, c_sell: float, c_buy: float,
                   start_idx: Optional[int] = None, end_idx: Optional[int] = None,
-                  mu_tol: float = 1e-10, mu_max_iter: int = 100) -> BacktestResult:
+                  mu_tol: float = 1e-10, mu_max_iter: int = 100,
+                  on_step: Optional[Callable[[int], None]] = None) -> BacktestResult:
     """Simulate one policy (agent or baseline) over [start_idx, end_idx].
 
     weight_fn(t, w_prev, w_drift, panel) -> w_target decides the portfolio
@@ -114,6 +123,11 @@ def run_backtest(panel: PricePanel, weight_fn: WeightFn, c_sell: float, c_buy: f
     seam between "how a policy decides" (networks.py / baselines.py) and
     "what a decision costs and returns" (this function) -- the agent and
     every baseline share this exact loop, so all get identical treatment.
+
+    on_step(t), if given, runs after period t's bookkeeping is complete --
+    train.py's OSBL online backtest hooks in here to run its `rolling_steps`
+    gradient updates after each period, without this function needing to
+    know anything about training.
     """
     start_idx = panel.start_idx if start_idx is None else start_idx
     end_idx = panel.end_idx if end_idx is None else end_idx
@@ -147,6 +161,8 @@ def run_backtest(panel: PricePanel, weight_fn: WeightFn, c_sell: float, c_buy: f
         weights[i] = w_target
 
         w_prev = w_target
+        if on_step is not None:
+            on_step(t)
 
     return BacktestResult(
         dates=panel.dates[start_idx:end_idx + 1],

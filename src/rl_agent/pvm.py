@@ -27,6 +27,21 @@ import torch
 from .data import CASH_GIDX
 
 
+def scatter_to_global_row(slot_gidx: torch.Tensor, w: torch.Tensor, n_global: int) -> torch.Tensor:
+    """Slot-space -> (n_global+1)-wide global-space row (w: [B, n_slots+1],
+    column 0 = cash). The dummy column at index n_global is always a safe
+    scatter target for a padding slot. Shared by PortfolioVectorMemory.write()
+    (which stores the result, detached) and train.py (which keeps it
+    differentiable for the loss, then detaches before persisting) -- one
+    scatter implementation, so the two can't drift apart.
+    """
+    B = w.shape[0]
+    row = torch.zeros(B, n_global + 1, dtype=w.dtype, device=w.device)
+    row[:, CASH_GIDX] = w[:, 0]
+    row.scatter_(1, slot_gidx, w[:, 1:])
+    return row
+
+
 class PortfolioVectorMemory:
     def __init__(self, T: int, n_global: int, device="cpu", dtype=torch.float32):
         """n_global: real global-space width (cash + N_union tickers, e.g.
@@ -66,8 +81,4 @@ class PortfolioVectorMemory:
         the liquidation isn't an extra step, it falls out of not writing
         to that column.
         """
-        B = w.shape[0]
-        row = torch.zeros(B, self.n_global + 1, dtype=w.dtype, device=w.device)
-        row[:, CASH_GIDX] = w[:, 0]
-        row.scatter_(1, slot_gidx, w[:, 1:])
-        self.buffer[row_idx] = row
+        self.buffer[row_idx] = scatter_to_global_row(slot_gidx, w, self.n_global)
