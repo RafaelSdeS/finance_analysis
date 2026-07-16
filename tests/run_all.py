@@ -48,6 +48,8 @@ FAST = [
     "tests/data_collection/test_yf_collectors_demo.py",
     "tests/data_collection/test_pipeline_dispatch.py",
     "tests/data_collection/test_cvm_filing_dates.py",
+    "tests/rl_agent/test_config.py",
+    "tests/rl_agent/test_data.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
@@ -60,6 +62,7 @@ DATA = [
     "tests/data_collection/validate_vs_yfinance.py",
     "tests/data_collection/test_collect_delisted.py",
     "tests/data_collection/test_cvm_statements.py",
+    "tests/rl_agent/test_data_integration.py",
 ]
 
 # Hits a live external vendor (yfinance) rather than only local/synthetic
