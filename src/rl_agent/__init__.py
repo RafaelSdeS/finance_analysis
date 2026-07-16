@@ -9,6 +9,7 @@ as each one is implemented instead of importing modules that don't exist yet.
 """
 
 from . import metrics
+from .baselines import BASELINE_NAMES, run_baseline
 from .config import ExperimentConfig
 from .data import CASH_GIDX, GlobalAssetIndex, PricePanel, load_price_panel
 from .environment import BacktestResult, drift_weights, run_backtest, solve_mu, solve_mu_torch
@@ -27,4 +28,6 @@ __all__ = [
     "solve_mu",
     "solve_mu_torch",
     "metrics",
+    "BASELINE_NAMES",
+    "run_baseline",
 ]
