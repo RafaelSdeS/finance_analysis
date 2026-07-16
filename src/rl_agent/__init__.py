@@ -13,7 +13,9 @@ from .baselines import BASELINE_NAMES, run_baseline
 from .config import ExperimentConfig
 from .data import CASH_GIDX, GlobalAssetIndex, PricePanel, load_price_panel
 from .environment import BacktestResult, drift_weights, run_backtest, solve_mu, solve_mu_torch
+from .experiment import compute_window_split, run_experiment
 from .networks import EIIECNN
+from .plots import write_report
 from .pvm import PortfolioVectorMemory
 from .sanity import SanityReport, run_sanity_checks
 from .train import agent_forward, pretrain, run_online_backtest, train_step
@@ -40,4 +42,7 @@ __all__ = [
     "run_online_backtest",
     "SanityReport",
     "run_sanity_checks",
+    "write_report",
+    "compute_window_split",
+    "run_experiment",
 ]
