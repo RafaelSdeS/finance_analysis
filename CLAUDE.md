@@ -195,3 +195,12 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 - **Preprocessing:** scikit-learn (`ColumnTransformer`/`RobustScaler` in `scale_features.py`), `joblib` (scaler serialization) — both were already installed for Stage 3 (agent), now also a Stage 2 direct dependency.
 - **Viz:** Plotly.
 - **No test framework:** standalone `python script.py`.
+
+## Knowledge Graph (graphify)
+
+A persistent knowledge graph of this repo lives in `graphify-out/` (gitignored, regenerable). Built with the `graphify` skill (`/graphify`).
+
+- **Query it first** for architecture/"how does X work"/"what calls Y" questions instead of re-reading source: `graphify query "<question>"` (BFS), `graphify path "A" "B"`, `graphify explain "<node>"`. The graph already exists — use it before a fresh scan.
+- **Outputs:** `graphify-out/graph.html` (interactive), `GRAPH_REPORT.md` (god nodes, communities, surprising links), `graph.json` (raw).
+- **Rebuild** after significant code/doc changes: `/graphify .` (full) or `/graphify . --update` (only new/changed files).
+- **Semantic extraction backend:** code is AST-extracted (no key). Docs/papers use Gemini when `GEMINI_API_KEY`/`GOOGLE_API_KEY` is set (OpenAI-compatible endpoint; needs `graphifyy[gemini]` → the `openai` package); otherwise falls back to host-agent subagents.
