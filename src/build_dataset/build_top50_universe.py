@@ -97,6 +97,17 @@ def zero_fill_missing_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
         'cagr_revenue_5y_final', 'payout_ratio', 'dividend_coverage_ratio',
         'revenue_per_earning', 'revenue_vs_earnings_growth_delta',
         'peg_ratio', 'pvp_to_roe_ratio', 'earnings_yield', 'earnings_yield_vs_selic',
+        # Sibling fundamental-derived columns missed by the original list --
+        # left NaN on has_fundamentals==0 rows while e.g. 'roe' above got
+        # zero-filled for the same rows, an inconsistent missing-data signal
+        # (docs/TOP50_UNIVERSE_ML_READINESS_AUDIT.md §1.3).
+        'market_cap', 'filing_lag_days', 'days_since_fundamental',
+        'pl_zscore_sector', 'pvp_zscore_sector', 'roe_zscore_sector', 'debt_equity_zscore_sector',
+        'pl_percentile_5y',
+        'f_roa_positive', 'f_roa_improving', 'f_margin_improving',
+        'f_leverage_decreasing', 'f_liquidity_improving', 'f_score',
+        'had_negative_earnings_5y',
+        'roe_trend_4q', 'margin_trend_4q', 'debt_trend_4q', 'roa_trend_4q',
     ]
     mask = df['has_fundamentals'] == 0
     for col in fundamental_cols:

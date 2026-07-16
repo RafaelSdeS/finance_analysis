@@ -684,6 +684,40 @@ def test_dividend_coverage_ratio_nan_when_no_dividend() -> None:
     assert approx(result.iloc[1]["dividend_coverage_ratio"], expected)
 
 
+def test_ratio_columns_nan_when_denominator_near_zero() -> None:
+    """5 more `x / (y + 1e-8)` ratios had the exact same failure mode already
+    fixed for dividend_coverage_ratio above: a near-zero denominator produced
+    a finite-but-astronomical value (confirmed up to 1e15-1e16 in the real
+    dataset for these columns) instead of NaN, because +1e-8 is a
+    division-by-zero guard, not a "this ratio is undefined" guard -- and a
+    near-zero denominator is the ORDINARY case for these columns (a
+    break-even quarter, zero growth, etc.), not rare distress.
+
+    Regression test for _safe_ratio(): each column must read NaN when its
+    denominator is ~0, and the correct finite value otherwise.
+    """
+    cases = [
+        # (result column, column to zero out, expected value on the "real" row)
+        ("payout_ratio", "lpa", 0.5 / 1.0),
+        ("revenue_per_earning", "net_income", 500.0 / 50.0),
+        ("ebitda_margin", "net_revenue", 100.0 / 500.0),
+        ("peg_ratio", "earnings_growth_yoy", 10.0 / (0.03 * 100)),
+        ("pvp_to_roe_ratio", "roe", 2.0 / 0.15),
+        ("earnings_yield", "pl", 1.0 / 10.0),
+    ]
+    for result_col, denom_col, expected_real in cases:
+        df = _advanced_features_fixture(2)
+        real_value = df[denom_col].iloc[1]
+        df[denom_col] = [0.0, real_value]
+
+        result = compute_advanced_features(df)
+
+        assert pd.isna(result.iloc[0][result_col]), f"{result_col}: expected NaN when {denom_col}==0"
+        assert approx(result.iloc[1][result_col], expected_real), (
+            f"{result_col}: expected {expected_real}, got {result.iloc[1][result_col]}"
+        )
+
+
 def test_adj_close_precision_degraded_flag() -> None:
     """Flags rows where adj_close is quantized to the 2-decimal vendor
     precision floor (e.g. 0.03) -- the case where a real price move gets

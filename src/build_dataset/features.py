@@ -389,6 +389,17 @@ def recompute_valuation_daily(df):
 # ADVANCED CONTEXTUAL FEATURES (for conservative long-term allocation)
 # =============================================================================
 
+def _safe_ratio(numerator, denominator, min_abs=1e-6):
+    """numerator / denominator, NaN where |denominator| isn't meaningfully
+    away from zero. Replaces the `x / (y + 1e-8)` pattern: that guard avoids
+    a literal division-by-zero crash, but when y==0 is the ORDINARY case
+    (not rare distress) it produces a finite-but-astronomical value instead
+    (e.g. ebitda/1e-8) -- finite means clean_dataset's inf->NaN pass never
+    catches it. Confirmed up to 1e15-1e16 in the real dataset across several
+    ratios below (see docs/TOP50_UNIVERSE_ML_READINESS_AUDIT.md §1.1)."""
+    return numerator / denominator.where(denominator.abs() > min_abs)
+
+
 def compute_advanced_features(df):
     """
     Add context-aware, raw metrics (no thresholds or hardcoded rules).
@@ -403,25 +414,22 @@ def compute_advanced_features(df):
     # --- DIVIDEND & PAYOUT ANALYSIS (raw, no thresholds) ---
 
     # Use LPA (lucro per ação = EPS) directly from API
-    df["payout_ratio"] = df["div_value_recent"] / (df["lpa"] + 1e-8)
+    df["payout_ratio"] = _safe_ratio(df["div_value_recent"], df["lpa"])
 
     # Dividend coverage: can EBITDA support annual dividend?
     # annual_dividend = div_value_recent * shares_outstanding
     #
-    # NOT a "+1e-8 near-zero denominator" case like the other ratios below --
     # div_value_recent==0 (no dividend paid, ever) is the ORDINARY case for
-    # ~27% of rows / 213 tickers (confirmed 2026-07-14), not rare distress.
-    # A +1e-8 epsilon there computes ebitda/1e-8 -- a ~1e8x-inflated, finite
-    # (so clean_dataset's inf->NaN pass never catches it) number as extreme as
-    # 2.3e15, poisoning any scaler/model that touches this column. "Coverage"
-    # is undefined, not infinite, when there's no dividend to cover -- NaN.
+    # ~27% of rows / 213 tickers (confirmed 2026-07-14), not rare distress,
+    # so this uses a >0 guard (annual_dividend is never legitimately
+    # negative) rather than _safe_ratio's abs()-near-zero guard.
     annual_dividend = df["div_value_recent"] * df["shares_outstanding"]
     df["dividend_coverage_ratio"] = df["ebitda"] / annual_dividend.where(annual_dividend > 0)
 
     # --- EARNINGS QUALITY (raw signals, no classification) ---
 
     # Revenue-to-earnings trend: stable ratio suggests quality
-    df["revenue_per_earning"] = df["net_revenue"] / (df["net_income"] + 1e-8)
+    df["revenue_per_earning"] = _safe_ratio(df["net_revenue"], df["net_income"])
 
     # YoY comparison: revenue growth aligned with earnings growth?
     df["revenue_vs_earnings_growth_delta"] = (
@@ -429,7 +437,7 @@ def compute_advanced_features(df):
     )
 
     # EBITDA margin as quality proxy (higher = better operational efficiency, but let model learn)
-    df["ebitda_margin"] = df["ebitda"] / (df["net_revenue"] + 1e-8)
+    df["ebitda_margin"] = _safe_ratio(df["ebitda"], df["net_revenue"])
 
     # --- LIQUIDITY (raw volume vs. float -- lives here, not compute_price_features,
     # since shares_outstanding is a fundamentals column) ---
@@ -528,13 +536,13 @@ def compute_advanced_features(df):
     # --- VALUATION RELATIVE TO FUNDAMENTALS (raw relationships) ---
 
     # PEG ratio: P/L (P/E) relative to earnings growth
-    df["peg_ratio"] = df["pl"] / (df["earnings_growth_yoy"] * 100 + 1e-8)
+    df["peg_ratio"] = _safe_ratio(df["pl"], df["earnings_growth_yoy"] * 100)
 
     # P/VP (P/B) relative to ROE (value signal: low P/VP + high ROE = cheap quality)
-    df["pvp_to_roe_ratio"] = df["pvp"] / (df["roe"] + 1e-8)
+    df["pvp_to_roe_ratio"] = _safe_ratio(df["pvp"], df["roe"])
 
     # Earnings yield (inverse P/L) vs macro rates
-    df["earnings_yield"] = 1.0 / (df["pl"] + 1e-8)
+    df["earnings_yield"] = _safe_ratio(1.0, df["pl"])
     df["earnings_yield_vs_selic"] = df["earnings_yield"] - (df["selic"] / 100)
 
     # Flag columns: CAGR defined (only if *_final columns exist; they're populated

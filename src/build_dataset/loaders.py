@@ -142,6 +142,20 @@ def load_dividends():
     dividends = pd.concat(dfs, ignore_index=True)
     dividends = dividends.sort_values(["ticker", "ex_date"])
 
+    # Sanity ceiling: a real BRL per-share dividend is at most low tens even
+    # for extreme cases. PDGR3's raw file has all 5 of its events in the
+    # hundreds of millions (vendor unit/labeling error, confirmed isolated to
+    # this ticker across all 523 raw dividend files, 2026-07-16) -- left in,
+    # this inflates div_yield_12m up to 154,600%
+    # (docs/TOP50_UNIVERSE_ML_READINESS_AUDIT.md §1.4). Threshold, not a
+    # hardcoded ticker name, so it also catches a future recurrence of this
+    # same vendor failure mode on a different ticker.
+    implausible = dividends["value_per_share"].abs() > 1000
+    if implausible.any():
+        print(f"Dropping {implausible.sum()} dividend rows with implausible "
+              f"value_per_share (>1000): {sorted(dividends.loc[implausible, 'ticker'].unique())}")
+        dividends = dividends[~implausible]
+
     print(f"Total dividend rows: {len(dividends)}")
 
     return dividends

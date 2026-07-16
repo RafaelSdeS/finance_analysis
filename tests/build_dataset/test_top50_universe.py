@@ -26,6 +26,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 from src.build_dataset.build_top50_universe import (  # noqa: E402
     build_top50_membership,
     filter_to_top50_universe,
+    zero_fill_missing_fundamentals,
 )
 from test_utils import print_check, print_header, print_section_end  # noqa: E402
 
@@ -113,6 +114,32 @@ def main():
     got_e = len(universe_df[universe_df["ticker"] == "E"])
     ok = got_e == expected_e and expected_e > 0
     print_check("E's rows locked to exactly its qualifying (post-spike) period", ok, f"expected {expected_e}, got {got_e}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    # --- zero_fill_missing_fundamentals: no NaN left on has_fundamentals==0
+    # rows, including the sibling columns (sector z-scores, f_score flags,
+    # trend cols) that the original list missed
+    # (docs/TOP50_UNIVERSE_ML_READINESS_AUDIT.md §1.3) ---
+    zf = pd.DataFrame({
+        "has_fundamentals": [0, 1],
+        "roe": [None, 0.15],
+        "market_cap": [None, 1_000_000.0],
+        "pl_zscore_sector": [None, 0.5],
+        "f_score": [None, 3],
+        "roe_trend_4q": [None, 0.02],
+    })
+    zf = zero_fill_missing_fundamentals(zf)
+
+    checked_cols = ["roe", "market_cap", "pl_zscore_sector", "f_score", "roe_trend_4q"]
+    ok = all(zf.loc[0, c] == 0 for c in checked_cols)
+    print_check("zero_fill_missing_fundamentals: sibling columns filled on has_fundamentals==0",
+                ok, f"row 0: {zf.loc[0, checked_cols].to_dict()}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = all(zf.loc[1, c] == v for c, v in
+             [("roe", 0.15), ("market_cap", 1_000_000.0), ("pl_zscore_sector", 0.5),
+              ("f_score", 3), ("roe_trend_4q", 0.02)])
+    print_check("zero_fill_missing_fundamentals: has_fundamentals==1 row left untouched", ok)
     passed, failed = passed + ok, failed + (not ok)
 
     print_section_end(passed, failed)
