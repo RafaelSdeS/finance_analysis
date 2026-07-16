@@ -230,20 +230,29 @@ checkpoint hashes.
 ## Implementation phases
 
 - [x] **Phase 1** — this plan doc + `config.py` + `configs/eiie_baseline.json` + package skeleton.
-- [ ] **Phase 2** — `data.py`: `GlobalAssetIndex`, `PricePanel` (prices + membership + CDI +
+- [x] **Phase 2** — `data.py`: `GlobalAssetIndex`, `PricePanel` (prices + membership + CDI +
       BOVA11), slot calendar, flat-fill, CDI known-value assertion. Unit tests.
-- [ ] **Phase 3** — `pvm.py`: `PortfolioVectorMemory` (gather/scatter, all-cash init, boundary
+- [x] **Phase 3** — `pvm.py`: `PortfolioVectorMemory` (gather/scatter, all-cash init, boundary
       liquidation). Unit tests.
-- [ ] **Phase 4** — `environment.py` (μ solver, weight evolution, global cost/reward) +
+- [x] **Phase 4** — `environment.py` (μ solver, weight evolution, global cost/reward) +
       `metrics.py` (full suite + bootstrap CIs). Unit tests.
-- [ ] **Phase 5** — `baselines.py` (7 baselines through the shared environment). Tests — runnable
+- [x] **Phase 5** — `baselines.py` (7 baselines through the shared environment). Tests — runnable
       end-to-end before any RL code exists.
-- [ ] **Phase 6** — `networks.py` (EIIE CNN), `train.py` (OSBL), `sanity.py`. Differentiable-μ
+- [x] **Phase 6** — `networks.py` (EIIE CNN), `train.py` (OSBL), `sanity.py`. Differentiable-μ
       validation gate + synthetic convergence diagnostic.
-- [ ] **Phase 7** — `plots.py`, `experiment.py` (CLI, `--dry-run`), validation checklist.
+- [x] **Phase 7** — `plots.py`, `experiment.py` (CLI, `--dry-run`), validation checklist.
       Integration tests.
-- [ ] **Phase 8** — Update root `CLAUDE.md` (Stage 3) + `README.md`; register `tests/rl_agent/*`
-      in `tests/run_all.py`'s FAST group.
+- [x] **Phase 8** — Update root `CLAUDE.md` (Stage 3) + `README.md`. Tests were registered into
+      `tests/run_all.py`'s FAST/DATA groups incrementally as each phase landed, rather than batched
+      here — kept every phase immediately CI-discoverable instead of leaving 6 phases' worth of
+      tests unregistered in the meantime.
+
+All 8 phases complete: 35 FAST-group tests + 1 DATA-group integration test, all passing, all
+run on synthetic data except the one DATA-group test (which loads the real dataset to verify the
+loader). **No real training run has been executed** — per this project's standing working rule,
+that requires explicit user go-ahead. Ready for: `python -m src.rl_agent.experiment --config
+configs/eiie_baseline.json --dry-run` (verifies wiring against the real dataset, no training) and,
+on approval, a real experiment run.
 
 Per the standing working rule: code is written and unit-tested per phase, but **no training run
 is launched without explicit go-ahead**; test/dry-run commands are offered, never auto-executed.

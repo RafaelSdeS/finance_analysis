@@ -155,10 +155,6 @@ class PricePanel:
     bova11_close: Optional[np.ndarray] = None  # (T,), benchmark only
 
     @property
-    def n_global(self) -> int:
-        return self.close.shape[1]
-
-    @property
     def n_slots(self) -> int:
         return self.slot_gidx.shape[1]
 

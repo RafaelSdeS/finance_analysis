@@ -46,6 +46,23 @@ python tests/build_dataset/test_final_dataset.py        # schema, shape, lookahe
 python -m src.build_dataset.scale_features               # → data/processed/scalers/{feature_scaler.joblib,scaler_metadata.json}
 ```
 
+### Stage 3: Train RL Agent (Iteration 1)
+
+Prereq: Stage 2 complete (`data/processed/ml_dataset.parquet` + `top50_universe_membership.parquet`
+on disk). EIIE portfolio-management agent (Jiang, Xu & Liang 2017), price-only, top-50 dynamic
+quarterly universe, CDI-accruing cash, 2011–2026 window. Design + approved paper deviations:
+`docs/EIIE_AGENT_PLAN.md`.
+
+```bash
+python -m src.rl_agent.experiment --config configs/eiie_baseline.json --dry-run   # data + sanity checks only
+python -m src.rl_agent.experiment --config configs/eiie_baseline.json             # full run: pretrain → OSBL backtest → baselines → report
+python -m src.rl_agent.experiment --config configs/eiie_baseline.json --eval-split test  # final run (train+val pretrain, test backtest)
+```
+Output: `experiments/{run_name}_{timestamp}/` — `config.json`, `run_manifest.json` (seed, git commit,
+dataset fingerprint, package versions), `sanity_report.txt`, `model.pt` (checkpoint), `report.html`
+(agent vs. all 7 baselines: PV, reward curves, allocation, turnover/cost, metrics + bootstrap CIs),
+`metrics_summary.json`, `report.json` (validation checklist).
+
 ### Utilities
 
 ```bash
@@ -70,8 +87,8 @@ python tests/run_all.py --group all
 ```
 
 **Test groups:**
-- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`
-- **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_universe_integrity.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`
+- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`; `tests/rl_agent/{test_config,test_data,test_pvm,test_environment,test_metrics,test_baselines,test_networks,test_train,test_sanity,test_plots,test_experiment}.py` (all synthetic-data — `test_train`/`test_experiment` exercise real gradient steps and the full orchestrator, just on tiny fabricated markets, never the real dataset or a real training run)
+- **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_universe_integrity.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`, `tests/rl_agent/test_data_integration.py` (loads the real `PricePanel`: 172-wide global space, every in-window day has exactly 50 active members, no NaNs)
 
 **Linting:**
 ```bash
@@ -82,6 +99,8 @@ ruff check .          # reports undefined names, unused imports/variables, bare-
 
 - **main:** Stages 1–2 (data collection + dataset build). Latest stable.
 - **build_dataset:** Stage 2 focus.
+- **refactor:** adds Stage 3 iteration 1 (`src/rl_agent/`, this branch) — see `docs/EIIE_AGENT_PLAN.md`.
+- **ml_agent:** a separate, earlier PPO agent (masked 279-ticker universe); not this branch's Stage 3.
 
 ## Architecture
 
@@ -137,6 +156,23 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 | `manifest.py` | `write_manifest()`, `compute_split_dates()`, `iter_fit_windows()`, `write_split_config()`, `sync_dataset_version()` |
 | `cagr_handler.py` | CAGR calc/fill (BolsAI first, backfill from earnings/revenue) |
 | `scale_features.py` | Fits `ColumnTransformer` (RobustScaler on ratio columns, passthrough elsewhere) train-only, per `split_config.json`; saves `feature_scaler.joblib` + `scaler_metadata.json` |
+
+**Stage 3 (RL Agent, iteration 1)** — `src/rl_agent/`, price-only EIIE reproduction (`docs/EIIE_AGENT_PLAN.md`):
+
+| File | Purpose |
+|------|---------|
+| `config.py` | Frozen-dataclass `ExperimentConfig` ↔ JSON; every hyperparameter/date/cost rate config-driven, nothing hardcoded downstream |
+| `paths.py` | Shared path constants for this package |
+| `data.py` | `GlobalAssetIndex` (permanent 172-wide map, cash=0); `PricePanel.window_tensor()` (X_t, eq. 18) / `.price_relative()` (y_t, eq. 1, CDI-accruing cash); `validate_cdi_daily_percent()` units guard; observation prices read from the full `ml_dataset.parquet` (not the pre-built top50 file) so an entrant's lookback history isn't missing |
+| `pvm.py` | `PortfolioVectorMemory` — global-space `[T, 172]` weight buffer; `read_slots()`/`write()` bridge slot-space (network's fixed 50 inputs) and global space via `torch.gather`/`scatter`; a departing ticker's forced-sale liquidation falls out of the data structure, no special-case code |
+| `environment.py` | `solve_mu`/`solve_mu_torch` (eq. 14, Theorem 1 fixed-point, converged vs. differentiable k-step); `drift_weights`/`drift_weights_torch` (eq. 7); `run_backtest()` — the one loop shared by the agent and every baseline |
+| `networks.py` | `EIIECNN` (paper Fig. 2): kernel-height-1 convs keep each asset's stream independent, `w_{t-1}` inserted as an extra feature map before the final 1×1 conv, softmax over masked logits |
+| `train.py` | OSBL (Sec. 5.3): `sample_batch_starts()` (eq. 26 geometric recency bias), `train_step()`, `pretrain()`, `run_online_backtest()` (interleaves `rolling_steps` updates via `run_backtest`'s `on_step` hook), checkpointing |
+| `sanity.py` | `run_sanity_checks()` — pre-training invariant gate (determinism, simplex weights, finite gradients/loss, baselines running cleanly); a dominant-asset toy market is a diagnostic, never a pass/fail gate |
+| `baselines.py` | UBAH, UCRP, Best-Stock (hindsight), Random Portfolio/Rebalancing, Constant-Cash, BOVA11 — all through `run_backtest` except BOVA11 (evaluated directly from its own price series) |
+| `metrics.py` | Full metrics suite (Sharpe/Sortino vs. CDI, Calmar, VaR/CVaR, turnover, cost drag, information ratio vs. BOVA11) + `block_bootstrap_ci()` |
+| `plots.py` | `write_report()` — one self-contained HTML report (plotly.js embedded once): PV vs. every baseline, reward curves, allocation evolution, turnover/cost, metrics + CI table |
+| `experiment.py` | CLI orchestrator: seed → load data → recompute a window-scoped split → sanity gate → pretrain → OSBL backtest → baselines → metrics → report → validation checklist |
 
 
 ## Critical Caveats

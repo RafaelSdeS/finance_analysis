@@ -8,7 +8,7 @@ Given a fixed monthly capital contribution (R$1000, inflation-adjusted), the mod
 
 ## Pipeline
 
-Three stages: collect → build dataset → train (RL agent on `ml_agent` branch).
+Three stages: collect → build dataset → train (RL agent, `src/rl_agent/` on this branch).
 
 ### Stage 1: Raw Data Collection
 
@@ -32,7 +32,20 @@ Output: `data/processed/ml_dataset.parquet`
 
 ### Stage 3: Train RL Agent
 
-Implemented on `ml_agent` branch. PPO agent with masked 279-ticker universe, temporal train/val/test splits, and equal-weight baseline (Sharpe 0.71). See CLAUDE.md for training commands, or `docs/ML_AGENT_ROADMAP.md` for deep dive.
+**Iteration 1** (`src/rl_agent/`, this branch): a faithful reproduction of Jiang, Xu & Liang's EIIE
+framework (`docs/papers/deep_reinforcement_learning_framework_financial_portfolio_management.pdf.pdf`)
+— price-only features, the top-50 dynamic quarterly universe, CDI-accruing cash, B3's 0.03%
+transaction cost — over the 2011–2026 pre-built top-50 window. Design, approved deviations from the
+paper, and phase-by-phase status: `docs/EIIE_AGENT_PLAN.md`.
+
+```bash
+python tests/run_all.py --group fast                                             # rl_agent unit/integration tests
+python -m src.rl_agent.experiment --config configs/eiie_baseline.json --dry-run   # data + sanity checks, no training
+python -m src.rl_agent.experiment --config configs/eiie_baseline.json            # full run -> experiments/{run_id}/report.html
+```
+
+A separate, earlier PPO agent (masked 279-ticker universe, equal-weight baseline Sharpe 0.71) lives
+on the `ml_agent` branch; see CLAUDE.md there for its training commands.
 
 ## Setup
 
@@ -62,4 +75,5 @@ python src/visualizations/financial_view.py
 - `docs/TODO.md` — work roadmap
 - `docs/STAGE1_DATA_COLLECTION.md`, `docs/STAGE2_DATASET_BUILD.md`, `docs/STAGE3_ML_AGENT.md` — how each stage actually works, with formulas and citations
 - `docs/RESEARCH_REFERENCES.md` — papers behind the design choices
-- `docs/ML_AGENT_ROADMAP.md` — phase-by-phase RL agent build plan
+- `docs/EIIE_AGENT_PLAN.md` — iteration-1 RL agent design, approved paper deviations, phase status (this branch)
+- `docs/ML_AGENT_ROADMAP.md` — phase-by-phase RL agent build plan (`ml_agent` branch)
