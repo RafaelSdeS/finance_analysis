@@ -84,7 +84,11 @@ def _build_slot_calendar(calendar: pd.DatetimeIndex, membership: pd.DataFrame,
 
     Returns (slot_gidx[T, n_slots] int64, valid[T, n_slots] bool). Calendar
     days before the first membership period (pre-history lookback buffer
-    only, never an experiment step) get all-invalid slots.
+    only, never an experiment step) get all-invalid slots. A period with
+    fewer than n_slots qualifiers pads with gidx=asset_index.n_global (a
+    dummy index past the real 0..n_global-1 range, never 0/cash) and
+    valid=False -- see pvm.py's write() for why that specific sentinel
+    value matters.
     """
     periods = membership[["period_id", "start"]].drop_duplicates().sort_values("start").reset_index(drop=True)
     cal_df = pd.DataFrame({"trade_date": calendar})
@@ -97,7 +101,12 @@ def _build_slot_calendar(calendar: pd.DatetimeIndex, membership: pd.DataFrame,
 
     period_ids = periods["period_id"].tolist()
     pid_to_row = {pid: i for i, pid in enumerate(period_ids)}
-    lookup_gidx = np.zeros((len(period_ids), n_slots), dtype=np.int64)
+    # Padding slots (a period with fewer than n_slots qualifiers) default to
+    # DUMMY_GIDX (n_global, one past the real 0..n_global-1 range) rather than
+    # 0/cash -- so that even if a masked slot's network weight isn't exactly
+    # zero, scattering it back into the PVM can never corrupt the cash column
+    # (pvm.py's write() relies on this).
+    lookup_gidx = np.full((len(period_ids), n_slots), asset_index.n_global, dtype=np.int64)
     lookup_valid = np.zeros((len(period_ids), n_slots), dtype=bool)
     for pid, members in period_members.items():
         if pid not in pid_to_row:
@@ -153,6 +162,16 @@ class PricePanel:
     def n_slots(self) -> int:
         return self.slot_gidx.shape[1]
 
+    @property
+    def n_global(self) -> int:
+        """Real global-space width (cash + N_union tickers). close/high/low
+        are allocated one column wider than this (see load_price_panel) so a
+        padding slot's dummy sentinel index (== n_global, from
+        _build_slot_calendar) is always a safe in-bounds gather in
+        window_tensor -- its value is masked out immediately after, never
+        exposed through this property or price_relative."""
+        return self.asset_index.n_global
+
     def _channel(self, name: str) -> np.ndarray:
         return {"close": self.close, "high": self.high, "low": self.low}[name]
 
@@ -161,7 +180,8 @@ class PricePanel:
         index i = v_{i,t}/v_{i,t-1}. Requires t >= 1."""
         if t < 1:
             raise ValueError("price_relative requires t >= 1 (needs t-1)")
-        y = self.close[t] / self.close[t - 1]
+        n = self.n_global
+        y = self.close[t, :n] / self.close[t - 1, :n]
         y[CASH_GIDX] = self.cdi_factor[t]
         return y
 
@@ -208,8 +228,11 @@ def load_price_panel(data_cfg: DataConfig, n_slots: int = 50) -> PricePanel:
         piv = prices.pivot(index="trade_date", columns="gidx", values=col)
         piv = piv.reindex(index=calendar, columns=range(1, asset_index.n_global))
         piv = piv.ffill().bfill()  # ffill: halts + post-delisting flat; bfill: pre-listing flat (paper Sec. 3.3)
-        arr = np.ones((len(calendar), asset_index.n_global), dtype=np.float64)
-        arr[:, 1:] = piv.to_numpy()
+        # +1 column: a dummy index (== n_global) padding slots can safely gather
+        # from in window_tensor without an out-of-bounds error; always masked
+        # out before use, never surfaced through PricePanel.n_global.
+        arr = np.ones((len(calendar), asset_index.n_global + 1), dtype=np.float64)
+        arr[:, 1:asset_index.n_global] = piv.to_numpy()
         return arr
 
     close = _dense("adj_close")

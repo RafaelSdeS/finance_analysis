@@ -10,6 +10,7 @@ as each one is implemented instead of importing modules that don't exist yet.
 
 from .config import ExperimentConfig
 from .data import CASH_GIDX, GlobalAssetIndex, PricePanel, load_price_panel
+from .pvm import PortfolioVectorMemory
 
 __all__ = [
     "ExperimentConfig",
@@ -17,4 +18,5 @@ __all__ = [
     "GlobalAssetIndex",
     "PricePanel",
     "load_price_panel",
+    "PortfolioVectorMemory",
 ]

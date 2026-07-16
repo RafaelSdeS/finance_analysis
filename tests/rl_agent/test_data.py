@@ -126,6 +126,24 @@ def test_slot_calendar(passed, failed):
     ok = bool(np.all(slot_gidx[day_in_p0][:2] == np.sort(slot_gidx[day_in_p0][:2])))
     print_check("slot calendar: slots filled sorted ascending by permanent global index", ok)
     passed, failed = passed + ok, failed + (not ok)
+
+    # --- padding sentinel: a period with fewer qualifiers than n_slots must
+    # NOT default padding slots to gidx=0/cash (pvm.py's write() relies on
+    # padding never colliding with the cash column during scatter) ---
+    small_membership = pd.DataFrame({
+        "period_id": [0],
+        "ticker": ["AAA"],
+        "start": pd.to_datetime(["2020-01-01"]),
+        "end": pd.to_datetime(["2020-06-01"]),
+    })
+    small_idx = GlobalAssetIndex.from_membership(small_membership)  # AAA=1, n_global=2
+    small_cal = pd.bdate_range("2020-01-01", "2020-01-03")
+    small_slot_gidx, small_valid = _build_slot_calendar(small_cal, small_membership, small_idx, n_slots=3)
+
+    ok = bool(np.all(small_slot_gidx[:, 1:] == small_idx.n_global)) and not small_valid[:, 1:].any()
+    print_check("slot calendar: padding slots use the dummy sentinel (n_global), not 0/cash",
+                ok, f"got gidx={small_slot_gidx[0]}, valid={small_valid[0]}, n_global={small_idx.n_global}")
+    passed, failed = passed + ok, failed + (not ok)
     return passed, failed
 
 
@@ -217,6 +235,31 @@ def test_window_tensor(passed, failed):
     return passed, failed
 
 
+def test_window_tensor_padding_slot(passed, failed):
+    """A padding slot's dummy sentinel index (== n_global, from
+    _build_slot_calendar) must be a safe in-bounds gather for window_tensor,
+    never an IndexError -- regression test for the fix that widened
+    close/high/low by one dummy column (docs/EIIE_AGENT_PLAN.md Phase 3)."""
+    asset_index = GlobalAssetIndex(tickers=("AAA",), ticker_to_gidx={"AAA": 1})  # n_global = 2
+    dates = pd.bdate_range("2020-01-01", periods=4)
+    close = np.array([[1.0, 10.0, 1.0], [1.0, 11.0, 1.0], [1.0, 12.0, 1.0], [1.0, 13.0, 1.0]])
+    panel = PricePanel(
+        asset_index=asset_index, dates=dates, close=close, high=close.copy(), low=close.copy(),
+        cdi_factor=np.full(4, 1.0004),
+        slot_gidx=np.array([[1, 2]] * 4),   # slot 1 = dummy sentinel (n_global == 2)
+        valid=np.array([[True, False]] * 4),
+        window=2, start_idx=0, end_idx=3,
+    )
+    try:
+        X = panel.window_tensor(2, features=("close",))
+        ok = np.allclose(X[0, 1], 1.0)
+    except IndexError:
+        ok = False
+    print_check("window_tensor: padding slot's dummy-sentinel gather never raises IndexError", ok)
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
 def main():
     print_header("test_data")
     passed = failed = 0
@@ -226,6 +269,7 @@ def main():
     passed, failed = test_slot_calendar(passed, failed)
     passed, failed = test_price_relative(passed, failed)
     passed, failed = test_window_tensor(passed, failed)
+    passed, failed = test_window_tensor_padding_slot(passed, failed)
 
     print_section_end(passed, failed)
     sys.exit(1 if failed else 0)
