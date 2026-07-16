@@ -8,8 +8,10 @@ Modules land incrementally per the plan's phases; this file grows an export
 as each one is implemented instead of importing modules that don't exist yet.
 """
 
+from . import metrics
 from .config import ExperimentConfig
 from .data import CASH_GIDX, GlobalAssetIndex, PricePanel, load_price_panel
+from .environment import BacktestResult, drift_weights, run_backtest, solve_mu, solve_mu_torch
 from .pvm import PortfolioVectorMemory
 
 __all__ = [
@@ -19,4 +21,10 @@ __all__ = [
     "PricePanel",
     "load_price_panel",
     "PortfolioVectorMemory",
+    "BacktestResult",
+    "drift_weights",
+    "run_backtest",
+    "solve_mu",
+    "solve_mu_torch",
+    "metrics",
 ]
