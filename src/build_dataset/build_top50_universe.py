@@ -58,13 +58,19 @@ def build_top50_membership(df: pd.DataFrame, top_n=TOP_N, trailing_days=TRAILING
 
 def filter_to_top50_universe(df: pd.DataFrame, membership: pd.DataFrame) -> pd.DataFrame:
     """Restrict df to rows whose (ticker, trade_date) falls in a period the
-    ticker qualified for. All original columns preserved, no row mutation."""
-    df = df.sort_values("trade_date")
+    ticker qualified for. All original columns preserved, no row mutation.
+
+    ponytail: merge_asof only against the (ticker, trade_date) key columns,
+    not the full ~165-column df — tagging the whole wide frame doubled peak
+    memory (df + tagged copy) and OOM-killed this step on a 1.3M-row dataset.
+    """
+    key = df[["ticker", "trade_date"]].sort_values("trade_date").reset_index()
     periods = membership[["period_id", "start"]].drop_duplicates().sort_values("start")
-    tagged = pd.merge_asof(df, periods, left_on="trade_date", right_on="start", direction="backward")
+    tagged = pd.merge_asof(key, periods, left_on="trade_date", right_on="start", direction="backward")
     member_idx = pd.MultiIndex.from_frame(membership[["period_id", "ticker"]])
     in_universe = pd.MultiIndex.from_frame(tagged[["period_id", "ticker"]]).isin(member_idx)
-    return df.loc[in_universe].reset_index(drop=True)
+    keep_idx = tagged.loc[in_universe, "index"]
+    return df.loc[keep_idx].sort_values("trade_date").reset_index(drop=True)
 
 
 def zero_fill_missing_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
