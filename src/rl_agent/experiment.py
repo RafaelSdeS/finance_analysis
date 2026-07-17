@@ -90,7 +90,8 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
         # than 14 on the dev machine. Doesn't affect results, only wall-clock.
         torch.set_num_threads(2)
 
-    out_dir = ROOT / cfg.experiment.out_dir / f"{cfg.experiment.name}_{datetime.now():%Y%m%dT%H%M%S}"
+    # %f: parallel sweep launches (sweep.py, S5) in the same second must not collide
+    out_dir = ROOT / cfg.experiment.out_dir / f"{cfg.experiment.name}_{datetime.now():%Y%m%dT%H%M%S%f}"
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg.save(out_dir / "config.json")
 
@@ -123,6 +124,9 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
 
     model = EIIECNN(cfg.data.window, cfg.model.conv1_out_channels, cfg.model.conv2_out_channels,
                      len(cfg.data.features)).to(cfg.train.device)
+    # S3: train through the compiled wrapper (shares parameters with `model`);
+    # checkpoints keep saving the eager module so state_dict keys stay prefix-free.
+    train_model = torch.compile(model, mode="reduce-overhead") if cfg.train.compile else model
     pvm = PortfolioVectorMemory(len(panel.dates), panel.n_global, slot_gidx=panel.slot_gidx,
                                 valid=panel.valid, device=cfg.train.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.l2)
@@ -145,11 +149,11 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
     else:
         pretrain_end_idx, backtest_start_idx, backtest_end_idx = train_end_idx, train_end_idx + 1, val_end_idx
 
-    train_losses = pretrain(model, pvm, panel, optimizer, cfg, train_end_idx=pretrain_end_idx,
+    train_losses = pretrain(train_model, pvm, panel, optimizer, cfg, train_end_idx=pretrain_end_idx,
                              device=cfg.train.device)
     checklist["no_numerical_instability"] = bool(np.all(np.isfinite(train_losses)))
 
-    agent_result = run_online_backtest(model, pvm, panel, optimizer, cfg,
+    agent_result = run_online_backtest(train_model, pvm, panel, optimizer, cfg,
                                         start_idx=backtest_start_idx, end_idx=backtest_end_idx,
                                         device=cfg.train.device)
     checklist["no_numerical_instability"] &= bool(np.all(np.isfinite(agent_result.portfolio_value)))

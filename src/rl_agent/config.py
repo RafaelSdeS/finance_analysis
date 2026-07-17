@@ -50,6 +50,10 @@ class TrainConfig:
     grad_clip_norm: float = 5.0
     seed: int = 42
     device: str = "cuda"  # GPU enabled; falls back to CPU if unavailable
+    compile: bool = False  # S3 (TRAINING_SPEEDUP_PLAN.md): torch.compile the training
+    # forward/backward (mode="reduce-overhead", CUDA graphs). Wall-clock only in intent,
+    # but compiled kernels may not be bit-identical to eager -- keep off for runs that
+    # must reproduce an eager run exactly.
 
 
 @dataclass(frozen=True)

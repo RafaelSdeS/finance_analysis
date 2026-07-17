@@ -27,6 +27,7 @@ from src.rl_agent.data import GlobalAssetIndex, PricePanel  # noqa: E402
 from src.rl_agent.networks import EIIECNN  # noqa: E402
 from src.rl_agent.pvm import PortfolioVectorMemory  # noqa: E402
 from src.rl_agent.train import (  # noqa: E402
+    _batch_tensors,
     agent_forward,
     load_checkpoint,
     pretrain,
@@ -100,6 +101,32 @@ def test_sample_batch_starts(passed, failed):
     except ValueError:
         ok = True
     print_check("sample_batch_starts: raises when there isn't enough history", ok)
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
+def test_store_matches_direct_path(passed, failed):
+    """S1 equivalence (TRAINING_SPEEDUP_PLAN.md): the cached-store
+    _batch_tensors must be bit-identical to tensors built directly from the
+    panel's numpy batch methods -- the one check that fails if the store's
+    indexing/offset logic is ever wrong."""
+    panel = _tiny_panel()
+    features = ("close", "high", "low")
+    rng = np.random.default_rng(1)
+    ok = True
+    for _ in range(3):
+        t_b = int(rng.integers(WINDOW - 1, T - 4))
+        t_idx = np.arange(t_b, t_b + 3)
+        X, y, y_next, slot_gidx, valid, prev_rows, curr_rows = _batch_tensors(panel, t_idx, features, "cpu")
+        ok &= torch.equal(X, torch.tensor(panel.window_tensor_batch(t_idx, features), dtype=torch.float32))
+        ok &= torch.equal(y, torch.tensor(panel.price_relative_batch(t_idx), dtype=torch.float32))
+        ok &= torch.equal(y_next, torch.tensor(panel.price_relative_batch(t_idx + 1), dtype=torch.float32))
+        ok &= torch.equal(slot_gidx, torch.tensor(panel.slot_gidx[t_idx], dtype=torch.long))
+        ok &= torch.equal(valid, torch.tensor(panel.valid[t_idx], dtype=torch.bool))
+        ok &= torch.equal(prev_rows, torch.tensor(t_idx - 1, dtype=torch.long))
+        ok &= torch.equal(curr_rows, torch.tensor(t_idx, dtype=torch.long))
+    ok = bool(ok)
+    print_check("feature store: _batch_tensors bit-identical to the direct numpy path", ok)
     passed, failed = passed + ok, failed + (not ok)
     return passed, failed
 
@@ -220,6 +247,7 @@ def main():
     passed = failed = 0
 
     passed, failed = test_sample_batch_starts(passed, failed)
+    passed, failed = test_store_matches_direct_path(passed, failed)
     passed, failed = test_train_step_updates_model_and_pvm(passed, failed)
     passed, failed = test_pretrain(passed, failed)
     passed, failed = test_agent_forward(passed, failed)

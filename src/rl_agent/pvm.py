@@ -70,11 +70,8 @@ class PortfolioVectorMemory:
             # Uniform weight = 1 / (n_active + 1)  for each asset (cash gets same)
             uniform_weight = 1.0 / (n_active + 1)  # [T]
 
-            # Asset slots: create slot-space weights [T, n_slots]
-            # Only active slots get uniform_weight; invalid slots get 0
-            w_slots = torch.zeros(T, slot_gidx_t.shape[1], dtype=dtype, device=device)
-            for t in range(T):
-                w_slots[t, valid_t[t]] = uniform_weight[t]
+            # Asset slots [T, n_slots]: active slots get uniform_weight, invalid 0
+            w_slots = valid_t.to(dtype) * uniform_weight.unsqueeze(1)
 
             # Scatter to global space via scatter_to_global_row
             # scatter_to_global_row expects w: [T, n_slots+1] with w[:, 0] = cash

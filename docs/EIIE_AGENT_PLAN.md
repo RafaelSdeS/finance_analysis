@@ -181,12 +181,14 @@ src/rl_agent/
   environment.py  # numpy backtest engine (agent + all baselines): mu solver, weight evolution,
                   #   global-space cost/reward, forced-sale; + differentiable torch mu for training
   networks.py     # Encoder protocol + EIIECNN
-  train.py        # OSBL: geometric sampler, pretrain loop, online rolling updates, checkpointing
+  train.py        # OSBL: geometric sampler, pretrain loop, online rolling updates, checkpointing;
+                  #   _PanelStore: all window tensors/price relatives precomputed once, GPU-resident
   baselines.py    # 7 baselines through environment.py with identical costs
   metrics.py      # full metric suite + block-bootstrap CIs
   plots.py        # plotly -> one self-contained HTML report per experiment
   sanity.py       # invariant-based pre-training checks
   experiment.py   # CLI orchestrator; --dry-run stops after sanity, no training
+  sweep.py        # parallel launcher: seed ensembles / config sweeps as bounded subprocesses
 
 configs/eiie_baseline.json
 tests/rl_agent/            # FAST group (synthetic only, no data files)
@@ -221,11 +223,18 @@ no benefit.
 
 ## Reproducibility
 
-A single config seed seeds Python/numpy/torch; `torch.use_deterministic_algorithms(True)`;
-deterministic geometric sampler. Same config ⇒ same results (CPU exact; GPU non-determinism
-documented as a caveat). Every run logs: config copy, seed, git commit, dataset version
-(`dataset_v1` + manifest fingerprint), package versions, the permanent asset-index map, and model
-checkpoint hashes.
+A single config seed seeds Python/numpy/torch; deterministic geometric sampler. Same config ⇒
+same results **on CPU**, verified bit-exact (the S1 feature-store A/B reproduced sanity losses to
+the last decimal — `TRAINING_SPEEDUP_PLAN.md`). On GPU, same-seed runs are deterministic *within*
+a process (what the sanity gate's determinism check compares) but drift *across* processes:
+cuDNN selects conv algorithms per-process, and measured sanity losses differ in the ~3rd–4th
+significant digit between launches on unchanged code. `torch.use_deterministic_algorithms(True)`
+is deliberately NOT enabled (speed cost); switch it on only if exact cross-process GPU
+reproduction ever matters. `train.compile` (config flag, default off) is likewise not
+bit-identical to eager — measured 1.13× here, not worth its reproducibility cost. Every run logs:
+config copy, seed, git commit, dataset version (`dataset_v1` + manifest fingerprint), package
+versions, the permanent asset-index map, and model checkpoint hashes. Run-dir timestamps carry
+microseconds so parallel sweep launches (`sweep.py`) never collide on a directory.
 
 ## Implementation phases
 

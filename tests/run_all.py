@@ -59,6 +59,7 @@ FAST = [
     "tests/rl_agent/test_sanity.py",
     "tests/rl_agent/test_plots.py",
     "tests/rl_agent/test_experiment.py",
+    "tests/rl_agent/test_sweep.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.

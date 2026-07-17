@@ -57,18 +57,60 @@ def sample_batch_starts(t_now: int, n_b: int, beta: float, n_batches: int,
     return t_now - n_b - chosen_k
 
 
+class _PanelStore:
+    """S1 (TRAINING_SPEEDUP_PLAN.md): every tensor _batch_tensors used to
+    rebuild per step is a deterministic function of the panel, so build them
+    all once -- float64, exactly as the per-step path did, then one float32
+    cast -- and keep them resident on the training device. Per-step data prep
+    becomes pure tensor indexing: no numpy, no host->device copy. Real panel:
+    X is ~6.5k x 3 x 50 x 50 float32 ~= 196 MB."""
+
+    def __init__(self, panel: PricePanel, features, device, chunk: int = 512):
+        self.features = tuple(features)
+        self.device = device
+        self.t0 = panel.window - 1  # X[i] == window_tensor(t0 + i)
+        T = len(panel.dates)
+        # chunked so the float64 numpy intermediate stays ~30 MB, not ~400 MB
+        self.X = torch.cat([
+            torch.tensor(panel.window_tensor_batch(np.arange(lo, min(lo + chunk, T)), features),
+                         dtype=torch.float32)
+            for lo in range(self.t0, T, chunk)
+        ]).to(device)
+        y = np.ones((T, panel.n_global))
+        # Row 0 and pre-window rows are never indexed (callers keep t >= start_idx
+        # >= t0 >= 1), but pre-window periods contain isolated genuine 0.0 prices
+        # (see pretrain()'s min_t comment) -- silence the spurious div-by-zero
+        # warning their unread inf/nan rows would emit.
+        with np.errstate(divide="ignore", invalid="ignore"):
+            y[1:] = panel.price_relative_batch(np.arange(1, T))
+        self.y = torch.tensor(y, dtype=torch.float32, device=device)
+        self.slot_gidx = torch.tensor(panel.slot_gidx, dtype=torch.long, device=device)
+        self.valid = torch.tensor(panel.valid, dtype=torch.bool, device=device)
+
+
+def _get_store(panel: PricePanel, features, device) -> _PanelStore:
+    """Lazy per-panel cache: no caller signature changes anywhere (sanity.py,
+    diagnose.py, and the tests all hit the fast path automatically)."""
+    store = panel.__dict__.get("_train_store")
+    if store is None or store.features != tuple(features) or store.device != device:
+        store = _PanelStore(panel, features, device)
+        panel.__dict__["_train_store"] = store
+    return store
+
+
 def _batch_tensors(panel: PricePanel, t_idx: np.ndarray, features, device):
-    X = panel.window_tensor_batch(t_idx, features)
-    y = panel.price_relative_batch(t_idx)
-    y_next = panel.price_relative_batch(t_idx + 1)  # earned by w_t; callers keep t_idx+1 <= t_now
+    store = _get_store(panel, features, device)
+    # guard: a t below t0 would silently wrap to a negative X index
+    assert t_idx.min() >= store.t0, f"_batch_tensors requires all t >= window-1 ({store.t0})"
+    t = torch.tensor(t_idx, dtype=torch.long, device=device)
     return (
-        torch.tensor(X, dtype=torch.float32, device=device),
-        torch.tensor(y, dtype=torch.float32, device=device),
-        torch.tensor(y_next, dtype=torch.float32, device=device),
-        torch.tensor(panel.slot_gidx[t_idx], dtype=torch.long, device=device),
-        torch.tensor(panel.valid[t_idx], dtype=torch.bool, device=device),
-        torch.tensor(t_idx - 1, dtype=torch.long, device=device),
-        torch.tensor(t_idx, dtype=torch.long, device=device),
+        store.X[t - store.t0],
+        store.y[t],
+        store.y[t + 1],  # earned by w_t; callers keep t_idx+1 <= t_now
+        store.slot_gidx[t],
+        store.valid[t],
+        t - 1,
+        t,
     )
 
 
@@ -127,14 +169,15 @@ def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     rng = np.random.default_rng(cfg.train.seed)
     losses = []
     pbar = tqdm(range(cfg.train.pretrain_steps), desc="pretrain", unit="step")
-    for _ in pbar:
+    for step in pbar:
         t_b = int(sample_batch_starts(train_end_idx, cfg.train.batch_size, cfg.train.beta, 1, min_t, rng)[0])
         t_idx = np.arange(t_b, t_b + cfg.train.batch_size)
         loss = train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
                            cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
                            cfg.train.grad_clip_norm, device)
         losses.append(loss)
-        pbar.set_postfix(loss=f"{loss:.6f}")
+        if step % 100 == 0 or step == cfg.train.pretrain_steps - 1:
+            pbar.set_postfix(loss=f"{loss:.6f}")
     return losses
 
 
@@ -143,9 +186,10 @@ def agent_forward(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     """One inference-only forward pass at period t: read w_{t-1} from the
     PVM in slot space, run the network, write w_t back, return it in GLOBAL
     space (ready for environment.run_backtest's weight_fn contract)."""
-    X = torch.tensor(panel.window_tensor(t, features)[None], dtype=torch.float32, device=device)
-    slot_gidx = torch.tensor(panel.slot_gidx[t][None], dtype=torch.long, device=device)
-    valid = torch.tensor(panel.valid[t][None], dtype=torch.bool, device=device)
+    store = _get_store(panel, features, device)
+    X = store.X[t - store.t0][None]
+    slot_gidx = store.slot_gidx[t][None]
+    valid = store.valid[t][None]
     prev_row = torch.tensor([t - 1], dtype=torch.long, device=device)
     curr_row = torch.tensor([t], dtype=torch.long, device=device)
 

@@ -57,6 +57,7 @@ quarterly universe, CDI-accruing cash, 2011–2026 window. Design + approved pap
 python -m src.rl_agent.experiment --config configs/eiie_baseline.json --dry-run   # data + sanity checks only
 python -m src.rl_agent.experiment --config configs/eiie_baseline.json             # full run: pretrain → OSBL backtest → baselines → report
 python -m src.rl_agent.experiment --config configs/eiie_baseline.json --eval-split test  # final run (train+val pretrain, test backtest)
+python -m src.rl_agent.sweep --config configs/eiie_baseline.json --seeds 1 2 3 4 -j 4    # parallel seed-ensemble / config sweep (per-job logs in experiments/sweep_logs/)
 ```
 Output: `experiments/{run_name}_{timestamp}/` — `config.json`, `run_manifest.json` (seed, git commit,
 dataset fingerprint, package versions), `sanity_report.txt`, `model.pt` (checkpoint), `report.html`
@@ -87,7 +88,7 @@ python tests/run_all.py --group all
 ```
 
 **Test groups:**
-- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`; `tests/rl_agent/{test_config,test_data,test_pvm,test_environment,test_metrics,test_baselines,test_networks,test_train,test_sanity,test_plots,test_experiment}.py` (all synthetic-data — `test_train`/`test_experiment` exercise real gradient steps and the full orchestrator, just on tiny fabricated markets, never the real dataset or a real training run)
+- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`; `tests/rl_agent/{test_config,test_data,test_pvm,test_environment,test_metrics,test_baselines,test_networks,test_train,test_sanity,test_plots,test_experiment,test_sweep}.py` (all synthetic-data — `test_train`/`test_experiment` exercise real gradient steps and the full orchestrator, just on tiny fabricated markets, never the real dataset or a real training run)
 - **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_universe_integrity.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`, `tests/rl_agent/test_data_integration.py` (loads the real `PricePanel`: 172-wide global space, every in-window day has exactly 50 active members, no NaNs)
 
 **Linting:**
@@ -167,12 +168,13 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 | `pvm.py` | `PortfolioVectorMemory` — global-space `[T, 172]` weight buffer; `read_slots()`/`write()` bridge slot-space (network's fixed 50 inputs) and global space via `torch.gather`/`scatter`; a departing ticker's forced-sale liquidation falls out of the data structure, no special-case code |
 | `environment.py` | `solve_mu`/`solve_mu_torch` (eq. 14, Theorem 1 fixed-point, converged vs. differentiable k-step); `drift_weights`/`drift_weights_torch` (eq. 7); `run_backtest()` — the one loop shared by the agent and every baseline |
 | `networks.py` | `EIIECNN` (paper Fig. 2): kernel-height-1 convs keep each asset's stream independent, `w_{t-1}` inserted as an extra feature map before the final 1×1 conv, softmax over masked logits |
-| `train.py` | OSBL (Sec. 5.3): `sample_batch_starts()` (eq. 26 geometric recency bias), `train_step()`, `pretrain()`, `run_online_backtest()` (interleaves `rolling_steps` updates via `run_backtest`'s `on_step` hook), checkpointing |
+| `train.py` | OSBL (Sec. 5.3): `sample_batch_starts()` (eq. 26 geometric recency bias), `train_step()`, `pretrain()`, `run_online_backtest()` (interleaves `rolling_steps` updates via `run_backtest`'s `on_step` hook), checkpointing; `_PanelStore` precomputes all window tensors/price relatives once, GPU-resident (~200 MB), so per-step data prep is pure tensor indexing — verified bit-identical to the per-step numpy path |
 | `sanity.py` | `run_sanity_checks()` — pre-training invariant gate (determinism, simplex weights, finite gradients/loss, baselines running cleanly); a dominant-asset toy market is a diagnostic, never a pass/fail gate |
 | `baselines.py` | UBAH, UCRP, Best-Stock (hindsight), Random Portfolio/Rebalancing, Constant-Cash, BOVA11 — all through `run_backtest` except BOVA11 (evaluated directly from its own price series) |
 | `metrics.py` | Full metrics suite (Sharpe/Sortino vs. CDI, Calmar, VaR/CVaR, turnover, cost drag, information ratio vs. BOVA11) + `block_bootstrap_ci()` |
 | `plots.py` | `write_report()` — one self-contained HTML report (plotly.js embedded once): PV vs. every baseline, reward curves, allocation evolution, turnover/cost, metrics + CI table |
 | `experiment.py` | CLI orchestrator: seed → load data → recompute a window-scoped split → sanity gate → pretrain → OSBL backtest → baselines → metrics → report → validation checklist |
+| `sweep.py` | Parallel launcher: runs several experiment subprocesses at once (seed ensembles / config sweeps), bounded by `-j`, per-job logs |
 
 
 ## Critical Caveats
@@ -189,6 +191,17 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 - **All feature engineering is in Stage 2**, not deferred to the agent (technicals, fundamental ratios, macro-adjusted, CAGR backfill, split repair, volatility rolling rank).
 - **Per-ticker own-history z-scores (`*_zhist_5y`, July 2026):** `compute_history_relative_features()` (`features.py`) adds a causal rolling robust z-score — `(x - rolling_median) / rolling_IQR`, 5y window — for 11 fundamental ratios (`pl`, `pvp`, `roe`, `net_margin`, `ebitda_margin`, `debt_equity`, `net_debt_ebitda`, `earnings_yield`, `book_to_market`, `current_ratio`, `asset_turnover`) and 2 daily liquidity ratios (`amihud_illiquidity`, `turnover_ratio`). Answers "how unusual is this value for *this company*," distinct from the global `RobustScaler`'s cross-sectional level view (`scale_features.py`) and `cross_sectional.py`'s peer-relative view — see `docs/PER_TICKER_SCALING_PLAN.md`. Stateless (a plain trailing rolling stat, not a fitted transform): no train/test split to manage, valid unchanged under any evaluation methodology. Fundamentals are deduped to one row per `reference_date` before rolling (rolling the daily-forward-filled panel directly would be ~65x redundant), then mapped back onto every daily row of that quarter. Warm-up (< `FUND_ZHIST_MIN_QUARTERS`=8 quarters / `DAILY_ZHIST_MIN_DAYS`=252 days of history) is NaN, a leading prefix like every other rolling-window feature in this pipeline.
 - **Scaler fit boundary is injected, not hardcoded (`iter_fit_windows()`, July 2026):** `scale_features.py`'s `fit_scaler(dataset, window)` takes a `FitWindow` (`manifest.py`) resolved from the active `split_config.json` via `iter_fit_windows()` — the one seam between the evaluation methodology (today: a single fixed split) and scaler fitting. A future rolling/expanding/multi-fold split format only changes `iter_fit_windows()`; `fit_scaler_on_train_split()` remains as a back-compat wrapper reproducing today's single-window behavior exactly. `sync_dataset_version()` now also snapshots `data/processed/scalers/` into `dataset_v{N}/`.
+- **Stage 3 training performance & reproducibility (July 2026, `TRAINING_SPEEDUP_PLAN.md`):**
+  training was CPU-bound (tiny ~3k-param CNN, per-step numpy prep dominated); `train.py`'s
+  `_PanelStore` now precomputes everything GPU-resident once — verified bit-identical, ~2×
+  faster (~6 ms → ~2.5–3.4 ms/step). `train.compile` (`torch.compile`, config flag, default
+  **off**) measured only 1.13× here and is NOT bit-identical to eager — leave off for runs
+  that must reproduce exactly. Same-seed GPU runs drift *across processes* (cuDNN picks conv
+  algorithms per-process; the sanity determinism gate only compares within-process) — CPU runs
+  are exactly reproducible; `torch.use_deterministic_algorithms(True)` is deliberately not
+  enabled. For seed ensembles / hyperparameter sweeps use `python -m src.rl_agent.sweep`
+  (parallel subprocesses, ~0.5 GB GPU each; run-dir timestamps carry microseconds so
+  same-second launches can't collide).
 - **FIIs deferred:** stocks only (prices/fundamentals/dividends). FIIs are a separate asset class; add if agent scope expands to mixed-asset.
 - **BolsAI:** key in `.env`, loaded by `config.load_env()` (stdlib parser). Backfill only — paid ~€0.10/1K calls. Caps: prices `limit<=5000` (date-window paginated), fundamentals `limit<=88` (use 80).
 - **yfinance:** free incremental refresh. Prices/dividends full history to 2000; fundamentals only ~4–6 quarters (enough for quarterly refresh).
