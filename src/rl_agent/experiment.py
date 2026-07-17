@@ -14,6 +14,7 @@ approved) training run.
 """
 
 import argparse
+from dataclasses import replace
 import json
 import platform
 import subprocess
@@ -203,9 +204,12 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="stop after sanity checks, no training")
     parser.add_argument("--eval-split", choices=["val", "test"], default="val",
                          help="'val' for hyperparameter runs, 'test' for the final run")
+    parser.add_argument("--seed", type=int, help="override random seed (for seed ensemble)")
     args = parser.parse_args()
 
     cfg = ExperimentConfig.from_json(args.config)
+    if args.seed is not None:
+        cfg = replace(cfg, train=replace(cfg.train, seed=args.seed))
     run_experiment(cfg, dry_run=args.dry_run, eval_split=args.eval_split)
 
 
