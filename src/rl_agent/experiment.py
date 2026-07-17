@@ -82,6 +82,12 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
         raise ValueError(f"eval_split must be 'val' or 'test', got {eval_split!r}")
 
     seed_everything(cfg.train.seed)
+    if cfg.train.device == "cpu":
+        # Measured: this network's tensors are tiny (50x50), so torch's default
+        # thread count (one per core) spends more time on inter-thread sync than
+        # the ops themselves save -- 2 threads measured ~27% faster end-to-end
+        # than 14 on the dev machine. Doesn't affect results, only wall-clock.
+        torch.set_num_threads(2)
 
     out_dir = ROOT / cfg.experiment.out_dir / f"{cfg.experiment.name}_{datetime.now():%Y%m%dT%H%M%S}"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -115,7 +121,7 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
     }, indent=2))
 
     model = EIIECNN(cfg.data.window, cfg.model.conv1_out_channels, cfg.model.conv2_out_channels,
-                     len(cfg.data.features))
+                     len(cfg.data.features)).to(cfg.train.device)
     pvm = PortfolioVectorMemory(len(panel.dates), panel.n_global, device=cfg.train.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.l2)
 

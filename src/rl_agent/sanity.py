@@ -48,14 +48,14 @@ def seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
-def _build_model(cfg: ExperimentConfig) -> EIIECNN:
+def _build_model(cfg: ExperimentConfig, device: str = "cpu") -> EIIECNN:
     return EIIECNN(cfg.data.window, cfg.model.conv1_out_channels,
-                    cfg.model.conv2_out_channels, len(cfg.data.features))
+                    cfg.model.conv2_out_channels, len(cfg.data.features)).to(device)
 
 
 def _short_train_run(cfg: ExperimentConfig, panel: PricePanel, t0: int, n_steps: int, device: str):
     seed_everything(cfg.train.seed)
-    model = _build_model(cfg)
+    model = _build_model(cfg, device)
     pvm = PortfolioVectorMemory(len(panel.dates), panel.n_global, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.l2)
     losses = []

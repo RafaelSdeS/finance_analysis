@@ -260,6 +260,42 @@ def test_window_tensor_padding_slot(passed, failed):
     return passed, failed
 
 
+def test_batch_vectorized_matches_loop(passed, failed):
+    """window_tensor_batch/price_relative_batch (vectorized OSBL hot-path
+    helpers) must be bit-exact against stacking the single-t methods."""
+    panel = _toy_panel(window=3)
+    t_idx = np.array([2, 3, 4, 5])
+
+    X_batch = panel.window_tensor_batch(t_idx, features=("close", "low"))
+    X_loop = np.stack([panel.window_tensor(t, features=("close", "low")) for t in t_idx])
+    ok = np.array_equal(X_batch, X_loop)
+    print_check("window_tensor_batch: bit-exact match with per-t loop (incl. masked slot)", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    y_batch = panel.price_relative_batch(t_idx)
+    y_loop = np.stack([panel.price_relative(t) for t in t_idx])
+    ok = np.array_equal(y_batch, y_loop)
+    print_check("price_relative_batch: bit-exact match with per-t loop", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    try:
+        panel.window_tensor_batch(np.array([1, 2]))  # window=3 needs t >= 2
+        ok = False
+    except ValueError:
+        ok = True
+    print_check("window_tensor_batch: t < window-1 raises (insufficient lookback)", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    try:
+        panel.price_relative_batch(np.array([0, 1]))
+        ok = False
+    except ValueError:
+        ok = True
+    print_check("price_relative_batch: t=0 raises (no t-1 available)", ok)
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
 def main():
     print_header("test_data")
     passed = failed = 0
@@ -270,6 +306,7 @@ def main():
     passed, failed = test_price_relative(passed, failed)
     passed, failed = test_window_tensor(passed, failed)
     passed, failed = test_window_tensor_padding_slot(passed, failed)
+    passed, failed = test_batch_vectorized_matches_loop(passed, failed)
 
     print_section_end(passed, failed)
     sys.exit(1 if failed else 0)

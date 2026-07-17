@@ -205,6 +205,44 @@ class PricePanel:
             out[f] = np.where(mask[:, None], hist / v_t, 1.0)
         return out
 
+    def price_relative_batch(self, t_idx: np.ndarray) -> np.ndarray:
+        """Vectorized price_relative (eq. 1) over an array of periods --
+        numerically identical to stacking price_relative(t) per t, but one
+        batched numpy op instead of a Python loop (OSBL's per-step hot path).
+        Requires all t_idx >= 1."""
+        t_idx = np.asarray(t_idx)
+        if np.any(t_idx < 1):
+            raise ValueError("price_relative_batch requires all t >= 1 (needs t-1)")
+        n = self.n_global
+        y = self.close[t_idx, :n] / self.close[t_idx - 1, :n]
+        y[:, CASH_GIDX] = self.cdi_factor[t_idx]
+        return y
+
+    def window_tensor_batch(self, t_idx: np.ndarray, features=("close", "high", "low")) -> np.ndarray:
+        """Vectorized window_tensor (eq. 18) over an array of periods, shape
+        (len(t_idx), len(features), n_slots, window) -- numerically identical
+        to stacking window_tensor(t) per t, but built as one batched numpy
+        gather instead of a Python loop over each period in the batch (OSBL's
+        per-training-step hot path). Requires all t_idx >= window - 1."""
+        t_idx = np.asarray(t_idx)
+        min_t = self.window - 1
+        if np.any(t_idx < min_t):
+            raise ValueError(f"window_tensor_batch requires all t >= window-1 ({min_t})")
+        B, W = len(t_idx), self.window
+        gidx = self.slot_gidx[t_idx]     # (B, n_slots)
+        mask = self.valid[t_idx]         # (B, n_slots)
+        rows = t_idx[:, None] - W + 1 + np.arange(W)[None, :]                  # (B, W)
+        rows_full = np.broadcast_to(rows[:, :, None], (B, W, self.n_slots))
+        cols_full = np.broadcast_to(gidx[:, None, :], (B, W, self.n_slots))
+        out = np.empty((B, len(features), self.n_slots, W), dtype=np.float64)
+        for f, name in enumerate(features):
+            channel = self._channel(name)
+            hist = channel[rows_full, cols_full].transpose(0, 2, 1)            # (B, n_slots, W)
+            raw_v_t = channel[t_idx[:, None], gidx]                            # (B, n_slots)
+            v_t = np.where(mask, raw_v_t, 1.0)[:, :, None]                     # same masked-divisor
+            out[:, f] = np.where(mask[:, :, None], hist / v_t, 1.0)            # guard as window_tensor
+        return out
+
 
 def load_price_panel(data_cfg: DataConfig, n_slots: int = 50) -> PricePanel:
     """Build the full PricePanel for an experiment window from the on-disk

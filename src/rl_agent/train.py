@@ -49,8 +49,8 @@ def sample_batch_starts(t_now: int, n_b: int, beta: float, n_batches: int,
 
 
 def _batch_tensors(panel: PricePanel, t_idx: np.ndarray, features, device):
-    X = np.stack([panel.window_tensor(t, features) for t in t_idx])
-    y = np.stack([panel.price_relative(t) for t in t_idx])
+    X = panel.window_tensor_batch(t_idx, features)
+    y = panel.price_relative_batch(t_idx)
     return (
         torch.tensor(X, dtype=torch.float32, device=device),
         torch.tensor(y, dtype=torch.float32, device=device),
