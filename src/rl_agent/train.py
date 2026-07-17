@@ -2,23 +2,32 @@
 train.py — Online Stochastic Batch Learning (paper Sec. 5.3),
 docs/EIIE_AGENT_PLAN.md "PVM, OSBL training, split protocol" section.
 
-Key design point, worth stating explicitly: within a mini-batch of n_b
-CONSECUTIVE periods, period t's loss depends on w_{t-1} only through a
-value READ from the PVM buffer -- a plain tensor with no autograd history,
-not the output of another period's forward pass in this same batch. So
-every period in a mini-batch is trained independently (embarrassingly
-parallel): gradients never flow "backward through time" across periods.
-This is exactly the paper's stated benefit of the PVM ("enormously
-improving training efficiency" over a truly sequential rollout) -- the
-memory converges toward self-consistency over many *training epochs*
-revisiting the same periods, not within one epoch's forward passes.
+Key design point: within a mini-batch of n_b CONSECUTIVE periods, the PVM
+supplies w_{t-1} only as the network's INPUT (a detached constant), so all
+n_b forward passes run in parallel -- the paper's stated benefit of the
+PVM over a truly sequential rollout. The LOSS, however, is the batch-window
+slice of eq. 21's whole-period objective R = mean ln(mu_t * y_{t+1} . w_t)
+with EVERY w a differentiable network output (eq. 23): each period's
+mu_t is computed against the previous row's OUTPUT, not its PVM read.
 
-Concretely, each period's forward pass is:
-    w_{t-1} = PVM.read_slots(t-1, ...)        <- detached constant this step
-    w_t     = model(X_t, w_{t-1}, mask)          <- the only differentiable step
-    r_t     = ln(mu_t(w'_t, w_t) * y_t . w_{t-1})   <- w'_t, y_t, w_{t-1} all constants
-    loss    = -mean(r_t over the batch)
-    PVM.write(t, w_t.detach())                       <- persists for a future read
+Concretely:
+    w_{t-1}^in = PVM.read_slots(t-1, ...)     <- detached, network input only
+    w_t        = model(X_t, w_{t-1}^in, mask)    <- parallel over the batch
+    r_t        = ln(mu_t(drift(y_t, w_{t-1}), w_t) * y_{t+1} . w_t)
+                 with w_{t-1} = the batch's own output row t-1
+    loss       = -mean(r_t over the batch)
+    PVM.write(t, w_t.detach())                   <- persists for a future read
+
+Two pairings here are load-bearing, both bugs that shipped once:
+- y_{t+1} . w_t (eq. 22): w_t earns the NEXT period's price relatives.
+  Pairing y_t . w_{t-1} instead (correct backtest bookkeeping, wrong loss)
+  makes the return term a constant -- the only gradient left is mu's cost
+  penalty, whose optimum is "never trade", and the agent collapses to the
+  PVM's all-cash init.
+- w_{t-1} in mu_t from the batch's own outputs: gives w_t the NEXT term's
+  unwind-cost gradient (mu_{t+1} depends on w_t). Reading it detached from
+  the PVM cuts the only cross-period link, so nothing rewards holding a
+  position and the agent flip-flops single-name bets every few days.
 """
 
 from typing import Optional
@@ -51,9 +60,11 @@ def sample_batch_starts(t_now: int, n_b: int, beta: float, n_batches: int,
 def _batch_tensors(panel: PricePanel, t_idx: np.ndarray, features, device):
     X = panel.window_tensor_batch(t_idx, features)
     y = panel.price_relative_batch(t_idx)
+    y_next = panel.price_relative_batch(t_idx + 1)  # earned by w_t; callers keep t_idx+1 <= t_now
     return (
         torch.tensor(X, dtype=torch.float32, device=device),
         torch.tensor(y, dtype=torch.float32, device=device),
+        torch.tensor(y_next, dtype=torch.float32, device=device),
         torch.tensor(panel.slot_gidx[t_idx], dtype=torch.long, device=device),
         torch.tensor(panel.valid[t_idx], dtype=torch.bool, device=device),
         torch.tensor(t_idx - 1, dtype=torch.long, device=device),
@@ -65,10 +76,11 @@ def train_step(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
                optimizer: torch.optim.Optimizer, t_idx: np.ndarray, features,
                c_sell: float, c_buy: float, mu_iters: int, grad_clip_norm: float,
                device: str = "cpu") -> float:
-    """One OSBL gradient step over a batch of period indices (need not be
-    contiguous for correctness -- see module docstring; the paper samples
-    contiguous batches, which this project follows via sample_batch_starts)."""
-    X, y, slot_gidx, valid, prev_rows, curr_rows = _batch_tensors(panel, t_idx, features, device)
+    """One OSBL gradient step over a batch of CONSECUTIVE period indices
+    (contiguity is load-bearing: the loss chains each period's w_{t-1} to the
+    previous row's output -- see module docstring)."""
+    assert len(t_idx) == 1 or (np.diff(t_idx) == 1).all(), "train_step requires consecutive periods"
+    X, y, y_next, slot_gidx, valid, prev_rows, curr_rows = _batch_tensors(panel, t_idx, features, device)
 
     w_prev_slots = pvm.read_slots(prev_rows, slot_gidx, valid)  # [B, m+1], detached (buffer holds no grad)
     w = model(X, w_prev_slots[:, 1:], valid)                     # [B, m+1], differentiable
@@ -77,8 +89,15 @@ def train_step(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     w_prev_global = pvm.read_global(prev_rows)                     # [B, n_global], detached
     w_target_global = scatter_to_global_row(slot_gidx, w, n_global)[:, :n_global]  # differentiable
 
-    growth = (y * w_prev_global).sum(dim=1)                          # y_t . w_{t-1} -- constant (w_prev_global detached)
-    w_drift_global = drift_weights_torch(y, w_prev_global)             # eq. 7
+    # Within the contiguous batch, w_{t-1} in the LOSS is the batch's own
+    # differentiable output for t-1 (paper eq. 23: every w is pi_theta), so
+    # each w_t also receives mu_{t+1}'s unwind-cost gradient from the next
+    # term -- the cross-period signal that rewards holding. Only the first
+    # row falls back to the detached PVM read (no earlier output exists).
+    w_prev_loss = torch.cat([w_prev_global[:1], w_target_global[:-1]], dim=0)
+
+    growth = (y_next * w_target_global).sum(dim=1)                   # y_{t+1} . w_t (eq. 22) -- differentiable, see module docstring
+    w_drift_global = drift_weights_torch(y, w_prev_loss)               # eq. 7
     mu = solve_mu_torch(w_drift_global, w_target_global, c_sell, c_buy, k=mu_iters)
 
     reward = torch.log(torch.clamp(mu * growth, min=1e-12))  # loss-stability clamp before log

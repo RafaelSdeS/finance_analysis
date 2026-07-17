@@ -56,7 +56,8 @@ def _build_model(cfg: ExperimentConfig, device: str = "cpu") -> EIIECNN:
 def _short_train_run(cfg: ExperimentConfig, panel: PricePanel, t0: int, n_steps: int, device: str):
     seed_everything(cfg.train.seed)
     model = _build_model(cfg, device)
-    pvm = PortfolioVectorMemory(len(panel.dates), panel.n_global, device=device)
+    pvm = PortfolioVectorMemory(len(panel.dates), panel.n_global, slot_gidx=panel.slot_gidx,
+                                valid=panel.valid, device=device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.l2)
     losses = []
     for i in range(n_steps):

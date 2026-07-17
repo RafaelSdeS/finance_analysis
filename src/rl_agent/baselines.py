@@ -47,23 +47,27 @@ def ucrp_weight_fn(t, w_prev, w_drift, panel):
     return w
 
 
-def ubah_weight_fn(t, w_prev, w_drift, panel):
+def make_ubah_weight_fn(start_idx: int):
     """Uniform Buy And Hold: the same uniform allocation as UCRP, bought
     exactly once at the start of the backtest, then never rebalanced again
     -- weights simply drift with prices thereafter (matching real-world
     buy-and-hold: a name doesn't get sold just because it later drops out
-    of the top-50)."""
-    if t == panel.start_idx:
-        return ucrp_weight_fn(t, w_prev, w_drift, panel)
-    return w_drift
+    of the top-50). start_idx must be the BACKTEST's first day, not
+    panel.start_idx -- checking the latter meant the buy never fired on
+    eval splits and UBAH sat 100% in cash."""
+    def fn(t, w_prev, w_drift, panel):
+        if t == start_idx:
+            return ucrp_weight_fn(t, w_prev, w_drift, panel)
+        return w_drift
+    return fn
 
 
-def make_random_portfolio_weight_fn(seed: int):
+def make_random_portfolio_weight_fn(seed: int, start_idx: int):
     """A single Dirichlet-drawn allocation (over cash + today's active
     assets), bought once and held -- a static baseline, distinct from
     random_rebalancing's daily churn."""
     def fn(t, w_prev, w_drift, panel):
-        if t == panel.start_idx:
+        if t == start_idx:
             active = _active_gidx(t, panel)
             rng = np.random.default_rng(seed)
             draw = rng.dirichlet(np.ones(len(active) + 1))
@@ -146,9 +150,9 @@ def run_baseline(name: str, panel: PricePanel, c_sell: float, c_buy: float,
     weight_fns = {
         "constant_cash": constant_cash_weight_fn,
         "ucrp": ucrp_weight_fn,
-        "ubah": ubah_weight_fn,
+        "ubah": make_ubah_weight_fn(start_idx),
         "best_stock": make_best_stock_weight_fn(panel, start_idx, end_idx),
-        "random_portfolio": make_random_portfolio_weight_fn(seed),
+        "random_portfolio": make_random_portfolio_weight_fn(seed, start_idx),
         "random_rebalancing": make_random_rebalancing_weight_fn(seed),
     }
     if name not in weight_fns:

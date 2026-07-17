@@ -27,7 +27,7 @@
     "rolling_steps": 30,
     "grad_clip_norm": 5.0,
     "seed": 42,
-    "device": "cpu"
+    "device": "cuda"
   },
   "eval": {
     "baselines": [

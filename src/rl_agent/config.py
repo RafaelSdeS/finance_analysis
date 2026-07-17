@@ -49,7 +49,7 @@ class TrainConfig:
     rolling_steps: int = 30  # OSBL online updates per period during backtest (paper Table B.1)
     grad_clip_norm: float = 5.0
     seed: int = 42
-    device: str = "cpu"
+    device: str = "cuda"  # GPU enabled; falls back to CPU if unavailable
 
 
 @dataclass(frozen=True)

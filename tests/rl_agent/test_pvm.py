@@ -22,18 +22,35 @@ from test_utils import print_check, print_header, print_section_end  # noqa: E40
 
 
 def test_init(passed, failed):
+    # Backward compat: without slot_gidx/valid, defaults to all-cash
     n_global = 4  # cash + 3 union tickers
     pvm = PortfolioVectorMemory(T=5, n_global=n_global)
 
     row0 = pvm.read_global(torch.tensor([0]))
     ok = torch.allclose(row0, torch.tensor([[1.0, 0.0, 0.0, 0.0]]))
-    print_check("init: every row starts all-cash (eq. 5)", ok, str(row0.tolist()))
+    print_check("init (fallback): every row starts all-cash when slot_gidx not provided", ok, str(row0.tolist()))
     passed, failed = passed + ok, failed + (not ok)
 
     all_rows = pvm.read_global(torch.arange(5))
     ok = bool(torch.allclose(all_rows[:, CASH_GIDX], torch.ones(5)))
-    print_check("init: cash column is 1.0 across all rows", ok)
+    print_check("init (fallback): cash column is 1.0 across all rows", ok)
     passed, failed = passed + ok, failed + (not ok)
+
+    # Paper-faithful init: with slot_gidx/valid, uniform over cash + active slots
+    T, n_slots = 3, 2
+    slot_gidx = torch.tensor([[1, 2], [1, 2], [1, 3]])  # 3 periods, 2 slots each
+    valid = torch.tensor([[True, True], [True, True], [True, True]])
+    pvm_uniform = PortfolioVectorMemory(T=T, n_global=n_global, slot_gidx=slot_gidx, valid=valid)
+
+    # Row 0: slot_gidx=[1,2], valid=[T,T] -> uniform over cash + assets 1,2 -> 1/3 each at indices [0,1,2], 0 at index [3]
+    row0_uniform = pvm_uniform.read_global(torch.tensor([0]))
+    expected_weight = 1.0 / 3.0
+    expected_row0 = torch.tensor([[expected_weight, expected_weight, expected_weight, 0.0]])
+    ok = torch.allclose(row0_uniform, expected_row0)
+    print_check("init (uniform): paper p.14 -- uniform over cash + active slots", ok,
+                f"row={row0_uniform.tolist()}, expected={expected_row0.tolist()}")
+    passed, failed = passed + ok, failed + (not ok)
+
     return passed, failed
 
 

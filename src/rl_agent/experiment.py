@@ -122,7 +122,8 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
 
     model = EIIECNN(cfg.data.window, cfg.model.conv1_out_channels, cfg.model.conv2_out_channels,
                      len(cfg.data.features)).to(cfg.train.device)
-    pvm = PortfolioVectorMemory(len(panel.dates), panel.n_global, device=cfg.train.device)
+    pvm = PortfolioVectorMemory(len(panel.dates), panel.n_global, slot_gidx=panel.slot_gidx,
+                                valid=panel.valid, device=cfg.train.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.train.lr, weight_decay=cfg.train.l2)
 
     sanity_report = run_sanity_checks(cfg, panel, device=cfg.train.device)

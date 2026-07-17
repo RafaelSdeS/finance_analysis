@@ -43,15 +43,46 @@ def scatter_to_global_row(slot_gidx: torch.Tensor, w: torch.Tensor, n_global: in
 
 
 class PortfolioVectorMemory:
-    def __init__(self, T: int, n_global: int, device="cpu", dtype=torch.float32):
+    def __init__(self, T: int, n_global: int, slot_gidx=None, valid=None, device="cpu", dtype=torch.float32):
         """n_global: real global-space width (cash + N_union tickers, e.g.
         172). The buffer allocates one extra dummy column (index n_global)
         as a safe scatter target for padding slots (data.py's dummy
         sentinel) -- never read back, so it can never leak into the cash or
-        a real asset's weight."""
+        a real asset's weight.
+
+        Initialization (paper p.14: "uniform weights"):
+        - If slot_gidx/valid provided: each row = uniform over cash + that day's active slots.
+          Matching paper's stated behavior (uniform over investable assets).
+        - If not provided: all-cash fallback (backward compat; used by diagnose.py when
+          loading a frozen checkpoint without reconstructing the full panel).
+        """
         self.n_global = n_global
         self.buffer = torch.zeros(T, n_global + 1, dtype=dtype, device=device)
-        self.buffer[:, CASH_GIDX] = 1.0  # every row initialized all-cash (eq. 5) -- see class docstring
+
+        if slot_gidx is not None and valid is not None:
+            # Initialize each row uniform-over-active: compute count per row,
+            # allocate uniform weight, scatter into global space.
+            slot_gidx_t = torch.as_tensor(slot_gidx, dtype=torch.long, device=device)  # [T, n_slots]
+            valid_t = torch.as_tensor(valid, dtype=torch.bool, device=device)          # [T, n_slots]
+
+            # Number of active slots per row
+            n_active = valid_t.sum(dim=1, dtype=dtype)  # [T]
+            # Uniform weight = 1 / (n_active + 1)  for each asset (cash gets same)
+            uniform_weight = 1.0 / (n_active + 1)  # [T]
+
+            # Asset slots: create slot-space weights [T, n_slots]
+            # Only active slots get uniform_weight; invalid slots get 0
+            w_slots = torch.zeros(T, slot_gidx_t.shape[1], dtype=dtype, device=device)
+            for t in range(T):
+                w_slots[t, valid_t[t]] = uniform_weight[t]
+
+            # Scatter to global space via scatter_to_global_row
+            # scatter_to_global_row expects w: [T, n_slots+1] with w[:, 0] = cash
+            w_slotted = torch.cat([uniform_weight.unsqueeze(1), w_slots], dim=1)
+            self.buffer = scatter_to_global_row(slot_gidx_t, w_slotted, n_global)
+        else:
+            # Fallback: all-cash (backward compat for diagnose.py or tests)
+            self.buffer[:, CASH_GIDX] = 1.0
 
     def read_global(self, row_idx: torch.Tensor) -> torch.Tensor:
         """Full previous-period global weight vector(s), shape [..., n_global]
