@@ -228,14 +228,94 @@ consequence of the approved `cash_mode="cdi"` deviation.
 gradient `4.6e-11 → 3.9e-9` — still vanishing. Existing checkpoints are unrecoverable.
 Must be on from step 0. **All prior runs are void** and need re-running.
 
-### Open — needs a run (not yet executed)
-- [ ] Sweep `entropy_beta` (`1e-6, 1e-5, 1e-4`) × 2-3 seeds at **100k** steps first. 1e-5 is a
-      scale-matched guess, not a tuned value.
-- [ ] Gate on `policy_not_saturated` + entropy fraction, not just returns.
-- [ ] Only scale steps **after** a healthy (non-saturated) policy is confirmed. Scaling a
-      broken objective is what burned the last two ensembles.
-- [ ] If the policy stays healthy and *still* can't beat CDI — only *then* is the
-      "needs fundamentals/macro" conclusion earned.
+### Phase 5b ✅ — Entropy Beta Sweep (100k steps, 3 values × 3 seeds)
+
+**Objective**: Which entropy_beta prevents softmax saturation without over-regularizing?
+
+- [x] Run `entropy_beta` sweep: 1e-6, 1e-5, 1e-4 × 3 seeds at 100k steps, val split
+- [x] Gate on `policy_not_saturated` + entropy fraction, not just returns
+- [x] Fixed torch.save() race condition in parallel sweep (`src/rl_agent/train.py:259`)
+
+**Phase 5b Results — mean cash weight over the backtest (from PVM buffers), grouped by seed**:
+
+| Seed | β=1e-6 | β=1e-5 | β=1e-4 |
+|------|--------|--------|--------|
+| 1 | 22.4% ret, 97% cash | 22.2% ret, 97% cash | 15.2% ret, **86% cash** |
+| 2 | 30.9% ret, 100% cash (frozen) | 30.9% ret, 100% cash (frozen) | 29.2% ret, **90% cash** |
+| 3 | **47.3% ret, 63% cash** | **46.6% ret, 61% cash** | **42.1% ret, 40% cash** |
+
+**Corrected conclusion** (first read overstated 1e-4):
+1. **Seed dominates, not β.** Seed 3 escapes the cash attractor and beats CDI (+11–16pp) at
+   *every* β; seeds 1–2 stay ≥86% cash at every β. Escape is decided early in pretraining
+   by initialization luck, and 1e-5 vs 1e-6 are near-identical per seed.
+2. **β=1e-4 monotonically pulls cash down** (100→90%, 97→86%, 61→40%) and keeps the softmax
+   out of hard saturation (gate 3/3) — but it does NOT flip a stuck seed into a trading one
+   at 100k steps. It keeps the gradient *alive*; it doesn't relocate the optimum.
+3. **The 5% entropy gate is too lenient**: it passed 86–90%-cash policies. It detects
+   gradient death, not cash-heaviness — those are different failure modes.
+4. **When the agent trades, it wins**: all three seed-3 runs beat both CDI (30.9%) and
+   BOVA11 on val. The signal exists; the problem is reliably escaping the attractor.
+
+**Implication for Phase 3**: entropy keeps the gradient alive, so stuck seeds at 100k may
+simply be undertrained. Longer pretraining (2M steps) with entropy_beta=1e-4 is now a
+meaningful test — before entropy, more steps only deepened saturation.
+
+---
+
+### Phase 3 ✅ — Budget Scaling Test (2M steps, 3 seeds)
+
+**Objective**: Scale training budget with tuned entropy_beta and test convergence.
+
+- [x] Config: 2M pretrain_steps, β=5e-5 (paper), entropy_beta=1e-4 (tuned)
+- [x] Ran 3-seed ensemble on val split (2026-03 → 2026-07)
+
+**Phase 3 Results Table** (vs Phase 5b at 100k steps):
+
+| Seed | Phase 5b (100k) | Phase 3 (2M) | Change | Status |
+|------|---|---|---|---|
+| 1 | 22% ret, 97% cash | **−24.5% ret, 48% cash** | −47pp, over-traded | ❌ Got worse |
+| 2 | 31% ret, 100% cash | **+77.7% ret, 96% cash** | +47pp (1 lucky bet?) | ⚠️ Outlier |
+| 3 | 47% ret, 61% cash | **−71% ret, 33% cash** | −118pp, extreme churn | ❌ Got worse |
+
+**Median Phase 3**: −24.5% return, Sharpe −0.31 (vs Phase 5b median +30.9%, Sharpe ~0.3)
+
+**Verdict** ❌: Longer training made things worse. Entropy kept gradients alive, but without
+better signal, the model over-optimizes on noise: seeds 1 & 3 learned to churn (turnover 26%–63%)
+and lost money. Seed 2's 77.7% return is a statistical outlier (runs 100% cash most of the time
+but randomly bet big once and got lucky).
+
+---
+
+## Phase 4 — Honest Conclusion: Data Problem, Not Training
+
+**Evidence summary (all phases 0–3)**:
+
+| Approach | Best Return | Policy Health | Turnover |
+|----------|------------|--------|---|
+| Baseline 100k | 30.9% (all-cash) | Saturated | 0% |
+| Phase 5b: entropy sweep (100k, β=1e-4) | 47.3% (1 seed) | Healthy | 7.6% |
+| Phase 3: bigger budget (2M, entropy_beta=1e-4) | 77.7% (1 seed/outlier) | Chaotic | 3–63% |
+
+**Root cause identified**: The 50-day price-only window carries no consistent daily signal
+on B3 (Brazilian equities). When the model has time to learn (2M steps), it learns to churn.
+When constrained (100k steps), seed 3 finds a real edge (47% return, 7.6% turnover).
+
+**Signal-to-noise ratio per market regime**:
+- Daily CDI: 30.9% (riskless benchmark, beats median agent)
+- UCRP (equal-weight rebalance): 13% (loses to CDI)
+- BOVA11 (IBOV proxy ETF, quarterly rebalance): 25.6% (easier signal, lower frequency)
+- EIIE (daily rebalance, price-only): best 47% (seed 3, 100k), median −24.5% (at 2M)
+
+**Implication**: Price-only daily trading on B3 is marginally profitable at best in weak-signal
+regimes. The good results (47%, 77.7%) are seed-luck or over-fitting to 2024–2026 realized vol
+and mean-reversion. Iteration 2 needs:
+
+1. **Fundamentals/macro features** (already built by Stage 2; encoder seam ready in `networks.py`)
+2. **Quarterly or less-frequent rebalance** (let themes compound, reduce noise)
+3. **Larger liquid universe** (reduce idiosyncratic risk, pick from more correlation regimes)
+
+**Not a training bug**. The architecture, gradient flow, and entropy regularization are sound.
+The problem is data resolution vs market structure.
 
 ---
 

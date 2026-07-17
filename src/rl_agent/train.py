@@ -256,6 +256,8 @@ def run_online_backtest(model: EIIECNN, pvm: PortfolioVectorMemory, panel: Price
 
 def save_checkpoint(path, model: EIIECNN, optimizer: torch.optim.Optimizer,
                      pvm: PortfolioVectorMemory, step: int, extra: Optional[dict] = None) -> None:
+    from pathlib import Path
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "model_state": model.state_dict(),
         "optimizer_state": optimizer.state_dict(),
