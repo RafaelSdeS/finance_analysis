@@ -100,13 +100,25 @@
 
 **Objective**: Scale pretrain_steps and β to paper values; check if pretrain converges in-sample.
 
-- [ ] Edit `configs/eiie_baseline.json`:
+- [x] Created `configs/eiie_phase3_budget.json`:
   - `pretrain_steps`: 100000 → **2000000** (paper value)
   - `beta`: 0.0005 → **0.00005** (paper value)
-  - Save as new config or edit existing (user's call).
-- [ ] Run Phase-2 seed ensemble at new budget (5 seeds on val split; ~5 hours expected).
-- [ ] Update Phase 2 results table with new rows for Phase 3.
-- [ ] Compare: does Phase 3 median beat Phase 2? If not, proceed to Phase 4.
+- [x] Launched 5-seed sweep using `sweep.py` (4 parallel jobs, ~5 hours expected):
+  ```bash
+  python -m src.rl_agent.sweep --config configs/eiie_phase3_budget.json --seeds 1 2 3 4 5 --eval-split val -j 4
+  ```
+  Logs in `experiments/sweep_logs/{timestamp}/`; runs in `experiments/eiie_phase3_*`
+
+**Phase 3 Results Table** (to be filled when sweep completes):
+
+| Seed | Agent Return | vs CDI | vs BOVA11 | Sharpe | Median/Spread |
+|------|---|---|---|---|---|
+| 1    |     |    |    |    | |
+| 2    |     |    |    |    | |
+| 3    |     |    |    |    | |
+| 4    |     |    |    |    | |
+| 5    |     |    |    |    | |
+| **Median** | **?** | **?** | **?** | **?** | **decision gate** |
 
 **Optional ablation** (if Phase 3 results stay cash-bound):
 - [ ] Test μ-chaining on/off: revert the `w_prev_loss` hunk in `train.py:97` in a scratch branch.
