@@ -18,6 +18,7 @@ Usage:
 """
 
 import argparse
+import os
 import subprocess
 import sys
 import time
@@ -27,12 +28,52 @@ from pathlib import Path
 
 from .paths import ROOT
 
+# ponytail: rough per-process floor (python+torch+cuda-context import, before any panel
+# data) measured informally on this project; not a tight bound, just enough to stop -j
+# from blindly exceeding available RAM. Raise MEMINFO_PATH mocking in tests if reused.
+EST_RAM_PER_JOB_MB = 700
+
+
+def _available_ram_mb() -> float | None:
+    """MemAvailable from /proc/meminfo (Linux only). None if unreadable, so callers
+    degrade to "don't clamp" rather than block on an unsupported platform."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024  # kB -> MB
+    except OSError:
+        pass
+    return None
+
+
+def _clamp_jobs(requested: int, available_mb: float | None, per_job_mb: float = EST_RAM_PER_JOB_MB) -> int:
+    """Pure decision (testable without touching /proc/meminfo): don't let -j promise
+    more concurrent jobs than available RAM can plausibly hold. None (unreadable
+    /proc/meminfo, e.g. non-Linux) means "don't clamp" rather than block."""
+    if available_mb is None:
+        return requested
+    return min(requested, max(1, int(available_mb // per_job_mb)))
+
+
+def _job_env(max_parallel: int) -> dict:
+    """Divide CPU intra-op threads across concurrent jobs so N torch processes don't
+    each default to all cores and thrash each other -- the hot loop is GPU tensor ops,
+    so a job only needs a sliver of CPU for host-side dispatch and its one-time panel
+    load."""
+    threads = max(1, (os.cpu_count() or 1) // max_parallel)
+    env = dict(os.environ)
+    env["OMP_NUM_THREADS"] = str(threads)
+    env["MKL_NUM_THREADS"] = str(threads)
+    return env
+
 
 def run_jobs(jobs: list, max_parallel: int, log_dir: Path, poll_s: float = 2.0) -> list:
     """jobs: [(label, cmd_list)]. Runs at most max_parallel at once, each with
     stdout+stderr redirected to log_dir/{label}.log. Returns labels that
     exited nonzero. Ctrl-C terminates every child before re-raising."""
     log_dir.mkdir(parents=True, exist_ok=True)
+    job_env = _job_env(max_parallel)
     queue = deque(jobs)
     running, failures = {}, []
     try:
@@ -41,7 +82,7 @@ def run_jobs(jobs: list, max_parallel: int, log_dir: Path, poll_s: float = 2.0) 
                 label, cmd = queue.popleft()
                 log_path = log_dir / f"{label}.log"
                 log_f = open(log_path, "w")
-                proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, cwd=ROOT)
+                proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, cwd=ROOT, env=job_env)
                 print(f"[sweep] started {label} (pid {proc.pid}) -> {log_path}", flush=True)
                 running[proc] = (label, log_path, log_f)
             time.sleep(poll_s)
@@ -71,6 +112,13 @@ def main():
     # ponytail: 4 fits a small GPU (~0.5 GB/job); raise if nvidia-smi shows headroom
     parser.add_argument("-j", "--jobs", type=int, default=4, help="max parallel runs (default 4)")
     args = parser.parse_args()
+
+    available_mb = _available_ram_mb()
+    clamped = _clamp_jobs(args.jobs, available_mb)
+    if clamped < args.jobs:
+        print(f"[sweep] WARNING: -j {args.jobs} requested but only {available_mb:.0f} MB RAM "
+              f"available (~{EST_RAM_PER_JOB_MB} MB/job est.) -- clamping to -j {clamped}", flush=True)
+        args.jobs = clamped
 
     jobs = []
     for cfg_path in args.config:
