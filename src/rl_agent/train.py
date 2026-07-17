@@ -25,6 +25,7 @@ from typing import Optional
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from .config import ExperimentConfig
 from .data import CASH_GIDX, PricePanel
@@ -99,16 +100,22 @@ def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     each of n_b consecutive periods, sampled with eq. 26's recency bias
     relative to train_end_idx. Returns the per-step loss history (the
     "training reward curve" is -loss)."""
-    min_t = panel.window - 1
+    # panel.start_idx, not panel.window - 1: sampling must stay inside the
+    # 2011-2026 experiment window, where every period is guaranteed exactly
+    # n_slots active members (docs/EIIE_AGENT_PLAN.md) -- pre-window periods
+    # have fewer members and isolated data-quality zero-price rows.
+    min_t = panel.start_idx
     rng = np.random.default_rng(cfg.train.seed)
     losses = []
-    for _ in range(cfg.train.pretrain_steps):
+    pbar = tqdm(range(cfg.train.pretrain_steps), desc="pretrain", unit="step")
+    for _ in pbar:
         t_b = int(sample_batch_starts(train_end_idx, cfg.train.batch_size, cfg.train.beta, 1, min_t, rng)[0])
         t_idx = np.arange(t_b, t_b + cfg.train.batch_size)
         loss = train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
                            cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
                            cfg.train.grad_clip_norm, device)
         losses.append(loss)
+        pbar.set_postfix(loss=f"{loss:.6f}")
     return losses
 
 
@@ -150,22 +157,30 @@ def run_online_backtest(model: EIIECNN, pvm: PortfolioVectorMemory, panel: Price
     baseline."""
     start_idx = panel.start_idx if start_idx is None else start_idx
     end_idx = panel.end_idx if end_idx is None else end_idx
-    min_t = panel.window - 1
+    min_t = panel.start_idx  # see pretrain()'s comment: stay inside the guaranteed-50-members window
     rng = np.random.default_rng(cfg.train.seed)
 
     def agent_weight_fn(t, w_prev_np, w_drift_np, panel):
         return agent_forward(model, pvm, panel, t, cfg.data.features, device)
 
+    pbar = tqdm(total=end_idx - start_idx + 1, desc="online backtest", unit="day")
+
     def after_step(t):
+        loss = None
         for _ in range(cfg.train.rolling_steps):
             t_b = int(sample_batch_starts(t, cfg.train.batch_size, cfg.train.beta, 1, min_t, rng)[0])
             t_idx = np.arange(t_b, t_b + cfg.train.batch_size)
-            train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
+            loss = train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
                        cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
                        cfg.train.grad_clip_norm, device)
+        pbar.update(1)
+        if loss is not None:
+            pbar.set_postfix(date=str(panel.dates[t].date()), loss=f"{loss:.6f}")
 
-    return run_backtest(panel, agent_weight_fn, cfg.costs.c_sell, cfg.costs.c_buy,
-                         start_idx, end_idx, cfg.costs.backtest_mu_tol, on_step=after_step)
+    result = run_backtest(panel, agent_weight_fn, cfg.costs.c_sell, cfg.costs.c_buy,
+                           start_idx, end_idx, cfg.costs.backtest_mu_tol, on_step=after_step)
+    pbar.close()
+    return result
 
 
 def save_checkpoint(path, model: EIIECNN, optimizer: torch.optim.Optimizer,
