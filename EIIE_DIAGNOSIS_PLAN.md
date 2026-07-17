@@ -126,16 +126,34 @@
 
 ---
 
-### Phase 4 — Honest conclusion gate (no code)
+### Phase 3b — Intermediate test (500k steps, 2 seeds)
+
+**Hypothesis test**: Does budget scaling (5× current) help, or is 100k steps already sufficient?
+
+- [x] Created `configs/eiie_phase3_intermediate.json` (500k steps, β=5e-5, same else)
+- [x] Launched 2-seed sweep (seeds 1, 2, -j 2 parallel)
+- ⏳ Running now (~1-2 hours expected); logs in `experiments/sweep_logs/`
+
+**Why not jump to 2M?** 100k already showed -15.3% vs CDI. Need evidence that more training helps before committing ~5 hours to full budget.
+
+---
+
+### Phase 4 — Honest conclusion gate (pending Phase 3b results)
 
 **Definition of success** (set before looking at results):
 - Beat **both CDI (30.9%)** AND **BOVA11 (25.6%)** on **val split** with **bootstrap CI** across the seed ensemble (not one lucky seed).
 
-- [ ] Examine Phase 3 results (Sharpe, return CI, median cash weight).
-- [ ] If in-sample edge exists but val stays flat: the 50-day price window carries no exploitable daily signal on B3 (consistent with the high CDI regime). Document this in this plan.
-  - **Next lever**: iteration 2's scope is the *feature set* (fundamentals/macro already built by Stage 2; `networks.py` already reserves the encoder seam).
-  - This is a scope decision for the user, not an optimization trick.
-- [ ] If Phase 3 still underperforms after ablations: mark as "requires feature engineering or market-regime rethinking" and close Phase 0–3.
+**Current evidence**:
+
+| Metric | Finding |
+|--------|---------|
+| **Phase 0** | Baseline (100k steps): All 3 runs lost to CDI. Run 231801 worst (-15.1% vs CDI). |
+| **Phase 1 fix** | PVM uniform init (paper p.14): Reduced volatility slightly but agent still lost. |
+| **Phase 2 (1 seed)** | Seed=3, Phase-1 code: 15.61% return, Sharpe -0.48, vs CDI -15.3%, vs BOVA11 -10.0%. |
+
+**Decision pending**: Phase 3b (500k steps) will determine:
+- If Phase 3b median > 25.6% (BOVA11): scaling helps → commit to full 2M
+- If Phase 3b median < 15%: scaling doesn't help enough → conclude data/feature problem, not training
 
 ---
 
