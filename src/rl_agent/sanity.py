@@ -64,8 +64,38 @@ def _short_train_run(cfg: ExperimentConfig, panel: PricePanel, t0: int, n_steps:
         t_idx = np.arange(t0 + i, t0 + i + cfg.train.batch_size)
         losses.append(train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
                                   cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
-                                  cfg.train.grad_clip_norm, device))
+                                  cfg.train.grad_clip_norm, device, cfg.train.entropy_beta))
     return losses, model, pvm, optimizer
+
+
+def check_policy_not_saturated(model: EIIECNN, panel: PricePanel, cfg: ExperimentConfig,
+                                t: int, device: str = "cpu", min_entropy_frac: float = 0.05) -> tuple:
+    """POST-training gate: has the softmax collapsed onto one asset (in practice,
+    cash) so hard that its gradient has vanished?
+
+    This is the failure that silently burned two full seed ensembles: asset scores
+    ran to -20/-32 vs a +0.06 cash bias, softmax output 1e-9 per asset, and
+    d(softmax)/d(score) went to ~0 -- the net could no longer learn its way back
+    out, and MORE training made it worse, not better. The pre-training gate can't
+    see this: at init the policy is healthy; the collapse happens during training.
+
+    Reports entropy as a fraction of uniform-over-active (1.0 = perfectly uniform,
+    0.0 = a point mass). Returns (ok, message)."""
+    with torch.no_grad():
+        X = torch.tensor(panel.window_tensor(t, cfg.data.features)[None], dtype=torch.float32, device=device)
+        mask = torch.tensor(panel.valid[t][None], device=device)
+        w_prev = torch.full((1, cfg.model.n_assets), 1.0 / (int(panel.valid[t].sum()) + 1), device=device)
+        w = model(X, w_prev, mask)[0].cpu().numpy()
+
+    n_active = int(panel.valid[t].sum())
+    ent = float(-(w * np.log(np.clip(w, 1e-12, None))).sum())
+    ent_frac = ent / np.log(n_active + 1)  # normalize by uniform-over-(cash+active)
+    ok = bool(ent_frac >= min_entropy_frac)  # bool(): np.bool_ isn't JSON-serializable for the checklist
+    return ok, (f"policy entropy={ent:.4f} ({ent_frac:.1%} of uniform), "
+                f"cash={w[0]:.4f}, max_asset={w[1:].max():.3e}, "
+                f"threshold={min_entropy_frac:.0%}"
+                + ("" if ok else " -- POLICY COLLAPSED: softmax saturated, gradients vanished; "
+                                  "raise train.entropy_beta"))
 
 
 def run_sanity_checks(cfg: ExperimentConfig, panel: PricePanel, device: str = "cpu",

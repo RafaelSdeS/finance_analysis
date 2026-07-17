@@ -35,7 +35,7 @@ from .networks import EIIECNN
 from .paths import ROOT
 from .plots import write_report
 from .pvm import PortfolioVectorMemory
-from .sanity import run_sanity_checks, seed_everything
+from .sanity import check_policy_not_saturated, run_sanity_checks, seed_everything
 from .train import pretrain, run_online_backtest, save_checkpoint
 
 
@@ -103,6 +103,7 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
         "config_saved": True, "seed_logged": True, "dataset_version_logged": False,
         "model_version_logged": False, "metrics_generated": False,
         "baseline_comparison_generated": False, "visualizations_generated": False,
+        "policy_not_saturated": False,
     }
 
     dataset_info = _dataset_fingerprint()
@@ -152,6 +153,15 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
     train_losses = pretrain(train_model, pvm, panel, optimizer, cfg, train_end_idx=pretrain_end_idx,
                              device=cfg.train.device)
     checklist["no_numerical_instability"] = bool(np.all(np.isfinite(train_losses)))
+
+    # Post-pretrain: did the policy collapse into a saturated (gradient-dead) corner?
+    # Loud, because a collapsed policy makes every downstream number meaningless -- the
+    # backtest still "runs", it just reports the frozen all-cash portfolio as if it were
+    # a decision. Not fatal: the report is still written so the failure is inspectable.
+    pol_ok, pol_msg = check_policy_not_saturated(model, panel, cfg, pretrain_end_idx + 1,
+                                                  device=cfg.train.device)
+    checklist["policy_not_saturated"] = pol_ok
+    print(f"[{'OK  ' if pol_ok else 'WARN'}] policy_not_saturated -- {pol_msg}")
 
     agent_result = run_online_backtest(train_model, pvm, panel, optimizer, cfg,
                                         start_idx=backtest_start_idx, end_idx=backtest_end_idx,

@@ -48,6 +48,23 @@ class TrainConfig:
     beta: float = 5e-4  # geometric sample-bias; retuned for daily (paper: 5e-5 over ~30k half-hour periods)
     rolling_steps: int = 30  # OSBL online updates per period during backtest (paper Table B.1)
     grad_clip_norm: float = 5.0
+    entropy_beta: float = 1e-5  # entropy bonus on the policy output. NOT in the paper: their
+    # cash asset returns 0%, so cash can never dominate and the softmax never collapses onto
+    # it. Ours accrues CDI (~8.65%/yr in log-space vs equal-weight's 8.22%), so the gradient
+    # pushes every asset score down with no restoring force -- measured: scores ran to -20/-32
+    # vs cash_bias +0.06, softmax saturated to ~1e-9, gradient vanished, agent frozen all-cash
+    # and unrecoverable. This term is that restoring force. Set 0.0 to reproduce that failure.
+    #
+    # PREVENTIVE, NOT CURATIVE: measured at an already-collapsed checkpoint, this only lifts
+    # the gradient norm 4.6e-11 -> 3.9e-9 (still vanishing). It has to be on from step 0; it
+    # cannot rescue a saturated net. Old checkpoints are dead, not fixable.
+    #
+    # SCALE: the reward term is ~5e-4/day (mean log return) and entropy is ~ln(51)=3.9, so
+    # the bonus is beta*3.9. At 1e-3 that is 8x the reward and the optimizer just maximizes
+    # entropy -> uniform portfolio -> that IS UCRP (8.22%/yr), worse than cash. 1e-5 keeps it
+    # at ~8% of the reward: enough to hold the softmax in its responsive range, not enough to
+    # dictate the allocation. This is a scale-matched starting point, NOT a tuned value --
+    # sweep it (src/rl_agent/sweep.py) before trusting any result that depends on it.
     seed: int = 42
     device: str = "cuda"  # GPU enabled; falls back to CPU if unavailable
     compile: bool = False  # S3 (TRAINING_SPEEDUP_PLAN.md): torch.compile the training

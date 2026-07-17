@@ -146,7 +146,16 @@ Agent learned: "Just hold CDI, ignore price data."
 
 ---
 
-### Phase 4 ✅ — Conclusion Gate (VERDICT FINAL)
+### ⚠️ PHASE 4 BELOW IS RETRACTED — see Phase 5. Kept for the record.
+
+The "cash is rational, it's a data problem" verdict was **wrong**, reached by
+reasoning about market regimes instead of opening the checkpoint. The tell was
+already in the Phase 3b table and I read past it: two seeds returning *identical*
+numbers to 4 decimals is not a strategy, it's an absorbing state.
+
+---
+
+### Phase 4 ❌ RETRACTED — Conclusion Gate (VERDICT WAS WRONG)
 
 **Definition of success** (set before looking at results):
 - Beat **both CDI (30.9%)** AND **BOVA11 (25.6%)** on **val split** with **bootstrap CI** across the seed ensemble (not one lucky seed).
@@ -174,6 +183,59 @@ Agent learned: "Just hold CDI, ignore price data."
 - **Lever 3**: Conditional universe (not static top-50)
 
 **Recommendation**: Price-only iteration complete. Approved architecture + training + fixes are sound. Problem is data, not code.
+
+---
+
+## Phase 5 ✅ — The actual root cause: softmax saturation (gradient death)
+
+Opened the Phase 3b checkpoint instead of theorizing. Measured, not inferred:
+
+| Probe | Measurement |
+|---|---|
+| Backtest weights | cash `1.000000` every day, turnover `1.1e-08` |
+| Asset scores vs cash_bias | assets `-20`..`-32`, cash `+0.064` → **cash wins by ~21 logits** |
+| Softmax output per asset | `~7e-10` (saturated) |
+| `conv3` w_prev-channel weight | `-3.6e-06` → **PVM input is functionally disconnected** |
+| Output vs 3 different `w_prev` | **byte-identical** (`4.617414e-09`) |
+| Gradient norm at collapse | `4.6e-11` — **dead** |
+| Valid mask in backtest | 50/50 every day — *not* a masking bug |
+
+**Mechanism**: cash's log-return (8.65%/yr) marginally beats equal-weight (8.22%),
+so the gradient nudges asset scores down. Nothing bounds them. They run to −30, the
+softmax saturates, `∂softmax/∂score → 0`, and the net freezes. **More training makes
+it worse** — which is exactly the 100k (−15.3%) → 500k (frozen all-cash) progression,
+and why both seeds landed on the same number: an absorbing state has no seed variance left.
+
+**Cash is NOT optimal** — 26 of 69 assets beat it in log-space; the best returns 36.98%/yr.
+The agent isn't choosing cash, it's *stuck* at cash.
+
+**Why the paper never hits this**: their cash asset returns **0%**, so cash can never
+dominate and the softmax never collapses onto it. Ours accrues CDI. This is a direct
+consequence of the approved `cash_mode="cdi"` deviation.
+
+### Fix (training-side only; costs/eval/data/CDI untouched)
+- [x] `config.py`: `train.entropy_beta` (default `1e-5`, scale-matched to the ~5e-4 reward —
+      `1e-3` would make entropy 8× the reward and collapse to uniform/UCRP instead)
+- [x] `train.py`: entropy bonus in `train_step`'s loss; threaded through `pretrain` +
+      `run_online_backtest`
+- [x] `sanity.py`: `check_policy_not_saturated()` — POST-pretrain gate (the pre-training
+      gate structurally cannot catch this: the policy is healthy at init and dies during
+      training). Verified: flags the collapsed run (0% entropy), passes a fresh net (100%).
+- [x] `experiment.py`: gate wired into the run + checklist
+- [x] 36/36 fast tests pass, ruff clean
+
+**PREVENTIVE, NOT CURATIVE**: at the collapsed checkpoint `entropy_beta=1e-3` only lifts the
+gradient `4.6e-11 → 3.9e-9` — still vanishing. Existing checkpoints are unrecoverable.
+Must be on from step 0. **All prior runs are void** and need re-running.
+
+### Open — needs a run (not yet executed)
+- [ ] Sweep `entropy_beta` (`1e-6, 1e-5, 1e-4`) × 2-3 seeds at **100k** steps first. 1e-5 is a
+      scale-matched guess, not a tuned value.
+- [ ] Gate on `policy_not_saturated` + entropy fraction, not just returns.
+- [ ] Only scale steps **after** a healthy (non-saturated) policy is confirmed. Scaling a
+      broken objective is what burned the last two ensembles.
+- [ ] If the policy stays healthy and *still* can't beat CDI — only *then* is the
+      "needs fundamentals/macro" conclusion earned.
 
 ---
 

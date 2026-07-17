@@ -117,7 +117,7 @@ def _batch_tensors(panel: PricePanel, t_idx: np.ndarray, features, device):
 def train_step(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
                optimizer: torch.optim.Optimizer, t_idx: np.ndarray, features,
                c_sell: float, c_buy: float, mu_iters: int, grad_clip_norm: float,
-               device: str = "cpu") -> float:
+               device: str = "cpu", entropy_beta: float = 0.0) -> float:
     """One OSBL gradient step over a batch of CONSECUTIVE period indices
     (contiguity is load-bearing: the loss chains each period's w_{t-1} to the
     previous row's output -- see module docstring)."""
@@ -144,6 +144,14 @@ def train_step(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
 
     reward = torch.log(torch.clamp(mu * growth, min=1e-12))  # loss-stability clamp before log
     loss = -reward.mean()
+
+    if entropy_beta:
+        # Restoring force against softmax saturation (see config.TrainConfig.entropy_beta).
+        # Computed over the ACTIVE slots + cash only: masked slots are exactly 0 and would
+        # contribute 0*log(0) -> the clamp makes that 0 anyway, but they also don't belong
+        # in the target distribution the bonus pushes toward.
+        entropy = -(w * torch.log(w.clamp_min(1e-12))).sum(dim=1).mean()
+        loss = loss - entropy_beta * entropy
 
     optimizer.zero_grad()
     loss.backward()
@@ -174,7 +182,7 @@ def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
         t_idx = np.arange(t_b, t_b + cfg.train.batch_size)
         loss = train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
                            cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
-                           cfg.train.grad_clip_norm, device)
+                           cfg.train.grad_clip_norm, device, cfg.train.entropy_beta)
         losses.append(loss)
         if step % 100 == 0 or step == cfg.train.pretrain_steps - 1:
             pbar.set_postfix(loss=f"{loss:.6f}")
@@ -235,7 +243,7 @@ def run_online_backtest(model: EIIECNN, pvm: PortfolioVectorMemory, panel: Price
             t_idx = np.arange(t_b, t_b + cfg.train.batch_size)
             loss = train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
                        cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
-                       cfg.train.grad_clip_norm, device)
+                       cfg.train.grad_clip_norm, device, cfg.train.entropy_beta)
         pbar.update(1)
         if loss is not None:
             pbar.set_postfix(date=str(panel.dates[t].date()), loss=f"{loss:.6f}")
