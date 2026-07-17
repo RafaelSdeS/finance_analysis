@@ -195,7 +195,13 @@ class PricePanel:
         for f, name in enumerate(features):
             channel = self._channel(name)
             hist = channel[lo:t + 1, gidx].T        # (n_slots, window)
-            v_t = channel[t, gidx][:, None]          # (n_slots, 1)
+            # Masked slots' gidx can point at a real ticker's pre-listing/
+            # padding-period rows (see _build_slot_calendar), which are
+            # occasionally a genuine 0.0 far outside the experiment window
+            # (e.g. some 2000-era prices) -- swap in a safe 1.0 divisor
+            # before dividing rather than dividing then discarding, so a
+            # masked slot never triggers a spurious div-by-zero warning.
+            v_t = np.where(mask, channel[t, gidx], 1.0)[:, None]  # (n_slots, 1)
             out[f] = np.where(mask[:, None], hist / v_t, 1.0)
         return out
 
