@@ -64,7 +64,7 @@ def _short_train_run(cfg: ExperimentConfig, panel: PricePanel, t0: int, n_steps:
         t_idx = np.arange(t0 + i, t0 + i + cfg.train.batch_size)
         losses.append(train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
                                   cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
-                                  cfg.train.grad_clip_norm, device, cfg.train.entropy_beta))
+                                  cfg.train.grad_clip_norm, device, cfg.train.entropy_beta_end))
     return losses, model, pvm, optimizer
 
 

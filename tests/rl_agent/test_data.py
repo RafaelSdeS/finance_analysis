@@ -260,6 +260,61 @@ def test_window_tensor_padding_slot(passed, failed):
     return passed, failed
 
 
+def _toy_panel_with_extra(window=3):
+    """Like _toy_panel, but with an `extra` technical-feature channel carrying a
+    warm-up NaN (BBB, day 0) -- exercises the passthrough/nan_to_num path that
+    "self"-normalized close/high/low never touch."""
+    tickers = ("AAA", "BBB")
+    asset_index = GlobalAssetIndex(tickers=tickers, ticker_to_gidx={"AAA": 1, "BBB": 2})
+    dates = pd.bdate_range("2020-01-01", periods=6)
+    close = np.array([
+        [1.0, 10.0, 20.0], [1.0, 11.0, 22.0], [1.0, 12.0, 24.0],
+        [1.0, 13.0, 26.0], [1.0, 14.0, 28.0], [1.0, 15.0, 30.0],
+    ])
+    cdi_factor = np.full(6, 1.0004)
+    slot_gidx = np.array([[1, 2]] * 5 + [[1, 2]])
+    valid = np.array([[True, True]] * 5 + [[True, False]])  # last day: BBB masked
+    drawdown = np.zeros((6, 4))
+    drawdown[:, 1] = [-0.5, -0.4, -0.3, -0.2, -0.1, 0.0]                    # AAA, no NaN
+    drawdown[:, 2] = [np.nan, -0.1, -0.1, -0.1, -0.1, -0.1]                 # BBB, day-0 warm-up NaN
+    return PricePanel(
+        asset_index=asset_index, dates=dates, close=close, high=close.copy(), low=close.copy(),
+        cdi_factor=cdi_factor, slot_gidx=slot_gidx, valid=valid,
+        window=window, start_idx=0, end_idx=5,
+        extra={"drawdown": drawdown},
+    )
+
+
+def test_window_tensor_extra_feature(passed, failed):
+    panel = _toy_panel_with_extra(window=3)
+
+    X = panel.window_tensor(2, features=("drawdown",))
+    ok = np.allclose(X[0, 0], [-0.5, -0.4, -0.3])
+    print_check("window_tensor: passthrough feature (norm=1.0) is NOT rescaled by its value-at-t",
+                ok, f"got {X[0, 0]}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = np.allclose(X[0, 1], [0.0, -0.1, -0.1])
+    print_check("window_tensor: warm-up NaN on an active (unmasked) slot lands at 0.0, not leaked/propagated",
+                ok, f"got {X[0, 1]}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    X_last = panel.window_tensor(5, features=("drawdown",))
+    ok = np.allclose(X_last[0, 1], 0.0)
+    print_check("window_tensor: masked passthrough slot is flat-filled to 0.0 (neutral), not 1.0",
+                ok, f"got {X_last[0, 1]}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    t_idx = np.array([2, 3, 4, 5])
+    X_batch = panel.window_tensor_batch(t_idx, features=("close", "drawdown"))
+    X_loop = np.stack([panel.window_tensor(t, features=("close", "drawdown")) for t in t_idx])
+    ok = np.array_equal(X_batch, X_loop)
+    print_check("window_tensor_batch: bit-exact match with per-t loop for a mixed self+passthrough feature set",
+                ok)
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
 def test_batch_vectorized_matches_loop(passed, failed):
     """window_tensor_batch/price_relative_batch (vectorized OSBL hot-path
     helpers) must be bit-exact against stacking the single-t methods."""
@@ -296,6 +351,102 @@ def test_batch_vectorized_matches_loop(passed, failed):
     return passed, failed
 
 
+def test_log1p_squash(passed, failed):
+    """log1p norm: sign-preserving log squash for extreme-tailed features."""
+    panel = _toy_panel(window=2)
+    # Inject extreme values into the extra dict and register them in FEATURE_NORM.
+    # The extra arrays match close shape: (T, n_global+1) = (6, 3) for cash + 2 assets + padding.
+    huge_pos, huge_neg = 18000.0, -18000.0
+    expected_pos = np.sign(huge_pos) * np.log1p(abs(huge_pos))
+    expected_neg = np.sign(huge_neg) * np.log1p(abs(huge_neg))
+
+    # shape: (6 days, 3 cols: cash + AAA + BBB + padding)
+    panel.extra["test_log1p"] = np.ones((6, 3)) * 1.0
+    panel.extra["test_log1p"][1, 2] = huge_pos  # day 1, BBB (col 2), positive extreme
+    panel.extra["test_log1p"][2, 2] = huge_neg  # day 2, BBB (col 2), negative extreme
+    panel.extra["test_log1p"][3, 2] = 0.5       # day 3, BBB (col 2), near-zero
+
+    from src.rl_agent.data import FEATURE_NORM
+    old_norm = FEATURE_NORM.get("test_log1p")
+    FEATURE_NORM["test_log1p"] = "log1p"
+    try:
+        # t=2, window=2: gathers rows [1,2], so BBB col gets [huge_pos, huge_neg]
+        X = panel.window_tensor(2, features=("test_log1p",))
+        # X shape: (1 feature, 2 slots, 2 window), X[0, 1] is slot 1 (BBB), X[0,1,1] is the window's last element (day 2 = huge_neg)
+        ok = np.isclose(X[0, 1, 1], expected_neg)
+        print_check("window_tensor: log1p squash maps -18000 to ~-9.8", ok,
+                    f"got {X[0, 1, 1]:.1f}")
+        passed, failed = passed + ok, failed + (not ok)
+
+        # Window at t=3: gathers rows [2,3], BBB gets [huge_neg, 0.5]
+        X3 = panel.window_tensor(3, features=("test_log1p",))
+        ok = np.isclose(X3[0, 1, 1], np.sign(0.5) * np.log1p(abs(0.5)))
+        print_check("window_tensor: log1p squash is identity-like near 0", ok,
+                    f"got {X3[0, 1, 1]:.3f}")
+        passed, failed = passed + ok, failed + (not ok)
+
+        # Window at t=1: gathers rows [0,1], BBB gets [1.0, huge_pos]
+        X1 = panel.window_tensor(1, features=("test_log1p",))
+        ok = np.isclose(X1[0, 1, 1], expected_pos)
+        print_check("window_tensor: log1p squash maps 18000 to ~9.8 (sign preserved)", ok,
+                    f"got {X1[0, 1, 1]:.1f}")
+        passed, failed = passed + ok, failed + (not ok)
+    finally:
+        if old_norm is not None:
+            FEATURE_NORM["test_log1p"] = old_norm
+        else:
+            del FEATURE_NORM["test_log1p"]
+    return passed, failed
+
+
+def test_isnan_mask_derivation(passed, failed):
+    """_isnan mask channels: 1.0 where base was NaN, 0.0 where data exists."""
+    panel = _toy_panel(window=2)
+    # Create a base feature and its derived _isnan mask, shape (6, 3) to match panel size.
+    panel.extra["test_base"] = np.array([
+        [1.0, 1.0, 1.0],
+        [1.0, 1.0, np.nan],
+        [1.0, 1.0, 2.0],
+        [1.0, 1.0, np.nan],
+        [1.0, 1.0, 3.0],
+        [1.0, 1.0, 4.0],
+    ])
+    panel.extra["test_base_isnan"] = np.isnan(panel.extra["test_base"]).astype(np.float64)
+
+    from src.rl_agent.data import FEATURE_NORM
+    old_base = FEATURE_NORM.get("test_base")
+    old_mask = FEATURE_NORM.get("test_base_isnan")
+    FEATURE_NORM["test_base"] = 1.0
+    FEATURE_NORM["test_base_isnan"] = 1.0
+    try:
+        # t=2, window=2: gathers rows [1,2]; AAA (col 1) has [1.0, 1.0], BBB (col 2) has [NaN, 2.0]
+        X_mask = panel.window_tensor(2, features=("test_base_isnan",))
+        # Slot 0 (AAA) should be 0.0 where data exists
+        ok = X_mask[0, 0, 1] == 0.0  # AAA, t=2 (last window element): base was 1.0, not NaN
+        print_check("window_tensor: _isnan mask is 0.0 where base data exists", ok)
+        passed, failed = passed + ok, failed + (not ok)
+
+        # Slot 1 (BBB) at row 1 (first window element) was NaN
+        ok = X_mask[0, 1, 0] == 1.0  # BBB, window's first element: base was NaN
+        print_check("window_tensor: _isnan mask is 1.0 where base was NaN", ok)
+        passed, failed = passed + ok, failed + (not ok)
+
+        # The mask itself must never contain NaN.
+        ok = np.isfinite(X_mask).all()
+        print_check("window_tensor: _isnan mask is always finite", ok)
+        passed, failed = passed + ok, failed + (not ok)
+    finally:
+        if old_base is not None:
+            FEATURE_NORM["test_base"] = old_base
+        else:
+            del FEATURE_NORM["test_base"]
+        if old_mask is not None:
+            FEATURE_NORM["test_base_isnan"] = old_mask
+        else:
+            del FEATURE_NORM["test_base_isnan"]
+    return passed, failed
+
+
 def main():
     print_header("test_data")
     passed = failed = 0
@@ -306,7 +457,10 @@ def main():
     passed, failed = test_price_relative(passed, failed)
     passed, failed = test_window_tensor(passed, failed)
     passed, failed = test_window_tensor_padding_slot(passed, failed)
+    passed, failed = test_window_tensor_extra_feature(passed, failed)
     passed, failed = test_batch_vectorized_matches_loop(passed, failed)
+    passed, failed = test_log1p_squash(passed, failed)
+    passed, failed = test_isnan_mask_derivation(passed, failed)
 
     print_section_end(passed, failed)
     sys.exit(1 if failed else 0)

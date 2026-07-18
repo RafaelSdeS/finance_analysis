@@ -30,7 +30,11 @@
     "beta": 5e-05,
     "rolling_steps": 30,
     "grad_clip_norm": 5.0,
-    "entropy_beta": 0.0001,
+    "entropy_beta_start": 0.0001,
+    "entropy_beta_end": 0.00001,
+    "entropy_anneal_frac": 0.1,
+    "checkpoint_holdout_days": 250,
+    "checkpoint_eval_every": 5000,
     "seed": 42,
     "device": "cuda",
     "compile": false

@@ -30,6 +30,7 @@ Two pairings here are load-bearing, both bugs that shipped once:
   position and the agent flip-flops single-name bets every few days.
 """
 
+import copy
 from typing import Optional
 
 import numpy as np
@@ -39,6 +40,7 @@ from tqdm import tqdm
 from .config import ExperimentConfig
 from .data import CASH_GIDX, PricePanel
 from .environment import drift_weights_torch, run_backtest, solve_mu_torch, BacktestResult
+from .metrics import total_return
 from .networks import EIIECNN
 from .pvm import PortfolioVectorMemory, scatter_to_global_row
 
@@ -162,31 +164,91 @@ def train_step(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     return float(loss.item())
 
 
+def entropy_schedule(step: int, total_steps: int, start: float, end: float, anneal_frac: float) -> float:
+    """Linear decay start -> end over the first anneal_frac*total_steps steps,
+    flat at end after. anneal_frac<=0 or total_steps<=0 means "flat at end"
+    (also start==end reproduces the old constant-beta behavior exactly)."""
+    anneal_steps = anneal_frac * total_steps
+    if anneal_steps <= 0:
+        return end
+    frac = min(1.0, step / anneal_steps)
+    return start + (end - start) * frac
+
+
+def _score_holdout(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
+                    cfg: ExperimentConfig, fit_end_idx: int, holdout_end_idx: int, device: str) -> float:
+    """Frozen-weights, forward-only backtest over (fit_end_idx, holdout_end_idx]
+    -- the tail of the TRAIN split carved out for checkpoint selection (never
+    val/test). Reuses agent_forward (no gradient) so this is exactly the same
+    inference path run_online_backtest uses, just scored instead of trained on."""
+    def weight_fn(t, w_prev_np, w_drift_np, panel):
+        return agent_forward(model, pvm, panel, t, cfg.data.features, device)
+
+    result = run_backtest(panel, weight_fn, cfg.costs.c_sell, cfg.costs.c_buy,
+                           fit_end_idx + 1, holdout_end_idx, cfg.costs.backtest_mu_tol)
+    return total_return(result)
+
+
 def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
              optimizer: torch.optim.Optimizer, cfg: ExperimentConfig,
-             train_end_idx: int, device: str = "cpu") -> list:
+             train_end_idx: int, device: str = "cpu") -> tuple:
     """OSBL pretraining over the train split: `pretrain_steps` mini-batches,
-    each of n_b consecutive periods, sampled with eq. 26's recency bias
-    relative to train_end_idx. Returns the per-step loss history (the
-    "training reward curve" is -loss)."""
+    each of n_b consecutive periods, sampled with eq. 26's recency bias.
+    entropy_beta anneals from entropy_beta_start to entropy_beta_end over the
+    first entropy_anneal_frac of the run (config.TrainConfig).
+
+    The last checkpoint_holdout_days of [.., train_end_idx] are carved out of
+    OSBL sampling and used only to periodically score the policy (never
+    trained on); the best-scoring checkpoint is restored at the end instead
+    of trusting whatever pretrain_steps happens to land on -- config.py's
+    comment has the measured case (seed 3: +47% at 100k steps, -71% at 2M,
+    same config) this directly targets. Too little history for a holdout
+    (e.g. tiny synthetic test panels) falls back to no checkpointing.
+
+    Returns (losses, best_step, best_score) -- best_step/best_score are None
+    if no holdout checkpoint ever beat the -inf floor (no holdout carved, or
+    checkpoint_eval_every never reached)."""
     # panel.start_idx, not panel.window - 1: sampling must stay inside the
     # 2011-2026 experiment window, where every period is guaranteed exactly
     # n_slots active members (docs/EIIE_AGENT_PLAN.md) -- pre-window periods
     # have fewer members and isolated data-quality zero-price rows.
     min_t = panel.start_idx
+    holdout_days = cfg.train.checkpoint_holdout_days
+    fit_end_idx = train_end_idx - holdout_days
+    if holdout_days <= 0 or fit_end_idx - min_t < cfg.train.batch_size:
+        fit_end_idx, holdout_days = train_end_idx, 0
+
     rng = np.random.default_rng(cfg.train.seed)
     losses = []
+    best_score, best_step, best_state = float("-inf"), None, None
     pbar = tqdm(range(cfg.train.pretrain_steps), desc="pretrain", unit="step")
     for step in pbar:
-        t_b = int(sample_batch_starts(train_end_idx, cfg.train.batch_size, cfg.train.beta, 1, min_t, rng)[0])
+        beta_t = entropy_schedule(step, cfg.train.pretrain_steps, cfg.train.entropy_beta_start,
+                                   cfg.train.entropy_beta_end, cfg.train.entropy_anneal_frac)
+        t_b = int(sample_batch_starts(fit_end_idx, cfg.train.batch_size, cfg.train.beta, 1, min_t, rng)[0])
         t_idx = np.arange(t_b, t_b + cfg.train.batch_size)
         loss = train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
                            cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
-                           cfg.train.grad_clip_norm, device, cfg.train.entropy_beta)
+                           cfg.train.grad_clip_norm, device, beta_t)
         losses.append(loss)
         if step % 100 == 0 or step == cfg.train.pretrain_steps - 1:
             pbar.set_postfix(loss=f"{loss:.6f}")
-    return losses
+
+        if holdout_days and ((step + 1) % cfg.train.checkpoint_eval_every == 0
+                              or step == cfg.train.pretrain_steps - 1):
+            score = _score_holdout(model, pvm, panel, cfg, fit_end_idx, train_end_idx, device)
+            if score > best_score:
+                best_score, best_step = score, step
+                best_state = copy.deepcopy(model.state_dict())
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+        # Refresh the PVM over the holdout under the RESTORED weights -- otherwise the
+        # online backtest's first read (at train_end_idx) reflects the final (possibly
+        # worse) model's trajectory, silently mixing two different policies at the seam.
+        _score_holdout(model, pvm, panel, cfg, fit_end_idx, train_end_idx, device)
+
+    return losses, best_step, (None if best_step is None else best_score)
 
 
 def agent_forward(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
@@ -243,7 +305,7 @@ def run_online_backtest(model: EIIECNN, pvm: PortfolioVectorMemory, panel: Price
             t_idx = np.arange(t_b, t_b + cfg.train.batch_size)
             loss = train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
                        cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
-                       cfg.train.grad_clip_norm, device, cfg.train.entropy_beta)
+                       cfg.train.grad_clip_norm, device, cfg.train.entropy_beta_end)
         pbar.update(1)
         if loss is not None:
             pbar.set_postfix(date=str(panel.dates[t].date()), loss=f"{loss:.6f}")

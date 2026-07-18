@@ -332,3 +332,218 @@ After Phase 0 approval by the user (this document):
 3. Depending on Phase 2 results, decide whether Phase 3 (budget scaling) is warranted
 
 **Verification**: Fast test group passes; --dry-run passes; at least one Phase-2 val run shows PVM rows no longer 100% cash at init (new test assertion).
+
+---
+
+## Phase 5 — From a Lucky Seed to a Repeatable Escape (implemented, not yet run)
+
+Digging into *why* seed 3's Phase-5b run (47% return, 100k steps, `entropy_beta=1e-6`) worked
+showed it wasn't a coin flip on returns — the PVM held ~60% cash steadily the whole val window
+(2018-07-30 → 2022-07-26), turnover was a boring ~5-7%/day outside the COVID crash spike, and
+the equity sleeve concentrated in PRIO3/WEGE3, two of B3's real multi-year compounders over
+that window. A found, low-order momentum heuristic, not a jackpot bet. But the *same* seed 3
+given 20x more budget (Phase 3, 2M steps) collapsed to −71% — it overfit the heuristic away.
+Seeds 1/2 never found the basin at all, at any budget. So "100k steps" was a sweet spot for
+one seed's init, not a property of the method.
+
+**Three levers implemented** (`src/rl_agent/config.py`, `train.py`, `experiment.py`,
+`sanity.py`; still inside the no-cost/no-eval/no-data constraint):
+
+- **A. Checkpoint-at-peak** — `pretrain()` now carves the last `checkpoint_holdout_days`
+  (default 250, ~1yr) off the *train* split's tail, samples OSBL batches only up to that
+  boundary, and every `checkpoint_eval_every` (default 5000) steps scores the frozen policy
+  on that untouched holdout via the existing `run_backtest`/`agent_forward`/`total_return`
+  path. Keeps the best-scoring `state_dict` and restores it (+ refreshes the PVM boundary row
+  under the restored weights) instead of trusting wherever `pretrain_steps` happens to land.
+  Directly targets the Phase-3 finding: budget no longer needs to be guessed, since overfitting
+  past the peak can't survive the restore.
+- **B. Annealed `entropy_beta`** — replaced the flat `entropy_beta` with
+  `entropy_beta_start=1e-4` decaying linearly to `entropy_beta_end=1e-5` over the first
+  `entropy_anneal_frac=0.1` of pretrain, then flat for the rest of pretrain and the whole
+  online/live phase. A fixed beta only helped the seed that was already going to escape on its
+  own (the Phase-5b sweep showed seed 3 escaping at *every* beta tested while seeds 1-2 stayed
+  cash-bound at *every* beta) — forcing more exploration early is aimed at seeds 1/2, not seed 3.
+- **C. Wider seed ensemble** — no code needed, `sweep.py --seeds` already supports it; just
+  hasn't been run at n>3 yet.
+
+**Status**: code + tests done (`tests/rl_agent/test_train.py::test_entropy_schedule`,
+`::test_pretrain_checkpoint_at_peak`), fast group green, `--dry-run` verified. All existing
+`configs/eiie_*.json` updated to the new field names (old `entropy_beta` key removed).
+
+### Phase 5 Results (2026-07-17, seeds 1–8 completed; 9–10 Ctrl-C'd mid-run)
+
+Val window (from each run's manifest, window-scoped split): **2021-11-30 → 2024-03-21**.
+Benchmarks on this window: CDI 30.9%, BOVA11 25.6%, UBAH 37.0%, UCRP 13.1%.
+
+| seed | return | sharpe | maxdd | turnover | mean cash | best_step | holdout_ret | behavior |
+|-----:|-------:|-------:|------:|---------:|----------:|----------:|------------:|----------|
+| 1 | 16.9% | −0.35 | 0.195 | 0.5% | 96.6% | 99999 | +5.9% | cash |
+| 2 | 30.9% | — | 0.000 | 0.0% | 100% | 79999 | +3.8% | pure cash |
+| 3 | 29.6% | 0.09 | 0.170 | 14.1% | 63.3% | 99999 | −3.7% | mixed |
+| 4 | **41.9%** | 0.40 | 0.104 | 0.8% | 99.0% | 94999 | **+30.5%** | cash + 11 days of lottery bets |
+| 5 | 25.1% | −0.24 | 0.116 | 0.7% | 97.8% | 34999 | +7.0% | cash |
+| 6 | −15.4% | −0.22 | 0.491 | 7.6% | 0.3% | 64999 | +1.1% | all-in high-beta |
+| 7 | 9.4% | −0.22 | 0.257 | 1.8% | 3.0% | 4999 | −9.1% | all-in high-beta |
+| 8 | 5.5% | −0.09 | 0.338 | 5.8% | 0.5% | 54999 | +1.7% | all-in high-beta |
+
+Median: 21.0% return, −0.15 Sharpe. Still below CDI.
+
+**What the anneal actually did — bimodal, not balanced.** Before (Phase 5b), 1 seed in 3
+escaped cash partially. Now 4 of 8 escape — but the escaped policies overshoot to ~0–3% cash,
+all-in on equities. The system is bistable (all-cash vs all-in) and `entropy_beta_end=1e-5`
+is too weak to hold a middle ground after the anneal window closes. No seed found a
+persistent diversified sleeve.
+
+**What the escaped seeds bought is the real indictment**: BHIA3, MGLU3, LWSA3, HAPV3, AZUL4 —
+the distressed, highest-volatility fallen names of the 2021–2023 tightening cycle, exactly
+the names that kept collapsing through this val window (seed 6: −15.4% with a 49% drawdown).
+A price-only CNN reads a dead-cat bounce in a high-vol name as momentum. It has no notion of
+quality — same conclusion as Phase 4, now with a sharper mechanism.
+
+**Seed 4's 41.9% is not a strategy**: 11 days (of 576) with equity >10%, concentrated
+single-name lunges into BHIA3/HAPV3/AZUL4 that happened to pay. Lottery tickets on top of CDI.
+
+**The genuinely positive result — the holdout score transfers across seeds**:
+corr(holdout_return, val_return) = 0.54 Pearson / 0.52 Spearman (n=8, p≈0.18 — suggestive,
+not significant). Picking the seed with the best holdout return (a legal, train-only
+selection rule) selects seed 4, which is also the best val seed. Within-run, though, most
+best_steps landed near the end (the holdout rarely triggered real early stopping), and the
+gate `policy_not_saturated` correctly flagged the cash-collapsed seeds (1, 2, 4).
+
+**Verdict**: the training machinery now works as designed — escapes happen, collapse is
+flagged, checkpoint selection carries signal. Performance is still poor because the policy's
+asset-picking is anti-signal (buys crashing high-beta names). This is the Phase 4 data-problem
+conclusion again, unchanged: price-only daily bars on B3 don't identify *what's worth
+holding*, only *what moved recently*. Iteration 2 levers remain: fundamentals/macro features,
+lower rebalance frequency, or both.
+
+---
+
+## Phase 6: Technical feature channels (2026-07-17, `configs/eiie_features.json`, seeds 1–8)
+
+Same val window (2021-11-30 → 2024-03-21), same benchmarks (CDI 30.9%, BOVA11 25.6%,
+UBAH 37.0%). One variable changed vs Phase 5: 3 → 11 input channels
+(`return_1m/3m/6m`, `price_vs_ma60`, `volatility_ratio_20_60`, `rsi_14`, `drawdown`,
+`volume_ratio_20d` on top of close/high/low). Cadence, costs, reward untouched.
+
+| seed | return | sharpe | maxdd | turn/day | cost drag | mean cash | best_step | holdout_ret | book |
+|-----:|-------:|-------:|------:|---------:|----------:|----------:|----------:|------------:|------|
+| 1 | 18.6% | −0.51 | 0.090 | 1.4% | 0.3% | 93.7% | 9999 | −0.9% | cash + BHIA3 dust |
+| 2 | 30.8% | 0.12 | 0.288 | 15.6% | 4.5% | 18.5% | 24999 | +17.3% | PETR3/4, BIDI11, EMBJ3 |
+| 3 | 8.5% | −0.06 | 0.258 | 48.9% | 12.9% | 33.4% | 44999 | +3.0% | BHIA3/MGLU3/AZUL4 churn |
+| 4 | 12.9% | −0.17 | 0.259 | 5.7% | 1.9% | 0.0% | 4999 | −9.5% | PETR3/4, GGBR4, PRIO3 |
+| 5 | −14.9% | −0.50 | 0.407 | 15.1% | 3.8% | 36.5% | 99999 | +44.3% | PETR + BHIA3/AZUL4 mix |
+| 6 | **53.2%** | 0.36 | 0.488 | 51.0% | 16.2% | 0.0% | 39999 | **+59.6%** | PETR3/4 (45%), PRIO3, GGBR4 |
+| 7 | 27.4% | −0.35 | 0.025 | 0.9% | 0.2% | 96.8% | 9999 | −1.3% | pure cash |
+| 8 | −6.2% | −0.50 | 0.251 | 1.4% | 0.3% | 93.0% | 69999 | +11.4% | cash + BHIA3 dust |
+
+Median 15.8%, mean 16.3% — vs Phase 5's median 21.0%. Headline unchanged: ensemble still
+below CDI. But the composition of the escaped policies changed qualitatively:
+
+**The features did what they were added to do — the dead-cat appetite is damped.** Phase 5's
+escaped seeds bought BHIA3/MGLU3/LWSA3/HAPV3/AZUL4 (the crashing high-beta names). Phase 6's
+strong escapes (2, 4, 6) buy PETR3+PETR4, PRIO3, GGBR4 — the *actual winners* of the
+2021–2023 tightening cycle (oil/commodity complex). Seed 6 buying both Petrobras share
+classes at once is a coherent-scoring sanity signal, not a coincidence. Junk residue survives
+only in the weaker seeds (3, 5) and as dust in the cash seeds.
+
+**The new tax is churn, not picking.** Seed 6's gross return ≈ 53% + 16.2pp cost drag ≈ ~69%
+before costs at 51%/day turnover; seed 3 burned 12.9pp churning junk. Concentration is also
+extreme (avg max single name 41–69% among escapees). The signal improved; the *trading* of
+the signal is now the dominant loss source. (Relevant evidence for the deferred
+rebalance-frequency question — NOT for a turnover penalty, which is off the table.)
+
+**Bistability persists**: 3 of 8 seeds (1, 7, 8) still sit at 93–97% cash.
+
+**Holdout selection rule: weaker on average, still right at the top.** corr(holdout, val)
+dropped to 0.22 Pearson / 0.10 Spearman (was 0.54/0.52) — seed 5 is the outlier (holdout
++44% → val −15%; it also ran all 100k steps, best_step=99999, i.e. it kept climbing on the
+250-day holdout tail and overfit it). But argmax still works: the best-holdout seed (6,
++59.6%) is also the best val seed (+53.2%) — same as Phase 5. The legal train-only selection
+rule picked the winner twice in a row.
+
+**More steps would not help.** 6 of 8 best_steps landed ≤ 45k of 100k; the only seed that
+used the full budget (5) is the worst on val. Consistent with Phase 3 (2M steps → −71%): the
+ceiling is representational/regime, not budget. Checkpoint-at-peak is already harvesting the
+peak that exists.
+
+**Verdict**: features moved the picking from anti-signal to signal (real 2022 winners), but
+the edge is spent on 15–50%/day turnover and single-name concentration, and n=8 with CI
+[−0.50, +3.39] on the best seed means no statistical claim of skill yet. Next levers (user
+to reopen): rebalance frequency (churn evidence above), and the deferred PE/PB opt-in group.
+
+---
+
+## Phase 7: Batch-size + valuation-channel ablations & the online-phase drift diagnosis (2026-07-17)
+
+Runs analyzed: `eiie_features` seeds 1–8 (batch 50), `eiie_features_b100` seeds 1–3,
+`eiie_valuation_b50`/`_b100` seeds 1–3 (adds `pl_zhist_5y`/`pvp_zhist_5y` + isnan masks, 15 ch).
+All series extracted from each run's `report.html` (PV, allocation evolution, turnover).
+
+### Finding 1 — The "mimics random_rebalancing early" behavior is a near-uniform policy, not copying
+
+Runs whose backtest starts diversified (allocation entropy 0.9–1.0, max single name 1–6%:
+features seed 4, valuation seeds 1–2) show daily-return correlation 0.86–0.98 with
+`random_rebalancing` — because a ~uniform 50-stock portfolio IS approximately the
+equal-weight portfolio that baseline approximates. Not a bug, not imitation.
+
+### Finding 2 — The later divergence is the ONLINE phase re-concentrating the policy (the real defect)
+
+Allocation entropy by backtest thirds falls monotonically in most runs while cash (or a
+single name) climbs:
+
+| run | ent t1→t3 | cash t1→t3 |
+|---|---|---|
+| features s1 | 0.80 → 0.35 | 0.77 → 0.90 |
+| features s7 | 0.63 → 0.22 | 0.82 → 0.95 |
+| features_b100 s1 | 0.81 → 0.43 | 0.75 → 0.87 |
+| valuation_b100 s1 | 0.99 → 0.69 | 0.05 → 0.77 |
+
+The pretrain-side fixes (entropy anneal, checkpoint-at-peak) protect only pretrain. During
+the live phase, `rolling_steps=30` updates/day run with entropy at its floor (1e-5) and NO
+checkpoint gate — the cash attractor re-forms mid-backtest, exactly the failure mode Phase 5
+diagnosed, now in the one phase nothing guards. The good checkpoint the holdout rule selected
+is progressively destroyed in production.
+
+### Finding 3 — The "varies A LOT / all-in hopping" archetype is the bistable regime + online hopping
+
+Seeds whose pretrain lands concentrated (features s3, s6; valuation s3: start entropy
+0.28–0.41) hop between >70% single-name positions during online updates (features s6: 28
+switches, 51%/day turnover). Outcome is a coin flip on the same mechanism: features s6 +53%,
+valuation s3 −50/−57% with 0.68–0.75 max drawdown.
+
+### Finding 4 — Ablation results: both new levers are dead or negative
+
+- **Batch 100 vs 50**: per-seed final PV differs by <0.02 (s1 1.186 vs 1.206, s2 1.308 vs
+  1.291). Dead lever; drop it.
+- **Valuation channels (pl/pvp zhist)**: no mean improvement; seed 3 became catastrophic in
+  BOTH batch variants (−50%, −57%, maxDD up to 0.75 — worst results in the whole ensemble).
+  The extra channels raised the concentrated regime's confidence without improving picking.
+  PE/PB opt-in group: tested, negative. Close it.
+
+### Finding 5 — Still no statistical edge, and the average seed loses to doing nothing
+
+Every Sharpe CI spans zero (width ~±1.2). Mean agent total return (features, 8 seeds) ≈ +16%
+vs `constant_cash` (pure CDI) +31% and UBAH +37% on the same window. Seed variance (PV
+0.85–1.53 on identical config) still dwarfs every config delta tested.
+
+### Recommended next actions (ranked by information-per-cost)
+
+- [ ] **7a — Frozen-policy ablation (config-only): `rolling_steps: 0`** on the features
+  config, seeds 1–8. Directly measures whether online training helps or hurts. Prediction
+  from Finding 2: frozen preserves the good checkpoints (s1/s7 stay diversified) and avoids
+  s3-style hopping.
+- [ ] **7b — Excess-CDI training reward** (training-gradient-only, within the scope
+  constraint): subtract the day's CDI log-return from the reward in `train_step`. All-cash
+  then earns exactly 0 and the gradient always has a restoring force away from cash —
+  removes the attractor structurally instead of fighting it with entropy. Eval/backtest
+  accounting untouched.
+- [ ] **7c — If online training survives 7a: raise `entropy_beta_end`** (e.g. hold 1e-4
+  through the live phase) so the floor that protects pretrain also protects production.
+- [ ] **7d — Concentration cap (design question for iteration 2)**: a hard per-asset max
+  weight (e.g. 20%, capped softmax) would clamp both tails of the bistable regime (s6 +53%
+  and valuation-s3 −57% are the same coin) and mechanically cut the churn tax. Model-side
+  change — needs user sign-off on scope.
+- [x] **PE/PB opt-in group: tested and closed** (Finding 4).
+- [ ] **Stop adding feature channels** until the live-phase stability is fixed — the
+  bottleneck is the objective/online drift, not inputs.

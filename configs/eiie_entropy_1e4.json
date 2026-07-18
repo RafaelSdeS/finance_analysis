@@ -32,7 +32,11 @@
     "grad_clip_norm": 5.0,
     "seed": 42,
     "device": "cuda",
-    "entropy_beta": 10000.0
+    "entropy_beta_start": 10000.0,
+    "entropy_beta_end": 10000.0,
+    "entropy_anneal_frac": 0.1,
+    "checkpoint_holdout_days": 250,
+    "checkpoint_eval_every": 5000
   },
   "eval": {
     "baselines": [

@@ -150,8 +150,8 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
     else:
         pretrain_end_idx, backtest_start_idx, backtest_end_idx = train_end_idx, train_end_idx + 1, val_end_idx
 
-    train_losses = pretrain(train_model, pvm, panel, optimizer, cfg, train_end_idx=pretrain_end_idx,
-                             device=cfg.train.device)
+    train_losses, best_step, best_holdout_score = pretrain(
+        train_model, pvm, panel, optimizer, cfg, train_end_idx=pretrain_end_idx, device=cfg.train.device)
     checklist["no_numerical_instability"] = bool(np.all(np.isfinite(train_losses)))
 
     # Post-pretrain: did the policy collapse into a saturated (gradient-dead) corner?
@@ -203,8 +203,10 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
         "baselines": {name: asdict(s) for name, s in baseline_summaries.items()},
     }, indent=2, default=str))
 
-    (out_dir / "report.json").write_text(json.dumps({"checklist": checklist, "valid": all(checklist.values())},
-                                                      indent=2))
+    (out_dir / "report.json").write_text(json.dumps({
+        "checklist": checklist, "valid": all(checklist.values()),
+        "pretrain_checkpoint": {"best_step": best_step, "best_holdout_return": best_holdout_score},
+    }, indent=2))
     if not all(checklist.values()):
         failed = [k for k, v in checklist.items() if not v]
         print(f"WARNING: experiment validation checklist incomplete: {failed}")

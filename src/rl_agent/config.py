@@ -48,12 +48,13 @@ class TrainConfig:
     beta: float = 5e-4  # geometric sample-bias; retuned for daily (paper: 5e-5 over ~30k half-hour periods)
     rolling_steps: int = 30  # OSBL online updates per period during backtest (paper Table B.1)
     grad_clip_norm: float = 5.0
-    entropy_beta: float = 1e-5  # entropy bonus on the policy output. NOT in the paper: their
-    # cash asset returns 0%, so cash can never dominate and the softmax never collapses onto
-    # it. Ours accrues CDI (~8.65%/yr in log-space vs equal-weight's 8.22%), so the gradient
-    # pushes every asset score down with no restoring force -- measured: scores ran to -20/-32
-    # vs cash_bias +0.06, softmax saturated to ~1e-9, gradient vanished, agent frozen all-cash
-    # and unrecoverable. This term is that restoring force. Set 0.0 to reproduce that failure.
+    # entropy bonus on the policy output. NOT in the paper: their cash asset returns 0%, so
+    # cash can never dominate and the softmax never collapses onto it. Ours accrues CDI
+    # (~8.65%/yr in log-space vs equal-weight's 8.22%), so the gradient pushes every asset
+    # score down with no restoring force -- measured: scores ran to -20/-32 vs cash_bias
+    # +0.06, softmax saturated to ~1e-9, gradient vanished, agent frozen all-cash and
+    # unrecoverable. This term is that restoring force. Set both ends to 0.0 to reproduce
+    # that failure.
     #
     # PREVENTIVE, NOT CURATIVE: measured at an already-collapsed checkpoint, this only lifts
     # the gradient norm 4.6e-11 -> 3.9e-9 (still vanishing). It has to be on from step 0; it
@@ -63,8 +64,27 @@ class TrainConfig:
     # the bonus is beta*3.9. At 1e-3 that is 8x the reward and the optimizer just maximizes
     # entropy -> uniform portfolio -> that IS UCRP (8.22%/yr), worse than cash. 1e-5 keeps it
     # at ~8% of the reward: enough to hold the softmax in its responsive range, not enough to
-    # dictate the allocation. This is a scale-matched starting point, NOT a tuned value --
-    # sweep it (src/rl_agent/sweep.py) before trusting any result that depends on it.
+    # dictate the allocation.
+    #
+    # ANNEALED (not flat): a fixed value never reliably escapes the cash attractor -- an
+    # entropy sweep at 1e-6/1e-5/1e-4 showed the same seed (3) escaping at every value while
+    # two other seeds stayed 86-100% cash at every value. Seed dominated over beta, meaning a
+    # fixed beta only helps when init got lucky. entropy_beta_start pushes exploration harder
+    # for the first entropy_anneal_frac of pretrain (forcing the escape instead of hoping for
+    # it), then decays linearly to entropy_beta_end -- the settled, scale-matched value above
+    # -- for the remainder of pretrain AND the whole online/live phase (no annealing once
+    # real trading starts). Set start == end to reproduce the old flat-beta behavior.
+    entropy_beta_start: float = 1e-4
+    entropy_beta_end: float = 1e-5
+    entropy_anneal_frac: float = 0.1
+    # Held-out checkpoint selection during pretrain: a fixed pretrain_steps budget isn't
+    # reliably right -- the same seed that found a real edge at 100k steps overfit it away by
+    # 2M (measured: seed 3 went from +47% to -71% return, same config, only budget changed).
+    # Every checkpoint_eval_every steps, score the current policy on a frozen-weights
+    # backtest over the last checkpoint_holdout_days of the TRAIN split (never val/test) and
+    # keep the best-scoring one instead of trusting whatever step the loop happens to end on.
+    checkpoint_holdout_days: int = 250  # ~1 trading year carved out of train's tail
+    checkpoint_eval_every: int = 5000
     seed: int = 42
     device: str = "cuda"  # GPU enabled; falls back to CPU if unavailable
     compile: bool = False  # S3 (TRAINING_SPEEDUP_PLAN.md): torch.compile the training

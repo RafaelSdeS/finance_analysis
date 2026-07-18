@@ -21,7 +21,7 @@ from the point-in-time top50_universe_membership.parquet, restricted to the
 this price-only iteration 1, but load-bearing for later ones).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
@@ -32,6 +32,24 @@ from .config import DataConfig
 from .paths import BOVA11_PATH, CDI_PATH, DATASET_PATH, MEMBERSHIP_PATH
 
 CASH_GIDX = 0
+
+# Per-channel normalization inside a window tensor. "self": divide the window by the
+# channel's own value-at-t (paper eq. 18) -- correct only for price LEVELS, where a
+# ratio-to-today is the meaningful representation. A float: multiply raw window values
+# by that constant instead ("passthrough" at 1.0 for an already-stationary technical
+# feature; a smaller constant rescales a wide-but-bounded feature like RSI's 0-100 range
+# down near the other channels' O(1) scale). The two kinds also mask differently in
+# window_tensor: "self" fills masked/missing with 1.0 (a neutral price-relative), a
+# float-scaled channel fills with 0.0 (a neutral "no signal").
+FEATURE_NORM = {
+    "close": "self", "high": "self", "low": "self",
+    "return_1m": 1.0, "return_3m": 1.0, "return_6m": 1.0,
+    "price_vs_ma60": 1.0, "volatility_ratio_20_60": 1.0,
+    "rsi_14": 0.01,
+    "drawdown": 1.0, "volume_ratio_20d": 1.0,
+    "pl_zhist_5y": "log1p", "pvp_zhist_5y": "log1p",
+    "pl_zhist_5y_isnan": 1.0, "pvp_zhist_5y_isnan": 1.0,
+}
 
 
 @dataclass(frozen=True)
@@ -153,6 +171,7 @@ class PricePanel:
     start_idx: int          # first t with dates[t] >= experiment window_start
     end_idx: int             # last t with dates[t] <= experiment window_end
     bova11_close: Optional[np.ndarray] = None  # (T,), benchmark only
+    extra: dict = field(default_factory=dict)  # name -> (T, n_global+1), any DataConfig.features beyond close/high/low
 
     @property
     def n_slots(self) -> int:
@@ -169,7 +188,9 @@ class PricePanel:
         return self.asset_index.n_global
 
     def _channel(self, name: str) -> np.ndarray:
-        return {"close": self.close, "high": self.high, "low": self.low}[name]
+        if name in ("close", "high", "low"):
+            return {"close": self.close, "high": self.high, "low": self.low}[name]
+        return self.extra[name]
 
     def price_relative(self, t: int) -> np.ndarray:
         """y_t (paper eq. 1), global space: index 0 = cash's CDI factor,
@@ -195,14 +216,29 @@ class PricePanel:
         for f, name in enumerate(features):
             channel = self._channel(name)
             hist = channel[lo:t + 1, gidx].T        # (n_slots, window)
-            # Masked slots' gidx can point at a real ticker's pre-listing/
-            # padding-period rows (see _build_slot_calendar), which are
-            # occasionally a genuine 0.0 far outside the experiment window
-            # (e.g. some 2000-era prices) -- swap in a safe 1.0 divisor
-            # before dividing rather than dividing then discarding, so a
-            # masked slot never triggers a spurious div-by-zero warning.
-            v_t = np.where(mask, channel[t, gidx], 1.0)[:, None]  # (n_slots, 1)
-            out[f] = np.where(mask[:, None], hist / v_t, 1.0)
+            norm = FEATURE_NORM[name]
+            if norm == "self":
+                # Masked slots' gidx can point at a real ticker's pre-listing/
+                # padding-period rows (see _build_slot_calendar), which are
+                # occasionally a genuine 0.0 far outside the experiment window
+                # (e.g. some 2000-era prices) -- swap in a safe 1.0 divisor
+                # before dividing rather than dividing then discarding, so a
+                # masked slot never triggers a spurious div-by-zero warning.
+                v_t = np.where(mask, channel[t, gidx], 1.0)[:, None]  # (n_slots, 1)
+                out[f] = np.where(mask[:, None], hist / v_t, 1.0)
+            elif norm == "log1p":
+                # Sign-preserving log squash for extreme-tailed features (e.g.
+                # pl_zhist_5y ±18k) -- maps ±18k → ±9.8, keeps identity near 0.
+                hist_clean = np.nan_to_num(hist, nan=0.0)
+                hist_squashed = np.sign(hist_clean) * np.log1p(np.abs(hist_clean))
+                out[f] = np.where(mask[:, None], hist_squashed, 0.0)
+            else:
+                # A technical feature can still be NaN inside its own warm-up (e.g.
+                # return_6m before 126 days of a ticker's own history) even on a day
+                # its slot IS active -- nan_to_num before the mask, not instead of it,
+                # so that warm-up (unmasked) and inactive (masked) both land at the
+                # same neutral 0.0 rather than leaking a NaN into the network input.
+                out[f] = np.where(mask[:, None], np.nan_to_num(hist, nan=0.0) * norm, 0.0)
         return out
 
     def price_relative_batch(self, t_idx: np.ndarray) -> np.ndarray:
@@ -238,9 +274,19 @@ class PricePanel:
         for f, name in enumerate(features):
             channel = self._channel(name)
             hist = channel[rows_full, cols_full].transpose(0, 2, 1)            # (B, n_slots, W)
-            raw_v_t = channel[t_idx[:, None], gidx]                            # (B, n_slots)
-            v_t = np.where(mask, raw_v_t, 1.0)[:, :, None]                     # same masked-divisor
-            out[:, f] = np.where(mask[:, :, None], hist / v_t, 1.0)            # guard as window_tensor
+            norm = FEATURE_NORM[name]
+            if norm == "self":
+                raw_v_t = channel[t_idx[:, None], gidx]                        # (B, n_slots)
+                v_t = np.where(mask, raw_v_t, 1.0)[:, :, None]                 # same masked-divisor
+                out[:, f] = np.where(mask[:, :, None], hist / v_t, 1.0)        # guard as window_tensor
+            elif norm == "log1p":
+                # Sign-preserving log squash for extreme-tailed features (e.g.
+                # pl_zhist_5y ±18k) -- maps ±18k → ±9.8, keeps identity near 0.
+                hist_clean = np.nan_to_num(hist, nan=0.0)
+                hist_squashed = np.sign(hist_clean) * np.log1p(np.abs(hist_clean))
+                out[:, f] = np.where(mask[:, :, None], hist_squashed, 0.0)
+            else:
+                out[:, f] = np.where(mask[:, :, None], np.nan_to_num(hist, nan=0.0) * norm, 0.0)
         return out
 
 
@@ -255,19 +301,29 @@ def load_price_panel(data_cfg: DataConfig, n_slots: int = 50) -> PricePanel:
     membership = pd.read_parquet(MEMBERSHIP_PATH)
     asset_index = GlobalAssetIndex.from_membership(membership)
 
+    # close/high/low are always loaded (paper's base channels, and close alone drives
+    # price_relative's eq. 1 math); any other requested feature is loaded as an extra
+    # dense column, keyed by its own name (matches the ml_dataset.parquet column name).
+    # Features ending in _isnan are derived (not parquet columns): mark for special handling.
+    extra_features = [f for f in data_cfg.features if f not in ("close", "high", "low")]
+    real_extra_features = [f for f in extra_features if not f.endswith("_isnan")]
+    mask_extra_features = [(f[:-6], f) for f in extra_features if f.endswith("_isnan")]  # (base, mask_name)
+
     table = pq.read_table(
         DATASET_PATH,
-        columns=["ticker", "trade_date", "adj_close", "adj_high", "adj_low"],
+        columns=["ticker", "trade_date", "adj_close", "adj_high", "adj_low"] + real_extra_features,
         filters=[("ticker", "in", list(asset_index.tickers)), ("trade_date", "<=", window_end)],
     )
     prices = table.to_pandas()
     calendar = pd.DatetimeIndex(sorted(prices["trade_date"].unique()))
     prices["gidx"] = prices["ticker"].map(asset_index.ticker_to_gidx).astype(np.int64)
 
-    def _dense(col: str) -> np.ndarray:
+    def _dense(col: str, bfill: bool = True) -> np.ndarray:
         piv = prices.pivot(index="trade_date", columns="gidx", values=col)
         piv = piv.reindex(index=calendar, columns=range(1, asset_index.n_global))
-        piv = piv.ffill().bfill()  # ffill: halts + post-delisting flat; bfill: pre-listing flat (paper Sec. 3.3)
+        piv = piv.ffill()  # halts + post-delisting flat
+        if bfill:
+            piv = piv.bfill()  # pre-listing flat (paper Sec. 3.3) -- prices only, see below
         # +1 column: a dummy index (== n_global) padding slots can safely gather
         # from in window_tensor without an out-of-bounds error; always masked
         # out before use, never surfaced through PricePanel.n_global.
@@ -278,6 +334,16 @@ def load_price_panel(data_cfg: DataConfig, n_slots: int = 50) -> PricePanel:
     close = _dense("adj_close")
     high = _dense("adj_high")
     low = _dense("adj_low")
+    # bfill=False for technicals: unlike a price (whose pre-listing days are always
+    # masked out, so backfilling them is harmless), a technical feature's own NaN
+    # warm-up (e.g. return_6m before 126 days of THIS ticker's history) can still fall
+    # on a day the slot IS active -- bfilling would leak a later, now-defined value
+    # backward into that unmasked training row. Left NaN here; window_tensor zeroes it.
+    extra = {name: _dense(name, bfill=False) for name in real_extra_features}
+    # Derive _isnan mask channels: 1.0 where the base feature was NaN, 0.0 where data exists.
+    for base_name, mask_name in mask_extra_features:
+        base_dense = extra[base_name] if base_name in extra else _dense(base_name, bfill=False)
+        extra[mask_name] = np.isnan(base_dense).astype(np.float64)
 
     cdi_df = pd.read_parquet(CDI_PATH)
     validate_cdi_daily_percent(cdi_df["cdi"].to_numpy())
@@ -305,4 +371,5 @@ def load_price_panel(data_cfg: DataConfig, n_slots: int = 50) -> PricePanel:
         window=data_cfg.window,
         start_idx=start_idx, end_idx=end_idx,
         bova11_close=_load_bova11(calendar),
+        extra=extra,
     )

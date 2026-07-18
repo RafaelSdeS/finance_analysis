@@ -28,7 +28,9 @@ from src.rl_agent.networks import EIIECNN  # noqa: E402
 from src.rl_agent.pvm import PortfolioVectorMemory  # noqa: E402
 from src.rl_agent.train import (  # noqa: E402
     _batch_tensors,
+    _score_holdout,
     agent_forward,
+    entropy_schedule,
     load_checkpoint,
     pretrain,
     run_online_backtest,
@@ -162,13 +164,95 @@ def test_pretrain(passed, failed):
     panel = _tiny_panel()
     model, pvm, optimizer = _tiny_model_pvm(cfg, panel)
 
-    losses = pretrain(model, pvm, panel, optimizer, cfg, train_end_idx=panel.end_idx)
+    # tiny panel is far smaller than the default checkpoint_holdout_days -- pretrain must
+    # fall back to no checkpointing rather than crash on an impossible holdout carve.
+    losses, best_step, best_score = pretrain(model, pvm, panel, optimizer, cfg, train_end_idx=panel.end_idx)
     ok = len(losses) == cfg.train.pretrain_steps
     print_check("pretrain: runs exactly pretrain_steps gradient steps", ok, f"got {len(losses)}")
     passed, failed = passed + ok, failed + (not ok)
 
     ok = all(np.isfinite(l) for l in losses)
     print_check("pretrain: every step's loss is finite (no divergence in a few steps)", ok, str(losses))
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = best_step is None and best_score is None
+    print_check("pretrain: too-small panel for the holdout falls back to no checkpointing", ok,
+                f"best_step={best_step}, best_score={best_score}")
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
+def test_entropy_schedule(passed, failed):
+    ok = entropy_schedule(0, 100, 1e-4, 1e-5, 0.1) == 1e-4
+    print_check("entropy_schedule: starts at entropy_beta_start", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = np.isclose(entropy_schedule(10, 100, 1e-4, 1e-5, 0.1), 1e-5)
+    print_check("entropy_schedule: reaches entropy_beta_end exactly at anneal_frac*total_steps", ok,
+                f"got {entropy_schedule(10, 100, 1e-4, 1e-5, 0.1)}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = np.isclose(entropy_schedule(50, 100, 1e-4, 1e-5, 0.1), 1e-5)
+    print_check("entropy_schedule: stays flat at entropy_beta_end past anneal_frac*total_steps", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    mid = entropy_schedule(5, 100, 1e-4, 1e-5, 0.1)
+    ok = 1e-5 < mid < 1e-4
+    print_check("entropy_schedule: strictly between start and end mid-anneal", ok, f"got {mid}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = entropy_schedule(0, 100, 1e-5, 1e-5, 0.1) == 1e-5
+    print_check("entropy_schedule: start==end reproduces the old flat-beta behavior", ok)
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
+def _wide_tiny_panel(seed=0, t=120, n_slots=N_SLOTS):
+    """Like _tiny_panel but long enough to carve a checkpoint holdout out of its tail."""
+    rng = np.random.default_rng(seed)
+    tickers = tuple(f"T{i}" for i in range(n_slots))
+    asset_index = GlobalAssetIndex(tickers=tickers, ticker_to_gidx={tk: i + 1 for i, tk in enumerate(tickers)})
+    dates = pd.bdate_range("2020-01-01", periods=t)
+    log_r = rng.normal(0.0002, 0.01, size=(t, n_slots))
+    prices = 10.0 * np.exp(np.cumsum(log_r, axis=0))
+    close = np.column_stack([np.ones(t), prices])
+    return PricePanel(
+        asset_index=asset_index, dates=dates, close=close, high=close.copy(), low=close.copy(),
+        cdi_factor=np.full(t, 1.0003),
+        slot_gidx=np.array([[1, 2, 3, 4]] * t), valid=np.array([[True] * n_slots] * t),
+        window=WINDOW, start_idx=10, end_idx=t - 1,
+    )
+
+
+def test_pretrain_checkpoint_at_peak(passed, failed):
+    """checkpoint-at-peak: a holdout that fits inside the panel must actually
+    engage, and the restored best checkpoint must reproduce its recorded score."""
+    d = ExperimentConfig().to_dict()
+    d["data"]["window"] = WINDOW
+    d["model"]["n_assets"] = N_SLOTS
+    d["train"]["batch_size"] = 3
+    d["train"]["pretrain_steps"] = 8
+    d["train"]["rolling_steps"] = 2
+    d["train"]["beta"] = 0.1
+    d["train"]["seed"] = 0
+    d["train"]["checkpoint_holdout_days"] = 15
+    d["train"]["checkpoint_eval_every"] = 2
+    cfg = ExperimentConfig.from_dict(d)
+    panel = _wide_tiny_panel()
+    model, pvm, optimizer = _tiny_model_pvm(cfg, panel)
+
+    losses, best_step, best_score = pretrain(model, pvm, panel, optimizer, cfg, train_end_idx=panel.end_idx)
+
+    ok = best_step is not None and 0 <= best_step < cfg.train.pretrain_steps
+    print_check("pretrain: a holdout that fits the panel records a best_step", ok,
+                f"best_step={best_step}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    fit_end_idx = panel.end_idx - cfg.train.checkpoint_holdout_days
+    replayed_score = _score_holdout(model, pvm, panel, cfg, fit_end_idx, panel.end_idx, "cpu")
+    ok = best_score is not None and np.isclose(replayed_score, best_score, atol=1e-9)
+    print_check("pretrain: restoring the best checkpoint reproduces its recorded holdout score", ok,
+                f"best_score={best_score}, replayed={replayed_score}")
     passed, failed = passed + ok, failed + (not ok)
     return passed, failed
 
@@ -250,6 +334,8 @@ def main():
     passed, failed = test_store_matches_direct_path(passed, failed)
     passed, failed = test_train_step_updates_model_and_pvm(passed, failed)
     passed, failed = test_pretrain(passed, failed)
+    passed, failed = test_entropy_schedule(passed, failed)
+    passed, failed = test_pretrain_checkpoint_at_peak(passed, failed)
     passed, failed = test_agent_forward(passed, failed)
     passed, failed = test_run_online_backtest(passed, failed)
     passed, failed = test_checkpoint_roundtrip(passed, failed)

@@ -164,11 +164,11 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 |------|---------|
 | `config.py` | Frozen-dataclass `ExperimentConfig` ↔ JSON; every hyperparameter/date/cost rate config-driven, nothing hardcoded downstream |
 | `paths.py` | Shared path constants for this package |
-| `data.py` | `GlobalAssetIndex` (permanent 172-wide map, cash=0); `PricePanel.window_tensor()` (X_t, eq. 18) / `.price_relative()` (y_t, eq. 1, CDI-accruing cash); `validate_cdi_daily_percent()` units guard; observation prices read from the full `ml_dataset.parquet` (not the pre-built top50 file) so an entrant's lookback history isn't missing |
+| `data.py` | `GlobalAssetIndex` (permanent 172-wide map, cash=0); `PricePanel.window_tensor()` (X_t, eq. 18) / `.price_relative()` (y_t, eq. 1, CDI-accruing cash); `validate_cdi_daily_percent()` units guard; observation prices read from the full `ml_dataset.parquet` (not the pre-built top50 file) so an entrant's lookback history isn't missing; `FEATURE_NORM` table lets `DataConfig.features` mix price-level channels (`close/high/low`, ÷value-at-t, paper eq. 18) with technical channels (`return_1m/3m/6m`, `price_vs_ma60`, `volatility_ratio_20_60`, `rsi_14`, `drawdown`, `volume_ratio_20d` — passthrough, a per-feature scale, masked/NaN→0) via `PricePanel.extra` |
 | `pvm.py` | `PortfolioVectorMemory` — global-space `[T, 172]` weight buffer; `read_slots()`/`write()` bridge slot-space (network's fixed 50 inputs) and global space via `torch.gather`/`scatter`; a departing ticker's forced-sale liquidation falls out of the data structure, no special-case code |
 | `environment.py` | `solve_mu`/`solve_mu_torch` (eq. 14, Theorem 1 fixed-point, converged vs. differentiable k-step); `drift_weights`/`drift_weights_torch` (eq. 7); `run_backtest()` — the one loop shared by the agent and every baseline |
-| `networks.py` | `EIIECNN` (paper Fig. 2): kernel-height-1 convs keep each asset's stream independent, `w_{t-1}` inserted as an extra feature map before the final 1×1 conv, softmax over masked logits |
-| `train.py` | OSBL (Sec. 5.3): `sample_batch_starts()` (eq. 26 geometric recency bias), `train_step()`, `pretrain()`, `run_online_backtest()` (interleaves `rolling_steps` updates via `run_backtest`'s `on_step` hook), checkpointing; `_PanelStore` precomputes all window tensors/price relatives once, GPU-resident (~200 MB), so per-step data prep is pure tensor indexing — verified bit-identical to the per-step numpy path |
+| `networks.py` | `EIIECNN` (paper Fig. 2): kernel-height-1 convs keep each asset's stream independent, `w_{t-1}` inserted as an extra feature map before the final 1×1 conv, softmax over masked logits; `n_features` (conv1's input width) is just `len(cfg.data.features)`, so adding technical channels needs no network change |
+| `train.py` | OSBL (Sec. 5.3): `sample_batch_starts()` (eq. 26 geometric recency bias), `train_step()` (entropy bonus scale-annealed per step, `entropy_schedule()`), `pretrain()` (held-out checkpoint-at-peak: scores the frozen policy every `checkpoint_eval_every` steps on a `checkpoint_holdout_days` slice carved off the train split's tail via `_score_holdout()`, restores + refreshes the PVM under the best-scoring `state_dict` at the end — returns `(losses, best_step, best_score)`), `run_online_backtest()` (interleaves `rolling_steps` updates via `run_backtest`'s `on_step` hook), checkpointing; `_PanelStore` precomputes all window tensors/price relatives once, GPU-resident (scales with channel count, ~200 MB at 3 channels), so per-step data prep is pure tensor indexing — verified bit-identical to the per-step numpy path |
 | `sanity.py` | `run_sanity_checks()` — pre-training invariant gate (determinism, simplex weights, finite gradients/loss, baselines running cleanly); a dominant-asset toy market is a diagnostic, never a pass/fail gate |
 | `baselines.py` | UBAH, UCRP, Best-Stock (hindsight), Random Portfolio/Rebalancing, Constant-Cash, BOVA11 — all through `run_backtest` except BOVA11 (evaluated directly from its own price series) |
 | `metrics.py` | Full metrics suite (Sharpe/Sortino vs. CDI, Calmar, VaR/CVaR, turnover, cost drag, information ratio vs. BOVA11) + `block_bootstrap_ci()` |
@@ -202,6 +202,35 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
   enabled. For seed ensembles / hyperparameter sweeps use `python -m src.rl_agent.sweep`
   (parallel subprocesses, ~0.5 GB GPU each; run-dir timestamps carry microseconds so
   same-second launches can't collide).
+- **Stage 3 cash-attractor diagnosis (July 2026, `EIIE_DIAGNOSIS_PLAN.md`):** the agent's default
+  failure mode is converging to 100% cash — CDI accrues ~8.65%/yr in log-space vs. equal-weight's
+  ~8.22%, so unlike the paper's 0%-return cash asset, the training gradient has no restoring force
+  pushing back once every asset score drifts down; softmax saturates (~1e-9/asset), the gradient
+  vanishes, and more training makes it worse, not better. Fixes, both in `TrainConfig`:
+  `entropy_beta_start/end/anneal_frac` (linear decay over the first `anneal_frac` of pretrain,
+  flat at `entropy_beta_end` after — including through the whole online/live phase) forces early
+  exploration instead of hoping a fixed value gets lucky; `checkpoint_holdout_days`/
+  `checkpoint_eval_every` (`train.pretrain()`) periodically scores the frozen policy on a
+  held-out tail of the TRAIN split (never val/test) and restores the best-scoring checkpoint
+  instead of trusting wherever `pretrain_steps` happens to land — measured case: the same seed
+  went from +47% (100k steps) to −71% (2M steps) on identical config, budget alone overfitting
+  the policy past its peak. Even with both fixes, escaped policies are bistable (all-cash or
+  all-in, no steady diversified sleeve) and gravitate to the highest-volatility names in the
+  universe — a raw price CNN can't distinguish a real trend from a dead-cat bounce. Motivated the
+  July 2026 technical-feature-channel work below.
+- **Stage 3 technical feature channels (July 2026):** `DataConfig.features` can mix `close/high/low`
+  with technical columns already computed by Stage 2 (`return_1m/3m/6m`, `price_vs_ma60`,
+  `volatility_ratio_20_60`, `rsi_14`, `drawdown`, `volume_ratio_20d` — see `configs/eiie_features.json`).
+  `data.FEATURE_NORM` routes each by kind: price levels divide by value-at-t (paper eq. 18); technicals
+  passthrough (optionally rescaled, e.g. `rsi_14` ÷100) since they're already stationary — dividing a
+  return by "the return at t" would be meaningless. **Technical columns are `ffill`-only, NOT `bfill`'d**
+  in `load_price_panel`, unlike `close/high/low`: a price's pre-listing days are always masked out
+  downstream so backfilling them is harmless, but a technical feature's own warm-up NaN (e.g.
+  `return_6m` before 126 days of a ticker's own history) can still land on a day its slot IS active —
+  bfilling would leak a later, now-defined value backward into that unmasked training row, a lookahead
+  bug specific to technicals that prices never had. `pl`/`pvp` (PE/PB) are deliberately NOT wired in yet
+  — 27–30% NaN and tails to ±2000 need a non-linear squash (pseudo-log or cross-sectional rank) plus a
+  companion `*_isnan` mask channel, not plain clipping, or they blow out conv gradients.
 - **FIIs deferred:** stocks only (prices/fundamentals/dividends). FIIs are a separate asset class; add if agent scope expands to mixed-asset.
 - **BolsAI:** key in `.env`, loaded by `config.load_env()` (stdlib parser). Backfill only — paid ~€0.10/1K calls. Caps: prices `limit<=5000` (date-window paginated), fundamentals `limit<=88` (use 80).
 - **yfinance:** free incremental refresh. Prices/dividends full history to 2000; fundamentals only ~4–6 quarters (enough for quarterly refresh).
