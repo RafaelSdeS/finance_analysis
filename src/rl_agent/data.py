@@ -49,6 +49,16 @@ FEATURE_NORM = {
     "drawdown": 1.0, "volume_ratio_20d": 1.0,
     "pl_zhist_5y": "log1p", "pvp_zhist_5y": "log1p",
     "pl_zhist_5y_isnan": 1.0, "pvp_zhist_5y_isnan": 1.0,
+    # Cross-sectional sector z-score (same-day peer group, cross_sectional.py) -- a
+    # DIFFERENT computation from pl_zhist_5y above (own 5y history, not peers), and
+    # already well-bounded (measured in the built dataset: p1/p99 ~ [-2.7, 2.8], max
+    # ~5.6) unlike pl_zhist_5y's robust rolling z-score (which needed "log1p" to tame
+    # occasional ~18k blowups from a near-zero rolling IQR) -- plain passthrough is
+    # correct here, no squash needed. 0.2 brings its wider spread down near the other
+    # channels' O(1) scale, same reasoning as rsi_14's 0.01. isnan mask matters: ~39%
+    # of rows are NaN (missing pl that day, or a sector-of-one quarter), too much to
+    # silently zero-fill without telling the network "no data" from "z-score of 0".
+    "pl_zscore_sector": 0.2, "pl_zscore_sector_isnan": 1.0,
 }
 
 

@@ -555,20 +555,46 @@ because Finding 5 stands — seed variance (PV 0.85–1.53 on identical config) 
 config delta tested. A/B-testing feature groups on top of that noise guarantees false
 conclusions. Fix the noise source first, then measure, then pick ONE lever with evidence.
 
-### Step 1 — Resolve 7a: frozen-policy ablation (config-only)
+### Step 1 — Resolve 7a: frozen-policy ablation (config-only) — DONE (2026-07-18)
 
-- [x] **Config ready**: `configs/eiie_features_frozen.json` (`eiie_features.json` copy,
-  `rolling_steps: 0`, name `eiie_features_frozen`). `rolling_steps: 0` was confirmed to
-  cleanly skip all online training (`train.py`'s `after_step` loop is `range(0)` — no crash,
-  no divide, `loss` stays `None`, postfix update is already guarded).
-- [ ] Run seeds 1–8 (~1.5 h): `python -m src.rl_agent.sweep --config configs/eiie_features_frozen.json --seeds 1 2 3 4 5 6 7 8 -j 4`.
-- [ ] Compare vs the existing Phase 6 online runs per seed: final PV, allocation-entropy
-  trajectory (Finding 2's t1→t3 decay), cash fraction, hopping switches — all now in
-  `metrics_summary.json` automatically (Step 2's 8-D1 fields).
-- Decision rule: frozen > online → online phase is the defect; either keep frozen or apply
-  7c (hold entropy floor at ~1e-4 through the live phase) and re-test. frozen ≈ online →
-  drop online updates (same result, less churn). frozen < online → pretrain is the weak
-  link, revisit checkpoint selection instead.
+- [x] **Config**: `configs/eiie_features_frozen.json` (`eiie_features.json` copy,
+  `rolling_steps: 0`, name `eiie_features_frozen`).
+- [x] **Bug found + fixed mid-sweep**: seed 5's first run collided with seed 8's on
+  `experiment.py`'s output directory (`datetime.now()` timestamp formatted to the identical
+  microsecond string under concurrent `sweep.py -j 4` launches — the old "timestamps carry
+  microseconds, so same-second launches can't collide" assumption didn't hold in practice).
+  Seed 8's write silently clobbered seed 5's artifacts. Fixed by appending `os.getpid()` to
+  the directory name (`experiment.py`, `sweep.py` docstring updated to match) — PIDs are
+  unique across every simultaneously-running process regardless of clock resolution. Seed 5
+  re-run cleanly afterward, no collision.
+- [x] Ran seeds 1–8: `python -m src.rl_agent.sweep --config configs/eiie_features_frozen.json --seeds 1 2 3 4 5 6 7 8 -j 4` (+ seed 5 individually after the fix).
+
+**Results — frozen vs. each seed's Phase 6 online counterpart** (same window; CDI +30.9%, BOVA11 +25.6%):
+
+| seed | frozen return | online return | frozen Sharpe | online Sharpe | verdict |
+|---:|---:|---:|---:|---:|---|
+| 1 | +24.5% | +18.6% | −0.23 | −0.51 | frozen better |
+| 2 | +23.8% | **+30.8%** | −0.05 | **+0.12** | online better |
+| 3 | **−17.7%** | **+8.5%** | −0.37 | −0.06 | online better |
+| 4 | +12.6% | +12.9% | −0.17 | −0.17 | wash |
+| 5 | −13.8% | −14.9% | −0.50 | −0.50 | wash |
+| 6 | **+98.4%** | +53.2% | **+0.62** | 0.36 | frozen better |
+| 7 | +28.5% | +27.4% | −0.08 | −0.35 | frozen better |
+| 8 | −7.2% | −6.2% | −0.49 | −0.50 | wash |
+
+Tally: 3 favor frozen (1, 6, 7), 2 favor online (2, 3), 3 wash (4, 5, 8).
+
+**Verdict: mixed, does NOT cleanly confirm Finding 2's hypothesis.** Seed 3 is a direct
+counterexample — online training *rescued* a policy that collapses when frozen (−17.7% →
++8.5%). This mostly reproduces Finding 5 again: the frozen/online switch is itself just
+another config delta whose effect is comparable to or smaller than seed-to-seed variance.
+Seed 6's headline +98.4% also carries a red flag, not a clean win: mean cash ≈0%, allocation
+entropy 0.08 (near-total concentration), 198 argmax switches (hopping between single-name
+all-in bets roughly every 3 days) — the same "lottery ticket that happened to pay" pattern
+Phase 5 already flagged, not evidence of a stable diversified strategy.
+- Decision rule (as specified) doesn't resolve cleanly on PV/Sharpe alone → proceed to
+  Step 2/3's diagnostics (8-D3 ranking quality especially) rather than picking 7c or dropping
+  online updates on this evidence alone.
 
 ### Step 2 — Build the three diagnostics (offline, no retraining) — CODE COMPLETE
 
@@ -601,31 +627,104 @@ conclusions. Fix the noise source first, then measure, then pick ONE lever with 
   has — note: for pre-Phase-8 runs `model.pt` is the POST-online, already-degraded policy,
   since nothing saved the pretrain checkpoint separately before now).
 
-### Step 3 — Re-read the existing 17 runs through the new lenses
+### Step 3 — Re-read the existing runs through the new lenses
 
-- [ ] Apply 8-D1 (already in each run's `metrics_summary.json`) + 8-D2/8-D3
-  (`python -m src.rl_agent.diagnostics --runs experiments/eiie_features_2026* experiments/eiie_features_b100_2026* experiments/eiie_valuation_*_2026* --replay`)
-  to all Phase 6+7 runs (features s1–8, features_b100 s1–3, valuation_b50/b100 s1–3) plus
-  the new frozen runs from Step 1 (no `--replay` needed for those — they'll have
-  `weights.npz` natively). No new training.
+- [x] Applied 8-D2/8-D3 to the 8 `eiie_features_frozen` runs from Step 1 (native
+  `weights.npz`, no `--replay` needed): `python -m src.rl_agent.diagnostics --runs experiments/eiie_features_frozen_*`.
+- [ ] Still open: apply the same to the other 17 Phase 6+7 runs (features s1–8,
+  features_b100 s1–3, valuation_b50/b100 s1–3) via `--replay`. Lower priority now — the
+  frozen-run result below is already decisive enough to pick Step 4's branch.
 
-### Step 4 — Branch on evidence (pick ONE, justified by 8-D3)
+**8-D3 result (all 8 seeds, k=1/5/21): flat, ~0 everywhere.** Mean Spearman(agent
+non-cash weights, realized forward return) ranges −0.011 to +0.007 across every
+seed/horizon — no seed, no horizon, shows a real correlation in either direction.
+Top-10-hit-rate on realized top-decile winners: 6–10%, matching the ~5.8% baseline
+random chance out of 171 assets would give. This is not "ranks winners low" (a
+consistent anti-signal would itself be informative) — it's indistinguishable from the
+agent's weights having no relationship at all to what happens next, on any single day.
 
-- [ ] **If representation problem** → feature work, incrementally: first the 8-channel
-  subset (close/high/low + return_1m/3m/6m + drawdown + price_vs_ma60), then the momentum/
-  oscillator group (rsi_14, volatility_ratio_20_60, volume_ratio_20d), then ONE
+**8-D2 result: mean pairwise cosine 0.39, top-10 Jaccard 0.19, mean-weight correlation
+0.56.** Seeds DO converge on a shared aggregate preference for certain tickers (matches
+Phase 6's PETR3/4, PRIO3, GGBR4 recurrence) even though day-to-day top-10 picks diverge a
+lot (Jaccard 0.19). So training reliably finds *something* stable across seeds — it just
+isn't something that predicts returns.
+
+**Verdict: REPRESENTATION PROBLEM, not policy/entropy/churn.** This also explains Step
+1's mixed frozen-vs-online result — if the underlying signal is ~zero either way, whether
+online updates run barely matters; both conditions are watching noise move around a
+near-zero-skill policy. Proceed to Step 4's feature-work branch.
+
+### Step 4 — Branch on evidence (pick ONE, justified by 8-D3) — DECIDED: feature work
+
+- [ ] **Feature work, incrementally** (decided by 8-D3's flat result above): first the
+  8-channel subset (close/high/low + return_1m/3m/6m + drawdown + price_vs_ma60), then the
+  momentum/oscillator group (rsi_14, volatility_ratio_20_60, volume_ratio_20d), then ONE
   cross-sectional relative-strength channel (Stage 2's `cross_sectional.py` already computes
-  market/sector-relative features — wiring, not new computation). One group per sweep.
-- [ ] **If policy/churn problem** → holding-horizon experiment (k ∈ {1, 3, 5}). Real code
-  change (environment/train/PVM step by k; μ-chaining must step by k; overlapping windows in
-  train, non-overlapping in eval) — Phase 6's churn-tax evidence (15–51%/day turnover eating
-  the edge) supports this branch if 8-D3 shows picking is fine.
-- [ ] **Architecture changes stay closed** unless 8-D3 proves a representation failure that
-  feature groups don't fix. Noted for the record: the proposed `groups=11` depthwise conv1
-  is invalid as stated (PyTorch requires out_channels divisible by groups; conv1_out=2) —
-  it would be a full depthwise-separable block, i.e. a structural change. The two-stream
-  valuation bypass stays in the drawer: valuation channels tested negative (Finding 4), so
-  the open question is whether they belong at all, not how to encode them.
+  market/sector-relative features — wiring, not new computation). One group per sweep, and
+  re-run 8-D3 after each — the whole point is to watch whether Spearman/hit-rate actually
+  moves off zero, not just whether backtest PV moves (Step 1 showed PV alone is too noisy
+  to attribute).
+- [x] ~~**Holding-horizon experiment**~~ **NOT indicated** — 8-D3 shows picking is flat, not
+  churny-but-correct, so more time between rebalances has nothing to lock in.
+- [x] ~~**Architecture changes**~~ **stay closed** — 8-D3's flat result doesn't distinguish
+  "wrong architecture" from "no signal in these inputs at any architecture"; the cheaper,
+  correctly-ordered next step is trying different/more inputs before rebuilding the encoder.
+  Noted for the record: the proposed `groups=11` depthwise conv1 is invalid as stated
+  (PyTorch requires out_channels divisible by groups; conv1_out=2) — it would be a full
+  depthwise-separable block, i.e. a structural change. The two-stream valuation bypass stays
+  in the drawer: valuation channels tested negative (Finding 4), so the open question is
+  whether they belong at all, not how to encode them.
+
+---
+
+## Phase 9: Cross-sectional PE z-score test (2026-07-18, `configs/eiie_pe_sector.json`, seeds 1–8)
+
+Added `pl_zscore_sector` + `pl_zscore_sector_isnan` (13 channels total) — the untested,
+peer-relative valuation feature chosen in Step 4 over the already-closed per-ticker
+`pl_zhist_5y`. Measured directly before wiring: well-bounded (p1/p99 ≈ [−2.7, 2.8], max
+≈ ±5.6 across the built dataset), unlike `pl_zhist_5y`'s occasional ~18k blowups — no
+`log1p` squash needed, `0.2` passthrough scale + isnan mask (39% NaN coverage measured).
+
+| seed | return | sharpe | mean cash | entropy | eff_n | switches | maxdd | turnover |
+|-----:|-------:|-------:|----------:|--------:|------:|---------:|------:|---------:|
+| 1 | −36.3% | −0.86 | 0.82 | 0.04 | 1.16 | 0 | 0.501 | 0.050 |
+| 2 | +1.1% | −0.33 | 0.85 | 0.06 | 1.22 | 0 | 0.271 | 0.018 |
+| 3 | +1.3% | −0.29 | 0.89 | 0.02 | 1.10 | 0 | 0.327 | 0.033 |
+| 4 | +28.8% | −0.09 | 0.82 | 0.20 | 1.80 | 0 | 0.066 | 0.018 |
+| 5 | +33.4% | 0.15 | 0.00 | 0.59 | 18.97 | 0 | 0.202 | 0.053 |
+| 6 | **+74.8%** | **0.51** | 0.00 | 0.17 | 2.14 | 21 | 0.432 | 0.366 |
+| 7 | +25.7% | −0.03 | 0.88 | 0.08 | 1.28 | 0 | 0.149 | 0.016 |
+| 8 | −12.0% | −0.03 | 0.02 | 0.31 | 4.27 | 17 | 0.452 | 0.460 |
+
+(CDI +30.9%, BOVA11 +25.6% on this window.) Seed 6 again the standout (PV 1.748).
+
+**8-D3 ranking quality: still flat, including for seed 6 itself.** Every seed, every
+k∈{1,5,21}: mean Spearman in [−0.012, +0.006], hit rate 6–9% (≈ the ~5.8% random-chance
+baseline). Seed 6's OWN numbers: Spearman +0.004/+0.006/+0.002, hit rate ~0.06 — no better
+than the worst seed in the batch. The new feature did not move the needle for anyone,
+including the seed that made the most money.
+
+**Why seed 6 succeeded — checked directly against its `weights.npz`**: top holdings by
+mean weight are PETR3 (24.1%), PETR4 (11.6%), PRIO3 (8.3%), GGBR4 (4.4%) — the *exact same*
+oil/commodity-complex names seed 6 concentrated into in Phase 6 (original 11-channel
+features) and the Phase 8 frozen ablation, regardless of which feature set it was trained
+on. This is not the PE-sector feature working — it's seed 6's initialization consistently
+locking onto the same handful of names independent of input channels, which happened to
+ride a real, large 2021–2023 commodity rally in this exact backtest window. Combined with
+its own flat 8-D3 numbers, this is the "lottery ticket that happened to pay" pattern
+(Phase 5/7) confirmed a third time, not evidence of a discovered edge.
+
+**Verdict: 4 configs in (baseline 3ch, features 11ch, frozen, pe_sector 13ch), 8-D3 has
+never moved off zero.** Chasing seed 6's specific concentrated bet further would be
+overfitting to one historical coincidence, not building a generalizable edge. The
+untested `momentum_vs_market_1m/3m` cross-sectional channel (Step 4's other candidate,
+not yet tried — PE-sector was tested instead) remains the cheapest still-open lever: it's
+the one piece of information the "Identical Independent Evaluators" architecture
+structurally cannot derive on its own (no cross-asset comparison inside the encoder), so
+it's a different bet than another valuation/technical variant. Recommended before any
+further feature attempts: decide up front what a null result on THIS channel means for
+the program overall (four price/technical/valuation attempts already flat is a strong
+prior against "one more feature" fixing it) rather than open-endedly iterating.
 
 ### Standing constraints (user decisions, do not reopen)
 
