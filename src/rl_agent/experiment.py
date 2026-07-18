@@ -16,6 +16,7 @@ approved) training run.
 import argparse
 from dataclasses import replace
 import json
+import os
 import platform
 import subprocess
 from dataclasses import asdict
@@ -90,8 +91,13 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
         # than 14 on the dev machine. Doesn't affect results, only wall-clock.
         torch.set_num_threads(2)
 
-    # %f: parallel sweep launches (sweep.py, S5) in the same second must not collide
-    out_dir = ROOT / cfg.experiment.out_dir / f"{cfg.experiment.name}_{datetime.now():%Y%m%dT%H%M%S%f}"
+    # %f alone isn't enough: a sweep.py -j batch starts several processes back-to-back
+    # with no delay, and on some systems datetime.now()'s underlying clock ticks coarser
+    # than a true microsecond -- two concurrent jobs CAN format to the identical string
+    # (observed: two same-batch seeds collided on one out_dir, one silently clobbering the
+    # other's artifacts). PID is unique across every simultaneously-running process on the
+    # machine regardless of clock resolution, so appending it closes the race outright.
+    out_dir = ROOT / cfg.experiment.out_dir / f"{cfg.experiment.name}_{datetime.now():%Y%m%dT%H%M%S%f}_{os.getpid()}"
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg.save(out_dir / "config.json")
 
@@ -154,6 +160,14 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
         train_model, pvm, panel, optimizer, cfg, train_end_idx=pretrain_end_idx, device=cfg.train.device)
     checklist["no_numerical_instability"] = bool(np.all(np.isfinite(train_losses)))
 
+    # Saved BEFORE the online backtest below mutates `model` further -- this is the
+    # pretrain-selected (checkpoint-at-peak) policy, needed as the frozen-vs-online
+    # comparison point for Phase 8 diagnostics (EIIE_DIAGNOSIS_PLAN.md Phase 8).
+    save_checkpoint(out_dir / "model_pretrain.pt", model, optimizer, pvm,
+                     step=best_step if best_step is not None else len(train_losses),
+                     extra={"eval_split": eval_split, "best_step": best_step,
+                            "best_holdout_return": best_holdout_score})
+
     # Post-pretrain: did the policy collapse into a saturated (gradient-dead) corner?
     # Loud, because a collapsed policy makes every downstream number meaningless -- the
     # backtest still "runs", it just reports the frozen all-cash portfolio as if it were
@@ -167,6 +181,16 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
                                         start_idx=backtest_start_idx, end_idx=backtest_end_idx,
                                         device=cfg.train.device)
     checklist["no_numerical_instability"] &= bool(np.all(np.isfinite(agent_result.portfolio_value)))
+
+    # Full per-day weight matrix -- report.html only keeps a lossy cash+top-9+other
+    # aggregation (plots.py's _allocation_figure); this is the on-disk source Phase 8's
+    # cross-seed consistency and ranking-quality diagnostics (diagnostics.py) read from.
+    np.savez_compressed(
+        out_dir / "weights.npz",
+        weights=agent_result.weights.astype(np.float32),
+        dates=agent_result.dates.values.astype("datetime64[D]"),
+        tickers=np.array(["cash"] + list(panel.asset_index.tickers)),
+    )
 
     save_checkpoint(out_dir / "model.pt", model, optimizer, pvm, step=len(train_losses),
                      extra={"eval_split": eval_split})

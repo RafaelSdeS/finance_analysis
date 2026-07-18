@@ -14,6 +14,7 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .data import CASH_GIDX
 from .environment import BacktestResult
 
 TRADING_DAYS_PER_YEAR = 252
@@ -125,6 +126,83 @@ def information_ratio(result: BacktestResult, benchmark_returns: np.ndarray,
     return float(active.mean() / std * np.sqrt(periods_per_year))
 
 
+def allocation_entropy(weights: np.ndarray) -> float:
+    """Mean daily Shannon entropy of the weight vector (cash + all assets),
+    normalized to [0, 1] by log(n_global) -- Phase 7's diagnostic for the
+    online phase re-concentrating a policy (entropy decaying toward 0 as
+    cash/a single name dominates). n_global<=1 has nothing to diversify
+    across (degenerate synthetic fixtures only; real panels are 172-wide)."""
+    n_global = weights.shape[1]
+    if n_global <= 1:
+        return 0.0
+    w = np.clip(weights, 1e-12, None)
+    daily = -(w * np.log(w)).sum(axis=1)
+    return float(daily.mean() / np.log(n_global))
+
+
+def effective_n_holdings(weights: np.ndarray) -> float:
+    """Mean daily 1/sum(w^2) (inverse Herfindahl) -- the number of
+    equal-sized positions a day's allocation is equivalent to. A weight row
+    summing to 0 (no holdings at all, a degenerate/synthetic fixture -- real
+    weights always sum to 1) reports 0 rather than dividing by zero."""
+    ssq = np.sum(weights ** 2, axis=1)
+    daily = np.where(ssq > 0, 1.0 / np.where(ssq > 0, ssq, 1.0), 0.0)
+    return float(daily.mean())
+
+
+def mean_cash_weight(weights: np.ndarray) -> float:
+    return float(weights[:, CASH_GIDX].mean())
+
+
+def frac_days_cash_above(weights: np.ndarray, threshold: float = 0.9) -> float:
+    return float((weights[:, CASH_GIDX] > threshold).mean())
+
+
+def frac_days_single_name_above(weights: np.ndarray, threshold: float = 0.7) -> float:
+    """Fraction of days any ONE non-cash asset holds more than `threshold`
+    of the portfolio (the "all-in" side of Phase 7's bistable regime)."""
+    non_cash = np.delete(weights, CASH_GIDX, axis=1)
+    if non_cash.shape[1] == 0:
+        return 0.0
+    return float((non_cash.max(axis=1) > threshold).mean())
+
+
+def argmax_switches(weights: np.ndarray, conc_threshold: float = 0.7) -> int:
+    """Count of days the concentrated (>conc_threshold) top non-cash asset
+    changes identity from the previous concentrated day -- isolates Phase
+    7's "all-in ticker hopping" from ordinary partial rebalancing."""
+    non_cash = np.delete(weights, CASH_GIDX, axis=1)
+    if non_cash.shape[1] == 0:
+        return 0
+    maxw = non_cash.max(axis=1)
+    which = non_cash.argmax(axis=1)
+    conc = maxw > conc_threshold
+    return int(sum(1 for i in range(1, len(conc))
+                   if conc[i] and conc[i - 1] and which[i] != which[i - 1]))
+
+
+def mean_position_lifetime(weights: np.ndarray, threshold: float = 0.01) -> float:
+    """Mean run-length (in days) of above-`threshold` holding spells, pooled
+    across every non-cash asset. NaN if no asset ever crosses threshold."""
+    non_cash = np.delete(weights, CASH_GIDX, axis=1)
+    if non_cash.shape[1] == 0:
+        return float("nan")
+    held = non_cash > threshold
+    lifetimes = []
+    for j in range(held.shape[1]):
+        col = held[:, j]
+        i = 0
+        while i < len(col):
+            if col[i]:
+                start = i
+                while i < len(col) and col[i]:
+                    i += 1
+                lifetimes.append(i - start)
+            else:
+                i += 1
+    return float(np.mean(lifetimes)) if lifetimes else float("nan")
+
+
 def block_bootstrap_ci(returns: np.ndarray, stat_fn: Callable[[np.ndarray], float],
                         n_bootstrap: int = 1000, block_size: int = 20,
                         level: float = 0.95, seed: Optional[int] = None) -> tuple:
@@ -165,6 +243,13 @@ class MetricsSummary:
     win_rate: float
     information_ratio: float
     final_apv: float
+    allocation_entropy: float
+    effective_n_holdings: float
+    mean_cash_weight: float
+    frac_days_cash_gt90: float
+    frac_days_single_name_gt70: float
+    argmax_switches: int
+    mean_position_lifetime: float
     total_return_ci: tuple  # (point, lo, hi)
     sharpe_ci: tuple
 
@@ -203,6 +288,13 @@ def summarize(result: BacktestResult, risk_free_returns: np.ndarray, benchmark_r
         win_rate=win_rate(returns),
         information_ratio=information_ratio(result, benchmark_returns, periods_per_year),
         final_apv=final_apv(result),
+        allocation_entropy=allocation_entropy(result.weights),
+        effective_n_holdings=effective_n_holdings(result.weights),
+        mean_cash_weight=mean_cash_weight(result.weights),
+        frac_days_cash_gt90=frac_days_cash_above(result.weights, 0.9),
+        frac_days_single_name_gt70=frac_days_single_name_above(result.weights, 0.7),
+        argmax_switches=argmax_switches(result.weights, 0.7),
+        mean_position_lifetime=mean_position_lifetime(result.weights, 0.01),
         total_return_ci=block_bootstrap_ci(returns, _total_return_stat, bootstrap_n, bootstrap_block, var_level, seed),
         sharpe_ci=block_bootstrap_ci(returns, _sharpe_stat, bootstrap_n, bootstrap_block, var_level, seed),
     )

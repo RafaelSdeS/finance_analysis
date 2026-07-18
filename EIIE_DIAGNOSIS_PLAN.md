@@ -533,17 +533,101 @@ vs `constant_cash` (pure CDI) +31% and UBAH +37% on the same window. Seed varian
   config, seeds 1–8. Directly measures whether online training helps or hurts. Prediction
   from Finding 2: frozen preserves the good checkpoints (s1/s7 stay diversified) and avoids
   s3-style hopping.
-- [ ] **7b — Excess-CDI training reward** (training-gradient-only, within the scope
-  constraint): subtract the day's CDI log-return from the reward in `train_step`. All-cash
-  then earns exactly 0 and the gradient always has a restoring force away from cash —
-  removes the attractor structurally instead of fighting it with entropy. Eval/backtest
-  accounting untouched.
+- [x] ~~**7b — Excess-CDI training reward**~~ **REJECTED by user (2026-07-17): the reward
+  function stays as the paper defines it.** Not a lever.
 - [ ] **7c — If online training survives 7a: raise `entropy_beta_end`** (e.g. hold 1e-4
   through the live phase) so the floor that protects pretrain also protects production.
-- [ ] **7d — Concentration cap (design question for iteration 2)**: a hard per-asset max
-  weight (e.g. 20%, capped softmax) would clamp both tails of the bistable regime (s6 +53%
-  and valuation-s3 −57% are the same coin) and mechanically cut the churn tax. Model-side
-  change — needs user sign-off on scope.
+- [x] ~~**7d — Concentration cap**~~ **REJECTED by user (2026-07-17): no hard per-asset
+  caps; the model must learn its own constraints.** Not a lever.
 - [x] **PE/PB opt-in group: tested and closed** (Finding 4).
 - [ ] **Stop adding feature channels** until the live-phase stability is fixed — the
   bottleneck is the objective/online drift, not inputs.
+
+---
+
+## Phase 8: Evidence-first sequencing — diagnostics before levers (planned 2026-07-18)
+
+Context: an external recommendation list (incremental feature groups, cross-sectional
+relative strength, multi-day holding horizons k, depthwise-separable conv1, two-stream
+valuation bypass, behavioral/consistency/ranking diagnostics) was reviewed. Verdict: the
+diagnostics are immediately valuable; every training-side lever is **blocked on Phase 7a**,
+because Finding 5 stands — seed variance (PV 0.85–1.53 on identical config) swamps every
+config delta tested. A/B-testing feature groups on top of that noise guarantees false
+conclusions. Fix the noise source first, then measure, then pick ONE lever with evidence.
+
+### Step 1 — Resolve 7a: frozen-policy ablation (config-only)
+
+- [x] **Config ready**: `configs/eiie_features_frozen.json` (`eiie_features.json` copy,
+  `rolling_steps: 0`, name `eiie_features_frozen`). `rolling_steps: 0` was confirmed to
+  cleanly skip all online training (`train.py`'s `after_step` loop is `range(0)` — no crash,
+  no divide, `loss` stays `None`, postfix update is already guarded).
+- [ ] Run seeds 1–8 (~1.5 h): `python -m src.rl_agent.sweep --config configs/eiie_features_frozen.json --seeds 1 2 3 4 5 6 7 8 -j 4`.
+- [ ] Compare vs the existing Phase 6 online runs per seed: final PV, allocation-entropy
+  trajectory (Finding 2's t1→t3 decay), cash fraction, hopping switches — all now in
+  `metrics_summary.json` automatically (Step 2's 8-D1 fields).
+- Decision rule: frozen > online → online phase is the defect; either keep frozen or apply
+  7c (hold entropy floor at ~1e-4 through the live phase) and re-test. frozen ≈ online →
+  drop online updates (same result, less churn). frozen < online → pretrain is the weak
+  link, revisit checkpoint selection instead.
+
+### Step 2 — Build the three diagnostics (offline, no retraining) — CODE COMPLETE
+
+- [x] **8-D1 Behavioral metrics** (was rec 5) — implemented in `metrics.py`:
+  `allocation_entropy`, `effective_n_holdings`, `mean_cash_weight`,
+  `frac_days_cash_above`, `frac_days_single_name_above`, `argmax_switches`,
+  `mean_position_lifetime`. Wired into `MetricsSummary`/`summarize()` (so every run's
+  `metrics_summary.json` gets them, agent AND every baseline) and into `plots.py`'s
+  `_METRIC_FIELDS` (report.html table). Tested: `tests/rl_agent/test_metrics.py`
+  (`test_behavioral_metrics`, `test_behavioral_metrics_degenerate`).
+- [x] **8-D2 Cross-seed consistency** (was rec 6) — `diagnostics.py`'s
+  `cross_seed_consistency()`: mean pairwise cosine similarity + top-10 Jaccard overlap of
+  daily weight vectors + correlation of per-run mean-weight vectors, aligned on the
+  intersection of dates across runs. Tested: `test_diagnostics.py`.
+- [x] **8-D3 Ranking quality** (was rec 7) — **the master key**. `diagnostics.py`'s
+  `ranking_quality()`: per k∈{1,5,21} (configurable), Spearman(agent non-cash weights,
+  realized forward k-day return) and top-decile-hit-rate-in-top-10, both overall and
+  restricted to days held <50% cash (Finding 5: heavy-cash days otherwise drown the signal).
+  New `forward_return(panel, t, k)` helper (no forward-return method existed on `PricePanel`
+  before this). Tested: `test_diagnostics.py` (perfect/inverted/mismatched-tickers cases).
+- [x] **On-disk artifact needed by D2/D3**: `experiment.py` now saves `weights.npz`
+  (full `(T, n_global)` weight matrix + dates + tickers — `report.html` only ever kept a
+  lossy cash+top-9+other aggregation) and `model_pretrain.pt` (the pretrain-selected
+  checkpoint, saved BEFORE the online backtest mutates the model further — this is what
+  lets `diagnostics.py --replay` reconstruct a frozen-policy backtest for **any** past run,
+  not just future `eiie_features_frozen` ones).
+- Old runs (predating this change) have no `weights.npz` — use
+  `python -m src.rl_agent.diagnostics --runs <dirs> --replay` to reconstruct weights via an
+  inference-only backtest against `model_pretrain.pt` (or `model.pt` if that's all a run
+  has — note: for pre-Phase-8 runs `model.pt` is the POST-online, already-degraded policy,
+  since nothing saved the pretrain checkpoint separately before now).
+
+### Step 3 — Re-read the existing 17 runs through the new lenses
+
+- [ ] Apply 8-D1 (already in each run's `metrics_summary.json`) + 8-D2/8-D3
+  (`python -m src.rl_agent.diagnostics --runs experiments/eiie_features_2026* experiments/eiie_features_b100_2026* experiments/eiie_valuation_*_2026* --replay`)
+  to all Phase 6+7 runs (features s1–8, features_b100 s1–3, valuation_b50/b100 s1–3) plus
+  the new frozen runs from Step 1 (no `--replay` needed for those — they'll have
+  `weights.npz` natively). No new training.
+
+### Step 4 — Branch on evidence (pick ONE, justified by 8-D3)
+
+- [ ] **If representation problem** → feature work, incrementally: first the 8-channel
+  subset (close/high/low + return_1m/3m/6m + drawdown + price_vs_ma60), then the momentum/
+  oscillator group (rsi_14, volatility_ratio_20_60, volume_ratio_20d), then ONE
+  cross-sectional relative-strength channel (Stage 2's `cross_sectional.py` already computes
+  market/sector-relative features — wiring, not new computation). One group per sweep.
+- [ ] **If policy/churn problem** → holding-horizon experiment (k ∈ {1, 3, 5}). Real code
+  change (environment/train/PVM step by k; μ-chaining must step by k; overlapping windows in
+  train, non-overlapping in eval) — Phase 6's churn-tax evidence (15–51%/day turnover eating
+  the edge) supports this branch if 8-D3 shows picking is fine.
+- [ ] **Architecture changes stay closed** unless 8-D3 proves a representation failure that
+  feature groups don't fix. Noted for the record: the proposed `groups=11` depthwise conv1
+  is invalid as stated (PyTorch requires out_channels divisible by groups; conv1_out=2) —
+  it would be a full depthwise-separable block, i.e. a structural change. The two-stream
+  valuation bypass stays in the drawer: valuation channels tested negative (Finding 4), so
+  the open question is whether they belong at all, not how to encode them.
+
+### Standing constraints (user decisions, do not reopen)
+
+- Reward function = paper's log-return reward. No excess-CDI reshaping, no turnover penalty.
+- No hard per-asset weight caps. Constraints must be learned, not imposed.

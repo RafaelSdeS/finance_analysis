@@ -171,6 +171,91 @@ def test_bootstrap_ci(passed, failed):
     return passed, failed
 
 
+def test_behavioral_metrics(passed, failed):
+    # 3 assets + cash. Day 0: uniform. Day 1: 90% cash. Day 2: 80% asset 2 (concentrated).
+    # Day 3: 75% asset 1 (concentrated, different name -> a switch). Day 4: back to uniform.
+    weights = np.array([
+        [0.25, 0.25, 0.25, 0.25],
+        [0.90, 0.05, 0.03, 0.02],
+        [0.05, 0.05, 0.10, 0.80],
+        [0.10, 0.75, 0.10, 0.05],
+        [0.25, 0.25, 0.25, 0.25],
+    ])
+    result = _result(np.zeros(5))
+    result.weights = weights
+
+    ent = m.allocation_entropy(weights)
+    # days 0 and 4 are uniform over 4 -> normalized entropy == 1.0 exactly
+    ok = np.isclose(ent, np.mean([
+        1.0,
+        -(weights[1] * np.log(weights[1])).sum() / np.log(4),
+        -(weights[2] * np.log(weights[2])).sum() / np.log(4),
+        -(weights[3] * np.log(weights[3])).sum() / np.log(4),
+        1.0,
+    ]))
+    print_check("allocation_entropy: matches hand-computed mean normalized entropy", ok, f"got {ent:.4f}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    eff_n_day0 = 1.0 / np.sum(weights[0] ** 2)
+    ok = np.isclose(eff_n_day0, 4.0)
+    print_check("effective_n_holdings: uniform-over-4 day gives exactly 4.0 by hand", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = np.isclose(m.mean_cash_weight(weights), weights[:, 0].mean())
+    print_check("mean_cash_weight: matches mean of cash column", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = np.isclose(m.frac_days_cash_above(weights, 0.9), 0.0) and np.isclose(
+        m.frac_days_cash_above(weights, 0.5), 1 / 5)
+    print_check("frac_days_cash_above: exactly day 1 crosses 0.5, none strictly exceed 0.9", ok,
+                f"got {m.frac_days_cash_above(weights, 0.5)}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = np.isclose(m.frac_days_single_name_above(weights, 0.7), 2 / 5)
+    print_check("frac_days_single_name_above: days 2 and 3 cross 0.7 by construction", ok,
+                f"got {m.frac_days_single_name_above(weights, 0.7)}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    # Concentrated days are 2 (asset idx 2, i.e. gidx 3) and 3 (asset idx 1, i.e. gidx 2) --
+    # different identity while both concentrated -> exactly one switch.
+    switches = m.argmax_switches(weights, 0.7)
+    ok = switches == 1
+    print_check("argmax_switches: exactly 1 switch between the two differently-named concentrated days", ok,
+                f"got {switches}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    # Asset gidx 3 (col index 3) crosses 0.01 only on day 2 -> lifetime 1.
+    # Asset gidx 1 (col index 1) crosses 0.01 on days 0,1(0.05),2,3,4 -> a 5-day run.
+    lifetime = m.mean_position_lifetime(weights, 0.01)
+    ok = np.isfinite(lifetime) and lifetime > 0
+    print_check("mean_position_lifetime: finite positive run-length over threshold spells", ok,
+                f"got {lifetime:.4f}")
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
+def test_behavioral_metrics_degenerate(passed, failed):
+    # n_global == 1 (cash-only, no assets) -- the fixture test_summarize_smoke's _result
+    # helper defaults to; every function must degrade gracefully, not crash.
+    weights = np.ones((6, 1))
+    ok = m.allocation_entropy(weights) == 0.0
+    print_check("allocation_entropy: n_global<=1 returns 0.0 (nothing to diversify across)", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = m.frac_days_single_name_above(weights, 0.7) == 0.0
+    print_check("frac_days_single_name_above: no non-cash columns returns 0.0", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = m.argmax_switches(weights, 0.7) == 0
+    print_check("argmax_switches: no non-cash columns returns 0", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = np.isnan(m.mean_position_lifetime(weights, 0.01))
+    print_check("mean_position_lifetime: no non-cash columns returns NaN", ok)
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
 def test_summarize_smoke(passed, failed):
     rng = np.random.default_rng(3)
     log_r = np.log(1 + rng.normal(0.0003, 0.01, size=100))
@@ -204,6 +289,8 @@ def main():
     passed, failed = test_turnover_and_cost_drag(passed, failed)
     passed, failed = test_win_rate_and_information_ratio(passed, failed)
     passed, failed = test_bootstrap_ci(passed, failed)
+    passed, failed = test_behavioral_metrics(passed, failed)
+    passed, failed = test_behavioral_metrics_degenerate(passed, failed)
     passed, failed = test_summarize_smoke(passed, failed)
 
     print_section_end(passed, failed)

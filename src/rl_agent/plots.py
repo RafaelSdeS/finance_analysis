@@ -21,6 +21,9 @@ _METRIC_FIELDS = [
     "total_return", "annualized_return", "cagr", "volatility", "sharpe", "sortino", "calmar",
     "max_drawdown", "var", "cvar", "mean_daily_turnover", "annualized_turnover",
     "transaction_cost_drag", "win_rate", "information_ratio", "final_apv",
+    "allocation_entropy", "effective_n_holdings", "mean_cash_weight",
+    "frac_days_cash_gt90", "frac_days_single_name_gt70", "argmax_switches",
+    "mean_position_lifetime",
 ]
 
 

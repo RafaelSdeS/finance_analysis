@@ -6,8 +6,9 @@ feature store), so one GPU comfortably hosts several independent runs at once â€
 seed ensembles and hyperparameter/config sweeps are wall-clock-divided by the
 number of parallel jobs. Each job is a plain `python -m src.rl_agent.experiment`
 subprocess; its interleaved output goes to a per-job log file, and each run
-still produces its own self-contained experiments/{name}_{timestamp}/ dir
-(timestamps carry microseconds, so same-second launches can't collide).
+still produces its own self-contained experiments/{name}_{timestamp}_{pid}/
+dir (experiment.py appends the PID, not just a microsecond timestamp, since
+concurrent same-batch launches were observed colliding on timestamp alone).
 
 Usage:
     # seed ensemble: one config, many seeds, 4 at a time
