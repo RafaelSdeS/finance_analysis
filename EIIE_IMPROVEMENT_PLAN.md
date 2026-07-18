@@ -177,6 +177,36 @@ option 3 — reconsider the premise).
 
 ### E1 — Widen the encoder
 
+- [x] **RESULT (2026-07-18, 8-seed sweep, `configs/eiie_capacity_e1.json`, seeds 1-8,
+  val split, 576 days)**: **FAIL, unanimous 8/8.**
+  - k=1 mean Spearman (primary metric, all days): {0.0020, 0.0026, 0.0022, -0.0010,
+    0.0020, 0.0015, 0.0003, -0.0003} across the 8 seeds — every value inside the noise
+    band, none within an order of magnitude of the 0.02 pass bar. 0/8 same-sign-pass.
+  - top-10 hit rate (all days): {0.071, 0.066, 0.075, 0.088, 0.077, 0.076, 0.087, 0.083}
+    — all well under the 0.12 bar. 0/8 pass.
+  - **Signal threshold not crossed by either criterion, in any seed.** Clean, unambiguous
+    null — not a marginal miss.
+  - **Confound checks (both required before trusting this) came back clean**:
+    (1) *checkpoint pinned at budget end?* No — 6/8 seeds picked an early best_step
+    (4999-14999 of 100000); only 2 picked a late one (89999, 99999). Consistent with the
+    documented early-peak-then-overfit pattern, not budget starvation — more
+    `pretrain_steps` would not likely change this. (2) *entropy-beta scale mismatch
+    (tiny-net beta on an 8x-wider conv1)?* Real, but didn't produce a new confounding
+    failure mode — `mean_cash_weight` ranges 0.10-0.78 and `frac_days_single_name_gt70`
+    ranges 0.08-0.80 across seeds (same cash-attractor / single-name-concentration
+    regime as every prior sweep, just re-landing on different seeds' corners), not a
+    qualitatively new behavior. Since the *symptom* is unchanged, the failure is not
+    plausibly an artifact of the scale mismatch.
+  - **Luck check**: only one seed (1839151) posted a positive return (+10.48%). Its
+    top holdings by days-as-argmax: PETR3 (110d), PETR4 (93d), BHIA3 (64d), MGLU3 (31d),
+    GGBR4 (21d), PRIO3 (20d) — the same commodity-complex pattern documented since the
+    original investigation, not a new signal. Confirms the one apparent "win" is the
+    established luck pattern, not capacity paying off.
+  - **Verdict**: capacity (channel width) is not the bottleneck. Per the plan's own
+    interpretation rule (E0 passed → failure here is strong evidence the bottleneck is
+    signal/architecture, not size): **E1b (dose-response) is skipped** — its precondition
+    ("if E1 shows movement") is not met. Proceed to Stage 2/4 per the plan's branch
+    logic; capacity-scaling line of inquiry is closed.
 - [ ] **Hypothesis**: `conv1_out_channels=2` is a structural bottleneck — 11 input
   channels compressed into 2 feature maps cannot carry distinct modalities forward —
   and widening to 16/64 lets a real but subtle signal through (8-D3 leaves the noise
@@ -214,6 +244,8 @@ option 3 — reconsider the premise).
 
 ### E1b — Capacity dose-response (conditional: only if E1 shows movement)
 
+- [x] **SKIPPED (2026-07-18)**: precondition not met — E1 showed no movement (8/8 seeds
+  flat null on both Spearman and top-10 hit). No dose-response to test.
 - [ ] **Hypothesis**: if E1 moved 8-D3, more width moves it further (a dose-response
   confirms the mechanism is capacity, not a fluke).
 - **Implementation**: 16/64 → 32/128, nothing else. Full SEP.
