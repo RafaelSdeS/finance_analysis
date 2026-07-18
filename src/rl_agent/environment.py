@@ -27,16 +27,23 @@ from .data import CASH_GIDX, PricePanel
 
 def drift_weights(y_t: np.ndarray, w_prev: np.ndarray) -> np.ndarray:
     """w'_t (eq. 7): weights after one period's price movement, before any
-    rebalancing trade."""
-    unnorm = y_t * w_prev
+    rebalancing trade. y_t can carry NaN in a global-space column with no
+    price data at all yet (e.g. a ticker whose IPO postdates window_end) --
+    zeroed before the multiply so that one absent, always-zero-weight column
+    can't poison the whole normalization (0*NaN=NaN otherwise); a no-op
+    wherever the column actually has data, which is every column in any
+    normal (full-history) experiment window."""
+    unnorm = np.nan_to_num(y_t, nan=0.0) * w_prev
     return unnorm / unnorm.sum()
 
 
 def drift_weights_torch(y_t: torch.Tensor, w_prev: torch.Tensor) -> torch.Tensor:
     """Batched, differentiable version of drift_weights (eq. 7), for
     train.py's loss (w_prev comes from a detached PVM read, but the
-    normalization stays a plain differentiable op for consistency/testing)."""
-    unnorm = y_t * w_prev
+    normalization stays a plain differentiable op for consistency/testing).
+    Same NaN guard as drift_weights above -- y_t is market data, never
+    gradient-tracked, so nan_to_num here has no autograd implication."""
+    unnorm = torch.nan_to_num(y_t, nan=0.0) * w_prev
     return unnorm / unnorm.sum(dim=1, keepdim=True)
 
 

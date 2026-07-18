@@ -726,6 +726,58 @@ further feature attempts: decide up front what a null result on THIS channel mea
 the program overall (four price/technical/valuation attempts already flat is a strong
 prior against "one more feature" fixing it) rather than open-endedly iterating.
 
+---
+
+## Phase 10: Cross-sectional momentum-vs-market test (2026-07-18, `configs/eiie_momentum_market.json`, seeds 1–8)
+
+Added `momentum_vs_market_1m`/`_3m` (13 channels) — the one still-untested channel from
+Step 4, chosen because it's information the "Identical Independent Evaluators" encoder
+structurally cannot derive itself (each asset's conv stream only ever sees its own
+window). Measured before wiring: low NaN (1.4%/3.4%, ordinary warm-up), already O(1)-scaled
+like `return_1m`/`_3m` (p1/p99 ≈ [−0.45,0.49]/[−0.87,0.82]) — plain passthrough, no isnan
+mask needed (unlike the PE feature's 39% missingness).
+
+| seed | return | sharpe | mean cash | entropy | eff_n | switches | maxdd | turnover |
+|-----:|-------:|-------:|----------:|--------:|------:|---------:|------:|---------:|
+| 1 | −50.2% | −0.93 | 0.31 | 0.21 | 2.51 | 19 | 0.577 | 0.449 |
+| 2 | −7.1% | −0.49 | 0.90 | 0.02 | 1.08 | 0 | 0.289 | 0.013 |
+| 3 | +5.2% | −0.26 | 0.91 | 0.01 | 1.04 | 0 | 0.268 | 0.014 |
+| 4 | +80.7% | 0.52 | 0.00 | 0.09 | 1.50 | 158 | 0.586 | 0.555 |
+| 5 | **+179.1%** | **0.93** | 0.00 | 0.08 | 1.46 | 127 | 0.340 | 0.486 |
+| 6 | −17.8% | −0.48 | 0.81 | 0.06 | 1.21 | 0 | 0.463 | 0.041 |
+| 7 | +19.7% | −0.24 | 0.93 | 0.04 | 1.15 | 0 | 0.147 | 0.008 |
+| 8 | −32.0% | −0.51 | 0.07 | 0.49 | 9.64 | 3 | 0.455 | 0.437 |
+
+(CDI +30.9%, BOVA11 +25.6%.) Mean return 22.2%, median 5.2% — widest seed spread yet
+(−50.2% to +179.1%), sweep completed with 0 directory collisions (PID fix holding under
+real concurrent load).
+
+**8-D3 ranking quality: flat again, including for seed 5 (the new best).** Spearman
++0.004/+0.007/+0.002 across k=1/5/21, hit rate ~0.06-0.07 — same magnitude and same
+near-chance level as every other seed in this run and every seed in Phase 8/9. Fifth
+consecutive config (baseline, features, frozen, pe_sector, momentum_market) with no
+ranking-quality signal detected anywhere.
+
+**The "winning seed" moved — from 6 to 5, and seed 6 itself collapsed.** Checked
+`weights.npz` directly: seed 5's top holdings are PETR4 (20.3%), PETR3 (20.1%), BBSE3
+(6.3%), PRIO3 (5.8%), GGBR4 (5.6%) — the *same* oil/commodity-complex bet seed 6 always
+made in Phases 6/8/9, just landing on a different seed number this time. Seed 4 (+80.7%)
+shows the same PETR3/PETR4/PRIO3/GGBR4 pattern too. Meanwhile seed 6 itself — the
+consistent winner in every prior config — collapsed to 81% cash + a small BHIA3/MGLU3
+position (−17.8%), the *old* dead-cat-bounce pattern from Phase 5, before technicals were
+even added.
+
+**This sharpens the mechanism finding, doesn't just repeat it.** It's not "seed 6 found
+something and holds onto it" — the profitable commodity-complex concentration is unstable
+and jumps between arbitrary seeds as the input channels change, while carrying zero
+ranking-quality signal wherever it lands. That's more consistent with initialization-driven
+chaos intersecting a real, large, regime-specific rally (2021–2023 commodities) than with
+any seed or feature combination having found a discoverable, transferable edge.
+
+**Verdict: 5 configs, 5 flat 8-D3 results.** Per the plan from Phase 9: this is now a
+strong-enough pattern to treat as a decision point rather than trying a 6th feature. See
+`EIIE_INVESTIGATION_ASSESSMENT.md` for the full synthesis and forward options.
+
 ### Standing constraints (user decisions, do not reopen)
 
 - Reward function = paper's log-return reward. No excess-CDI reshaping, no turnover penalty.

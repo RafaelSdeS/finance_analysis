@@ -59,6 +59,15 @@ FEATURE_NORM = {
     # of rows are NaN (missing pl that day, or a sector-of-one quarter), too much to
     # silently zero-fill without telling the network "no data" from "z-score of 0".
     "pl_zscore_sector": 0.2, "pl_zscore_sector_isnan": 1.0,
+    # Cross-sectional excess return (return_Nm minus that day's cross-sectional mean,
+    # cross_sectional.py) -- the one piece of information the encoder structurally can't
+    # derive itself: each asset's conv stream only ever sees its OWN window (the "Identical
+    # Independent Evaluators" design), so it has no path to compute "how am I doing vs.
+    # everyone else today." Measured in the built dataset: low NaN (1.4%/3.4%, ordinary
+    # warm-up, not the ~39% that justified an isnan mask for pl_zscore_sector above) and
+    # already the same O(1) scale as return_1m/return_3m (p1/p99 ~ [-0.45,0.49]/[-0.87,0.82])
+    # -- plain passthrough at 1.0, same treatment as the return_* channels it's derived from.
+    "momentum_vs_market_1m": 1.0, "momentum_vs_market_3m": 1.0,
 }
 
 

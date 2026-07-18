@@ -79,6 +79,30 @@ def test_drift_weights(passed, failed):
     return passed, failed
 
 
+def test_drift_weights_nan_column_safe(passed, failed):
+    """A global-space column with no price data yet (NaN in y_t) must not
+    poison the drift-weight normalization as long as its own weight is 0 --
+    0*NaN=NaN would otherwise propagate into every other column's result."""
+    y_t = np.array([1.0, 2.0, np.nan])
+    w_prev = np.array([0.4, 0.6, 0.0])
+    w_drift = drift_weights(y_t, w_prev)
+    expected_unnorm = np.array([0.4, 1.2, 0.0])
+    expected = expected_unnorm / expected_unnorm.sum()
+
+    ok = np.allclose(w_drift, expected) and not np.any(np.isnan(w_drift))
+    print_check("drift_weights: NaN column with zero weight doesn't poison the result", ok, str(w_drift))
+    passed, failed = passed + ok, failed + (not ok)
+
+    y_t_torch = torch.tensor(y_t, dtype=torch.float32).unsqueeze(0)
+    w_prev_torch = torch.tensor(w_prev, dtype=torch.float32).unsqueeze(0)
+    from src.rl_agent.environment import drift_weights_torch
+    w_drift_torch = drift_weights_torch(y_t_torch, w_prev_torch).squeeze(0).numpy()
+    ok = np.allclose(w_drift_torch, expected) and not np.any(np.isnan(w_drift_torch))
+    print_check("drift_weights_torch: same NaN-safety", ok, str(w_drift_torch))
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
 def test_solve_mu_zero_trade(passed, failed):
     w = np.array([0.3, 0.3, 0.4])
     mu = solve_mu(w, w, C_SELL, C_BUY)
@@ -247,6 +271,7 @@ def main():
     passed = failed = 0
 
     passed, failed = test_drift_weights(passed, failed)
+    passed, failed = test_drift_weights_nan_column_safe(passed, failed)
     passed, failed = test_solve_mu_zero_trade(passed, failed)
     passed, failed = test_solve_mu_vs_bisection(passed, failed)
     passed, failed = test_solve_mu_bounds(passed, failed)

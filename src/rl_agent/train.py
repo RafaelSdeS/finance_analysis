@@ -31,7 +31,7 @@ Two pairings here are load-bearing, both bugs that shipped once:
 """
 
 import copy
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 import torch
@@ -191,7 +191,8 @@ def _score_holdout(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel
 
 def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
              optimizer: torch.optim.Optimizer, cfg: ExperimentConfig,
-             train_end_idx: int, device: str = "cpu") -> tuple:
+             train_end_idx: int, device: str = "cpu",
+             on_step: Optional[Callable[[int, float, EIIECNN], None]] = None) -> tuple:
     """OSBL pretraining over the train split: `pretrain_steps` mini-batches,
     each of n_b consecutive periods, sampled with eq. 26's recency bias.
     entropy_beta anneals from entropy_beta_start to entropy_beta_end over the
@@ -204,6 +205,11 @@ def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     comment has the measured case (seed 3: +47% at 100k steps, -71% at 2M,
     same config) this directly targets. Too little history for a holdout
     (e.g. tiny synthetic test panels) falls back to no checkpointing.
+
+    on_step(step, loss, model), if given, runs after each step's optimizer
+    update -- purely for external instrumentation (e.g. EIIE_IMPROVEMENT_PLAN.md
+    E0's saturation probe); mirrors run_backtest's on_step, same reasoning:
+    this function stays ignorant of what the hook does with `model`.
 
     Returns (losses, best_step, best_score) -- best_step/best_score are None
     if no holdout checkpoint ever beat the -inf floor (no holdout carved, or
@@ -231,6 +237,8 @@ def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
                            cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
                            cfg.train.grad_clip_norm, device, beta_t)
         losses.append(loss)
+        if on_step is not None:
+            on_step(step, loss, model)
         if step % 100 == 0 or step == cfg.train.pretrain_steps - 1:
             pbar.set_postfix(loss=f"{loss:.6f}")
 
