@@ -217,17 +217,25 @@ def run_supervised_experiment(config: ExperimentConfig, out_dir: Path) -> dict:
     # Load data
     print("Loading price panel...")
     panel = load_price_panel(config.data)
-    print(f"  Panel: {panel.prices.shape[0]} days, {panel.prices.shape[1]} global assets")
+    print(f"  Panel: {panel.close.shape[0]} days, {panel.n_global} global assets")
 
     # Compute forward returns for each horizon
     print("Computing forward returns...")
     k_list = [1, 5, 21]
     fwd_returns = {k: compute_forward_returns(panel, k) for k in k_list}
 
-    # Get train/val split indices from split_config
-    from .manifest import iter_fit_windows
+    # Get train/val split indices from split_config.json
+    from ..build_dataset.paths import DATA_DIR
 
-    fit_windows = list(iter_fit_windows(config.data.window_end))
+    split_config_path = DATA_DIR / "split_config.json"
+    if split_config_path.exists():
+        import json
+        with open(split_config_path) as f:
+            split_config = json.load(f)
+        from ..build_dataset.manifest import iter_fit_windows
+        fit_windows = list(iter_fit_windows(split_config))
+    else:
+        raise FileNotFoundError(f"split_config.json not found at {split_config_path}")
     if not fit_windows:
         raise ValueError("No fit windows found in split_config.json")
 
