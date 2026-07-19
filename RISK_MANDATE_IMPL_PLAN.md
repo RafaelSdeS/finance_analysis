@@ -275,10 +275,10 @@ R0 exits when this suite passes and `ruff` is clean. **No real-data run in R0.**
 - [x] **R0.4** `tests/rl_agent/test_risk_portfolios.py` — full §3.6 table, wired into `run_all.py --group fast` — **written, not yet run** (project working rule: code isn't executed until explicitly requested)
 - [x] **R0.5** `src/rl_agent/risk_experiment.py` thin runner (+ `--dry-run`)
 - [ ] **R0.6** DR + effective-N additions in `metrics.py` — **descoped**: `effective_n_holdings` already existed in `metrics.py` and covers the concentration KPI; a true ex-ante diversification ratio needs per-rebalance Sigma plumbed out of the weight_fn closure, which isn't exposed by `BacktestResult` today — deferred to R1 alongside deciding how to surface it (`# ponytail:` marks the hook in `risk_portfolios.py`'s `make_risk_weight_fn`)
-- [ ] **R0.7 (new)** run `python tests/rl_agent/test_risk_portfolios.py` (or `run_all.py --group fast`) and fix anything that fails — **blocked on user go-ahead to execute**
-- [ ] **R1.1** dry-run clean on real panel (eligibility stats sane at every rebalance date)
-- [ ] **R1.2** full val-split run: 4 policies vs 7 baselines, report + CIs
-- [ ] **R1.3** `R1_FINDINGS.md` written; R2 grid frozen before any further runs
+- [x] **R0.7** `python tests/rl_agent/test_risk_portfolios.py`: 31/31 pass; full fast suite (`run_all.py --group fast`): 38/38 pass, no regressions
+- [x] **R1.1** dry-run clean on real panel: all 50 top-50 members eligible at every one of 28 val-window rebalances
+- [x] **R1.2** full val-split run: 4 policies vs 7 baselines, report + CIs — `experiments/risk_mandate_20260719T104432181562_2257576/`
+- [x] **R1.3** `R1_FINDINGS.md` written — point estimates favor `min_variance_voltarget` on every risk-adjusted metric, but CIs too wide (short 2.3yr window) for R4's "CI separation" bar; `risk_parity` underperforms `min_variance` (surprise, flagged for R3 re-check). **Not yet a pass/fail verdict** — R2 grid + R3 disjoint-window/test-split robustness required before any success claim.
 
 ### Deviation from the original spec (worth flagging)
 

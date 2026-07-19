@@ -53,18 +53,25 @@ None new. Prices, CDI, and the top-50 membership file already on disk cover ever
 
 R0/R1 detailed implementation spec: `RISK_MANDATE_IMPL_PLAN.md`.
 
-- [ ] **R0 — Skeleton + sanity**: `risk_portfolios.py` with min-variance only; synthetic-data
-      test (known 2-asset Σ → analytic weights); wire into `run_backtest` on the train split.
-- [ ] **R1 — Baseline comparison**: min-variance + risk-parity + vol-target vs the existing
-      7 baselines on the existing split; full report + bootstrap CIs.
-- [ ] **R2 — Sensitivity**: lookback ∈ {63, 126, 252}d × rebalance ∈ {daily, weekly, monthly}.
-      Expect turnover cost to dominate daily rebalancing; monthly likely wins after costs.
-- [ ] **R3 — Robustness**: disjoint time window (same discipline as M1's replication check);
-      cost-rate stress (2× transaction cost).
-- [ ] **R4 — Decision gate**: does any variant beat UCRP *and* BOVA11 on risk-adjusted
-      metrics with CI separation, after costs, on both windows? If yes → candidate for the
-      long-term investment agent core; if no → the structural-premium hypothesis is also
-      rejected for this universe, document and reassess.
+- [x] **R0 — Skeleton + sanity**: `risk_portfolios.py` (min-variance, risk-parity, vol-target);
+      31/31 synthetic tests pass, full fast suite 38/38 green. Commit `9967c9b`.
+- [x] **R1 — Baseline comparison**: min-variance + risk-parity + vol-target vs the existing
+      7 baselines, val split, full report + bootstrap CIs. `R1_FINDINGS.md` — promising point
+      estimates (`min_variance_voltarget` best), CIs too wide to claim significance yet.
+- [x] **R2 — Sensitivity**: lookback ∈ {63, 126, 252}d × rebalance ∈ {daily, weekly, monthly}.
+      `R2_FINDINGS.md` — clean monotonic "shorter lookback wins" pattern found (Sharpe
+      0.52 @ lb63 vs 0.27 @ lb126 vs -0.05 @ lb252); selected lb63/daily for R3 confirmation.
+- [x] **R3 — Robustness**: disjoint test-split (2024-03-22 → 2026-07-14) + 2x cost stress.
+      `R3_FINDINGS.md` — **R2's lookback finding did NOT replicate** (same shape as M1's
+      false positive); risk_parity's underperformance DID replicate (3 independent checks).
+- [x] **R4 — Decision gate: FAIL.** BOVA11 (passive cap-weighted benchmark) beats every
+      risk-mandate variant outright on the test split (Sharpe 0.24 vs best 0.074) — the
+      "beat UCRP and BOVA11" bar is not met. Plain min-variance/risk-parity/vol-target on
+      the top-50 large-cap universe does not durably beat BOVA11 net of costs. Clean
+      negative result, not an implementation failure — see `R3_FINDINGS.md` "Overall
+      conclusion" and "Recommendation" for candidate next directions (different universe,
+      benchmark-relative constraints, or closing out Option A). **Awaiting user decision
+      on next direction — not pursued further without sign-off**, same as the M4 gate.
 
 ## Validation discipline (carried over from M-series)
 
