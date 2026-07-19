@@ -54,7 +54,8 @@ def compute_forward_returns(panel: PricePanel, k: int) -> np.ndarray:
 def create_train_val_loaders(
     panel: PricePanel,
     data_config: DataConfig,
-    fwd_returns: dict,  # {k: [T, n_global] array}
+    fwd_returns: dict,  # {k: [T, n_slots] array}
+    train_start_idx: int,
     train_end_idx: int,
     val_end_idx: int,
     batch_size: int = 50,
@@ -64,7 +65,8 @@ def create_train_val_loaders(
     Args:
         panel: the price panel
         data_config: data configuration with features list
-        fwd_returns: dict mapping horizon k to forward return array [T, n_global]
+        fwd_returns: dict mapping horizon k to forward return array [T, n_slots]
+        train_start_idx: first (inclusive) index in train split
         train_end_idx: last (inclusive) index in train split
         val_end_idx: last (inclusive) index in val split
         batch_size: batch size for loader
@@ -91,13 +93,13 @@ def create_train_val_loaders(
             X_np = self.panel.window_tensor(t, features=self.features)
             X = torch.from_numpy(X_np).float()
             mask = torch.from_numpy(self.panel.valid[t]).bool()
-            # Returns for each horizon: {k: [n_global]} as torch
+            # Returns for each horizon: {k: [n_slots]} as torch
             returns_t = {k: torch.from_numpy(self.fwd_returns[k][t]).float() for k in self.k_list}
             return X, mask, returns_t, t
 
     k_list = sorted(fwd_returns.keys())
 
-    train_dataset = RankingDataset(panel, data_config, fwd_returns, 0, train_end_idx, k_list)
+    train_dataset = RankingDataset(panel, data_config, fwd_returns, train_start_idx, train_end_idx, k_list)
     val_dataset = RankingDataset(panel, data_config, fwd_returns, train_end_idx + 1, val_end_idx, k_list)
 
     train_loader = torch.utils.data.DataLoader(
@@ -235,18 +237,28 @@ def run_supervised_experiment(config: ExperimentConfig, out_dir: Path) -> dict:
     k_list = [1, 5, 21]
     fwd_returns = {k: compute_forward_returns(panel, k) for k in k_list}
 
-    # Map FitWindow dates to panel indices via searchsorted
+    # Map split_config dates to panel indices via searchsorted
     import pandas as pd
-    train_end_date = config.data.window_end  # From config, this is the train cutoff
-    # Split: train=[window_start, train_end], val=[train_end+1, window_end]
-    # Panel dates are a DatetimeIndex; use searchsorted to find indices
-    panel_dates = panel.dates
-    train_end_dt = pd.Timestamp(train_end_date)
-    # Find the last index with date <= train_end_dt
-    train_end_idx = int(np.searchsorted(panel_dates.values, np.datetime64(train_end_dt), side="right")) - 1
-    val_end_idx = panel.end_idx
+    split_config_path = Path(__file__).resolve().parent.parent.parent / "data" / "processed" / "split_config.json"
+    with open(split_config_path) as f:
+        split_cfg = json.load(f)
 
-    print(f"  Train: [0, {train_end_idx}] ({train_end_idx + 1} days)")
+    train_end_date = split_cfg["train_end"]
+    val_end_date = split_cfg["val_end"]
+
+    panel_dates = panel.dates
+    train_end_dt = np.datetime64(train_end_date)
+    val_end_dt = np.datetime64(val_end_date)
+
+    # Find the last index with date <= train_end_dt, etc.
+    train_end_idx = int(np.searchsorted(panel_dates.values, train_end_dt, side="right")) - 1
+    val_end_idx = int(np.searchsorted(panel_dates.values, val_end_dt, side="right")) - 1
+
+    # Avoid window_tensor on indices < window-1; start training at window-1
+    train_start_idx = config.data.window - 1
+    train_end_idx = max(train_end_idx, train_start_idx)
+
+    print(f"  Train: [{train_start_idx}, {train_end_idx}] ({train_end_idx - train_start_idx + 1} days)")
     print(f"  Val:   [{train_end_idx + 1}, {val_end_idx}] ({val_end_idx - train_end_idx} days)")
 
     # Results for each horizon
@@ -270,6 +282,7 @@ def run_supervised_experiment(config: ExperimentConfig, out_dir: Path) -> dict:
                 panel,
                 config.data,
                 fwd_returns,
+                train_start_idx,
                 train_end_idx,
                 val_end_idx,
                 batch_size=50,
