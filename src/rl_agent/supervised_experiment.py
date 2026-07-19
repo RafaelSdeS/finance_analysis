@@ -225,17 +225,12 @@ def run_supervised_experiment(config: ExperimentConfig, out_dir: Path) -> dict:
     fwd_returns = {k: compute_forward_returns(panel, k) for k in k_list}
 
     # Get train/val split indices from split_config.json
-    from ..build_dataset.paths import DATA_DIR
+    from ..build_dataset.paths import SPLIT_CONFIG_PATH
+    from ..build_dataset.manifest import iter_fit_windows
 
-    split_config_path = DATA_DIR / "split_config.json"
-    if split_config_path.exists():
-        import json
-        with open(split_config_path) as f:
-            split_config = json.load(f)
-        from ..build_dataset.manifest import iter_fit_windows
-        fit_windows = list(iter_fit_windows(split_config))
-    else:
-        raise FileNotFoundError(f"split_config.json not found at {split_config_path}")
+    with open(SPLIT_CONFIG_PATH) as f:
+        split_config = json.load(f)
+    fit_windows = list(iter_fit_windows(split_config))
     if not fit_windows:
         raise ValueError("No fit windows found in split_config.json")
 
