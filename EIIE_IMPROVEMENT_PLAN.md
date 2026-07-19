@@ -697,6 +697,57 @@ change that makes the training objective and the skill metric point at the same 
     `test_backtest_nan_column_safe` (`test_environment.py`) and
     `test_train_step_nan_column_safe` (`test_train.py`), both passing. The
     replication config's dry-run now passes cleanly.
+  - **Addendum 2 (2026-07-18): a third bug, this time in the diagnostics tool itself.**
+    The first real replication sweep (8 seeds) came back with `n_days=0` for every
+    seed at every horizon — `ranking_quality`'s and `spearman_permutation_null`'s
+    day-validity guard checked `np.isnan()` on the FULL ~171-wide global forward-
+    return vector, not the active-only subset the metric actually scores. Several
+    union tickers postdate 2019 (this window's `window_end`), so at least one
+    permanently-NaN global column exists on literally every day — every day got
+    silently skipped. Fixed by checking `isnan` only on `fwd[active_g]` (matching how
+    the rest of the function was already scoped). The existing phantom-ticker tests
+    didn't catch this because they used fast-growing, not actually NaN, phantom
+    prices — added `test_ranking_quality_nan_phantom_column_doesnt_skip_every_day`
+    with a genuinely NaN phantom column. 24/24 diagnostics tests pass. Also restored
+    a second recurrence of the "git-tracked experiment files missing from disk"
+    anomaly (one directory, `eiie_valuation_b50_20260717T173625686901`) — happened
+    again after the earlier restore, not caused by this session's actions; worth
+    investigating the root cause (a disk-space cleanup process on this machine?)
+    if it keeps recurring.
+  - **RESULT (2026-07-18, `configs/eiie_replication_window2.json`, 8 seeds, window
+    2011-01-31..2019-12-31, val split ≈2017-05..2018-08, 332 days) — signal does
+    NOT replicate.**
+    | seed | k1 ρ | k1 p | k5 ρ | k5 p | k21 ρ | k21 p |
+    |---|---|---|---|---|---|---|
+    | 2035246 | −0.0007 | .048 | +0.0022 | .006 | −0.0069 | .002 |
+    | 2035247 | −0.0010 | .17 | −0.0022 | .02 | −0.0097 | .002 |
+    | 2035248 | −0.0167 | .94 | −0.0455 | 1.0 | −0.0736 | 1.0 |
+    | 2038551 | +0.0023 | .07 | +0.0009 | .01 | −0.0125 | .01 |
+    | 2038550 | −0.0054 | .07 | −0.0034 | .002 | −0.0151 | .002 |
+    | 2038616 | +0.0096 | .67 | +0.0095 | .97 | +0.0122 | 1.0 |
+    | 2041250 | +0.0041 | .32 | +0.0170 | .06 | +0.0089 | .30 |
+    | 2041289 | +0.0115 | **.014** | +0.0201 | **.002** | +0.0176 | **.002** |
+
+    Only **1/8 seeds** (2041289) is positive-and-significant at all three horizons —
+    versus **5/8** in the original 2021–2023 window. Its shape is also different: a
+    roughly flat 0.012→0.020→0.018 rather than the original window's clean,
+    dramatic climb (e.g. 0.002→0.05→0.10). Three seeds (2035247, 2038550, and 2035246
+    at k21) are *significantly negative* — anti-correlated, the opposite of skill.
+    `selection_alpha` corroborates the incoherence rather than the signal: at k21/
+    top5, the seeds it flags as significant (2035246, 2038550, both p=.002) are
+    **different seeds** than the one Spearman flagged (2041289, whose own k21/top5
+    selection alpha is −0.0087, p=1.0 — not even in the same direction). In the
+    original window, both metrics agreed on the *same* 5 seeds every time; here they
+    disagree entirely. Cross-seed consistency (8-D2) is similar in magnitude to
+    before (cosine 0.55, jaccard 0.26, meanweight corr 0.68) — seeds still converge
+    to structurally similar allocations, just not ones that predict returns here.
+    **Verdict: the luck explanation is confirmed.** Per the pre-registered gate, the
+    original window's candidate signal was a subset of seeds riding the one real
+    2021–2023 oil-shock trend long enough to look like skill in that single window —
+    it does not survive a disjoint window with no comparable single dominant trend.
+    **M1 is closed. Proceed to M2 (needs separate sign-off) and M3 as planned**; no
+    further capacity/feature/window experiments are warranted on the original
+    premise.
 
 ### M2 — Entropy floor: make the objective train (and expose) more than the argmax
 - [ ] **Requires sign-off** (amends "no reward reshaping" — Finding 5).
