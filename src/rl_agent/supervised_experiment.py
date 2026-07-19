@@ -7,6 +7,7 @@ directly tests "is there extractable cross-sectional signal in these features?"
 """
 
 import json
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -275,7 +276,7 @@ def run_supervised_experiment(config: ExperimentConfig, out_dir: Path) -> dict:
             n_features=len(config.data.features),
         )
 
-        # Create loaders (reduced batch size to avoid OOM)
+        # Create loaders (minimal batch size to avoid OOM)
         print(f"  Creating data loaders...")
         loaders = list(
             create_train_val_loaders(
@@ -285,16 +286,18 @@ def run_supervised_experiment(config: ExperimentConfig, out_dir: Path) -> dict:
                 train_start_idx,
                 train_end_idx,
                 val_end_idx,
-                batch_size=16,  # reduced from 50
+                batch_size=8,  # minimal
             )
         )
 
         train_loader = dict(loaders)["train"]
         val_loader = dict(loaders)["val"]
 
-        # Train (reduced epochs for faster feedback)
+        # Train (minimal epochs for testing)
         print(f"  Training probe on {k}-day horizon...")
-        probe = train_probe(probe, train_loader, k, epochs=5, device=config.train.device)
+        sys.stdout.flush()
+        probe = train_probe(probe, train_loader, k, epochs=2, device=config.train.device)
+        sys.stdout.flush()
 
         # Evaluate
         print(f"  Evaluating on train split...")
