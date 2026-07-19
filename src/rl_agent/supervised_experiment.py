@@ -275,7 +275,7 @@ def run_supervised_experiment(config: ExperimentConfig, out_dir: Path) -> dict:
             n_features=len(config.data.features),
         )
 
-        # Create loaders
+        # Create loaders (reduced batch size to avoid OOM)
         print(f"  Creating data loaders...")
         loaders = list(
             create_train_val_loaders(
@@ -285,16 +285,16 @@ def run_supervised_experiment(config: ExperimentConfig, out_dir: Path) -> dict:
                 train_start_idx,
                 train_end_idx,
                 val_end_idx,
-                batch_size=50,
+                batch_size=16,  # reduced from 50
             )
         )
 
         train_loader = dict(loaders)["train"]
         val_loader = dict(loaders)["val"]
 
-        # Train
+        # Train (reduced epochs for faster feedback)
         print(f"  Training probe on {k}-day horizon...")
-        probe = train_probe(probe, train_loader, k, epochs=20, device=config.train.device)
+        probe = train_probe(probe, train_loader, k, epochs=5, device=config.train.device)
 
         # Evaluate
         print(f"  Evaluating on train split...")
