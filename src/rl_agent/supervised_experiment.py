@@ -100,7 +100,24 @@ def create_train_val_loaders(
 
     k_list = sorted(fwd_returns.keys())
 
-    train_dataset = RankingDataset(panel, data_config, fwd_returns, train_start_idx, train_end_idx, k_list)
+    # Subsample train data for speed (every 10th day for quick iteration)
+    train_step = 10  # ponytail: subsample for faster training; full data later if needed
+    train_dataset = RankingDataset(
+        panel, data_config, fwd_returns,
+        train_start_idx, train_end_idx, k_list
+    )
+    # Wrap with index sampler to skip 90% of training data
+    class SubsampleDataset(torch.utils.data.Dataset):
+        def __init__(self, base_dataset, step):
+            self.base = base_dataset
+            self.step = step
+            self.indices = list(range(0, len(base_dataset), step))
+        def __len__(self):
+            return len(self.indices)
+        def __getitem__(self, idx):
+            return self.base[self.indices[idx]]
+
+    train_dataset = SubsampleDataset(train_dataset, train_step)
     val_dataset = RankingDataset(panel, data_config, fwd_returns, train_end_idx + 1, val_end_idx, k_list)
 
     train_loader = torch.utils.data.DataLoader(
