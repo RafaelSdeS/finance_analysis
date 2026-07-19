@@ -27,11 +27,8 @@ def main():
         raise FileNotFoundError(f"Config not found: {config_path}")
 
     config = ExperimentConfig.from_json(config_path)
-
-    # Override experiment name for supervised probe
-    config.experiment.name = f"{config.experiment.name}_supervised"
-
-    out_dir = Path(args.out_dir) / config.experiment.name
+    exp_name = f"{config.experiment.name}_supervised"
+    out_dir = Path(args.out_dir) / exp_name
     print(f"\nM3 Supervised Ranking Probe\n{'='*60}")
     print(f"Config: {config_path}")
     print(f"Output: {out_dir}\n")
