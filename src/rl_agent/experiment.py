@@ -31,13 +31,15 @@ import torch
 from .baselines import run_baseline
 from .config import ExperimentConfig
 from .data import PricePanel, load_price_panel
-from .metrics import simple_returns, summarize
+from .diagnostics import ranking_quality
+from .environment import run_backtest
+from .metrics import simple_returns, summarize, total_return
 from .networks import EIIECNN
 from .paths import ROOT
 from .plots import write_report
 from .pvm import PortfolioVectorMemory
 from .sanity import check_policy_not_saturated, run_sanity_checks, seed_everything
-from .train import pretrain, run_online_backtest, save_checkpoint
+from .train import agent_forward, pretrain, run_online_backtest, save_checkpoint
 
 
 def compute_window_split(panel: PricePanel, train_frac: float = 0.7, val_frac: float = 0.15) -> tuple:
@@ -157,7 +159,8 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
         pretrain_end_idx, backtest_start_idx, backtest_end_idx = train_end_idx, train_end_idx + 1, val_end_idx
 
     train_losses, best_step, best_holdout_score = pretrain(
-        train_model, pvm, panel, optimizer, cfg, train_end_idx=pretrain_end_idx, device=cfg.train.device)
+        train_model, pvm, panel, optimizer, cfg, train_end_idx=pretrain_end_idx, device=cfg.train.device,
+        saturation_log_path=out_dir / "saturation_probe.json")
     checklist["no_numerical_instability"] = bool(np.all(np.isfinite(train_losses)))
 
     # Saved BEFORE the online backtest below mutates `model` further -- this is the
@@ -167,6 +170,39 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
                      step=best_step if best_step is not None else len(train_losses),
                      extra={"eval_split": eval_split, "best_step": best_step,
                             "best_holdout_return": best_holdout_score})
+
+    # Train-window diagnostics (EIIE_IMPROVEMENT_PLAN.md Finding 4): a frozen,
+    # inference-only backtest over the SAME window pretrain() just trained on, using
+    # the checkpoint-at-peak state just saved above -- before the online backtest
+    # below mutates `model` further. No val/test data touched; this can't leak. Every
+    # future sweep gets a train-vs-val/test bias/variance read for free, closing the
+    # gap that let E1 conclude "capacity isn't it" from val-only metrics alone.
+    #
+    # Snapshot/restore the PVM buffer around this: agent_forward WRITES each row it
+    # reads (pvm.write), and this walks the full train span from panel.start_idx --
+    # a wider range than pretrain()'s own post-training holdout refresh touches. Left
+    # unrestored, it would silently change the w_prev the online backtest below reads
+    # at the train/val seam, quietly altering the reported val/test numbers. This
+    # diagnostic must observe, not perturb, the real run.
+    pvm_snapshot = pvm.buffer.clone()
+    model.eval()
+
+    def _train_weight_fn(t, w_prev_np, w_drift_np, panel):
+        return agent_forward(model, pvm, panel, t, cfg.data.features, cfg.train.device)
+
+    train_result = run_backtest(panel, _train_weight_fn, cfg.costs.c_sell, cfg.costs.c_buy,
+                                 panel.start_idx, pretrain_end_idx, cfg.costs.backtest_mu_tol)
+    model.train()
+    pvm.buffer = pvm_snapshot
+    train_tickers = np.array(["cash"] + list(panel.asset_index.tickers))
+    train_quality = ranking_quality(train_result.weights,
+                                     train_result.dates.values.astype("datetime64[D]"),
+                                     train_tickers, panel)
+    (out_dir / "train_metrics.json").write_text(json.dumps({
+        "n_days": pretrain_end_idx - panel.start_idx + 1,
+        "total_return": total_return(train_result),
+        "ranking_quality": train_quality,
+    }, indent=2))
 
     # Post-pretrain: did the policy collapse into a saturated (gradient-dead) corner?
     # Loud, because a collapsed policy makes every downstream number meaningless -- the

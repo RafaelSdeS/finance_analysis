@@ -34,7 +34,7 @@ from src.rl_agent.networks import EIIECNN
 from src.rl_agent.paths import ROOT
 from src.rl_agent.pvm import PortfolioVectorMemory
 from src.rl_agent.sanity import seed_everything
-from src.rl_agent.train import agent_forward, pretrain
+from src.rl_agent.train import agent_forward, pretrain, saturation_probe as make_saturation_probe
 
 CONFIG = "configs/eiie_overfit_check.json"
 SPEARMAN_PASS = 0.3
@@ -52,37 +52,10 @@ class ZeroWPrev(torch.nn.Module):
         return self.inner(X, torch.zeros_like(w_prev), mask)
 
 
-def make_saturation_probe(panel, features, device, every: int = 500):
-    """Saturation check: did the policy freeze early into a corner (softmax
-    entropy -> ~0, gradient vanishes) well before pretrain_steps, the same
-    mechanism as the cash-attractor bug just landing on a different corner
-    (e.g. one-hot momentum-chasing)? Every `every` steps, runs an EXTRA
-    forward pass (no grad, w_prev=0 to match ZeroWPrev) on a FIXED reference
-    day -- never the real training batch -- so probing never touches the PVM
-    or the actual training trajectory. Logs (step, max non-cash weight,
-    softmax entropy). Returns (on_step callback, history list to read after
-    pretrain() returns)."""
-    t_ref = panel.start_idx + (panel.end_idx - panel.start_idx) // 2
-    X_ref = torch.tensor(panel.window_tensor(t_ref, features), dtype=torch.float32,
-                          device=device).unsqueeze(0)
-    mask_ref = torch.tensor(panel.valid[t_ref], dtype=torch.bool, device=device).unsqueeze(0)
-    w_prev_ref = torch.zeros(1, mask_ref.shape[1], device=device)
-    history = []
-
-    def probe(step, loss, model):
-        if step % every != 0:
-            return
-        was_training = model.training
-        model.eval()
-        with torch.no_grad():
-            w = model(X_ref, w_prev_ref, mask_ref)
-            max_w = float(w[0, 1:].max())
-            entropy = float(-(w * w.clamp_min(1e-12).log()).sum())
-        if was_training:
-            model.train()
-        history.append({"step": step, "loss": loss, "max_weight": max_w, "entropy": entropy})
-
-    return probe, history
+# Saturation probe itself moved into train.saturation_probe() (2026-07-18) so every
+# future real run gets this diagnostic via pretrain()'s saturation_log_path param,
+# without needing this script's bespoke wiring -- imported above as make_saturation_probe
+# to keep this script's call site unchanged.
 
 
 def main():

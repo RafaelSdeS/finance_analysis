@@ -10,6 +10,7 @@ Run from project root:
 """
 
 import copy
+import json
 import sys
 import tempfile
 from pathlib import Path
@@ -36,6 +37,7 @@ from src.rl_agent.train import (  # noqa: E402
     run_online_backtest,
     sample_batch_starts,
     save_checkpoint,
+    saturation_probe,
     train_step,
 )
 from test_utils import print_check, print_header, print_section_end  # noqa: E402
@@ -178,6 +180,68 @@ def test_pretrain(passed, failed):
     ok = best_step is None and best_score is None
     print_check("pretrain: too-small panel for the holdout falls back to no checkpointing", ok,
                 f"best_step={best_step}, best_score={best_score}")
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
+def test_pretrain_saturation_log(passed, failed):
+    cfg = _tiny_cfg()
+    panel = _tiny_panel()
+    model, pvm, optimizer = _tiny_model_pvm(cfg, panel)
+    external_calls = []
+
+    with tempfile.TemporaryDirectory() as tmp:
+        log_path = Path(tmp) / "saturation_probe.json"
+        pretrain(model, pvm, panel, optimizer, cfg, train_end_idx=panel.end_idx,
+                 on_step=lambda step, loss, model: external_calls.append(step),
+                 saturation_log_path=log_path, saturation_every=1)
+
+        ok = log_path.exists()
+        print_check("pretrain: saturation_log_path writes a file when given", ok)
+        passed, failed = passed + ok, failed + (not ok)
+
+        history = json.loads(log_path.read_text())
+        ok = len(history) == cfg.train.pretrain_steps
+        print_check("pretrain: saturation history has one entry per step at saturation_every=1", ok,
+                    f"got {len(history)}, expected {cfg.train.pretrain_steps}")
+        passed, failed = passed + ok, failed + (not ok)
+
+        ok = all({"step", "loss", "max_weight", "entropy"} <= set(h) for h in history)
+        print_check("pretrain: each saturation entry has step/loss/max_weight/entropy", ok, str(history[:1]))
+        passed, failed = passed + ok, failed + (not ok)
+
+        ok = len(external_calls) == cfg.train.pretrain_steps
+        print_check("pretrain: an externally-provided on_step still runs every step (composes, doesn't replace)",
+                    ok, f"got {len(external_calls)} calls")
+        passed, failed = passed + ok, failed + (not ok)
+
+    # No saturation_log_path given: no file-writing side effect, on_step still fires.
+    model2, pvm2, optimizer2 = _tiny_model_pvm(cfg, panel)
+    calls2 = []
+    pretrain(model2, pvm2, panel, optimizer2, cfg, train_end_idx=panel.end_idx,
+             on_step=lambda step, loss, model: calls2.append(step))
+    ok = len(calls2) == cfg.train.pretrain_steps
+    print_check("pretrain: on_step alone (no saturation_log_path) still works exactly as before", ok)
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
+def test_saturation_probe_reference_day_fixed(passed, failed):
+    panel = _tiny_panel()
+    cfg = _tiny_cfg()
+    model, pvm, _ = _tiny_model_pvm(cfg, panel)
+    model.train()
+    probe, history = saturation_probe(panel, cfg.data.features, device="cpu", every=1)
+
+    probe(0, 0.123, model)
+    probe(1, 0.456, model)
+    ok = len(history) == 2 and history[0]["loss"] == 0.123 and history[1]["loss"] == 0.456
+    print_check("saturation_probe: logs one entry per call at every=1, preserving the passed-in loss", ok,
+                str(history))
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = model.training  # probe must restore training mode after its internal eval()
+    print_check("saturation_probe: restores the model's training mode after probing", ok)
     passed, failed = passed + ok, failed + (not ok)
     return passed, failed
 
@@ -334,6 +398,8 @@ def main():
     passed, failed = test_store_matches_direct_path(passed, failed)
     passed, failed = test_train_step_updates_model_and_pvm(passed, failed)
     passed, failed = test_pretrain(passed, failed)
+    passed, failed = test_pretrain_saturation_log(passed, failed)
+    passed, failed = test_saturation_probe_reference_day_fixed(passed, failed)
     passed, failed = test_entropy_schedule(passed, failed)
     passed, failed = test_pretrain_checkpoint_at_peak(passed, failed)
     passed, failed = test_agent_forward(passed, failed)

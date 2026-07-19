@@ -114,9 +114,13 @@ def run_sanity_checks(cfg: ExperimentConfig, panel: PricePanel, device: str = "c
         return report
 
     # --- deterministic seeding: two identically-seeded short runs must match exactly ---
+    # rtol=1e-3, not np.allclose's 1e-5 default: cuDNN picks conv algorithms per-process
+    # (CLAUDE.md, "Stage 3 training performance & reproducibility"), so two GPU runs in
+    # the same process can differ by ~1e-4 relative purely from that, not a real bug --
+    # a real seeding bug diverges at O(1), so 1e-3 still catches it cleanly.
     losses_a, model_a, _, _ = _short_train_run(cfg, panel, t0, n_steps, device)
     losses_b, _, _, _ = _short_train_run(cfg, panel, t0, n_steps, device)
-    report.add("deterministic_seeding", np.allclose(losses_a, losses_b),
+    report.add("deterministic_seeding", np.allclose(losses_a, losses_b, rtol=1e-3),
                f"run A={losses_a}, run B={losses_b}")
 
     # --- weights on the simplex, finite, respecting the mask ---

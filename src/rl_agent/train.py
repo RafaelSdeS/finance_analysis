@@ -31,6 +31,8 @@ Two pairings here are load-bearing, both bugs that shipped once:
 """
 
 import copy
+import json
+from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
@@ -189,10 +191,46 @@ def _score_holdout(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel
     return total_return(result)
 
 
+def saturation_probe(panel: PricePanel, features, device: str, every: int = 500):
+    """Saturation check (originated as EIIE_IMPROVEMENT_PLAN.md E0's ad-hoc
+    instrumentation, promoted here 2026-07-18 so every future run gets it for
+    free): did the policy freeze early into a corner (softmax entropy -> ~0,
+    gradient vanished) well before the training budget ran out, vs. converging
+    smoothly across the whole budget -- the same mechanism as the documented
+    cash-attractor bug, just possibly landing on a different corner. Every
+    `every` steps, runs an EXTRA forward pass (no grad, w_prev=0 so the probe
+    never depends on that period's actual PVM state) on a FIXED reference day
+    -- never the real training batch -- so probing never touches the PVM or
+    the training trajectory itself. Returns (on_step callback, history list to
+    read/serialize after the training loop returns)."""
+    t_ref = panel.start_idx + (panel.end_idx - panel.start_idx) // 2
+    X_ref = torch.tensor(panel.window_tensor(t_ref, features), dtype=torch.float32,
+                          device=device).unsqueeze(0)
+    mask_ref = torch.tensor(panel.valid[t_ref], dtype=torch.bool, device=device).unsqueeze(0)
+    w_prev_ref = torch.zeros(1, mask_ref.shape[1], device=device)
+    history = []
+
+    def probe(step, loss, model):
+        if step % every != 0:
+            return
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            w = model(X_ref, w_prev_ref, mask_ref)
+            max_w = float(w[0, 1:].max())
+            entropy = float(-(w * w.clamp_min(1e-12).log()).sum())
+        if was_training:
+            model.train()
+        history.append({"step": step, "loss": loss, "max_weight": max_w, "entropy": entropy})
+
+    return probe, history
+
+
 def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
              optimizer: torch.optim.Optimizer, cfg: ExperimentConfig,
              train_end_idx: int, device: str = "cpu",
-             on_step: Optional[Callable[[int, float, EIIECNN], None]] = None) -> tuple:
+             on_step: Optional[Callable[[int, float, EIIECNN], None]] = None,
+             saturation_log_path: Optional[Path] = None, saturation_every: int = 500) -> tuple:
     """OSBL pretraining over the train split: `pretrain_steps` mini-batches,
     each of n_b consecutive periods, sampled with eq. 26's recency bias.
     entropy_beta anneals from entropy_beta_start to entropy_beta_end over the
@@ -207,9 +245,16 @@ def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     (e.g. tiny synthetic test panels) falls back to no checkpointing.
 
     on_step(step, loss, model), if given, runs after each step's optimizer
-    update -- purely for external instrumentation (e.g. EIIE_IMPROVEMENT_PLAN.md
-    E0's saturation probe); mirrors run_backtest's on_step, same reasoning:
-    this function stays ignorant of what the hook does with `model`.
+    update -- purely for external instrumentation; mirrors run_backtest's
+    on_step, same reasoning: this function stays ignorant of what the hook
+    does with `model`.
+
+    saturation_log_path, if given, additionally runs the built-in
+    saturation_probe() (see above) every saturation_every steps and writes its
+    history to that path as JSON once training completes -- promoted out of
+    EIIE_IMPROVEMENT_PLAN.md E0's bespoke script so every future run gets this
+    diagnostic without extra wiring. Composes with an externally-provided
+    on_step (both run each step) rather than replacing it.
 
     Returns (losses, best_step, best_score) -- best_step/best_score are None
     if no holdout checkpoint ever beat the -inf floor (no holdout carved, or
@@ -223,6 +268,16 @@ def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     fit_end_idx = train_end_idx - holdout_days
     if holdout_days <= 0 or fit_end_idx - min_t < cfg.train.batch_size:
         fit_end_idx, holdout_days = train_end_idx, 0
+
+    sat_history = None
+    if saturation_log_path is not None:
+        sat_probe, sat_history = saturation_probe(panel, cfg.data.features, device, saturation_every)
+        user_on_step = on_step
+
+        def on_step(step, loss, model):  # noqa: F811 -- deliberately shadows the param
+            sat_probe(step, loss, model)
+            if user_on_step is not None:
+                user_on_step(step, loss, model)
 
     rng = np.random.default_rng(cfg.train.seed)
     losses = []
@@ -255,6 +310,9 @@ def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
         # online backtest's first read (at train_end_idx) reflects the final (possibly
         # worse) model's trajectory, silently mixing two different policies at the seam.
         _score_holdout(model, pvm, panel, cfg, fit_end_idx, train_end_idx, device)
+
+    if sat_history is not None:
+        Path(saturation_log_path).write_text(json.dumps(sat_history, indent=2))
 
     return losses, best_step, (None if best_step is None else best_score)
 

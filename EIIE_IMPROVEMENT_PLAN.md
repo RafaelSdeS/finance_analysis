@@ -202,11 +202,14 @@ option 3 — reconsider the premise).
     GGBR4 (21d), PRIO3 (20d) — the same commodity-complex pattern documented since the
     original investigation, not a new signal. Confirms the one apparent "win" is the
     established luck pattern, not capacity paying off.
-  - **Verdict**: capacity (channel width) is not the bottleneck. Per the plan's own
-    interpretation rule (E0 passed → failure here is strong evidence the bottleneck is
-    signal/architecture, not size): **E1b (dose-response) is skipped** — its precondition
-    ("if E1 shows movement") is not met. Proceed to Stage 2/4 per the plan's branch
-    logic; capacity-scaling line of inquiry is closed.
+  - **Verdict**: capacity (channel width) is not the bottleneck. **E1b (dose-response)
+    is skipped** — its precondition ("if E1 shows movement") is not met.
+    *Correction (2026-07-18 design review)*: this verdict originally cited the
+    E0-success branch ("E0 passed") — factually wrong, E0's recorded verdict is FAIL.
+    The applicable branch (E0-failure + E1-failure) reads "failure points at
+    architecture (E4) or optimization beyond LR" — and note E0b (optimization beyond
+    LR) was skipped, not cleared. Superseded either way: see the Design Review section
+    below, which re-reads E0 itself and reorders everything downstream.
 - [ ] **Hypothesis**: `conv1_out_channels=2` is a structural bottleneck — 11 input
   channels compressed into 2 feature maps cannot carry distinct modalities forward —
   and widening to 16/64 lets a real but subtle signal through (8-D3 leaves the noise
@@ -354,3 +357,413 @@ the accepted baseline. Low expected value given five nulls — these exist to ma
 - **Any experiment combining two changes** (e.g. capacity + new feature): forbidden by
   the attribution rule unless a single-variable result explicitly motivates the
   interaction test.
+
+---
+
+# Design Review — 2026-07-18 (post-E0/E1) — v2 roadmap, SUPERSEDES Stages 2–4 above
+
+Adversarial re-read of this plan after E0 and E1 concluded. Original stage text is kept
+above for the record; where this section conflicts with it, this section wins. Findings
+first (most severe first), then the revised roadmap.
+
+## Finding 1 — the decisive instrument (8-D3) has three concrete defects. VERIFIED IN CODE.
+
+The entire evidence base — five feature nulls, E0's FAIL, E1's 8/8 null — was read
+through `diagnostics.ranking_quality()`. Read line-by-line today, it has three
+independent problems:
+
+1. **Scope bug — global space instead of active members** (`diagnostics.py:150,196-203`).
+   `forward_return()` computes over all 171 non-cash *global* assets; Spearman and the
+   top-decile cut then include ~121 assets/day that are not in the top-50 membership:
+   some listed-but-non-member (real returns the agent is *masked from holding*), some
+   pre-IPO/post-delisting (bfill/ffill-flat prices → forward return exactly 0.0). A real
+   ranking signal on the 50 holdable names is diluted ~3.4× by pairs the agent cannot
+   act on; the top-decile hit denominator includes unholdable names, mechanically
+   depressing hit rates; on down days the 0.9-quantile cut can sit at ~0 so the flat
+   phantom names *enter the "top decile"*.
+2. **Tie-handling bug** (`diagnostics.py:158` — "ties are vanishingly unlikely in
+   continuous returns, so no rank-averaging needed"). That assumption is violated by
+   construction on every single day: ~121 weights are exactly 0.0 and a block of forward
+   returns is exactly 0.0. `argsort`-based ranking assigns arbitrary distinct ranks
+   inside these massive tie blocks. If both axes happen to tie-break in similar index
+   order, the (w=0, fwd=0) block is spuriously concordant with itself — a small
+   systematic *positive* bias is plausible, and suspicious in the data: 6/8 E1 seeds and
+   E0 all landed at +0.001..+0.003 rather than symmetric noise. Testable: recompute with
+   average ranks; if the positive lean vanishes, it was artifact.
+3. **Circular threshold calibration**. The ±0.02 signal bar was set from "the observed
+   noise band so far" — i.e., from the very metric now known to be diluted and
+   tie-biased. Neither the observed values *nor the bar* mean what the plan thinks.
+   There is no permutation null anywhere in the daily pipeline (the plan prescribes one
+   for E3 only — the one place it hasn't been needed yet).
+
+**Consequence**: every 8-D3 number in this file is unreliable in both directions. The
+nulls are *probably* still nulls (dilution shrinks signal, and PV/hit-rate corroborate),
+but "probably" is not what a decisive metric is for. Fix the instrument, then re-read
+ALL committed runs for free — every run's `weights.npz` is in git.
+
+## Finding 2 — even a fixed Spearman is low-powered for the policies this objective produces
+
+For reward `log(w·y)` with `w = softmax(z)`: `∂L/∂z_j = w_j·(y_j/(w·y) − 1)` — the
+gradient on each asset's logit scales with its *current weight*. EIIE's shared evaluator
+means tail scores aren't pure init noise (one function scores all assets), but the loss
+only ever disciplines the scorer on the high-weight region — "does this look like the
+current winner," not "order all 50 by expected return." Observed policies hold
+effective_n ≈ 1.2–2.4. A full-cross-section rank correlation grades an ordering the
+objective never trained. Two consequences:
+- **Metric side**: add a metric with full power at any concentration —
+  **selection alpha**: forward log-return of the argmax (and weight-top-k) holdings
+  minus the active-universe mean that day, with a permutation null. This measures
+  exactly "is the pick better than random," which is what the top of the policy is
+  actually trained to do.
+- **Training side**: if we want the *ranking* to be trained (and measurable), the
+  policy must be non-degenerate — see M2 (entropy floor). At eff_n ≈ 10 the loss
+  disciplines the scorer on ~10 names/day instead of ~1.5, and it directly attacks the
+  documented bistable corner-seeking (cash attractor / one-hot) at its mechanism.
+
+## Finding 3 — E0's verdict is internally inconsistent: the model DID fit its training window
+
+E0 recorded "FAIL, clean — cannot memorize." Its own numbers refute the "clean":
+train-window return **+432.9%** vs. best-stock buy-and-hold **+44.6%** with **65 argmax
+switches** — log-return 4.5× the best static position. The block's stated trap ("matching
+Best-Stock via static parking is not memorization") explains matching, not a 10×
+day-varying beat. A policy earning 4.5× the best static log-return *on its training data*
+has fit substantial structure of that window (within-oil-complex switching), full stop.
+What E0 actually established: **the optimizer and network fit the training objective
+fine** (loss ↓17×, smooth convergence, monetized in-sample); the *Spearman bar* measures
+a different capability (full cross-sectional ordering) that the objective never demands
+— see Findings 1–2. The E0 "FAIL" fed the "capacity/architecture is limiting" prior that
+motivated E1; that prior was misassigned, and E1's null is the confirmation. Also never
+computed: the day-by-day **hindsight-optimal PV** (the block's own listed yardstick) —
+without it, "how much memorization" was unquantifiable. One line on saved data; do in M1.
+
+## Finding 4 — fitting vs. generalization: never separated, still
+
+No sweep logs train-window diagnostics. E1 concluded "capacity isn't it" from val-only
+metrics — which cannot distinguish "can't fit more" from "fits more, generalizes
+nothing." (E4's spec even requires an E0-rerun for the new architecture; E1 skipped the
+analogous check.) Fix once in `experiment.py`: after pretrain, also run the frozen model
+over the train window and write `train_metrics.json` + the same diagnostics. Every
+future sweep then doubles as a bias/variance read at zero incremental cost.
+
+## Finding 5 — the standing constraint freezes the variable the evidence now points at
+
+"Paper log-return reward, no reward reshaping" was right for the reproduction phase.
+The reproduction phase is over, and it succeeded — at reproducing the *mechanism*:
+maximizing empirical log-growth over a finite sample concentrates on the
+highest-realized-growth corner (here, the oil complex). That is textbook behavior of
+empirical growth-optimal (Kelly) estimation — extreme estimation-error sensitivity and
+concentration (MacLean/Thorp/Ziemba 2011), the same estimation problem behind DeMiguel
+et al. 2009's result that even optimized Markowitz loses to 1/N out of sample. Our
+metrics tables show exactly that: UBAH +37%, UCRP +13%, agent −47%..+10%. The paper's
+domain (Poloniex crypto, 30-minute bars, enormous cross-sectional dispersion, 0%-return
+cash) is where this objective family found signal; daily B3 equities with CDI cash is
+not that domain, and independent replications of EIIE on daily equities have generally
+failed to reproduce the crypto results. Keeping the objective frozen while spending
+sweeps on capacity/features/architecture inverts the evidence. **Decision point
+(user sign-off required, it amends a standing constraint)**: permit *entropy floor*
+(raise `entropy_beta_end` so the converged policy stays diversified) as the one
+sanctioned objective-level change. It is standard policy-gradient regularization
+(max-entropy RL), uses an existing config knob, zero new code, and is the minimal
+change that makes the training objective and the skill metric point at the same thing.
+
+## Finding 6 — statistical validity gaps
+
+- **Single regime**: every conclusion is conditional on one val window (2021–2023:
+  post-COVID recovery + commodity supercycle + election). SEP v2: any accepted signal
+  must also replicate on a disjoint window before it re-baselines anything.
+- **Permutation nulls everywhere**, not just E3: shuffle weight rows across days within
+  a run (B≈1000, seeded), recompute each metric → per-run p-value. Kills the circular
+  threshold (Finding 1.3) and the multiplicity hand-wraving in one move; the seeds 9–16
+  replication rule stays for accepted signals.
+- 6/8 same-sign alone is weak (p≈0.29 two-sided under null); it only works combined
+  with calibrated magnitude bars — which don't exist until the permutation nulls do.
+
+## Finding 7 — process/QA debt that already cost runs
+
+- **Sanity-gate flake**: `sanity.py:119` `np.allclose` default rtol=1e-5 failed on a
+  cuDNN rel-diff of ~9e-5 at step 3 — a whole seed lost + manual retry. Real seeding
+  bugs diverge at O(1); set rtol=1e-3 for the GPU path.
+- **OOM policy**: wide-net jobs are ~2.4 GB RSS each; `-j 4` + VS Code on a 15 GB box
+  OOM-killed the editor twice and (indirectly) a sweep. `sweep.py` should check
+  available RAM and clamp `-j` with a warning (psutil is available), and optionally
+  retry a failed seed once.
+- **Hand-rebuilt summaries**: per-seed table (Spearman/hit/entropy/eff_n/cash/return)
+  was assembled by hand three times this week. `sweep.py` should write
+  `sweep_summary.json` aggregating per-run metrics + diagnostics at the end.
+- **Saturation probe**: built for E0, decisive once, then left in the E0 script.
+  Promote the entropy/max-weight trajectory logging into `pretrain()` proper (cheap,
+  answers "which corner, when" for every future run).
+- **Missing regression armor for later stages**: E3's surgery has no golden test
+  pinning `decision_period_days=1` to current behavior; E4 has no slot-permutation
+  equivariance test spec. Both required before any such code is written.
+
+## Finding 8 — portfolio cuts (ladder applied)
+
+- **E2a/E2b (features): CUT.** Adding input channels to an objective that only
+  disciplines the argmax, measured by a diluted metric, is spending sweeps to move a
+  broken needle. Reinstate only if M3 shows signal and asks "which features carry it."
+- **E3 (weekly): environment surgery deferred, question kept.** The horizon question
+  collapses into a *label parameter* of the supervised probe (M3: k∈{1,5,21}) — no
+  `environment.py`/`train.py` surgery, no recalibrated weekly thresholds, same
+  information. Build weekly RL only if weekly signal is actually found.
+- **E4 (attention RL): deferred, replaced by M5.** Attention cannot conjure signal a
+  supervised probe can't find, and it inherits the concentration attractor. Test the
+  architecture question inside the probe (attention layer in a supervised ranker) at
+  ~1/10 the cost; port to RL only on a positive.
+
+## Hidden assumptions surfaced
+
+- A1: "8-D3 measures what training optimizes" — false (Findings 1–2). Load-bearing.
+- A2: "Spearman ≈ 0 + big return ⇒ luck/no memorization" — E0's own numbers refute it.
+- A3: "After optimizer cleared, capacity/architecture are the suspects" — the objective
+  was never on the suspect list because a standing constraint froze it.
+- A4: "The 2021–2023 window generalizes" — untested regime-conditionality.
+- A5: "Entropy beta is nuisance calibration" — it is the concentration dial that
+  decides whether ranking is trained *and* measurable. First-class variable.
+- A6: "PETR-complex = luck" — never tested against "genuine momentum structure of the
+  window." (M1's fixed metrics + hindsight yardstick partially adjudicate this.)
+
+## Revised roadmap (v2) — supersedes Stages 2–4
+
+| M | What | Code | Compute | Gate |
+|---|---|---|---|---|
+| M1 | Fix the instrument + retro re-read all runs | ~1 day | none (offline) | **blocks everything** |
+| M2 | Entropy-floor sweep (existing knob) | none | calib + 1 sweep | M1 done + constraint sign-off |
+| M3 | Supervised ranking probe, k∈{1,5,21} | ~1–2 days | cheap (supervised) | M1 done; parallel to M2 |
+| M4 | Decision gate on M1+M2+M3 | — | — | all three read |
+| M5 | Attention inside the probe | small | cheap | only per M4 |
+
+### M1 — Fix the measuring instrument, re-read history (no training)
+- [x] `ranking_quality()` fixed (2026-07-18, `src/rl_agent/diagnostics.py`): Spearman +
+      decile universe now restricted to `panel.valid[t]` active members via
+      `_active_stock_gidx()`; `_spearman` now uses `_rankdata` (tie-aware average-rank).
+      Existing tests (fixed-universe synthetic fixtures) pass unchanged — the fix is a
+      no-op there by construction, confirming backward compatibility.
+- [x] Added `selection_alpha()`: forward log-return of argmax/weight-top-k holdings
+      minus active-universe mean, per (k, top_k), with a permutation null (redraw a
+      random top-k subset per day, B=1000 default) → 97.5th-pct threshold + p-value.
+- [x] Added `spearman_permutation_null()`: recalibrates the signal threshold per run by
+      shuffling weight-day/return-day pairing (day's own active-only rank vectors held
+      fixed) → 97.5th-pct threshold + p-value, replacing the hand-set ±0.02/12% bar.
+      **Caveat discovered building this**: the null specifically tests for *day-specific*
+      timing information — a policy with a purely *static* factor tilt (same ranking
+      reused every day) is degenerate under this null (shuffling day-pairing changes
+      nothing if the "pairing" carries no day-specific content), which surfaced as a
+      literal floating-point-only null distribution in early test iterations. Real
+      trained policies vary their weight vector day to day (reacting to that day's
+      input window), so this isn't a practical limitation for actual runs — but it's a
+      sharp reminder that this null answers "is there timing information," not "is
+      there a real factor tilt at all" (the latter needs `selection_alpha` + a
+      multi-window check, not this null alone).
+- [x] Tests added (`tests/rl_agent/test_diagnostics.py`, 22/22 pass): tie-averaging
+      regression (`_rankdata` on a hand-verified tie block), active-only dilution case
+      (phantom never-holdable tickers growing far faster than any holdable name — old
+      code would have diluted/zeroed the hit rate; fixed code reproduces the
+      undiluted perfect-ranking result exactly), `selection_alpha` known-skill vs.
+      known-anti-skill cases, `spearman_permutation_null` day-varying skilled vs.
+      random cases (the latter two needed day-varying synthetic weights specifically
+      because of the static-tilt degeneracy above).
+- [x] **Re-ran diagnostics over all recoverable committed experiment dirs** — E0, all 8
+      E1 seeds, and all 8-seed sweeps for `eiie_features_frozen` (the original
+      11-channel baseline), `eiie_momentum_market`, and `eiie_pe_sector` (36 runs
+      total). **Four older families (`eiie_features`, `eiie_features_b100`,
+      `eiie_valuation_b50`, `eiie_valuation_b100`) predate the `weights.npz` artifact
+      and would need `--replay` (reload dataset + checkpoint per run) — not done here,
+      flagged as a remaining gap, not silently skipped.**
+  - **Process note**: recovering these directories required restoring 341 files across
+    ~40 experiment dirs that were tracked in git HEAD but missing from the working
+    tree (deleted at some point without the deletion being committed — not caused by
+    this session's work). Restored via `git restore --source=HEAD -- experiments/`
+    with explicit user sign-off before touching it, per the "investigate unexpected
+    repo state before acting" rule. Nothing was lost; HEAD was always the source of
+    truth.
+  - **E0 (train window, seed 42, 123 days)**: fixed metric gives k=1 Spearman
+    **0.042**, k=5 **0.084**, k=21 **0.111** — ALL significant vs. the permutation null
+    (p ≤ 0.021, most p < 0.001). The originally reported ~0.001 was the dilution
+    artifact. **Hindsight-optimal ceiling** (a true omniscient day-by-day best-picker,
+    zero cost) for this window: **+173,925%** — E0's own +433% captures only ~22% of
+    the available log-return "memorization budget" (log(1+4.33)/log(1+1739.25) ≈ 0.22),
+    not the ~0% the original "clean FAIL" implied, but nowhere near full memorization
+    either. **Verdict revised**: E0 shows real, partial, statistically confirmed
+    in-sample ranking structure — "optimizer/architecture can't fit anything" is
+    false; "fits everything" is also false. The tie-bias hypothesis (Finding 1.2, "does
+    the +0.002 lean vanish under average-rank ties") is moot — the fix revealed
+    structure an order of magnitude larger than any plausible tie artifact, not a
+    small bias that vanished.
+  - **E1 (8 seeds, widened encoder) — re-verdict**: k=1/5/21 Spearman now significant
+    and POSITIVE in 5/8 seeds (same 5 at every horizon), climbing monotonically with
+    horizon in every one of them (e.g. strongest: 0.025 → 0.048 → 0.070, all
+    p=0.002); `selection_alpha` independently confirms the same 5 seeds significant at
+    k=5/21 (p ≤ 0.014, mostly p<0.002), null in the other 3. The 5 "signal" seeds also
+    have far higher `n_active_days` (257–519 of 576) than the 3 null seeds (68–161) —
+    the split tracks how invested the policy stayed, not which seed number. **This
+    overturns the "unanimous 8/8 null, capacity ruled out" verdict recorded above** —
+    under the diluted metric this was invisible.
+  - **Same pattern reproduces in ALL THREE other re-read families**
+    (`eiie_features_frozen`, `eiie_momentum_market`, `eiie_pe_sector`) — each an
+    independent 8-seed sweep with a *different* extra feature channel (or none):
+    2–4 of 8 seeds per family show the identical signature (significant, positive,
+    horizon-climbing Spearman + selection alpha, p<0.05 mostly p<0.005), the rest
+    null/negative. Magnitudes are close to E1's across all four families (k=21 rho
+    typically 0.07–0.10 in the "signal" seeds).
+  - **Synthesis — why this is "candidate," not "signal"**: the pattern's
+    *cross-config* consistency is itself the tell. It shows up at nearly identical
+    magnitude regardless of which extra feature channel is present (momentum,
+    PE-sector, wider encoder, or none) — that rules out "this specific feature carries
+    real information" as the explanation (Stage 2's original premise), and instead
+    points at something about the *base setup* (this architecture, this training
+    objective, this one 2021–2023 window). Checked the strongest signal-seed's
+    holdings in both E1 and the historical families: **same PETR3/PETR4/PRIO3/GGBR4
+    commodity complex documented everywhere else in this investigation** — the real
+    2022 Ukraine-war oil shock. A subset of seeds' policies happen to converge to
+    riding that one genuine, long, single macro trend hard enough and long enough
+    that it registers as a horizon-climbing, statistically significant correlation
+    *within this window* — indistinguishable, using only this data, from actual
+    multi-day forecasting skill. The signal getting stronger at k=21 than k=1 is
+    consistent with "rode one slow trend for months" and equally consistent with "the
+    market has weak multi-week momentum here"; this design review cannot separate
+    them alone (Finding 5/6's single-regime concern, now concretely realized rather
+    than theoretical).
+  - **Per M1's own gate**: technically "a historical run shows real signal under the
+    fixed instrument" — literally true in four separate configs. But because it's the
+    *same* signal in the *same* magnitude regardless of config, it does not "jump the
+    queue" toward any one feature/config. It jumps the queue toward the single
+    concrete check that can actually distinguish luck from skill: **replicate on a
+    disjoint window** (SEP v2, Finding 6) before any of this counts as more than
+    candidate. Seeds 9–16 replication (same window) is necessary but not sufficient —
+    a second window is the decisive test, since a real 2022-only oil shock would
+    trivially "replicate" across seeds 9–16 (same window, same trend) while still
+    being pure luck.
+- [x] E0 addendum: hindsight-optimal PV computed above (+173,925%, recalibrates the
+      original +433%/+44.6% comparison). Tie-bias hypothesis addressed above (moot).
+- [x] `experiment.py`: train-window metrics/diagnostics per run (Finding 4). After
+      saving `model_pretrain.pt`, runs a frozen inference-only backtest over the same
+      span pretrain() trained on (`panel.start_idx` → `pretrain_end_idx`), writes
+      `train_metrics.json` (n_days, total_return, ranking_quality at k=1/5/21). PVM
+      buffer is snapshotted before and restored after — this walks a wider span than
+      pretrain()'s own holdout refresh touches, and left unrestored would silently
+      change the w_prev the online backtest reads at the train/val seam. Tests
+      (`test_experiment.py`, 14/14 pass) check the file's shape AND that the agent's
+      val-window return stays finite (the seam wasn't perturbed). The *next* sweep
+      (e.g. the second-window replication M1 calls for) gets train/val together for
+      free.
+- [x] QA (Finding 7): sanity-gate `deterministic_seeding` now rtol=1e-3 (was 1e-5;
+      cuDNN per-process algorithm selection was failing this at ~9e-5, not a real
+      seeding bug — real bugs diverge at O(1)). `sweep.py`'s `EST_RAM_PER_JOB_MB`
+      corrected 700→2500 (the E1 sweep measured ~2.3-2.4 GB/job via `/proc/<pid>/
+      status`, not the ~0.5 GB the old estimate assumed for the smaller original
+      network — the stale constant is *why* -j under-clamped and OOM-killed VS Code
+      twice this session). `run_jobs()` now retries a failed job once before counting
+      it as a real failure (covers exactly the cuDNN sanity-gate flake and transient
+      OOM hit this session). `sweep.py` now writes `sweep_summary.json` (per-job
+      status + `metrics_summary.json`, parsed from each job's own "Artifacts in"
+      log line — race-free vs. scanning `experiments/` for the newest matching dir).
+      `saturation_probe()` promoted from the E0 script into `train.py` proper,
+      wired into `pretrain()` via an optional `saturation_log_path` (composes with
+      any externally-supplied `on_step`, doesn't replace it) — every future real run
+      gets `saturation_probe.json` for free via `experiment.py`. Tests:
+      `tests/rl_agent/test_sweep.py` (+7, retry-once/retry-exhausted/artifact-log-
+      parsing/summary-writing) and `tests/rl_agent/test_train.py` (+2, saturation
+      log shape + on_step composition), all passing.
+- **Tests**: synthetic known-skill weights → positive selection alpha & Spearman;
+  shuffled → ~0 with calibrated null; tie-block regression case (a (w=0, fwd=0) block
+  must contribute nothing); active-only scope case (planted signal on members must not
+  be diluted by non-members). **Done — see above, 22/22 pass.**
+- **Gate**: if ANY historical run shows real signal under the fixed instrument, that
+  config jumps the queue. If all stay null, proceed with a trustworthy baseline.
+  **Outcome: neither branch cleanly fires — see synthesis above. Candidate signal
+  found, cross-config, most parsimoniously explained by single-window luck. Next
+  action before M2/M3 proceed: run the SAME accepted config on a second, disjoint
+  window (e.g. 2018–2020, pre-COVID, no oil shock) and re-apply this fixed
+  instrument. If the signal vanishes on the second window, the luck explanation is
+  confirmed and M2/M3 proceed exactly as planned below. If it persists, this becomes
+  the actual M4 "Strong" row and reprioritizes ahead of M2/M3.**
+
+### M2 — Entropy floor: make the objective train (and expose) more than the argmax
+- [ ] **Requires sign-off** (amends "no reward reshaping" — Finding 5).
+- [ ] Calibration mini-run (2–3 betas × 2 seeds, labeled calibration, not evidence):
+      pick `entropy_beta_end` targeting effective_n ≈ 5–15 (too high → uniform, logits
+      flatter than noise; too low → status quo). Candidates: 1e-3, 3e-3, 1e-2
+      (current: 1e-5). Fallback if the knob can't hold the band: ε-uniform weight
+      mixing — more code, only if needed.
+- [ ] Full SEP at the chosen beta, judged by M1's fixed metrics. Also the product bar:
+      does the diversified agent beat UCRP (=1/N — the bar DeMiguel showed is the hard
+      one) net of costs?
+- **Confound**: beta changes both the trained objective and metric power — that is the
+  point; record it as the sanctioned deviation, one variable.
+
+### M3 — Supervised ranking probe (the premise experiment)
+- [ ] `src/rl_agent/supervised_probe.py`: same conv trunk (no softmax head, no
+      `w_prev`), per-asset score; listwise softmax cross-entropy over each day's
+      active cross-section against forward k-day returns (cross-sectionally
+      standardized); masked to active slots. Horizons k∈{1,5,21} are configs, not code.
+- [ ] Metric: daily IC (active-only Spearman(scores, realized)) on train AND val, vs.
+      permutation null. This is the direct, maximally-powered answer to "is there
+      extractable cross-sectional signal in these features at horizon k" — no RL
+      credit-assignment noise, all 50 assets disciplined every day.
+- [ ] Expectation calibration: Gu–Kelly–Xiu 2020 got OOS R² ≈ 0.4%/month with ~900
+      features on US equities. Daily, price-only, 50 B3 names is a strictly harder ask.
+      IC of 0.02–0.05 at k=5/21 would be a strong result here.
+- **Tests**: label alignment (window ends t, label (t, t+k], zero overlap); masked-slot
+  loss contribution exactly 0; leakage guard reuse (`test_ffill_guard` pattern);
+  synthetic end-to-end (planted predictive feature → IC recovered; shuffled labels →
+  IC ≈ null). Edge cases: delisting terminal returns; PETR3/PETR4 near-duplicate
+  cross-section (note, don't fix yet).
+- **Interpretation**: IC > null at some k → signal exists; bottleneck is confirmed as
+  objective/policy, not representation → two-stage build (rank → portfolio
+  construction) or RL fine-tune at that k. IC ≈ null at all k → the strongest premise
+  answer this project can produce: no extractable daily/weekly cross-sectional signal
+  in these inputs. That conclusion still needs the multi-window check before it's
+  final (Finding 6).
+
+### M4 — Decision gate (no compute) — EXPLICIT, to prevent "one more experiment" syndrome
+
+Definitions (fixed *before* looking at M3 results): **null** = val IC inside the
+permutation null's 95% band at every k. **Weak** = above the 97.5th percentile at some
+k, but IC < 0.03. **Strong** = IC ≥ 0.03 at some k, same sign in ≥ 6/8 seeds.
+(Calibration: Gu–Kelly–Xiu-level results on far richer data correspond to ~0.02–0.05
+here; 0.03 is "clearly real, plausibly monetizable after costs.")
+
+| M3 result | + context | Next step — and *only* this step |
+|---|---|---|
+| Null at all k | M1 retro-read also null, M2 null | **STOP model-side work.** One confirmation run on a disjoint window to seal it, then write the premise conclusion. Pivot is objective-level (risk/diversification mandate, macro-conditioning, different data). M5 optional as a final cheap falsification, then nothing else. |
+| Null at all k | M1 retro-read or M2 found something | The RL-side result outranks the probe's null: chase that specific config/against a second window. No new feature/capacity/architecture experiments. |
+| Weak | — | Allocation research only: can a portfolio layer monetize a weak IC after costs (turnover-budgeted top-k, etc.)? **No model-improvement experiments** — a weak signal doesn't fund an architecture search. |
+| Strong | M2 null or unhelpful | Head-to-head: predict-then-allocate pipeline vs. RL fine-tune at the winning k. Winner (net of costs, both windows) becomes the system. |
+| Strong | M2 also positive (entropy floor helped RL) | Objective-level regularization research: the evidence says signal exists AND the RL objective can express it when regularized — tune that axis (entropy floor, risk-sensitive reward à la Moody–Saffell), not inputs or topology. |
+
+Standing rules: (1) any experiment not named in this table requires amending this plan
+first, in writing, with the hypothesis it tests — no ad-hoc runs. (2) Every row's
+outcome must replicate per SEP v2 (fresh seeds + disjoint window) before it
+re-baselines anything. (3) Weekly env surgery (old E3) only enters via the Strong rows
+and only if k=5 wins and native weekly RL is explicitly wanted.
+
+### M5 — Attention inside the probe (conditional)
+- [ ] Attention layer across the 50 slots in the supervised probe; slot-permutation
+      equivariance test mandatory (shuffle slots → permuted outputs, bit-exact).
+      Isolates "can cross-asset comparison find what independent evaluation can't" at
+      prediction level, without RL noise or the concentration attractor.
+
+## SEP v2 amendments (once M1 lands)
+1. All Spearman/hit metrics active-members-only, tie-aware.
+2. Selection alpha + permutation p-values accompany every run; thresholds come from
+   the permutation null, not hand-set bands.
+3. Train-window metrics logged for every run.
+4. Any accepted signal must replicate (seeds 9–16) AND hold on a second, disjoint
+   val window.
+
+## References
+- Jiang, Xu & Liang 2017, *A Deep RL Framework for the Financial Portfolio Management
+  Problem* (arXiv:1706.10059) — source paper; domain is Poloniex crypto at 30-min bars.
+- DeMiguel, Garlappi & Uppal 2009, *Optimal Versus Naive Diversification* (RFS 22-5) —
+  1/N beats optimized portfolios OOS; the estimation-error frame for Finding 5.
+- MacLean, Thorp & Ziemba 2011, *The Kelly Capital Growth Investment Criterion* —
+  empirical growth-optimal concentration & sensitivity (the attractor's theory).
+- Gu, Kelly & Xiu 2020, *Empirical Asset Pricing via Machine Learning* (RFS 33-5) —
+  supervised cross-sectional NN benchmark; calibrates M3 expectations.
+- Haarnoja et al. 2018 (SAC) / max-entropy RL — entropy regularization as standard
+  practice, grounding M2's legitimacy.
+- Cao et al. 2007 (ListNet) — listwise ranking loss used in M3.
+- Moody & Saffell 2001, *Learning to Trade via Direct Reinforcement* (IEEE TNN) —
+  precedent for risk-sensitive objective modification in trading RL (differential
+  Sharpe), relevant if M4 lands on objective redesign.

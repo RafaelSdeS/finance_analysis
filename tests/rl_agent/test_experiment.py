@@ -104,7 +104,8 @@ def test_full_run_val_split(passed, failed):
         out_dir = run_experiment(cfg, dry_run=False, eval_split="val", panel=panel)
 
         expected_files = ["config.json", "run_manifest.json", "sanity_report.txt",
-                           "model.pt", "report.html", "metrics_summary.json", "report.json"]
+                           "model.pt", "report.html", "metrics_summary.json", "report.json",
+                           "train_metrics.json", "saturation_probe.json"]
         missing = [f for f in expected_files if not (out_dir / f).exists()]
         ok = len(missing) == 0
         print_check("full run: every required artifact is produced", ok, f"missing={missing}")
@@ -113,6 +114,24 @@ def test_full_run_val_split(passed, failed):
         report = json.loads((out_dir / "report.json").read_text())
         ok = report["valid"] and all(report["checklist"].values())
         print_check("full run: validation checklist is entirely true", ok, str(report["checklist"]))
+        passed, failed = passed + ok, failed + (not ok)
+
+        train_metrics = json.loads((out_dir / "train_metrics.json").read_text())
+        ok = (np.isfinite(train_metrics["total_return"]) and train_metrics["n_days"] > 0
+              and set(train_metrics["ranking_quality"].keys()) == {"1", "5", "21"})
+        print_check("full run: train_metrics.json has a finite return and ranking_quality at k=1/5/21",
+                    ok, str(train_metrics))
+        passed, failed = passed + ok, failed + (not ok)
+
+        # The train-window diagnostic snapshots/restores the PVM buffer around itself
+        # (see experiment.py) -- if that restore were missing or buggy, the subsequent
+        # online backtest's portfolio value would very likely go non-finite, or the
+        # checklist above would already have failed. Explicit second look specifically
+        # at the seam that snapshot/restore is designed to protect.
+        summary_check = json.loads((out_dir / "metrics_summary.json").read_text())
+        ok = np.isfinite(summary_check["agent"]["total_return"])
+        print_check("full run: agent's val-window return is finite (PVM seam wasn't perturbed by the "
+                    "train-window diagnostic)", ok, str(summary_check["agent"]["total_return"]))
         passed, failed = passed + ok, failed + (not ok)
 
         summary = json.loads((out_dir / "metrics_summary.json").read_text())
