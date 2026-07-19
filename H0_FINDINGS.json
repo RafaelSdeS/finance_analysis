@@ -1,0 +1,68 @@
+{
+  "baselines": {
+    "ucrp": {
+      "n_monthly_obs": 91,
+      "total_return": {
+        "point": 0.6777932617317739,
+        "ci_lo": -0.5451141366380585,
+        "ci_hi": 4.295979539533059
+      },
+      "monthly_active_return_vs_bova11": {
+        "mean": -0.0018015757535259484,
+        "se": 0.0020092656589990867,
+        "tstat": -0.896633924666488
+      }
+    },
+    "bova11": {
+      "n_monthly_obs": 91,
+      "total_return": {
+        "point": 1.0686760953118823,
+        "ci_lo": -0.41167014417596354,
+        "ci_hi": 4.7857310141359255
+      },
+      "monthly_active_return_vs_bova11": {
+        "mean": 0.0,
+        "se": 1.0482848367219183e-07,
+        "tstat": 0.0
+      }
+    },
+    "min_variance": {
+      "n_monthly_obs": 91,
+      "total_return": {
+        "point": 0.9245036767495112,
+        "ci_lo": -0.29908095665087664,
+        "ci_hi": 3.426131639824424
+      },
+      "monthly_active_return_vs_bova11": {
+        "mean": -0.0017208258153111643,
+        "se": 0.003481596140021164,
+        "tstat": -0.49426347746947574
+      }
+    },
+    "classical_mv": {
+      "n_monthly_obs": 91,
+      "total_return": {
+        "point": 9.13361303496649,
+        "ci_lo": 1.1362052886119465,
+        "ci_hi": 44.81448452783114
+      },
+      "monthly_active_return_vs_bova11": {
+        "mean": 0.020558199273170968,
+        "se": 0.00884754041663166,
+        "tstat": 2.3236061442031435
+      }
+    }
+  },
+  "power_floors": {
+    "n_monthly_obs": 91,
+    "21": {
+      "min_detectable_ic": 0.02995099533491195,
+      "hac_lag_months": 0
+    },
+    "63": {
+      "min_detectable_ic": 0.051876645657325915,
+      "hac_lag_months": 2
+    },
+    "min_detectable_ir_annual": 0.7262730392025629
+  }
+}

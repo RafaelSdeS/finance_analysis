@@ -62,6 +62,13 @@ FAST = [
     "tests/rl_agent/test_experiment.py",
     "tests/rl_agent/test_sweep.py",
     "tests/rl_agent/test_diagnostics.py",
+    "tests/h_series/test_stats.py",
+    "tests/h_series/test_spine.py",
+    "tests/h_series/test_features.py",
+    "tests/h_series/test_milestone_h0.py",
+    "tests/h_series/test_milestone_h1.py",
+    "tests/h_series/test_composite.py",
+    "tests/h_series/test_milestone_h2.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
