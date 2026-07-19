@@ -15,8 +15,10 @@ from typing import Optional
 
 import numpy as np
 
+from .config import RiskConfig
 from .data import CASH_GIDX, PricePanel
 from .environment import BacktestResult, run_backtest
+from .risk_portfolios import RISK_POLICY_NAMES, make_risk_weight_fn
 
 BASELINE_NAMES = (
     "ubah", "ucrp", "best_stock", "random_portfolio",
@@ -138,14 +140,21 @@ def _bova11_result(panel: PricePanel, start_idx: int, end_idx: int) -> BacktestR
 
 def run_baseline(name: str, panel: PricePanel, c_sell: float, c_buy: float,
                   seed: int = 42, start_idx: Optional[int] = None, end_idx: Optional[int] = None,
-                  mu_tol: float = 1e-10, mu_max_iter: int = 100) -> BacktestResult:
-    """Run any of the BASELINE_NAMES over [start_idx, end_idx] with the same
-    costs and dates as the agent's own backtest."""
+                  mu_tol: float = 1e-10, mu_max_iter: int = 100,
+                  risk_cfg: Optional[RiskConfig] = None) -> BacktestResult:
+    """Run any of the BASELINE_NAMES or RISK_POLICY_NAMES over
+    [start_idx, end_idx] with the same costs and dates as the agent's own
+    backtest. risk_cfg only matters for a risk-policy name (defaults to
+    RiskConfig() if omitted)."""
     start_idx = panel.start_idx if start_idx is None else start_idx
     end_idx = panel.end_idx if end_idx is None else end_idx
 
     if name == "bova11":
         return _bova11_result(panel, start_idx, end_idx)
+
+    if name in RISK_POLICY_NAMES:
+        weight_fn = make_risk_weight_fn(name, risk_cfg or RiskConfig(), panel, start_idx)
+        return run_backtest(panel, weight_fn, c_sell, c_buy, start_idx, end_idx, mu_tol, mu_max_iter)
 
     weight_fns = {
         "constant_cash": constant_cash_weight_fn,
@@ -156,5 +165,6 @@ def run_baseline(name: str, panel: PricePanel, c_sell: float, c_buy: float,
         "random_rebalancing": make_random_rebalancing_weight_fn(seed),
     }
     if name not in weight_fns:
-        raise ValueError(f"unknown baseline: {name!r} (available: {sorted(weight_fns) + ['bova11']})")
+        available = sorted(weight_fns) + ["bova11"] + list(RISK_POLICY_NAMES)
+        raise ValueError(f"unknown baseline: {name!r} (available: {available})")
     return run_backtest(panel, weight_fns[name], c_sell, c_buy, start_idx, end_idx, mu_tol, mu_max_iter)

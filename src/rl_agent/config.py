@@ -111,6 +111,23 @@ class ExperimentMeta:
 
 
 @dataclass(frozen=True)
+class RiskConfig:
+    """Risk/diversification mandate (RISK_MANDATE_PLAN.md Option A) -- no
+    mu estimate anywhere, purely structural allocation from covariance."""
+    policies: tuple = ("min_variance", "risk_parity",
+                        "min_variance_voltarget", "risk_parity_voltarget")
+    lookback: int = 126             # trading days; R2 grid {63, 126, 252}
+    min_history_frac: float = 0.8   # eligibility: real (non-backfilled) coverage within lookback
+    rebalance_every: int = 21       # trading days; R2 grid {1, 5, 21}
+    cov_estimator: str = "ledoit_wolf"  # or "ewma"
+    ewma_halflife: int = 63         # trading days
+    vol_target_ann: float = 0.12    # ex-ante annualized sigma for *_voltarget policies
+    max_weight: float = 1.0         # per-name cap; 1.0 = off
+    solver_tol: float = 1e-9
+    warm_start: bool = True         # reuse previous rebalance's solution as QP x0
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     data: DataConfig = field(default_factory=DataConfig)
     costs: CostConfig = field(default_factory=CostConfig)
@@ -118,6 +135,7 @@ class ExperimentConfig:
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
     experiment: ExperimentMeta = field(default_factory=ExperimentMeta)
+    risk: RiskConfig = field(default_factory=RiskConfig)
 
     @classmethod
     def from_dict(cls, d: dict) -> "ExperimentConfig":
@@ -127,6 +145,9 @@ class ExperimentConfig:
         ev = dict(d.get("eval", {}))
         if "baselines" in ev:
             ev["baselines"] = tuple(ev["baselines"])
+        rk = dict(d.get("risk", {}))
+        if "policies" in rk:
+            rk["policies"] = tuple(rk["policies"])
         return cls(
             data=DataConfig(**data),
             costs=CostConfig(**d.get("costs", {})),
@@ -134,6 +155,7 @@ class ExperimentConfig:
             train=TrainConfig(**d.get("train", {})),
             eval=EvalConfig(**ev),
             experiment=ExperimentMeta(**d.get("experiment", {})),
+            risk=RiskConfig(**rk),
         )
 
     @classmethod

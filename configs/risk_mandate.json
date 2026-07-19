@@ -1,0 +1,40 @@
+{
+  "data": {
+    "window": 50,
+    "features": ["close", "high", "low"],
+    "window_start": "2011-01-31",
+    "window_end": "2026-07-14",
+    "cash_mode": "cdi"
+  },
+  "costs": {
+    "c_sell": 0.0003,
+    "c_buy": 0.0003,
+    "train_mu_iters": 1,
+    "backtest_mu_tol": 1e-10
+  },
+  "eval": {
+    "baselines": [
+      "ubah", "ucrp", "best_stock", "random_portfolio",
+      "random_rebalancing", "constant_cash", "bova11"
+    ],
+    "var_level": 0.95,
+    "bootstrap_n": 1000,
+    "bootstrap_block": 20
+  },
+  "experiment": {
+    "name": "risk_mandate",
+    "out_dir": "experiments"
+  },
+  "risk": {
+    "policies": ["min_variance", "risk_parity", "min_variance_voltarget", "risk_parity_voltarget"],
+    "lookback": 126,
+    "min_history_frac": 0.8,
+    "rebalance_every": 21,
+    "cov_estimator": "ledoit_wolf",
+    "ewma_halflife": 63,
+    "vol_target_ann": 0.12,
+    "max_weight": 1.0,
+    "solver_tol": 1e-9,
+    "warm_start": true
+  }
+}

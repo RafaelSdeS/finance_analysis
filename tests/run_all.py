@@ -54,6 +54,7 @@ FAST = [
     "tests/rl_agent/test_environment.py",
     "tests/rl_agent/test_metrics.py",
     "tests/rl_agent/test_baselines.py",
+    "tests/rl_agent/test_risk_portfolios.py",
     "tests/rl_agent/test_networks.py",
     "tests/rl_agent/test_train.py",
     "tests/rl_agent/test_sanity.py",
