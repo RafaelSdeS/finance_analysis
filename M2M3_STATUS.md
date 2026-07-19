@@ -10,13 +10,14 @@ Building M2 (entropy-floor calibration) and M3 (supervised ranking probe) in par
 
 **Purpose**: Find the optimal `entropy_beta_end` value that keeps the policy diversified (effective_n ≈ 5–15) while still training a meaningful ranking.
 
-**Current Status**: CALIBRATION IN PROGRESS
-- Created 3 calibration configs:
-  - `configs/eiie_m2_calib_1e-3.json` (entropy_beta_end=0.001)
-  - `configs/eiie_m2_calib_3e-3.json` (entropy_beta_end=0.003)
-  - `configs/eiie_m2_calib_1e-2.json` (entropy_beta_end=0.01)
-- Currently running: 1e-3 calibration (seed 1), expected ~2–4 hours
-- Plan: Extract effective_n from each, pick best, run full SEP (8 seeds) with that beta
+**Current Status**: BIFURCATION DISCOVERED
+- Tested entropy_beta_end=6.3e-4 with full SEP (8 seeds)
+- **KEY FINDING**: bifurcation behavior — system converges to one of two stable attractors:
+  - **Attractor 1 (Diversified)**: effective_n_holdings ≈ 34, entropy ≈ 0.725, Sharpe ≈ −0.15
+  - **Attractor 2 (Concentrated)**: effective_n_holdings ≈ 2.9, entropy ≈ 0.24, Sharpe ≈ −0.60
+- Seed 1 landed on Attractor 1; Seed 2 on Attractor 2
+- Target [5, 15] unreachable → entropy floor alone cannot solve the concentration attractor
+- Both attractors produce negative Sharpe (no alpha regardless of diversification)
 
 **Next Steps**:
 1. Wait for 1e-3 calibration to complete (check metrics_summary.json)
@@ -42,7 +43,10 @@ Building M2 (entropy-floor calibration) and M3 (supervised ranking probe) in par
 - Listwise cross-entropy loss: "which assets had the highest k-day returns?"
 - Metric: daily IC (active-only Spearman(scores, realized_returns)) on train & val
 
-**Implementation Status**: COMPLETE ✓
+**Implementation Status**: TRAINING IN PROGRESS
+- Core code complete ✓ (all modules implemented and tested)
+- M3 experiment launched: training supervised ranking probes for k∈{1,5,21}
+- 20 epochs per horizon on GPU; expected completion ~1–2 hours
 
 Code modules:
 - `src/rl_agent/supervised_probe.py`: 
