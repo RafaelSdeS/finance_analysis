@@ -20,22 +20,33 @@ from .supervised_probe import SupervisedRankingProbe, listwise_ranking_loss, com
 
 
 def compute_forward_returns(panel: PricePanel, k: int) -> np.ndarray:
-    """Compute k-day forward log-returns for each asset (global space).
+    """Compute k-day forward log-returns for each slot (slot space).
 
-    Returns: [T, n_global] array, where returns[t, i] is the log-return of
-    asset i from day t to day t+k (inclusive), or NaN if the window extends
-    past the end of data or the asset has no price on day t or t+k.
+    Returns: [T, n_slots] array, where returns[t, i] is the log-return of
+    slot i from day t to day t+k (inclusive), or NaN if the window extends
+    past the end or the asset is not active in slot i on day t or t+k.
     """
     T = panel.close.shape[0]
-    n_global = panel.n_global
-    fwd_returns = np.full((T, n_global), np.nan)
+    n_slots = panel.n_slots
+    fwd_returns = np.full((T, n_slots), np.nan)
 
     for t in range(T - k):
-        # Log-return from close[t] to close[t+k], global space
-        c_t = panel.close[t, :n_global]
-        c_tk = panel.close[t + k, :n_global]
-        # ponytail: vectorized element-wise; NaN * anything = NaN as desired
-        fwd_returns[t] = np.log(c_tk / c_t)
+        # Get slot-to-global mapping for this day and future day
+        slot_map_t = panel.slot_gidx[t]        # [n_slots] -> global indices
+        slot_map_tk = panel.slot_gidx[t + k]   # [n_slots] -> global indices
+        valid_t = panel.valid[t]                # [n_slots] bool
+        valid_tk = panel.valid[t + k]           # [n_slots] bool
+
+        for slot in range(n_slots):
+            if not (valid_t[slot] and valid_tk[slot]):
+                continue  # Leave as NaN
+            # Log-return from day t to day t+k for this slot's assets
+            g_t = slot_map_t[slot]
+            g_tk = slot_map_tk[slot]
+            c_t = panel.close[t, g_t]
+            c_tk = panel.close[t + k, g_tk]
+            if c_t > 0:
+                fwd_returns[t, slot] = np.log(c_tk / c_t)
 
     return fwd_returns
 
@@ -224,19 +235,16 @@ def run_supervised_experiment(config: ExperimentConfig, out_dir: Path) -> dict:
     k_list = [1, 5, 21]
     fwd_returns = {k: compute_forward_returns(panel, k) for k in k_list}
 
-    # Get train/val split indices from split_config.json
-    from ..build_dataset.paths import SPLIT_CONFIG_PATH
-    from ..build_dataset.manifest import iter_fit_windows
-
-    with open(SPLIT_CONFIG_PATH) as f:
-        split_config = json.load(f)
-    fit_windows = list(iter_fit_windows(split_config))
-    if not fit_windows:
-        raise ValueError("No fit windows found in split_config.json")
-
-    fit_window = fit_windows[0]  # Use the first (and usually only) window
-    train_end_idx = fit_window.train_end_idx
-    val_end_idx = fit_window.val_end_idx
+    # Map FitWindow dates to panel indices via searchsorted
+    import pandas as pd
+    train_end_date = config.data.window_end  # From config, this is the train cutoff
+    # Split: train=[window_start, train_end], val=[train_end+1, window_end]
+    # Panel dates are a DatetimeIndex; use searchsorted to find indices
+    panel_dates = panel.dates
+    train_end_dt = pd.Timestamp(train_end_date)
+    # Find the last index with date <= train_end_dt
+    train_end_idx = int(np.searchsorted(panel_dates.values, np.datetime64(train_end_dt), side="right")) - 1
+    val_end_idx = panel.end_idx
 
     print(f"  Train: [0, {train_end_idx}] ({train_end_idx + 1} days)")
     print(f"  Val:   [{train_end_idx + 1}, {val_end_idx}] ({val_end_idx - train_end_idx} days)")
