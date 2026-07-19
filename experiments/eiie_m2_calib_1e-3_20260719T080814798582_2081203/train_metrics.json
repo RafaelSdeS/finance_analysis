@@ -1,0 +1,30 @@
+{
+  "n_days": 2689,
+  "total_return": 1.8118716915766218,
+  "ranking_quality": {
+    "1": {
+      "n_days": 2689,
+      "mean_spearman": 0.014244110828402233,
+      "mean_top10_hit_rate": 0.22811778734054672,
+      "n_active_days": 2689,
+      "mean_spearman_active_days": 0.014244110828402233,
+      "mean_top10_hit_rate_active_days": 0.22811778734054672
+    },
+    "5": {
+      "n_days": 2689,
+      "mean_spearman": 0.02309210986246836,
+      "mean_top10_hit_rate": 0.23756043138713276,
+      "n_active_days": 2689,
+      "mean_spearman_active_days": 0.02309210986246836,
+      "mean_top10_hit_rate_active_days": 0.23756043138713276
+    },
+    "21": {
+      "n_days": 2689,
+      "mean_spearman": 0.026130010871212646,
+      "mean_top10_hit_rate": 0.24512210239246313,
+      "n_active_days": 2689,
+      "mean_spearman_active_days": 0.026130010871212646,
+      "mean_top10_hit_rate_active_days": 0.24512210239246313
+    }
+  }
+}

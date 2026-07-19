@@ -1,0 +1,10 @@
+SanityReport (PASSED):
+  [OK  ] deterministic_seeding -- run A=[-0.0026081635151058435, -0.0021477178670465946, -0.0025785353500396013], run B=[-0.0026081635151058435, -0.0021477178670465946, -0.0025785353500396013]
+  [OK  ] weights_on_simplex -- sum=1.000000, min=0.016854
+  [OK  ] weights_finite
+  [OK  ] finite_gradients_first_batch
+  [OK  ] finite_loss -- loss=-0.0026081635151058435
+  [OK  ] pvm_finite
+  [OK  ] baselines_run_cleanly -- final_pv=0.999718
+  [OK  ] zero_cost_no_drag -- mu range=[1.000000, 1.000000]
+  [OK  ] real_cost_reduces_value -- zero_cost_final=1.008096, real_cost_final=1.004924

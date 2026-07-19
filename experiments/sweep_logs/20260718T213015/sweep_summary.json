@@ -1,0 +1,314 @@
+{
+  "eiie_replication_window2_seed1": {
+    "status": "ok",
+    "artifact_dir": "/home/rafael/Documents/finance_analysis/experiments/eiie_replication_window2_20260718T213016614161_2035246",
+    "metrics": {
+      "total_return": 0.09374032831392909,
+      "annualized_return": 0.07037831937522765,
+      "cagr": 0.07148506042179914,
+      "volatility": 0.015200803682329069,
+      "sharpe": -0.41025757651353983,
+      "sortino": -0.46616559148206654,
+      "calmar": 6.042742670778815,
+      "max_drawdown": 0.011646751021776836,
+      "var": 0.0011830022975839016,
+      "cvar": 0.0021792449723800704,
+      "mean_daily_turnover": 0.00808178953769568,
+      "annualized_turnover": 2.0366109634993115,
+      "transaction_cost_drag": 0.001010671436324273,
+      "win_rate": 0.7108433734939759,
+      "information_ratio": -0.41191222867052546,
+      "final_apv": 1.093740328313929,
+      "allocation_entropy": 0.07725315741956751,
+      "effective_n_holdings": 1.1419225721227917,
+      "mean_cash_weight": 0.9374058004244264,
+      "frac_days_cash_gt90": 0.8283132530120482,
+      "frac_days_single_name_gt70": 0.0,
+      "argmax_switches": 0,
+      "mean_position_lifetime": 8.5,
+      "total_return_ci": [
+        0.09374032831392753,
+        0.049202552092017536,
+        0.14294473169047467
+      ],
+      "sharpe_ci": [
+        -0.41025757651353983,
+        -2.71617267468024,
+        1.9463454496566146
+      ]
+    }
+  },
+  "eiie_replication_window2_seed2": {
+    "status": "ok",
+    "artifact_dir": "/home/rafael/Documents/finance_analysis/experiments/eiie_replication_window2_20260718T213016632546_2035247",
+    "metrics": {
+      "total_return": 0.09078138042581108,
+      "annualized_return": 0.06817962662863275,
+      "cagr": 0.06925068573016868,
+      "volatility": 0.01591824658456387,
+      "sharpe": -0.5207205431890441,
+      "sortino": -0.5058179596146671,
+      "calmar": 4.467811204441924,
+      "max_drawdown": 0.015260185247050763,
+      "var": 0.0012027760861414824,
+      "cvar": 0.002802056336232552,
+      "mean_daily_turnover": 0.003523110062069808,
+      "annualized_turnover": 0.8878237356415916,
+      "transaction_cost_drag": 0.0004162528104598717,
+      "win_rate": 0.8162650602409639,
+      "information_ratio": -0.4256876913073719,
+      "final_apv": 1.090781380425811,
+      "allocation_entropy": 0.07147537606270286,
+      "effective_n_holdings": 1.1136864781867477,
+      "mean_cash_weight": 0.950294209891055,
+      "frac_days_cash_gt90": 0.8795180722891566,
+      "frac_days_single_name_gt70": 0.0,
+      "argmax_switches": 0,
+      "mean_position_lifetime": 4.4,
+      "total_return_ci": [
+        0.09078138042580908,
+        0.05493787709869829,
+        0.13453809334088473
+      ],
+      "sharpe_ci": [
+        -0.5207205431890441,
+        -2.1185565555346972,
+        2.208588269831573
+      ]
+    }
+  },
+  "eiie_replication_window2_seed3": {
+    "status": "ok",
+    "artifact_dir": "/home/rafael/Documents/finance_analysis/experiments/eiie_replication_window2_20260718T213016634327_2035248",
+    "metrics": {
+      "total_return": -0.15652615445785456,
+      "annualized_return": -0.12120882324404225,
+      "cagr": -0.12293246303432326,
+      "volatility": 0.2931284228922381,
+      "sharpe": -0.5455922803365165,
+      "sortino": -0.8031202125388209,
+      "calmar": -0.3854808058647953,
+      "max_drawdown": 0.31443543076579383,
+      "var": 0.028440970760959784,
+      "cvar": 0.04152549716521642,
+      "mean_daily_turnover": 0.417345928246607,
+      "annualized_turnover": 105.17117391814496,
+      "transaction_cost_drag": 0.06760514034481724,
+      "win_rate": 0.463855421686747,
+      "information_ratio": -0.8508224797150861,
+      "final_apv": 0.8434738455421454,
+      "allocation_entropy": 0.20116614544390668,
+      "effective_n_holdings": 2.4588099473057223,
+      "mean_cash_weight": 0.19811964787391062,
+      "frac_days_cash_gt90": 0.015060240963855422,
+      "frac_days_single_name_gt70": 0.3825301204819277,
+      "argmax_switches": 7,
+      "mean_position_lifetime": 2.4766505636070852,
+      "total_return_ci": [
+        -0.1565261544578549,
+        -0.48142301474874155,
+        0.631486737322816
+      ],
+      "sharpe_ci": [
+        -0.5455922803365165,
+        -1.8349561080608932,
+        1.1490490211366016
+      ]
+    }
+  },
+  "eiie_replication_window2_seed4": {
+    "status": "ok",
+    "artifact_dir": "/home/rafael/Documents/finance_analysis/experiments/eiie_replication_window2_20260718T213614821848_2038550",
+    "metrics": {
+      "total_return": 0.05782252704599222,
+      "annualized_return": 0.04359071444738949,
+      "cagr": 0.044267521202058235,
+      "volatility": 0.02598193459177505,
+      "sharpe": -1.2090539144559425,
+      "sortino": -1.4400449402665223,
+      "calmar": 1.108660613097767,
+      "max_drawdown": 0.039318357604127725,
+      "var": 0.0027272796305389635,
+      "cvar": 0.004127916489009949,
+      "mean_daily_turnover": 0.008566304033415269,
+      "annualized_turnover": 2.1587086164206477,
+      "transaction_cost_drag": 0.001016785569496692,
+      "win_rate": 0.6686746987951807,
+      "information_ratio": -0.5420215805109316,
+      "final_apv": 1.0578225270459922,
+      "allocation_entropy": 0.09911068399379294,
+      "effective_n_holdings": 1.2546478411775701,
+      "mean_cash_weight": 0.8934607918722084,
+      "frac_days_cash_gt90": 0.6234939759036144,
+      "frac_days_single_name_gt70": 0.0,
+      "argmax_switches": 0,
+      "mean_position_lifetime": 11.80952380952381,
+      "total_return_ci": [
+        0.05782252704598978,
+        -0.0188826270968211,
+        0.1391501332492271
+      ],
+      "sharpe_ci": [
+        -1.2090539144559425,
+        -3.0858764351277683,
+        1.1425741854167752
+      ]
+    }
+  },
+  "eiie_replication_window2_seed5": {
+    "status": "ok",
+    "artifact_dir": "/home/rafael/Documents/finance_analysis/experiments/eiie_replication_window2_20260718T213614820893_2038551",
+    "metrics": {
+      "total_return": 0.12543164132630324,
+      "annualized_return": 0.09383815391731853,
+      "cagr": 0.09532993174549831,
+      "volatility": 0.11934085175526093,
+      "sharpe": 0.18663681703537716,
+      "sortino": 0.2970984121334601,
+      "calmar": 0.8402843496560288,
+      "max_drawdown": 0.11167428496761991,
+      "var": 0.008930565861676579,
+      "cvar": 0.014572019008004696,
+      "mean_daily_turnover": 0.02226203063286492,
+      "annualized_turnover": 5.6100317194819596,
+      "transaction_cost_drag": 0.0024877612316028808,
+      "win_rate": 0.5813253012048193,
+      "information_ratio": -0.24413418539497822,
+      "final_apv": 1.1254316413263032,
+      "allocation_entropy": 0.12874702818198863,
+      "effective_n_holdings": 1.584372582208995,
+      "mean_cash_weight": 0.7793859557574054,
+      "frac_days_cash_gt90": 0.3704819277108434,
+      "frac_days_single_name_gt70": 0.0,
+      "argmax_switches": 0,
+      "mean_position_lifetime": 17.705882352941178,
+      "total_return_ci": [
+        0.12543164132630413,
+        -0.12355309916362654,
+        0.668574303902133
+      ],
+      "sharpe_ci": [
+        0.18663681703537716,
+        -2.167533015258272,
+        1.90178525677923
+      ]
+    }
+  },
+  "eiie_replication_window2_seed6": {
+    "status": "ok",
+    "artifact_dir": "/home/rafael/Documents/finance_analysis/experiments/eiie_replication_window2_20260718T213616793608_2038616",
+    "metrics": {
+      "total_return": 0.17921226602560125,
+      "annualized_return": 0.13328960841893478,
+      "cagr": 0.13544633027412556,
+      "volatility": 0.24172312902187118,
+      "sharpe": 0.33115543249518775,
+      "sortino": 0.42658056904586383,
+      "calmar": 0.5689883672189812,
+      "max_drawdown": 0.23425717659292122,
+      "var": 0.023122695243919085,
+      "cvar": 0.03711960935057962,
+      "mean_daily_turnover": 0.07807591405718219,
+      "annualized_turnover": 19.67513034240991,
+      "transaction_cost_drag": 0.015134585826675484,
+      "win_rate": 0.5210843373493976,
+      "information_ratio": 0.02652250447136183,
+      "final_apv": 1.1792122660256013,
+      "allocation_entropy": 0.5784876645056786,
+      "effective_n_holdings": 15.743642684499278,
+      "mean_cash_weight": 0.0010510093893791204,
+      "frac_days_cash_gt90": 0.0,
+      "frac_days_single_name_gt70": 0.012048192771084338,
+      "argmax_switches": 0,
+      "mean_position_lifetime": 23.984520123839008,
+      "total_return_ci": [
+        0.17921226602559703,
+        -0.2416273199373756,
+        0.8036306925304474
+      ],
+      "sharpe_ci": [
+        0.33115543249518775,
+        -0.891650190446529,
+        2.1077283500475263
+      ]
+    }
+  },
+  "eiie_replication_window2_seed7": {
+    "status": "ok",
+    "artifact_dir": "/home/rafael/Documents/finance_analysis/experiments/eiie_replication_window2_20260718T214222997348_2041250",
+    "metrics": {
+      "total_return": 0.19528177414816938,
+      "annualized_return": 0.14499280025334604,
+      "cagr": 0.14735089200392082,
+      "volatility": 0.15622900644951102,
+      "sharpe": 0.4717337286548703,
+      "sortino": 0.5808669637730945,
+      "calmar": 1.1224288250682712,
+      "max_drawdown": 0.12917772335767208,
+      "var": 0.013629133401579039,
+      "cvar": 0.021864928721714506,
+      "mean_daily_turnover": 0.03268572003113661,
+      "annualized_turnover": 8.236801447846425,
+      "transaction_cost_drag": 0.00535973290177616,
+      "win_rate": 0.5572289156626506,
+      "information_ratio": -0.016463399350266902,
+      "final_apv": 1.1952817741481694,
+      "allocation_entropy": 0.6189503256746042,
+      "effective_n_holdings": 23.97782565218389,
+      "mean_cash_weight": 0.2559717062198703,
+      "frac_days_cash_gt90": 0.0,
+      "frac_days_single_name_gt70": 0.0,
+      "argmax_switches": 0,
+      "mean_position_lifetime": 44.82700421940928,
+      "total_return_ci": [
+        0.1952817741481736,
+        -0.10346131101742524,
+        0.728910964906843
+      ],
+      "sharpe_ci": [
+        0.4717337286548703,
+        -1.0315696701241732,
+        2.4930184605192687
+      ]
+    }
+  },
+  "eiie_replication_window2_seed8": {
+    "status": "ok",
+    "artifact_dir": "/home/rafael/Documents/finance_analysis/experiments/eiie_replication_window2_20260718T214224861069_2041289",
+    "metrics": {
+      "total_return": 0.14296336892138428,
+      "annualized_return": 0.10674768498432274,
+      "cagr": 0.10845466755542077,
+      "volatility": 0.025294728839170964,
+      "sharpe": 1.0885717693809278,
+      "sortino": 1.2391168990850816,
+      "calmar": 6.648305156289021,
+      "max_drawdown": 0.0160563756438502,
+      "var": 0.0017306521107731613,
+      "cvar": 0.0032858295949787213,
+      "mean_daily_turnover": 0.007160457294386549,
+      "annualized_turnover": 1.8044352381854105,
+      "transaction_cost_drag": 0.000851577226889666,
+      "win_rate": 0.6746987951807228,
+      "information_ratio": -0.253624626396114,
+      "final_apv": 1.1429633689213843,
+      "allocation_entropy": 0.13669691690706162,
+      "effective_n_holdings": 1.2628093261576379,
+      "mean_cash_weight": 0.8943438388137932,
+      "frac_days_cash_gt90": 0.5542168674698795,
+      "frac_days_single_name_gt70": 0.0,
+      "argmax_switches": 0,
+      "mean_position_lifetime": 10.555555555555555,
+      "total_return_ci": [
+        0.14296336892138117,
+        0.08296537129961128,
+        0.21456261139814187
+      ],
+      "sharpe_ci": [
+        1.0885717693809278,
+        -0.6371222602470767,
+        3.4038908523418807
+      ]
+    }
+  }
+}
