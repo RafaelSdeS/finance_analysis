@@ -142,7 +142,13 @@ def train_step(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     # row falls back to the detached PVM read (no earlier output exists).
     w_prev_loss = torch.cat([w_prev_global[:1], w_target_global[:-1]], dim=0)
 
-    growth = (y_next * w_target_global).sum(dim=1)                   # y_{t+1} . w_t (eq. 22) -- differentiable, see module docstring
+    # Same NaN guard as environment.drift_weights_torch, same reasoning: y_next can
+    # carry NaN in a column with no price data yet, and w_target_global is exactly 0
+    # there (never scattered a weight -- never an active slot), so it would otherwise
+    # be 0*NaN=NaN poisoning the whole batch's loss. No-op in any normal (full-history)
+    # experiment window; only bites a deliberately truncated window (e.g. a pre-full-
+    # history replication config), which is exactly what surfaced this.
+    growth = (torch.nan_to_num(y_next, nan=0.0) * w_target_global).sum(dim=1)  # y_{t+1} . w_t (eq. 22) -- differentiable, see module docstring
     w_drift_global = drift_weights_torch(y, w_prev_loss)               # eq. 7
     mu = solve_mu_torch(w_drift_global, w_target_global, c_sell, c_buy, k=mu_iters)
 

@@ -678,6 +678,25 @@ change that makes the training objective and the skill metric point at the same 
   instrument. If the signal vanishes on the second window, the luck explanation is
   confirmed and M2/M3 proceed exactly as planned below. If it persists, this becomes
   the actual M4 "Strong" row and reprioritizes ahead of M2/M3.**
+  - **Addendum (2026-07-18): a second NaN-propagation site found and fixed while
+    preparing this replication.** `configs/eiie_replication_window2.json` (copy of
+    `eiie_features.json`, `window_end` truncated to 2019-12-31 so train/val/test all
+    predate the 2022 oil shock and the 2020 COVID crash) NaN'd on its very first
+    training step. Root cause: the SAME `0*NaN=NaN` hazard as the E0 confound, but at
+    two sites the original fix (`drift_weights`/`drift_weights_torch`) never
+    covered — `environment.py`'s `run_backtest` growth calc
+    (`np.dot(y_t, w_prev)`) and `train.py`'s `train_step` growth calc
+    (`(y_next * w_target_global).sum(dim=1)`). Both multiply a global-space
+    price-relative vector against a weight vector that's exactly 0 at any
+    not-yet-IPO'd ticker's column — fine everywhere the column has real data, NaN
+    otherwise. Never triggered before because every production config's
+    `window_end` is "today," past every union ticker's IPO; a truncated
+    replication window is exactly what exposes it. Fixed with the identical
+    `nan_to_num`-before-multiply pattern, applied only after explicit sign-off
+    (same standing rule as the original fix). Regression tests added:
+    `test_backtest_nan_column_safe` (`test_environment.py`) and
+    `test_train_step_nan_column_safe` (`test_train.py`), both passing. The
+    replication config's dry-run now passes cleanly.
 
 ### M2 — Entropy floor: make the objective train (and expose) more than the argmax
 - [ ] **Requires sign-off** (amends "no reward reshaping" — Finding 5).

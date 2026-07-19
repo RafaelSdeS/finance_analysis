@@ -75,6 +75,26 @@ def _tiny_panel(seed=0):
     )
 
 
+def _tiny_panel_with_phantom(seed=0):
+    """Like _tiny_panel, but with one extra global column (gidx 5) that's
+    never in slot_gidx (never holdable -- e.g. a ticker whose IPO postdates
+    a truncated window_end) and has all-NaN prices throughout. Isolates
+    train_step's growth dot-product NaN guard specifically."""
+    rng = np.random.default_rng(seed)
+    tickers = tuple(f"T{i}" for i in range(N_SLOTS)) + ("PHANTOM",)
+    asset_index = GlobalAssetIndex(tickers=tickers, ticker_to_gidx={t: i + 1 for i, t in enumerate(tickers)})
+    dates = pd.bdate_range("2020-01-01", periods=T)
+    log_r = rng.normal(0.0002, 0.01, size=(T, N_SLOTS))
+    prices = 10.0 * np.exp(np.cumsum(log_r, axis=0))
+    close = np.column_stack([np.ones(T), prices, np.full(T, np.nan)])
+    return PricePanel(
+        asset_index=asset_index, dates=dates, close=close, high=close.copy(), low=close.copy(),
+        cdi_factor=np.full(T, 1.0003),
+        slot_gidx=np.array([[1, 2, 3, 4]] * T), valid=np.array([[True] * N_SLOTS] * T),  # gidx 5 never referenced
+        window=WINDOW, start_idx=10, end_idx=T - 1,
+    )
+
+
 def _tiny_model_pvm(cfg, panel):
     torch.manual_seed(cfg.train.seed)
     model = EIIECNN(cfg.data.window, cfg.model.conv1_out_channels, cfg.model.conv2_out_channels,
@@ -246,6 +266,26 @@ def test_saturation_probe_reference_day_fixed(passed, failed):
     return passed, failed
 
 
+def test_train_step_nan_column_safe(passed, failed):
+    """A never-holdable global column with all-NaN prices (e.g. a ticker
+    whose IPO postdates a truncated window_end) must not poison train_step's
+    growth dot-product (y_next . w_target_global) -- the same 0*NaN=NaN
+    hazard already guarded in drift_weights, but a separate site that
+    guard doesn't cover."""
+    cfg = _tiny_cfg()
+    panel = _tiny_panel_with_phantom()
+    model, pvm, optimizer = _tiny_model_pvm(cfg, panel)
+
+    t_idx = np.arange(panel.start_idx, panel.start_idx + cfg.train.batch_size)
+    loss = train_step(model, pvm, panel, optimizer, t_idx, cfg.data.features,
+                       cfg.costs.c_sell, cfg.costs.c_buy, cfg.costs.train_mu_iters,
+                       cfg.train.grad_clip_norm, "cpu", cfg.train.entropy_beta_end)
+    ok = np.isfinite(loss)
+    print_check("train_step: an all-NaN never-held column doesn't poison the loss", ok, f"loss={loss}")
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
 def test_entropy_schedule(passed, failed):
     ok = entropy_schedule(0, 100, 1e-4, 1e-5, 0.1) == 1e-4
     print_check("entropy_schedule: starts at entropy_beta_start", ok)
@@ -398,6 +438,7 @@ def main():
     passed, failed = test_store_matches_direct_path(passed, failed)
     passed, failed = test_train_step_updates_model_and_pvm(passed, failed)
     passed, failed = test_pretrain(passed, failed)
+    passed, failed = test_train_step_nan_column_safe(passed, failed)
     passed, failed = test_pretrain_saturation_log(passed, failed)
     passed, failed = test_saturation_probe_reference_day_fixed(passed, failed)
     passed, failed = test_entropy_schedule(passed, failed)

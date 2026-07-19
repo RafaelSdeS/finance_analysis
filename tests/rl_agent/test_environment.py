@@ -195,6 +195,44 @@ def _toy_panel(close_a_path, T=5):
     )
 
 
+def _toy_panel_with_phantom(close_a_path, T=5):
+    """Like _toy_panel, but with a 4th global column (CCC) that's never in
+    slot_gidx (never holdable, e.g. a ticker whose IPO postdates this
+    truncated window) and has all-NaN prices throughout. Isolates the
+    run_backtest growth dot-product's NaN guard specifically (drift_weights'
+    own guard is tested separately above and would mask this if the panel
+    only had 3 columns)."""
+    asset_index = GlobalAssetIndex(tickers=("AAA", "BBB", "CCC"),
+                                    ticker_to_gidx={"AAA": 1, "BBB": 2, "CCC": 3})
+    dates = pd.bdate_range("2020-01-01", periods=T)
+    close = np.column_stack([np.ones(T), close_a_path, np.full(T, 10.0), np.full(T, np.nan)])
+    return PricePanel(
+        asset_index=asset_index, dates=dates, close=close, high=close.copy(), low=close.copy(),
+        cdi_factor=np.ones(T),
+        slot_gidx=np.array([[1, 2]] * T), valid=np.array([[True, True]] * T),  # CCC (gidx 3) never referenced
+        window=2, start_idx=1, end_idx=T - 1,
+    )
+
+
+def test_backtest_nan_column_safe(passed, failed):
+    """A never-holdable global column with all-NaN prices (e.g. a ticker
+    whose IPO postdates a truncated window_end) must not poison the
+    backtest's growth dot-product, exactly the same 0*NaN=NaN hazard as
+    drift_weights, but in run_backtest's OWN growth calc (a separate,
+    previously unguarded site)."""
+    panel = _toy_panel_with_phantom(close_a_path=np.full(5, 10.0))
+
+    def hold(t, w_prev, w_drift, panel):
+        return w_drift  # never trade; w_drift is already global-space width (cash, AAA, BBB, CCC=0)
+
+    result = run_backtest(panel, hold, C_SELL, C_BUY)
+    ok = bool(np.all(np.isfinite(result.portfolio_value))) and np.allclose(result.portfolio_value, 1.0)
+    print_check("backtest: an all-NaN never-held column doesn't poison portfolio value", ok,
+                str(result.portfolio_value))
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
 def test_backtest_no_trade_zero_cost(passed, failed):
     """Constant prices + weight_fn holds the drifted weights unchanged
     (no rebalancing) => zero turnover, mu == 1, portfolio value constant."""
@@ -277,6 +315,7 @@ def main():
     passed, failed = test_solve_mu_bounds(passed, failed)
     passed, failed = test_differentiable_mu_matches_solver(passed, failed)
     passed, failed = test_differentiable_mu_gradient(passed, failed)
+    passed, failed = test_backtest_nan_column_safe(passed, failed)
     passed, failed = test_backtest_no_trade_zero_cost(passed, failed)
     passed, failed = test_backtest_costs_reduce_value(passed, failed)
     passed, failed = test_backtest_buy_and_hold_growth(passed, failed)

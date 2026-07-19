@@ -158,7 +158,11 @@ def run_backtest(panel: PricePanel, weight_fn: WeightFn, c_sell: float, c_buy: f
         w_target = weight_fn(t, w_prev, w_drift, panel)
 
         mu = solve_mu(w_drift, w_target, c_sell, c_buy, tol=mu_tol, max_iter=mu_max_iter)
-        growth = float(np.dot(y_t, w_prev))
+        # Same NaN guard as drift_weights above, same reasoning: y_t can carry NaN in a
+        # column with no price data yet, and w_prev is exactly 0 there (never held) --
+        # zeroed before the dot product so that column can't poison growth (0*NaN=NaN
+        # otherwise). No-op in any normal (full-history) experiment window.
+        growth = float(np.dot(np.nan_to_num(y_t, nan=0.0), w_prev))
 
         portfolio_value[i + 1] = portfolio_value[i] * mu * growth
         log_returns[i] = np.log(mu * growth)
