@@ -218,14 +218,22 @@ def ranking_quality(weights: np.ndarray, dates: np.ndarray, tickers: np.ndarray,
         rows = []  # (rho, hit, is_active)
         for i, t in enumerate(t_idx):
             fwd = forward_return(panel, int(t), k)
-            if np.any(np.isnan(fwd)):
-                continue
             active_g = _active_stock_gidx(panel, int(t))
             if len(active_g) == 0:
                 continue
+            fwd_active = fwd[active_g]
+            # Only the ACTIVE subset needs to be finite -- forward_return is computed
+            # over the full ~171-wide global space, and a column with no price data yet
+            # (e.g. a ticker whose IPO postdates a truncated window_end) is genuinely
+            # NaN there but never holdable, so it must not invalidate an otherwise-good
+            # day. Checking the unrestricted `fwd` here (as this used to) skips EVERY
+            # day in any window where such a column exists anywhere in global space --
+            # for a truncated window that can be every single day (found while running
+            # the M1 second-window replication: n_days=0 for all 8 seeds).
+            if np.any(np.isnan(fwd_active)):
+                continue
             w = weights[i]
             w_active = w[active_g]
-            fwd_active = fwd[active_g]
 
             rho = _spearman(w_active, fwd_active)
             decile_cut = np.quantile(fwd_active, 0.9)
@@ -350,13 +358,16 @@ def spearman_permutation_null(weights: np.ndarray, dates: np.ndarray, tickers: n
         for i, t in enumerate(t_idx):
             t = int(t)
             fwd = forward_return(panel, t, k)
-            if np.any(np.isnan(fwd)):
-                continue
             active_g = _active_stock_gidx(panel, t)
             if len(active_g) == 0:
                 continue
             w_active = weights[i][active_g]
             fwd_active = fwd[active_g]
+            # Same fix as ranking_quality: only the active subset needs to be finite --
+            # see the comment there for why checking the unrestricted `fwd` skips every
+            # day in a truncated window.
+            if np.any(np.isnan(fwd_active)):
+                continue
             if np.std(w_active) == 0 or np.std(fwd_active) == 0:
                 continue
             rw, rf = _rankdata(w_active), _rankdata(fwd_active)

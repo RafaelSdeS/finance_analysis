@@ -102,6 +102,57 @@ def _noisy_ranked_panel(T=250, seed=0, noise_sigma=0.01):
     )
 
 
+def _ranked_panel_with_nan_phantom(T=10):
+    """Same 15 holdable tickers as _ranked_panel, plus one phantom global
+    ticker (T16) that's never in any day's slot_gidx AND has all-NaN prices
+    throughout the whole window -- e.g. a ticker whose IPO postdates a
+    truncated window_end, exactly the case a real second-window replication
+    run hit (n_days=0 for every seed: forward_return is computed over the
+    FULL global space, so a permanently-NaN phantom column made
+    ranking_quality's day-validity check reject every single day, even
+    though the phantom was never in the active-only subset actually
+    scored)."""
+    n_holdable = N_ASSETS
+    tickers = tuple(f"T{i:02d}" for i in range(1, n_holdable + 1)) + ("PHANTOM",)
+    asset_index = GlobalAssetIndex(tickers=tickers, ticker_to_gidx={t: i + 1 for i, t in enumerate(tickers)})
+    rates = np.arange(1, n_holdable + 1) * 0.001
+    t_arr = np.arange(T)[:, None]
+    holdable_close = 100.0 * (1.0 + rates[None, :]) ** t_arr
+    close = np.column_stack([np.ones(T), holdable_close, np.full(T, np.nan)])
+    dates = pd.bdate_range("2021-01-01", periods=T)
+    return PricePanel(
+        asset_index=asset_index, dates=dates, close=close, high=close.copy(), low=close.copy(),
+        cdi_factor=np.full(T, 1.0001),
+        slot_gidx=np.tile(np.arange(1, n_holdable + 1), (T, 1)),  # phantom (gidx n_holdable+1) never referenced
+        valid=np.ones((T, n_holdable), dtype=bool),
+        window=2, start_idx=0, end_idx=T - 1,
+    )
+
+
+def test_ranking_quality_nan_phantom_column_doesnt_skip_every_day(passed, failed):
+    panel = _ranked_panel_with_nan_phantom(T=6)
+    dates = panel.dates.values.astype("datetime64[D]")
+    tickers = np.array(["cash"] + list(panel.asset_index.tickers))
+
+    w_holdable = np.arange(1, N_ASSETS + 1, dtype=float)
+    w_holdable /= w_holdable.sum()
+    row = np.concatenate([[0.0], w_holdable, [0.0]])  # phantom always weight 0
+    weights = np.tile(row, (6, 1))
+
+    out = diag.ranking_quality(weights, dates, tickers, panel, k_list=(1,))
+    ok = out[1]["n_days"] > 0 and np.isclose(out[1]["mean_spearman"], 1.0)
+    print_check("ranking_quality: a permanently-NaN phantom column doesn't zero out n_days for every day",
+                ok, str(out[1]))
+    passed, failed = passed + ok, failed + (not ok)
+
+    null_out = diag.spearman_permutation_null(weights, dates, tickers, panel, k_list=(1,), n_perm=100, seed=0)
+    ok = null_out[1]["n_days"] > 0
+    print_check("spearman_permutation_null: same fix applies -- n_days > 0 despite the NaN phantom column",
+                ok, str(null_out[1]))
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
 def test_forward_return(passed, failed):
     panel = _ranked_panel(T=10)
     fwd = diag.forward_return(panel, t=0, k=3)
@@ -377,6 +428,7 @@ def main():
     passed, failed = test_ranking_quality_ticker_mismatch(passed, failed)
     passed, failed = test_rankdata_tie_averaging(passed, failed)
     passed, failed = test_ranking_quality_active_only_scope(passed, failed)
+    passed, failed = test_ranking_quality_nan_phantom_column_doesnt_skip_every_day(passed, failed)
     passed, failed = test_selection_alpha(passed, failed)
     passed, failed = test_spearman_permutation_null(passed, failed)
     passed, failed = test_cross_seed_consistency(passed, failed)
