@@ -339,6 +339,39 @@ def permutation_null(panel: pd.DataFrame, score_col: str, anchor_col: str, gamma
     return null_irs
 
 
+def within_date_permutation_null(panel: pd.DataFrame, score_col: str, anchor_col: str, gamma: float,
+                                  construction, fwd_col: str, n_draws: int = PERMUTATION_DRAWS,
+                                  seed: int = 43) -> np.ndarray:
+    """Complementary to permutation_null (cross-date): shuffles scores
+    WITHIN each date, across that date's own eligible tickers, instead of
+    across dates -- preserves the date's exact score distribution and
+    market conditions, breaking only the ticker-to-score pairing. Isolates
+    pure within-date ranking skill (closer to a standard Fama-MacBeth-style
+    rank test) separately from any date-level effect the cross-date test
+    alone could conflate with real skill. Same signature/return shape as
+    permutation_null so both slot into the same downstream reporting code
+    (H3_PORTFOLIO_CONSTRUCTION_PLAN.md Validation -- added here, not H3's
+    own module, per that doc's "same module" instruction)."""
+    by_date = list(panel.groupby("decision_date"))
+    rng = np.random.default_rng(seed)
+    null_irs = np.empty(n_draws)
+
+    for b in range(n_draws):
+        rows = {}
+        for d, g in by_date:
+            anchor = g[anchor_col].to_numpy()
+            score = rng.permutation(g[score_col].fillna(0.0).to_numpy())
+            w = construction(anchor, score, gamma)
+            fwd = g[fwd_col].to_numpy()
+            valid = np.isfinite(fwd)
+            total = w[valid].sum()
+            rows[d] = float(np.dot(w[valid], fwd[valid]) / total) if valid.any() and total > 0 else np.nan
+        s = pd.Series(rows).dropna()
+        null_irs[b] = ir_stats(s)["ir_annualized"] if len(s) > 1 else np.nan
+
+    return null_irs
+
+
 # ---------------------------------------------------------------------------
 # Quintile monotonicity
 # ---------------------------------------------------------------------------
