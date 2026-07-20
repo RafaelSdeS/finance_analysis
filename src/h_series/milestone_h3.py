@@ -126,20 +126,25 @@ def select_anchor_type(panel: pd.DataFrame, anchor_cols: dict, ticker_to_gidx: d
     ANCHOR_TYPES-alone portfolio on pre-2024 data only, picks whichever has
     the higher realized annualized IR vs BOVA11, freezes that choice, and
     reports both splits (post-2024 is reported, never used to pick).
-    Returns (winning_type, summary_by_type)."""
+    Returns (winning_type, summary_by_type, result_by_type) -- result_by_type
+    carries every type's already-run BacktestResult so callers never need to
+    re-run the (expensive, full daily-backtest) anchor-only backtest a
+    second time just to fetch the winner's series."""
     summary = {}
+    result_by_type = {}
     best_type, best_ir = None, -np.inf
     for atype in ANCHOR_TYPES:
         acol = anchor_cols[atype]
         target_by_t = anchor_only_target_weights_by_t(panel, acol, ticker_to_gidx, rl_panel.n_global, date_to_t)
         result = run_construction_backtest(target_by_t, rl_panel, costs, start_idx, end_idx)
+        result_by_type[atype] = result
         active = active_monthly_returns(result, bench_result)
         pre, post = split_pre_post(active, confirmation_start)
         pre_ir = ir_stats(pre)["ir_annualized"]
         summary[atype] = {"pre2024": ir_stats(pre), "post2024": ir_stats(post)}
         if np.isfinite(pre_ir) and pre_ir > best_ir:
             best_type, best_ir = atype, pre_ir
-    return best_type, summary
+    return best_type, summary, result_by_type
 
 
 # ---------------------------------------------------------------------------
@@ -196,10 +201,13 @@ def main() -> None:
     panel["score_k21"] = model_result["scores"]
 
     # --- (b) Anchor layer: per-type weights (Design §b) ---
+    # anchor_weights_by_date solves the trailing covariance ONCE per date and
+    # derives every type from that same matrix, not once per (date, type).
     prices_wide, _bench = _load_daily_prices()
+    weights_by_type = anchor_weights_by_date(panel, prices_wide, ANCHOR_TYPES)
     anchor_cols = {}
     for atype in ANCHOR_TYPES:
-        w = anchor_weights_by_date(panel, prices_wide, atype).rename(columns={"weight": f"anchor_{atype}"})
+        w = weights_by_type[atype].rename(columns={"weight": f"anchor_{atype}"})
         panel = panel.merge(w, on=["decision_date", "ticker"], how="left")
         anchor_cols[atype] = f"anchor_{atype}"
 
@@ -221,16 +229,18 @@ def main() -> None:
     cdi_result = run_baseline("constant_cash", rl_panel, costs.c_sell, costs.c_buy,
                                start_idx=start_idx, end_idx=end_idx)
 
-    winning_anchor_type, anchor_type_summary = select_anchor_type(
+    winning_anchor_type, anchor_type_summary, anchor_result_by_type = select_anchor_type(
         oos_panel, anchor_cols, ticker_to_gidx, rl_panel, costs, start_idx, end_idx,
         date_to_t, bench_result)
     anchor_col = anchor_cols[winning_anchor_type]
 
-    # Anchor-alone series for the WINNING type -- feeds both the Failure
+    # Anchor-alone series for the WINNING type -- reuses the BacktestResult
+    # select_anchor_type already ran for this type (both types are always
+    # backtested there to pick the winner), instead of re-running the same
+    # full daily backtest a second time here. Feeds both the Failure
     # Criteria's "anchor alone underperforms BOVA11/CDI" check and the
     # IR-delta bootstrap below.
-    anchor_target_by_t = anchor_only_target_weights_by_t(oos_panel, anchor_col, ticker_to_gidx, n_global, date_to_t)
-    anchor_result = run_construction_backtest(anchor_target_by_t, rl_panel, costs, start_idx, end_idx)
+    anchor_result = anchor_result_by_type[winning_anchor_type]
     anchor_vs_bova11 = active_monthly_returns(anchor_result, bench_result)
     anchor_vs_bova11_pre, anchor_vs_bova11_post = split_pre_post(anchor_vs_bova11)
     anchor_vs_cdi = active_monthly_returns(anchor_result, cdi_result)

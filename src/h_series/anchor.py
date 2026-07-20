@@ -37,7 +37,12 @@ def _trailing_returns_asof(prices_wide: pd.DataFrame, decision_date: pd.Timestam
     if start < 0:
         return pd.DataFrame(columns=tickers)
     window = prices_wide.iloc[start:end + 1][tickers]
-    return window.pct_change().iloc[1:]
+    # fill_method=None: a genuine price gap must stay NaN here, not be
+    # silently pad-filled into a fabricated 0% return (pandas' deprecated
+    # default) that would also distort the return on the day trading
+    # resumes. _eligible()'s notna() count and the caller's fillna(0.0) on
+    # the covariance input already handle NaN explicitly and deliberately.
+    return window.pct_change(fill_method=None).iloc[1:]
 
 
 def _eligible(returns: pd.DataFrame, min_history_frac: float) -> list:
@@ -51,42 +56,55 @@ def _eligible(returns: pd.DataFrame, min_history_frac: float) -> list:
     return frac_real[frac_real >= min_history_frac].index.tolist()
 
 
-def anchor_weights_by_date(panel: pd.DataFrame, prices_wide: pd.DataFrame, anchor_type: str,
-                            cfg: RiskConfig = RiskConfig()) -> pd.DataFrame:
-    """Per decision_date, per-ticker anchor weight (long format: decision_date,
-    ticker, weight) for `anchor_type`, solved from that date's trailing daily
-    covariance (Ledoit-Wolf, Step 0's T-1 cutoff). Tickers without enough
-    trailing history (cfg.min_history_frac) get weight 0, not a dropped row
-    -- downstream target-weight construction expects a dense per-date vector
-    over the full panel universe, matching milestone_h2.add_anchor_columns'
-    contract."""
-    if anchor_type not in ANCHOR_TYPES:
-        raise ValueError(f"unknown anchor_type: {anchor_type!r} (available: {ANCHOR_TYPES})")
+def _solve(anchor_type: str, cov, cfg: RiskConfig):
+    if anchor_type == "min_variance":
+        return min_variance_weights(cov, max_weight=cfg.max_weight)
+    return risk_parity_weights(cov)
 
-    rows = []
+
+def anchor_weights_by_date(panel: pd.DataFrame, prices_wide: pd.DataFrame,
+                            anchor_types=ANCHOR_TYPES, cfg: RiskConfig = RiskConfig()) -> dict:
+    """Per decision_date, per-ticker anchor weight (long format: decision_date,
+    ticker, weight), one DataFrame per requested type -- {anchor_type: df}.
+    Tickers without enough trailing history (cfg.min_history_frac) get
+    weight 0, not a dropped row -- downstream target-weight construction
+    expects a dense per-date vector over the full panel universe, matching
+    milestone_h2.add_anchor_columns' contract.
+
+    The trailing-returns slice, eligibility mask, and Ledoit-Wolf covariance
+    (Step 0's T-1 cutoff) are each computed ONCE per date and shared across
+    every requested type -- min-variance and risk-parity solve the identical
+    (date, eligible-universe, covariance) input, so recomputing that input
+    per type would be pure waste. Solving for all of ANCHOR_TYPES here costs
+    exactly one covariance estimate per date, not one per (date, type)."""
+    for t in anchor_types:
+        if t not in ANCHOR_TYPES:
+            raise ValueError(f"unknown anchor_type: {t!r} (available: {ANCHOR_TYPES})")
+
+    rows_by_type = {t: [] for t in anchor_types}
     for date, g in panel.groupby("decision_date"):
         tickers = list(g["ticker"])
         avail = [t for t in tickers if t in prices_wide.columns]
         returns = _trailing_returns_asof(prices_wide, date, avail, cfg.lookback)
         eligible = _eligible(returns, cfg.min_history_frac)
 
-        w_by_ticker = dict.fromkeys(tickers, 0.0)
+        w_by_type = {t: dict.fromkeys(tickers, 0.0) for t in anchor_types}
         if len(eligible) >= 2:
             r = returns[eligible].fillna(0.0).to_numpy()
-            cov = estimate_cov(r, cfg)
-            if anchor_type == "min_variance":
-                w_eq, _ = min_variance_weights(cov, max_weight=cfg.max_weight)
-            else:
-                w_eq, _ = risk_parity_weights(cov)
-            for t, w in zip(eligible, w_eq):
-                w_by_ticker[t] = float(w)
+            cov = estimate_cov(r, cfg)  # one LedoitWolf fit per date, shared below
+            for atype in anchor_types:
+                w_eq, _ = _solve(atype, cov, cfg)
+                for t, w in zip(eligible, w_eq):
+                    w_by_type[atype][t] = float(w)
 
-        rows.append(pd.DataFrame({
-            "decision_date": date,
-            "ticker": tickers,
-            "weight": [w_by_ticker[t] for t in tickers],
-        }))
-    return pd.concat(rows, ignore_index=True)
+        for atype in anchor_types:
+            rows_by_type[atype].append(pd.DataFrame({
+                "decision_date": date,
+                "ticker": tickers,
+                "weight": [w_by_type[atype][t] for t in tickers],
+            }))
+
+    return {atype: pd.concat(rows, ignore_index=True) for atype, rows in rows_by_type.items()}
 
 
 def _demo() -> None:
@@ -118,15 +136,15 @@ def _demo() -> None:
     assert decision_date not in ret.index, "leakage: T's own return leaked into the covariance window"
     assert ret.index.max() < decision_date
 
-    for atype in ANCHOR_TYPES:
-        out = anchor_weights_by_date(panel, prices, atype, cfg)
+    out_by_type = anchor_weights_by_date(panel, prices, ANCHOR_TYPES, cfg)
+    for atype, out in out_by_type.items():
         w = out.set_index("ticker")["weight"]
         assert abs(w.sum() - 1.0) < 1e-6, f"{atype}: weights don't sum to 1 ({w.sum()})"
         assert (w >= -1e-9).all(), f"{atype}: negative weight"
         assert w["NEWCO"] == 0.0, f"{atype}: under-seasoned name got nonzero weight"
 
-    w_mv = anchor_weights_by_date(panel, prices, "min_variance", cfg).set_index("ticker")["weight"]
-    w_rp = anchor_weights_by_date(panel, prices, "risk_parity", cfg).set_index("ticker")["weight"]
+    w_mv = out_by_type["min_variance"].set_index("ticker")["weight"]
+    w_rp = out_by_type["risk_parity"].set_index("ticker")["weight"]
     assert w_mv["HIVOL"] < w_rp["HIVOL"], "min-variance should tilt away from the high-vol name harder than risk-parity"
 
     print("anchor.py self-check: OK")
