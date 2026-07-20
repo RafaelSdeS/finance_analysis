@@ -6,9 +6,12 @@ the previous one is either done or has produced a clear, reportable result (pass
 
 ## Phase 1 — Validate the Premise
 
-- [ ] **0. Resolve H3's open data question.** Confirm where daily close prices come from for the
-      anchor's trailing-covariance estimate (h_series' panel is monthly; the anchor needs daily
-      returns). Quick investigation, not a milestone — blocks H3 stage 3 specifically.
+- [x] **0. H3's data-source question — answered, not open.** Daily close prices for the anchor's
+      trailing-covariance estimate come from `features.py::_load_daily_prices()` (already reads
+      `adj_close` + BOVA11 from `ml_dataset.parquet`, reused verbatim — not a new source). One
+      piece remains genuinely open, not a five-minute check: confirming the eligible-ticker
+      universe aligns exactly between that daily wide frame and the monthly decision panel's
+      active-universe membership — verify before H3 stage 3 runs.
 
 - [ ] **1. H3 — fix the diagnosed H2 defect** (`H3_PORTFOLIO_CONSTRUCTION_PLAN.md`). Runs on the
       **same H1 survivor set H2 used** — deliberately not expanded yet, so a pass/fail here is

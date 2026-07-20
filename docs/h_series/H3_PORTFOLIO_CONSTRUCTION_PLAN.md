@@ -4,11 +4,13 @@
 
 ## Step 0 (prerequisite, not templated below)
 
-Confirm where daily close prices come from for the anchor's trailing-covariance estimate.
-`h_series`' panel (`features.py::build_monthly_panel()`) is monthly; the anchor (Design §b below)
-needs daily returns over a lookback window. Not templated with the full 10-section structure
-below — it's a five-minute investigation, not a step with its own success/failure criteria, and
-forcing that template on it would be padding, not signal. Blocks Design §b specifically.
+**Answered, not open:** `features.py::_load_daily_prices()` already reads exactly this — daily
+`adj_close` per ticker (+ BOVA11) straight from `ml_dataset.parquet`, pivoted wide by
+`trade_date` — for `build_forward_targets()`'s own use. The anchor's trailing-covariance lookback
+reuses this same function/source, not a new one. What's still genuinely open (not answered by
+this) is the second Risks bullet below: that the eligible-ticker universe aligns exactly between
+`_load_daily_prices()`'s wide frame and the monthly decision panel's active-universe membership —
+that's a real check, not a five-minute one, and stays open until verified.
 
 **Leakage guardrail (non-negotiable part of Step 0, not optional polish):** the daily return
 series feeding `estimate_cov()` must strictly terminate at *T−1* relative to the monthly
@@ -69,9 +71,11 @@ greedily isolates small, noisy clusters — where ridge instead gracefully shrin
 collinear features. The GBM candidate must additionally enforce `max_features='sqrt'` (feature
 subsampling per split) and a high `min_samples_leaf` (floor to be set relative to the ~62-row
 pre-2024 training window, not a fixed absolute count copied from a larger-data default). The
-train-IC-vs-OOS-IC gap must be logged per model class; if GBM wins the CV selection but shows a
-materially larger train/OOS divergence than ridge, that triggers a manual review before GBM's
-score is trusted, not an automatic accept-the-winner.
+train-IC-vs-OOS-IC gap must be logged per model class. **Disqualification rule, mechanical, not a
+manual call:** if GBM wins the raw CV-IC selection but its train/OOS IC gap exceeds 2× ridge's own
+gap on the same folds, GBM is automatically disqualified and `select_model()` falls back to the
+best of ridge/ElasticNet instead — a fixed, pre-registered rule, not a judgment call left for
+later, since this document's whole premise is that no stage gets to hand-pick an exception.
 
 **(b) Anchor layer** (new `anchor.py`) — per decision date, build trailing daily returns for the
 month's eligible tickers, feed through `risk_portfolios.py`'s already-implemented
@@ -79,6 +83,15 @@ month's eligible tickers, feed through `risk_portfolios.py`'s already-implemente
 tuning) into `min_variance_weights()` (long-only simplex QP) or `risk_parity_weights()` (Spinu's
 convex reformulation, cyclical coordinate descent). Both solvers are reused as library calls,
 verbatim — they were built and validated for the R-series and need no changes.
+
+**Anchor-type selection is fit, not asserted — the same discipline as everything else in this
+document.** Picking min-variance vs. risk-parity by hand would be the identical "asserted, not
+fit" mistake H2 was killed for, just moved one layer over. Selection criterion: on pre-2024 data
+only, re-estimate both anchor types per expanding fold exactly as they'll run live (no fitted
+parameter beyond the trailing covariance itself, so this isn't circular the way tuning a model
+hyperparameter against the reported metric would be), and pick whichever anchor-alone series has
+the higher realized Sharpe/IR over that segment. That choice is then frozen and confirmed once on
+the untouched post-2024 segment, same as `select_lambda`'s λ and component (a)'s model class.
 
 **(c) Blend layer** (new `blend.py`) — `w_posterior = w_anchor + κ·(w_view − w_anchor)`, where
 `w_view` is stage-(a)'s score renormalized onto the simplex and κ ∈ [0,1] is *derived* from the
@@ -95,8 +108,14 @@ floors), so anchoring κ to it is also the more internally consistent choice, no
 stable one. Concretely: `κ = sigmoid(k · (IC_OOF − IC_min))`, where `IC_min` is **H0's own
 pre-registered minimum-detectable mean IC** (0.0300 at k=21, `H0_FINDINGS.md`) — reusing an
 already-established, non-arbitrary threshold from this project rather than inventing a new one —
-and `k` is a fixed slope constant (not swept against the reported backtest IR, for the same
-circularity reason κ itself isn't).
+and `k` is a fixed slope constant, **derived from two already-established project numbers, not
+swept against the reported backtest IR** (that sweep is exactly the circularity κ itself is
+designed to avoid). Two calibration points, both reused rather than invented: κ=0.5 at
+`IC_OOF = IC_min` (true by construction of the sigmoid's center) and κ≈0.9 at `IC_OOF = 0.088`
+(H1's single strongest real survivor IC, `momentum_vs_market_12m`, per `H1_FINDINGS.md` — i.e. "if
+the model's OOF skill matches the best signal this project has actually measured, trust the view
+strongly"). Solving `sigmoid(k·(0.088−0.0300)) = 0.9` gives `k = ln(9)/0.058 ≈ 37.9`. This is fixed
+before any backtest is run, exactly like `IC_min` itself — not a free knob left to taste.
 
 ## Implementation
 
@@ -110,14 +129,14 @@ circularity reason κ itself isn't).
   stitched across all folds including the confirmation segment, scored once.
 - **Anchor:** `estimate_cov()` (Ledoit-Wolf + trace-relative jitter for PD-ness) →
   `min_variance_weights()` (SLSQP, bounds `[0, max_weight]`, equality constraint sum=1) or
-  `risk_parity_weights()` (closed-form per-coordinate update, no bounds needed by construction).
-  Both already handle the fallback chain (`_solve_with_fallback` — jitter retry, then an
-  analytic inverse-variance/inverse-vol proxy) built for the R-series; reused as-is.
+  `risk_parity_weights()` (closed-form per-coordinate update, no bounds needed by construction) —
+  **type selected** by pre-2024 anchor-alone Sharpe/IR (Design §b), not hand-picked. Both already
+  handle the fallback chain (`_solve_with_fallback` — jitter retry, then an analytic
+  inverse-variance/inverse-vol proxy) built for the R-series; reused as-is.
 - **Blend:** normalize the view score to the eligible-universe simplex; κ from the winning
-  model's stitched pre-2024 OOF mean Spearman IC via `κ = sigmoid(k · (IC_OOF − 0.0300))`
-  (`IC_min` = H0's pre-registered minimum-detectable mean IC at k=21; `k`'s exact value is an
-  implementation-time decision but must be fixed *before* looking at the resulting backtest IR,
-  not tuned to it).
+  model's stitched pre-2024 OOF mean Spearman IC via `κ = sigmoid(k · (IC_OOF − 0.0300))`, with
+  `k = ln(9)/0.058 ≈ 37.9` (Design §c derivation — fixed from `IC_min` and H1's best survivor IC,
+  not tuned against the resulting backtest IR).
 - **Constraints:** monthly rebalance (unchanged cadence); `max_weight` passed straight into
   `min_variance_weights()`'s existing parameter; turnover cost `c_sell=c_buy=0.03%`
   (`src/rl_agent/config.py::CostConfig`, reused so cost assumptions stay consistent project-wide).
@@ -182,13 +201,22 @@ one wouldn't rule out the other's failure mode:**
 
 ## Risks & Assumptions
 
-- Assumes the h_series panel can supply genuine daily trailing prices for the anchor's covariance
-  (Step 0, open).
+- Daily price source for the anchor's covariance is resolved (Step 0) — `_load_daily_prices()`,
+  already reused as-is, not a new source.
 - Assumes the eligible-ticker universe can be aligned exactly between the monthly h_series panel
   and whatever daily source is used — misalignment would silently bias the covariance estimate.
+  This is the item Step 0 refers to as still genuinely open.
 - ~90 monthly observations across an estimated 2-3 independent multi-year cycles limits how much
   can be trusted even from a properly-fit procedure (H0's own power-floor analysis already
   established this ceiling) — a PASS here is evidence, not proof.
+- **This directly interacts with the Success Criteria's bar, and the two should be read together.**
+  Passing requires 4 roughly-independent conjunctive tests (cross-date permutation, within-date
+  permutation, monotonicity, bootstrap CI) on each of 2 splits. Even a real, moderate effect has a
+  non-trivial chance of missing at least one of the 4 by chance alone at ~62 pre-2024
+  observations — that is the cost of raising the bar over H2's single-test standard, not a flaw in
+  the tests themselves, but it means a **narrow miss on exactly one test (e.g. 3 of 4 clearing
+  comfortably, one at p≈0.11-0.13) should be reported and investigated as borderline**, not
+  written up identically to a clean, uniform failure across all four.
 - GBM, despite CV selection, may still overfit more than ridge on this sample size; the
   train-IC-vs-OOS-IC gap should be reported per model class as a diagnostic, not just the winner
   picked silently.

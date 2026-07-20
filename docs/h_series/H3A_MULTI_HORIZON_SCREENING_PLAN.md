@@ -34,17 +34,30 @@ regardless.
 
 **Fixed characteristic list (k=5, short horizon), exact formulas — no others added without
 returning to this doc first:**
-- `reversal_5d = −return_5d` (5-trading-day price return, sign-flipped — short-term reversal)
-- `rsi_5` (5-day RSI, already computable the same way `rsi_14` is in Stage 2's `features.py`)
 - `volume_shock_5d = volume_5d_avg / volume_20d_avg − 1` (short-window liquidity/attention shock)
+- `turnover_shock_5d = turnover_ratio_5d_avg / turnover_ratio_20d_avg − 1` (short-horizon version
+  of `turnover_ratio`, mirroring `volume_shock_5d`'s own formula)
 
-Capped at 3 to keep the new multiple-testing family small and deliberate, not an open-ended
-technical-indicator search.
+**Deliberately not a price-return/technical-indicator list.** An earlier draft included
+`reversal_5d = −return_5d` and `rsi_5` — dropped. Both are pure price technicals, exactly the
+feature family M1-M4 already tested at daily/short horizons and found carries zero cross-sectional
+signal using a full conv-trunk model with far more power than a rank-IC screen would have here;
+re-testing that same family with a weaker tool spends FDR budget re-asking a question this project
+already has stronger evidence answers "no." Both replacement characteristics instead extend
+`turnover_ratio` — one of H1's cleanest survivors (significant at **both** k=21 and k=63,
+sector-neutral, per `H1_FINDINGS.md`) — to a short horizon. This is testing whether a family H1
+already validated *elsewhere* also carries signal at k=5, a genuinely different and better-motivated
+question than re-probing the family M1-M4 closed. Capped at 2 to keep the new multiple-testing
+family small and deliberate, not an open-ended technical-indicator search.
 
 **k=252 (long horizon), if Step 0 clears it:** reuse the *same* 16 characteristics H1 already
 screened at k∈{21,63}, recomputed at k=252 — no new characteristic definitions needed, only a new
-horizon for existing ones. This keeps the new family size exactly 16 (k=252) + 3 (k=5) = 19 tests,
-a fixed, known number going into the FDR correction (see Implementation).
+horizon for existing ones. **k=5 (2 tests) and k=252 (16 tests) are corrected as two separate FDR
+families, not pooled into one 18-test family** — the same logic this document already uses to
+justify running its own family separate from H1 (a large, low-powered family shouldn't loosen the
+rejection threshold for a better-motivated one) applies again one level down: k=252 is the more
+novel, better-motivated half; pooling it with k=5's low-expected-power tests would only dilute it
+for no benefit, and splitting costs nothing.
 
 **No-peeking discipline:** this k-grid (5, 252) and this exact characteristic list were fixed
 before examining any post-2024 data, the same discipline H1/H2/H3 already follow via
@@ -53,24 +66,33 @@ in the recent segment.
 
 ## Implementation
 
-- Extend `features.py::build_monthly_panel()`'s target/characteristic construction to compute
-  forward returns at k=5 (new Stage 2 column, doesn't exist yet — `return_1m/3m/6m` cover
-  21/63/126d, nothing at 5d) and k=252 (also new — nothing currently covers 12m). The 3 new k=5
-  characteristics (`reversal_5d`, `rsi_5`, `volume_shock_5d`) are computed once at Stage 2 level,
-  same as existing technicals; the 16 k=252 characteristics reuse Stage 2's existing fundamental
-  computations, just resampled at the longer horizon.
-- **FDR correction — hierarchical, not joint-with-H1:** H1's PASS is treated as a closed, frozen
-  decision (it's referenced elsewhere in this project, e.g. `composite.load_survivors()`, as a
-  stable artifact — reopening it every time a new horizon is tested would mean no decision in
-  this project ever actually closes). H3a runs its **own, separate** BH-FDR correction across
-  exactly its own new family: 19 tests (16 characteristics × k=252, plus 3 characteristics × k=5)
-  if Step 0 clears k=252, or 3 tests (k=5 only) if it doesn't. H1's original characteristics keep
-  their original H1 verdict at k∈{21,63} unchanged regardless of what H3a finds at the new
-  horizons — this is standard hierarchical/stage-wise multiple-testing practice (correct within
-  each pre-registered stage, don't retroactively re-pool across stages).
+- **Targets need no Stage 2 work — corrected from an earlier draft.** `spine.py::build_forward_targets()`
+  already takes `k` as a free parameter, computing forward relative returns directly from the daily
+  `adj_close` panel `features.py::_load_daily_prices()` loads (see H3's Step 0); `build_monthly_panel()`
+  already loops `k_horizons` and calls `build_forward_targets()` once per k. Widening
+  `k_horizons=(21, 63)` to include 5 and 252 needs **zero new Stage 2 columns** for the target
+  side — it's an argument change, not a pipeline change.
+- Only the 2 new k=5 **characteristic** (predictor) columns (`volume_shock_5d`,
+  `turnover_shock_5d`) genuinely need new computation, since `CHARACTERISTIC_COLUMNS` currently
+  assumes every characteristic already exists as a precomputed `ml_dataset.parquet` column. Both
+  are derivable from data `h_series` can already reach (`volume`, `turnover_ratio` are already
+  Stage 2 columns; the 5d/20d rolling averages are the only new arithmetic) — whether that's
+  computed as a genuine new Stage 2 column or directly inside `h_series` from an added daily-volume
+  read is an implementation-time choice, not a blocker either way. The 16 k=252 characteristics
+  need no new computation at all, just the existing `CHARACTERISTIC_COLUMNS` resampled at a longer
+  target horizon.
+- **FDR correction — hierarchical, not joint-with-H1, and split by horizon (see Design):** H1's
+  PASS is treated as a closed, frozen decision (it's referenced elsewhere in this project, e.g.
+  `composite.load_survivors()`, as a stable artifact — reopening it every time a new horizon is
+  tested would mean no decision in this project ever actually closes). H3a runs **two separate**
+  BH-FDR corrections: one over the k=5 family (2 tests), one over the k=252 family (16 tests, only
+  if Step 0 clears it). H1's original characteristics keep their original H1 verdict at k∈{21,63}
+  unchanged regardless of what H3a finds at the new horizons — standard hierarchical/stage-wise
+  multiple-testing practice (correct within each pre-registered stage, don't retroactively re-pool
+  across stages or across horizons within this stage).
 - **Redundancy check before counting a "new" survivor as incremental:** for each new survivor,
   compute its partial Spearman IC controlling for the nearest-correlated existing H1 survivor
-  (e.g. `reversal_5d` against `momentum_vs_market_12m`/`momentum_vs_sector_12m`). If the partial
+  (e.g. `turnover_shock_5d` against `turnover_ratio`). If the partial
   IC is not itself significant by the same NW-HAC/FDR standard, the "new" characteristic is
   redundant with an existing one, not incremental — exclude it from the enlarged survivor set
   used in the next step, regardless of its marginal-IC survival.
@@ -86,22 +108,30 @@ arbitrary starting point.
 
 ## Validation
 
-Same FDR/NW-HAC/sign-consistency gate as H1, applied jointly across the expanded
-horizon × characteristic family. Any new survivors get compared via H3's own permutation-null and
-quintile-monotonicity tests, run twice — once on H3's original survivor set, once on the enlarged
-set — so the delta is directly attributable.
+Same FDR/NW-HAC/sign-consistency gate as H1, applied separately per horizon family (k=5, k=252 —
+see Design/Implementation), not jointly. **Sign-consistency at k=252 is diagnostic, not gating:**
+H1's ≥60%-sign-consistency-across-sub-windows check was implicitly sized for k∈{21,63}; at k=252
+the same sub-window logic likely leaves too few independent sub-windows to mean anything (Risks).
+Concretely, if the number of independent sub-windows available at k=252 falls below 3, report
+sign-consistency at k=252 as "inconclusive" and do not let it fail a characteristic on its own —
+the NW-HAC t-stat + FDR + redundancy check remain the operative gates for k=252 survivors. k=5 is
+unaffected (shorter horizon gives more, not fewer, sub-windows) and uses the unmodified H1 gate.
+Any new survivors get compared via H3's own permutation-null and quintile-monotonicity tests, run
+twice — once on H3's original survivor set, once on the enlarged set — so the delta is directly
+attributable.
 
 ## Success Criteria
 
-At least one new characteristic × horizon combination (a) survives H3a's own hierarchical FDR
-gate, (b) survives the redundancy check (significant partial IC against its nearest existing H1
-survivor), **and** (c) its inclusion moves H3's post-2024 bootstrap CI on the IR delta
-(enlarged-set vs. original-set) to exclude 0 — the identical quantitative bar H3 itself uses, not
-a separate, looser one.
+At least one new characteristic × horizon combination (a) survives its own horizon-specific
+hierarchical FDR gate (k=5's 2-test family or k=252's 16-test family, corrected separately — see
+Design/Implementation), (b) survives the redundancy check (significant partial IC against its
+nearest existing H1 survivor), **and** (c) its inclusion moves H3's post-2024 bootstrap CI on the
+IR delta (enlarged-set vs. original-set) to exclude 0 — the identical quantitative bar H3 itself
+uses, not a separate, looser one.
 
 ## Failure Criteria
 
-- No survivors under H3a's own FDR correction.
+- No survivors under H3a's own FDR correction (either horizon family).
 - Survivors exist but all fail the redundancy check (duplicate existing signal, not new).
 - Survivors clear both gates but the resulting IR-delta bootstrap CI still includes 0.
 - k=252 specifically: Step 0's power floor already exceeds H1's observed survivor IC range —
@@ -121,12 +151,16 @@ In any of these cases, H3's medium-horizon-only scope stands as final, not provi
   implicitly sized around k∈{21,63}. At k=5, more/shorter sub-windows are natural and should
   give the check *more* power, not less. At k=252, the same sub-window logic likely leaves too
   few independent sub-windows to assess sign-consistency meaningfully at all — another symptom of
-  the same power problem Step 0 checks for, not a separate issue to solve independently.
-- Short-horizon characteristics risk re-entering the problem space M1-M4 already found empty
-  (no daily cross-sectional alpha using price/technical features). A failure to find short-horizon
-  survivors here would *corroborate* that earlier finding rather than being a new, surprising
-  negative result — it's testing genuinely different (potentially non-price) short-horizon
-  characteristics, not repeating M1-M4's exact test.
+  the same power problem Step 0 checks for. **Resolved, not left open (Validation): below 3
+  independent sub-windows at k=252, sign-consistency is reported as inconclusive and doesn't gate
+  that characteristic** — the other three criteria (NW-HAC, FDR, redundancy) carry the k=252 gate
+  instead.
+- **Deliberately not re-testing the price/technical family M1-M4 already found empty** (no daily
+  cross-sectional alpha from price/technical features) — the k=5 list (Design) was corrected to
+  drop `reversal_5d`/`rsi_5` for exactly this reason and instead extends `turnover_ratio`, one of
+  H1's actual survivors, to a short horizon. A failure to find k=5 survivors here would still be
+  informative on its own terms (does a *validated* family's signal persist at a much shorter
+  horizon), not merely re-confirm M1-M4 by construction the way the dropped candidates would have.
 
 ## Next Decision Gate
 
