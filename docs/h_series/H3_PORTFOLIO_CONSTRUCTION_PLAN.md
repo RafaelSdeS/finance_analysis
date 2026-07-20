@@ -1,112 +1,203 @@
-# H3 — Fully Data-Driven Portfolio Construction (detailed)
+# H3 — Fitted Portfolio Construction (Phase 1: Validate the Premise)
 
-**Status:** draft — design-level detail, not yet implemented.
+**Status:** implementation-ready design, not yet coded.
+
+## Step 0 (prerequisite, not templated below)
+
+Confirm where daily close prices come from for the anchor's trailing-covariance estimate.
+`h_series`' panel (`features.py::build_monthly_panel()`) is monthly; the anchor (Design §b below)
+needs daily returns over a lookback window. Not templated with the full 10-section structure
+below — it's a five-minute investigation, not a step with its own success/failure criteria, and
+forcing that template on it would be padding, not signal. Blocks Design §b specifically.
+
+**Leakage guardrail (non-negotiable part of Step 0, not optional polish):** the daily return
+series feeding `estimate_cov()` must strictly terminate at *T−1* relative to the monthly
+rebalance's execution date T. Because the anchor uses a *daily* covariance to set weights for a
+*monthly* execution, an off-by-one here — including T's own return in the lookback window used to
+decide a trade executed at T's close — is a lookahead leak: it means the covariance estimate used
+to size the trade partly depends on the same day's price the trade executes at. `T`'s return must
+be programmatically masked/excluded when building the lookback slice, not just conventionally
+omitted. Note this is a distinct question from whether `risk_portfolios.py::trailing_returns()`'s
+existing "`ending at t (inclusive)`" convention is safe to copy — that convention was reasoned
+through for the R-series' own daily-indexed `PricePanel`/`run_backtest` loop, where day `t`'s
+close *is* the same close the backtest trades at, by that loop's own construction. Whatever daily
+source H3 ends up using may not share that same timing convention with h_series' `decision_date`,
+so the T−1 cutoff must be verified against the *actual* source chosen here, not assumed safe by
+analogy.
+
+---
 
 ## Objective
 
-Fix the one diagnosed defect in H2: the anchor and the tilt-blend were asserted, not fit, and
-that's where nearly all of H2's reported IR came from (untilted cap-weight anchor alone: IR
-0.95 pre-2024, t=2.19; full tilted composite: IR 1.12; permutation-null IR distribution centered
-at 1.27, p=0.78 — the tilt's contribution over the anchor was indistinguishable from noise).
-H3 replaces both hand-picked pieces with fitted/optimized equivalents and reruns H2's own
-validation tools against the result.
+Replace H2's two hand-picked pieces — the cap-weight anchor and the ad hoc γ-tilt — with fitted
+equivalents, to test whether the 10 characteristics that survived H1's rigorous screen carry real
+incremental value once that specific confound is removed.
 
-## Reused unchanged
+## Rationale
 
-- `src/h_series/features.py::build_monthly_panel()` — characteristics + raw targets.
-- `src/h_series/spine.py::iter_expanding_folds()` — same expanding-window spine as H0/H1/H2.
-- `src/h_series/milestone_h1.py` — the FDR/NW-HAC survivor gate. H3 never runs without a fresh
-  H1 PASS (`composite.py::load_survivors()` already enforces this for H2; same guard applies).
-- `src/h_series/composite.py::build_feature_matrix()` — rank-normalized survivor features.
-- `src/rl_agent/risk_portfolios.py::estimate_cov()`, `min_variance_weights()`,
-  `risk_parity_weights()` — the pure numeric solvers only (NOT `make_risk_weight_fn`, which is
-  coupled to `PricePanel`/`environment.run_backtest`'s daily-index loop; H3 runs over the
-  h_series monthly `decision_date` panel instead, so it needs its own thin adapter loop, not
-  the existing wrapper).
-- `src/h_series/milestone_h2.py`'s `permutation_null()` and quintile-monotonicity check —
-  rerun as-is against H3's output.
+H2 already did the hard part correctly in one place: its ridge regularization strength (λ) was
+selected via walk-forward CV (`composite.py::select_lambda`), not guessed. It still failed its
+own decision gate, and the diagnostics say exactly why: the untilted cap-weight anchor *alone*
+already had IR = 0.9544 pre-2024 (se 0.00276, t = 2.187, n = 62); the full tilted composite only
+reached IR ≈ 1.12; and the date-permutation null (shuffling scores across dates, rerunning) put
+the *real* signal's IR at roughly the 22nd percentile of a null distribution centered at 1.27
+(p = 0.78). In plain terms: a portfolio built from randomly shuffled scores did as well as the
+real ones. The anchor was asserted, not fit — and it was doing virtually all the work.
 
-## Stage 2 — Combination layer (extends `composite.py`)
+This must happen before Phase 2 (new characteristics, H3a) or Phase 3 (behavior layer, H4)
+because both would silently inherit the same confound if left in place — there's no point
+teaching a stateful hold/sell layer to trust a score whose portfolio-construction step is already
+known to be broken. It also must run on the **same H1 survivor set H2 used**, not an expanded
+one, so that a pass or fail here is attributable to the anchor/blend fix alone.
 
-`composite.py`'s docstring currently states ridge is deliberately the *only* model
-("linear-on-ranks is the max complexity this dataset has earned"). Revising that stance is
-justified here specifically because letting the data choose the model class is *more*
-data-driven, not less — but keep it to 2 extra candidates, not an AutoML sweep:
+## Design
 
-- [ ] Generalize `walk_forward_scores(panel, X, feature_cols, target_col, folds, alpha)` into
-      `walk_forward_scores(panel, X, feature_cols, target_col, folds, model_factory)` — same
-      per-fold refit loop, `model_factory` swaps in `Ridge(alpha)`, `ElasticNet(alpha, l1_ratio)`,
-      or a shallow `GradientBoostingRegressor`/`LGBMRegressor` (max_depth<=3, few hundred trees —
-      this dataset has ~90 monthly decision dates, a deep GBM would just overfit faster than ridge did).
-- [ ] Generalize `select_lambda()` into `select_model()`: same pre-2024-only mean-IC criterion
-      (`CONFIRMATION_START` untouched), grid now spans model class × its own hyperparameter grid.
-      Selection stays walk-forward and out-of-sample — this is the one part of H2 that was
-      already correctly data-driven; H3 keeps the discipline, just widens what's being selected.
-- [ ] Output a comparison table (per target: `k21_raw`, `k21_sector_neutral`, `k63`) of each
-      model class's selected hyperparameters + pre-2024 mean IC, so the model choice itself is
-      auditable, not silent.
+Three components, replacing H2's two hand-picked pieces:
 
-## Stage 3 — Anchor layer (new: `src/h_series/anchor.py`)
+**(a) Combination layer** (extends `composite.py`) — generalize the existing ridge-only
+`walk_forward_scores`/`select_lambda` pair into a `select_model()` that also competes ElasticNet
+and a shallow GBM (max_depth ≤ 3) against ridge, selected by the same pre-2024-only mean OOS
+Spearman IC criterion `select_lambda` already uses. `composite.py`'s docstring currently states
+ridge is deliberately the *only* model considered ("linear-on-ranks is the max complexity this
+dataset has earned"). Widening this is justified specifically because letting walk-forward CV
+choose the model class is *more* data-driven than fixing it by assertion, not less; it's kept to
+2 extra candidates, not an open-ended search, for the same reason the original ladder was chosen.
 
-- [ ] Per decision date, build trailing daily returns for the panel's active tickers over a
-      lookback window (mirrors `risk_portfolios.trailing_returns`, but sourced from the h_series
-      monthly panel's own price history rather than `PricePanel` — confirm exact source against
-      `features.py`/`loaders.py` before writing this; not yet verified which module already has
-      daily closes joined in at this stage).
-- [ ] `estimate_cov()` (Ledoit-Wolf shrinkage, already handles the L~126-250, N<=50 regime) →
-      `min_variance_weights()` and `risk_parity_weights()` (both already built, reused verbatim).
-- [ ] Produce one anchor weight vector per decision date per policy — this replaces the
-      hand-picked cap-weight/equal-weight choice entirely; the anchor is now a solver output.
-- [ ] Report both policies' standalone IR (same diagnostic H2 ran for cap-weight) before any
-      blending — need to confirm the *learned* anchor alone still beats or matches the old
-      hand-picked anchor's 0.95 IR; if it doesn't, that's a finding in itself.
+*GBM regularization constraint:* `max_depth ≤ 3` alone is not enough. On ~90 monthly rows with
+highly correlated fundamental/technical characteristics, a shallow-but-unconstrained tree still
+greedily isolates small, noisy clusters — where ridge instead gracefully shrinks the same
+collinear features. The GBM candidate must additionally enforce `max_features='sqrt'` (feature
+subsampling per split) and a high `min_samples_leaf` (floor to be set relative to the ~62-row
+pre-2024 training window, not a fixed absolute count copied from a larger-data default). The
+train-IC-vs-OOS-IC gap must be logged per model class; if GBM wins the CV selection but shows a
+materially larger train/OOS divergence than ridge, that triggers a manual review before GBM's
+score is trusted, not an automatic accept-the-winner.
 
-## Stage 4 — Blending layer (new: `src/h_series/blend.py`)
+**(b) Anchor layer** (new `anchor.py`) — per decision date, build trailing daily returns for the
+month's eligible tickers, feed through `risk_portfolios.py`'s already-implemented
+`estimate_cov()` (Ledoit-Wolf shrinkage, handles the L~126-250, N≤50 near-singular regime with no
+tuning) into `min_variance_weights()` (long-only simplex QP) or `risk_parity_weights()` (Spinu's
+convex reformulation, cyclical coordinate descent). Both solvers are reused as library calls,
+verbatim — they were built and validated for the R-series and need no changes.
 
-Ladder call: start with the cheapest thing that could work, escalate only if it's insufficient.
+**(c) Blend layer** (new `blend.py`) — `w_posterior = w_anchor + κ·(w_view − w_anchor)`, where
+`w_view` is stage-(a)'s score renormalized onto the simplex and κ ∈ [0,1] is *derived* from the
+winning model's own pre-2024 out-of-fold predictive skill — not grid-searched against the
+reported IR the way H2's γ was (that grid-search-against-the-reported-metric is precisely the
+circularity being fixed here). **κ is anchored to out-of-fold mean Spearman IC, not R².** OOF R²
+against realized cross-sectional equity returns is notoriously noisy and routinely negative (a
+model can easily predict worse than the historical cross-sectional mean out of fold, which is a
+normal, uninformative outcome in this setting, not evidence of zero skill) — constraining a
+negative R² into [0,1] either breaks the formula, forces a hard floor at 0 with a discontinuous
+weight jump right at that floor, or manufactures false confidence. IC is what this project
+already scores every stage by (`select_lambda`'s own selection criterion, H1's gate, H0's power
+floors), so anchoring κ to it is also the more internally consistent choice, not just the more
+stable one. Concretely: `κ = sigmoid(k · (IC_OOF − IC_min))`, where `IC_min` is **H0's own
+pre-registered minimum-detectable mean IC** (0.0300 at k=21, `H0_FINDINGS.md`) — reusing an
+already-established, non-arbitrary threshold from this project rather than inventing a new one —
+and `k` is a fixed slope constant (not swept against the reported backtest IR, for the same
+circularity reason κ itself isn't).
 
-- [ ] **Primary (rung 1):** shrinkage-style interpolation —
-      `w_posterior = w_anchor + κ · (w_view − w_anchor)`, where `w_view` is the H3-stage-2 score
-      renormalized to a simplex and κ ∈ [0,1] is *derived* from the winning model's own pre-2024
-      out-of-fold IC/R² (higher OOF skill → higher κ), not grid-searched against the reported IR
-      the way H2's γ was. This directly closes the exact circularity that made H2's blending
-      indefensible.
-- [ ] **Stretch (rung 2, only if rung 1 underperforms):** full Black-Litterman — reverse-optimize
-      implied prior returns `π = δ·Σ·w_anchor`, set view uncertainty `Ω` from the model's OOF
-      residual variance, solve the standard BL posterior. More principled, more moving parts
-      (needs a risk-aversion δ) — don't build this unless rung 1 demonstrably needs it.
+## Implementation
 
-## Stage 5 — Constraints
+- **Data flow:** `H1_FINDINGS.json` survivors (`composite.load_survivors()`, unchanged, still
+  raises if H1 isn't a fresh PASS) → `composite.build_feature_matrix()` (unchanged) → generalized
+  `walk_forward_scores(panel, X, feature_cols, target_col, folds, model_factory)`, refit per
+  expanding fold exactly as today, just with `model_factory` swapping in `Ridge(alpha)`,
+  `ElasticNet(alpha, l1_ratio)`, or `GradientBoostingRegressor(max_depth<=3)` → `select_model()`
+  picks `(model_class, hyperparams)` maximizing pre-2024 mean IC, same `CONFIRMATION_START` guard
+  H2 already enforces (2024-03 → 2026-07 untouched by any hyperparameter choice) → score series
+  stitched across all folds including the confirmation segment, scored once.
+- **Anchor:** `estimate_cov()` (Ledoit-Wolf + trace-relative jitter for PD-ness) →
+  `min_variance_weights()` (SLSQP, bounds `[0, max_weight]`, equality constraint sum=1) or
+  `risk_parity_weights()` (closed-form per-coordinate update, no bounds needed by construction).
+  Both already handle the fallback chain (`_solve_with_fallback` — jitter retry, then an
+  analytic inverse-variance/inverse-vol proxy) built for the R-series; reused as-is.
+- **Blend:** normalize the view score to the eligible-universe simplex; κ from the winning
+  model's stitched pre-2024 OOF mean Spearman IC via `κ = sigmoid(k · (IC_OOF − 0.0300))`
+  (`IC_min` = H0's pre-registered minimum-detectable mean IC at k=21; `k`'s exact value is an
+  implementation-time decision but must be fixed *before* looking at the resulting backtest IR,
+  not tuned to it).
+- **Constraints:** monthly rebalance (unchanged cadence); `max_weight` passed straight into
+  `min_variance_weights()`'s existing parameter; turnover cost `c_sell=c_buy=0.03%`
+  (`src/rl_agent/config.py::CostConfig`, reused so cost assumptions stay consistent project-wide).
+- **Validation:** rerun `milestone_h2.py`'s existing `permutation_null()` (cross-date) and
+  quintile-monotonicity check verbatim against H3's blended weights and score series; add a new
+  `within_date_permutation_null()` (same module) for the complementary cross-sectional test —
+  same signature/return shape as `permutation_null()` so both slot into the same downstream
+  reporting code.
 
-- [ ] Monthly rebalance (unchanged cadence throughout H0-H3).
-- [ ] Max-weight cap — reuse `min_variance_weights()`'s existing `max_weight` param.
-- [ ] Turnover penalty at the blend/execution step — reuse the EIIE cost rates
-      (`c_sell=c_buy=0.03%`, `src/rl_agent/config.py::CostConfig`) so cost assumptions stay
-      consistent across the whole project rather than inventing a second number.
+## Expected Outcome
 
-## Stage 6 — Validation
+If the H1 survivors carry real, learnable incremental information beyond a risk-based prior, the
+blended portfolio's IR should exceed the anchor-alone IR by a margin that survives the
+permutation-null test — on **both** the pre-2024 selection window and the previously-untouched
+post-2024 confirmation segment (H2's own breakdown only ever examined this pre-2024).
 
-- [ ] Rerun `milestone_h2.py`'s `permutation_null()` against the H3 blended portfolio.
-- [ ] Rerun the quintile-monotonicity check.
-- [ ] Same pre-2024 (selection) / post-2024 (confirmation, untouched) split H2 already used.
-- [ ] Compare against: (a) H3's own anchor-alone (no blend), (b) H2's old cap-weight-anchor
-      result, (c) BOVA11, (d) CDI.
+## Validation
 
-## Stage 7 — Decision gate (define before running stage 6)
+**Two permutation-null tests, not one — they isolate different null hypotheses, and passing only
+one wouldn't rule out the other's failure mode:**
 
-- [ ] PASS requires: blended portfolio's IR exceeds its own anchor-alone IR by a margin that
-      survives the permutation-null test at p < 0.10, on **both** pre-2024 and post-2024 splits
-      (H2 only had this break down on the pre-2024 selection window — post-2024 confirmation is
-      the harder, honest bar).
-- [ ] If it fails: the conclusion is that the H1-surviving characteristics carry nothing beyond
-      a risk-based prior at this sample size — a real, useful negative result, not a bug to
-      chase.
+1. **Cross-date test** (H2's existing `permutation_null()`, reused verbatim, not modified): each
+   date's *intact* real score cross-section — full inter-ticker structure preserved — gets
+   reassigned to a different, randomly-drawn date's real universe/anchor/forward-returns.
+   Compares the real (correctly-dated) IR's percentile against the null distribution this
+   produces. Tests whether *this specific date's* score cross-section maps to *its own* outcomes
+   better than to a randomly-matched other date's — i.e., whether the score-to-return mapping is
+   meaningfully date-specific, not an artifact of which dates happened to be volatile.
+2. **Cross-sectional (within-date) test** (new, complementary): for each date independently,
+   shuffle scores *across the eligible tickers on that same date* before passing them to the
+   blend layer, preserving that date's exact score distribution and market conditions while
+   breaking the specific ticker-to-score pairing. This isolates pure within-date ranking skill —
+   closer to a standard Fama-MacBeth-style rank test — separately from any date-level effect the
+   cross-date test alone could conflate with real skill.
+3. OOS score-quintile monotonicity: mean realized forward return should be monotonic (or
+   near-monotonic) across score quintiles.
+4. Bootstrap CI on the IR delta (blended vs. anchor-alone), checking it excludes 0.
+5. Repeat all four, unmodified, on the post-2024 confirmation split.
 
-## Open implementation questions (resolve before coding stage 3)
+## Success Criteria
 
-- Where does h_series currently get daily close prices from, if at all — `features.py` builds a
-  *monthly* panel; stage 3 needs daily trailing returns for the covariance estimate. May need a
-  new loader call, not yet identified.
-- Universe alignment: H1/H2 run over the same eligible-ticker set every month; stage 3's
-  `eligible_mask`-equivalent needs to match that set exactly, or the anchor and the view will be
-  scored over different universes.
+- Blended IR exceeds anchor-alone IR with **both** permutation-null tests (cross-date and
+  within-date) at **p < 0.10, on both splits** (H2 only had the cross-date version break down
+  pre-2024; requiring both tests on the untouched post-2024 segment too is a deliberately harder
+  bar than H2 cleared).
+- Quintile monotonicity holds to the same standard H2 used (adjacent-quintile ordering, not
+  necessarily perfectly monotonic across all 5).
+- Bootstrap CI on the IR delta excludes 0 on both splits.
+
+## Failure Criteria
+
+- Permutation-null p ≥ 0.10 on **either** test (cross-date or within-date) on either split —
+  passing only one would leave open exactly the failure mode the other test exists to catch
+  (date-level artifact vs. pure ranking-skill artifact), so either one failing is a real failure,
+  not a partial pass. Failing the cross-date test specifically repeats H2's exact failure mode
+  with the confound removed, meaning the confound wasn't the whole story.
+- Quintile monotonicity fails even with a fitted anchor and blend.
+- The anchor *alone* (before any blend) underperforms BOVA11/CDI — a more fundamental finding
+  than H3 was designed to test, echoing R1-R3's result that structural, no-alpha policies don't
+  clear the bar either; would mean the anchor choice (min-variance vs. risk-parity) itself needs
+  re-examination before any scoring model can be evaluated on top of it.
+
+## Risks & Assumptions
+
+- Assumes the h_series panel can supply genuine daily trailing prices for the anchor's covariance
+  (Step 0, open).
+- Assumes the eligible-ticker universe can be aligned exactly between the monthly h_series panel
+  and whatever daily source is used — misalignment would silently bias the covariance estimate.
+- ~90 monthly observations across an estimated 2-3 independent multi-year cycles limits how much
+  can be trusted even from a properly-fit procedure (H0's own power-floor analysis already
+  established this ceiling) — a PASS here is evidence, not proof.
+- GBM, despite CV selection, may still overfit more than ridge on this sample size; the
+  train-IC-vs-OOS-IC gap should be reported per model class as a diagnostic, not just the winner
+  picked silently.
+
+## Next Decision Gate
+
+**PASS** → proceed to Phase 2 (H3a: multi-horizon screening).
+**FAIL** → do not proceed to H3a/H4 on this foundation. Report as a substantive negative result —
+H1's survivors carry nothing beyond a risk-based prior at this sample size — and fall back to the
+risk-based anchor alone (structurally the same conclusion the R-series already reached for
+no-alpha policies) as the practical baseline, rather than continuing to build behavior/reporting
+layers on top of an unproven scoring signal.

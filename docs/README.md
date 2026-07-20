@@ -28,10 +28,17 @@ M-series diagnoses). Each series' own docs cross-reference each other by filenam
 - `H2_FINDINGS.md`/`.json` — ridge composite + benchmark-relative construction (**FAIL** —
   anchor confound: untilted anchor alone already beats BOVA11, tilt's contribution is
   statistically indistinguishable from noise)
-- `H3_PORTFOLIO_CONSTRUCTION_PLAN.md` — fixes H2's diagnosed anchor/blending defect
-- `H4_LONG_TERM_BEHAVIOR_PLAN.md` — position-level hold/sell behavior layer on top of H3
+- `H3_PORTFOLIO_CONSTRUCTION_PLAN.md` — Phase 1: fixes H2's diagnosed anchor/blending defect
+- `H3A_MULTI_HORIZON_SCREENING_PLAN.md` — Phase 2: extends H1's screen to new horizons, if warranted
+- `H4_LONG_TERM_BEHAVIOR_PLAN.md` — Phase 3: position-level hold/sell behavior layer on top of H3
+- `H5_OBJECTIVE_CALIBRATION_ROBUSTNESS_PLAN.md` — Phase 3: risk-aversion calibration + stability testing
+- `H6_FINAL_REPORT_PLAN.md` — Phase 3: one comprehensive report vs. every baseline
+- `H7_DEPLOYMENT_PLAN.md` — Phase 3, contingent: turning a validated pipeline into a runnable script
+- `RL_EXECUTION_LAYER_PLAN.md` — deferred, unscheduled: narrow RL for execution timing only
 - `H_SERIES_ROADMAP.md` — **start here** for what's next and in what order (also lists rejected
   designs, e.g. hand-picked factor weights, and the standing no-hardcoding rule)
+- `IMPLEMENTATION_TIMELINE.md` — one-glance what/how/why table for every remaining stage; each
+  row links to its own detailed plan doc above
 
 ## Dataset / general
 - `FEATURE_SCALING_AUDIT.md` — Stage 2 (`ml_dataset.parquet`) feature/scaling design audit
