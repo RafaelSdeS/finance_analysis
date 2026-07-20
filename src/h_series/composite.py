@@ -270,18 +270,22 @@ def select_model(panel: pd.DataFrame, X: pd.DataFrame, feature_cols: list, targe
 
     winner = max(candidates, key=lambda k: candidates[k][1])
 
-    _, _, ridge_gap = _train_oos_ic_gap(panel, X, feature_cols, target_col, folds,
-                                         candidates["ridge"][3], confirmation_start)
+    # Train/OOS IC gap logged per model class (Risks: "not just the winner
+    # picked silently"), not only for whichever pair the disqualification
+    # rule happens to need.
+    gap_by_class = {}
+    for cls, (_, _, _, factory) in candidates.items():
+        _, _, gap = _train_oos_ic_gap(panel, X, feature_cols, target_col, folds, factory, confirmation_start)
+        gap_by_class[cls] = gap
+
     diagnostics = {
         "ic_by_class": {k: v[1] for k, v in candidates.items()},
         "hyperparams_by_class": {k: v[0] for k, v in candidates.items()},
-        "ridge_train_oos_ic_gap": ridge_gap,
+        "train_oos_ic_gap_by_class": gap_by_class,
     }
 
     if winner == "gbm":
-        _, _, gbm_gap = _train_oos_ic_gap(panel, X, feature_cols, target_col, folds,
-                                           candidates["gbm"][3], confirmation_start)
-        diagnostics["gbm_train_oos_ic_gap"] = gbm_gap
+        ridge_gap, gbm_gap = gap_by_class["ridge"], gap_by_class["gbm"]
         disqualified = not np.isfinite(ridge_gap) or gbm_gap > GBM_DISQUALIFY_GAP_MULTIPLE * ridge_gap
         diagnostics["gbm_disqualified"] = bool(disqualified)
         if disqualified:
@@ -323,9 +327,8 @@ def _demo() -> None:
 
     assert result["model_class"] in ("ridge", "elasticnet", "gbm")
     assert set(result["diagnostics"]["ic_by_class"]) == {"ridge", "elasticnet", "gbm"}
+    assert set(result["diagnostics"]["train_oos_ic_gap_by_class"]) == {"ridge", "elasticnet", "gbm"}
     assert len(result["scores"]) == len(panel)
-    if result["model_class"] == "gbm":
-        assert np.isfinite(result["diagnostics"]["gbm_train_oos_ic_gap"])
 
     print("composite.select_model self-check: OK "
           f"(winner={result['model_class']}, ic_by_class={result['diagnostics']['ic_by_class']})")
