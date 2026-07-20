@@ -1,6 +1,6 @@
 """
 Test: data.py's GlobalAssetIndex, slot calendar, CDI unit validation, and
-PricePanel's price_relative / window_tensor math (docs/EIIE_AGENT_PLAN.md
+PricePanel's price_relative / window_tensor math (docs/eiie_agent/EIIE_AGENT_PLAN.md
 Phase 2). Synthetic data only -- no file I/O, runs anywhere.
 
 Run from project root:
@@ -51,7 +51,7 @@ def test_global_asset_index(passed, failed):
 
 
 def test_cdi_validation(passed, failed):
-    # Real anchor values verified against BCB series 12 (docs/EIIE_AGENT_PLAN.md):
+    # Real anchor values verified against BCB series 12 (docs/eiie_agent/EIIE_AGENT_PLAN.md):
     # 2000-01-03 cdi=0.068318 (~18.7% p.a.), 2026-07-14 cdi=0.052531 (~14% p.a.)
     good = np.array([0.068318, 0.052531, 0.045513])
     try:
@@ -239,7 +239,7 @@ def test_window_tensor_padding_slot(passed, failed):
     """A padding slot's dummy sentinel index (== n_global, from
     _build_slot_calendar) must be a safe in-bounds gather for window_tensor,
     never an IndexError -- regression test for the fix that widened
-    close/high/low by one dummy column (docs/EIIE_AGENT_PLAN.md Phase 3)."""
+    close/high/low by one dummy column (docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 3)."""
     asset_index = GlobalAssetIndex(tickers=("AAA",), ticker_to_gidx={"AAA": 1})  # n_global = 2
     dates = pd.bdate_range("2020-01-01", periods=4)
     close = np.array([[1.0, 10.0, 1.0], [1.0, 11.0, 1.0], [1.0, 12.0, 1.0], [1.0, 13.0, 1.0]])

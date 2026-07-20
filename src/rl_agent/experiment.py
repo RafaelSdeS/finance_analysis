@@ -1,5 +1,5 @@
 """
-experiment.py — CLI orchestrator (docs/EIIE_AGENT_PLAN.md "Implementation
+experiment.py — CLI orchestrator (docs/eiie_agent/EIIE_AGENT_PLAN.md "Implementation
 phases", "Reproducibility", "Experiment Validation Checklist"). Ties every
 module together into one reproducible run:
 
@@ -45,7 +45,7 @@ from .train import agent_forward, pretrain, run_online_backtest, save_checkpoint
 def compute_window_split(panel: PricePanel, train_frac: float = 0.7, val_frac: float = 0.15) -> tuple:
     """Recompute train/val/test cutoffs WITHIN this experiment's date window
     (2011-2026) -- the repo's split_config.json was computed over the full
-    2000-2026 dataset and doesn't fit here (docs/EIIE_AGENT_PLAN.md "PVM,
+    2000-2026 dataset and doesn't fit here (docs/eiie_agent/EIIE_AGENT_PLAN.md "PVM,
     OSBL training, split protocol")."""
     n = panel.end_idx - panel.start_idx + 1
     train_end_idx = panel.start_idx + int(n * train_frac) - 1
@@ -79,7 +79,7 @@ def run_experiment(cfg: ExperimentConfig, dry_run: bool = False, eval_split: str
                     panel: Optional[PricePanel] = None) -> Path:
     """eval_split: 'val' for hyperparameter-selection runs (pretrain on
     train, backtest on val) or 'test' for the final run (pretrain on
-    train+val, backtest on test) -- docs/EIIE_AGENT_PLAN.md's "Training /
+    train+val, backtest on test) -- docs/eiie_agent/EIIE_AGENT_PLAN.md's "Training /
     evaluation protocol". `panel` can be injected (e.g. by tests) instead
     of loading the real dataset."""
     if eval_split not in ("val", "test"):

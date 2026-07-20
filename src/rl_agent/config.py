@@ -1,6 +1,6 @@
 """
 config.py — reproducible, JSON-driven experiment configuration for the EIIE
-agent (docs/EIIE_AGENT_PLAN.md). Every knob a training/backtest run depends
+agent (docs/eiie_agent/EIIE_AGENT_PLAN.md). Every knob a training/backtest run depends
 on lives here; nothing downstream should hardcode a hyperparameter, a date,
 or a cost rate.
 

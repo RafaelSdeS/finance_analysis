@@ -1,5 +1,5 @@
 """
-networks.py — the EIIE CNN encoder (paper Fig. 2), docs/EIIE_AGENT_PLAN.md
+networks.py — the EIIE CNN encoder (paper Fig. 2), docs/eiie_agent/EIIE_AGENT_PLAN.md
 "EIIE network" section.
 
 Any future encoder (RNN/LSTM, the paper's other two instantiations, or a

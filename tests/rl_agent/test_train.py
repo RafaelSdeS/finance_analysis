@@ -1,6 +1,6 @@
 """
 Test: train.py's OSBL batch sampler, gradient step, pretraining loop,
-online-backtest driver, and checkpointing (docs/EIIE_AGENT_PLAN.md Phase
+online-backtest driver, and checkpointing (docs/eiie_agent/EIIE_AGENT_PLAN.md Phase
 6). Everything here runs on a tiny synthetic market and a scaled-down
 config (few periods, small batch, few steps) -- fast unit/integration
 tests of the code, not a real training run.

@@ -1,5 +1,5 @@
 """
-Test: sanity.py's pre-training invariant gate (docs/EIIE_AGENT_PLAN.md
+Test: sanity.py's pre-training invariant gate (docs/eiie_agent/EIIE_AGENT_PLAN.md
 Phase 6). Synthetic data only.
 
 Run from project root:

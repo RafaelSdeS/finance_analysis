@@ -1,6 +1,6 @@
 """
 Test: environment.py's mu solver (eq. 14, Theorem 1), weight drift (eq. 7),
-and the shared backtest loop (docs/EIIE_AGENT_PLAN.md Phase 4). Synthetic
+and the shared backtest loop (docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 4). Synthetic
 data only.
 
 Run from project root:

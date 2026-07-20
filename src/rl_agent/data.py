@@ -1,5 +1,5 @@
 """
-data.py — price data pipeline for the EIIE agent (docs/EIIE_AGENT_PLAN.md
+data.py — price data pipeline for the EIIE agent (docs/eiie_agent/EIIE_AGENT_PLAN.md
 "Global asset indexing & PVM dynamic<->global mapping" and "Observation /
 state" sections).
 
@@ -101,7 +101,7 @@ def validate_cdi_daily_percent(cdi_values: np.ndarray) -> None:
     2000-2026: ~2%-19% p.a.) with a generous 1%-60% band -- tight enough to
     catch an off-by-100 (fraction instead of percent) or an annualized value
     dropped in the daily field, loose enough to never false-fail on real data
-    (docs/EIIE_AGENT_PLAN.md "Facts verified against the actual data").
+    (docs/eiie_agent/EIIE_AGENT_PLAN.md "Facts verified against the actual data").
     """
     assert np.all(cdi_values >= 0), "CDI must be non-negative (BCB target rate floor)"
     annualized = (1.0 + cdi_values / 100.0) ** 252 - 1.0
@@ -377,7 +377,7 @@ def load_price_panel(data_cfg: DataConfig, n_slots: int = 50) -> PricePanel:
     in_window_counts = valid[start_idx:end_idx + 1].sum(axis=1)
     assert np.all(in_window_counts == n_slots), (
         f"expected every in-window trading day to have exactly {n_slots} active members "
-        f"(docs/EIIE_AGENT_PLAN.md verified fact); got counts in "
+        f"(docs/eiie_agent/EIIE_AGENT_PLAN.md verified fact); got counts in "
         f"[{in_window_counts.min()}, {in_window_counts.max()}]"
     )
 

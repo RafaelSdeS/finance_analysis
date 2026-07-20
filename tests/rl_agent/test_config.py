@@ -1,6 +1,6 @@
 """
 Test: config.py's ExperimentConfig round-trips through dict/JSON without
-losing or mutating values (docs/EIIE_AGENT_PLAN.md Phase 1).
+losing or mutating values (docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 1).
 
 Run from project root:
     python tests/rl_agent/test_config.py

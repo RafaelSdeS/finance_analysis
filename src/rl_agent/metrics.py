@@ -1,6 +1,6 @@
 """
 metrics.py — performance metrics + block-bootstrap confidence intervals
-for a BacktestResult (docs/EIIE_AGENT_PLAN.md "Evaluation" section).
+for a BacktestResult (docs/eiie_agent/EIIE_AGENT_PLAN.md "Evaluation" section).
 
 Every function takes plain numpy arrays (not BacktestResult directly) so
 they're independently testable and reusable outside the backtest loop.
@@ -258,7 +258,7 @@ def summarize(result: BacktestResult, risk_free_returns: np.ndarray, benchmark_r
               var_level: float = 0.95, bootstrap_n: int = 1000, bootstrap_block: int = 20,
               periods_per_year: int = TRADING_DAYS_PER_YEAR, seed: Optional[int] = None) -> MetricsSummary:
     """One-stop metrics + bootstrap CIs for an experiment report, computed
-    identically for the agent and every baseline (docs/EIIE_AGENT_PLAN.md
+    identically for the agent and every baseline (docs/eiie_agent/EIIE_AGENT_PLAN.md
     "Evaluation": the agent is never evaluated in isolation)."""
     returns = simple_returns(result.log_returns)
 

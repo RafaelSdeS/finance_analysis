@@ -1,6 +1,6 @@
 """
 Test: data.py's load_price_panel() against the real on-disk dataset
-(docs/EIIE_AGENT_PLAN.md Phase 2). Needs data/processed/ml_dataset.parquet,
+(docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 2). Needs data/processed/ml_dataset.parquet,
 data/processed/top50_universe_membership.parquet, data/raw/macro/cdi.parquet,
 data/raw/prices/BOVA11.parquet -- DATA group, not FAST.
 

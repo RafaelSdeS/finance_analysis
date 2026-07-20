@@ -1,6 +1,6 @@
 """
 Test: networks.py's EIIECNN -- output shape, simplex constraint, and slot
-masking (docs/EIIE_AGENT_PLAN.md Phase 6). Synthetic data only.
+masking (docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 6). Synthetic data only.
 
 Run from project root:
     python tests/rl_agent/test_networks.py

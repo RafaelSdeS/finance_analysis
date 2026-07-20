@@ -51,7 +51,7 @@ python -m src.build_dataset.scale_features               # → data/processed/sc
 Prereq: Stage 2 complete (`data/processed/ml_dataset.parquet` + `top50_universe_membership.parquet`
 on disk). EIIE portfolio-management agent (Jiang, Xu & Liang 2017), price-only, top-50 dynamic
 quarterly universe, CDI-accruing cash, 2011–2026 window. Design + approved paper deviations:
-`docs/EIIE_AGENT_PLAN.md`.
+`docs/eiie_agent/EIIE_AGENT_PLAN.md`.
 
 ```bash
 python -m src.rl_agent.experiment --config configs/eiie_baseline.json --dry-run   # data + sanity checks only
@@ -100,7 +100,7 @@ ruff check .          # reports undefined names, unused imports/variables, bare-
 
 - **main:** Stages 1–2 (data collection + dataset build). Latest stable.
 - **build_dataset:** Stage 2 focus.
-- **refactor:** adds Stage 3 iteration 1 (`src/rl_agent/`, this branch) — see `docs/EIIE_AGENT_PLAN.md`.
+- **refactor:** adds Stage 3 iteration 1 (`src/rl_agent/`, this branch) — see `docs/eiie_agent/EIIE_AGENT_PLAN.md`.
 - **ml_agent:** a separate, earlier PPO agent (masked 279-ticker universe); not this branch's Stage 3.
 
 ## Architecture
@@ -158,7 +158,7 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 | `cagr_handler.py` | CAGR calc/fill (BolsAI first, backfill from earnings/revenue) |
 | `scale_features.py` | Fits `ColumnTransformer` (RobustScaler on ratio columns, passthrough elsewhere) train-only, per `split_config.json`; saves `feature_scaler.joblib` + `scaler_metadata.json` |
 
-**Stage 3 (RL Agent, iteration 1)** — `src/rl_agent/`, price-only EIIE reproduction (`docs/EIIE_AGENT_PLAN.md`):
+**Stage 3 (RL Agent, iteration 1)** — `src/rl_agent/`, price-only EIIE reproduction (`docs/eiie_agent/EIIE_AGENT_PLAN.md`):
 
 | File | Purpose |
 |------|---------|
@@ -202,7 +202,7 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
   enabled. For seed ensembles / hyperparameter sweeps use `python -m src.rl_agent.sweep`
   (parallel subprocesses, ~0.5 GB GPU each; run-dir timestamps carry microseconds so
   same-second launches can't collide).
-- **Stage 3 cash-attractor diagnosis (July 2026, `EIIE_DIAGNOSIS_PLAN.md`):** the agent's default
+- **Stage 3 cash-attractor diagnosis (July 2026, `docs/eiie_agent/EIIE_DIAGNOSIS_PLAN.md`):** the agent's default
   failure mode is converging to 100% cash — CDI accrues ~8.65%/yr in log-space vs. equal-weight's
   ~8.22%, so unlike the paper's 0%-return cash asset, the training gradient has no restoring force
   pushing back once every asset score drifts down; softmax saturates (~1e-9/asset), the gradient

@@ -1,7 +1,7 @@
 """
 Test: experiment.py's CLI orchestrator -- --dry-run, a full synthetic run,
 the validation checklist, and the sanity-failure path
-(docs/EIIE_AGENT_PLAN.md Phase 7). Runs entirely on a tiny, dependency-
+(docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 7). Runs entirely on a tiny, dependency-
 injected synthetic panel (never the real 15-year dataset, never a real
 training run) via run_experiment(..., panel=...).
 

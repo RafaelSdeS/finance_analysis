@@ -1,7 +1,7 @@
 """
 Test: pvm.py's PortfolioVectorMemory -- gather/scatter read/write between
 global space and slot space, all-cash init, and boundary liquidation of a
-departing ticker (docs/EIIE_AGENT_PLAN.md Phase 3). Synthetic data only.
+departing ticker (docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 3). Synthetic data only.
 
 Run from project root:
     python tests/rl_agent/test_pvm.py
@@ -95,7 +95,7 @@ def test_boundary_liquidation(passed, failed):
     of the universe at t (its slot is no longer in slot_gidx_t at all). Its
     global weight must still be readable (raw) at t-1 for the cost solver's
     drift computation, and must be exactly 0 in the fresh row written at t
-    (docs/EIIE_AGENT_PLAN.md "Boundary liquidation happens in global space")."""
+    (docs/eiie_agent/EIIE_AGENT_PLAN.md "Boundary liquidation happens in global space")."""
     n_global = 5  # cash + 4 union tickers, ticker X = global idx 3
     pvm = PortfolioVectorMemory(T=3, n_global=n_global)
 

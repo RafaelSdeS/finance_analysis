@@ -1,6 +1,6 @@
 """
 sanity.py — automated invariant checks run before any real training
-(docs/EIIE_AGENT_PLAN.md "Sanity checks"). These check STRUCTURAL
+(docs/eiie_agent/EIIE_AGENT_PLAN.md "Sanity checks"). These check STRUCTURAL
 invariants of the actual wired-up model/PVM/panel (determinism, simplex
 weights, positive/finite portfolio values, finite gradients, baselines
 running cleanly) -- never whether the agent behaves any particular way. A

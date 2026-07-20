@@ -1,6 +1,6 @@
 """
 train.py — Online Stochastic Batch Learning (paper Sec. 5.3),
-docs/EIIE_AGENT_PLAN.md "PVM, OSBL training, split protocol" section.
+docs/eiie_agent/EIIE_AGENT_PLAN.md "PVM, OSBL training, split protocol" section.
 
 Key design point: within a mini-batch of n_b CONSECUTIVE periods, the PVM
 supplies w_{t-1} only as the network's INPUT (a detached constant), so all
@@ -267,7 +267,7 @@ def pretrain(model: EIIECNN, pvm: PortfolioVectorMemory, panel: PricePanel,
     checkpoint_eval_every never reached)."""
     # panel.start_idx, not panel.window - 1: sampling must stay inside the
     # 2011-2026 experiment window, where every period is guaranteed exactly
-    # n_slots active members (docs/EIIE_AGENT_PLAN.md) -- pre-window periods
+    # n_slots active members (docs/eiie_agent/EIIE_AGENT_PLAN.md) -- pre-window periods
     # have fewer members and isolated data-quality zero-price rows.
     min_t = panel.start_idx
     holdout_days = cfg.train.checkpoint_holdout_days

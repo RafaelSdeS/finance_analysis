@@ -1,6 +1,6 @@
 """
 Test: baselines.py's 7 baseline strategies, all through the shared
-environment (docs/EIIE_AGENT_PLAN.md Phase 5). Synthetic data only.
+environment (docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 5). Synthetic data only.
 
 Run from project root:
     python tests/rl_agent/test_baselines.py

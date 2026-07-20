@@ -1,5 +1,5 @@
 """
-paths.py — shared filesystem paths for the EIIE agent (docs/EIIE_AGENT_PLAN.md).
+paths.py — shared filesystem paths for the EIIE agent (docs/eiie_agent/EIIE_AGENT_PLAN.md).
 
 Mirrors src/build_dataset/paths.py's convention: a single source of truth so
 data.py, environment.py, experiment.py etc. each import only the paths they

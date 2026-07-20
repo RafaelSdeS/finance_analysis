@@ -1,6 +1,6 @@
 """
 Test: plots.py's self-contained HTML report generation
-(docs/EIIE_AGENT_PLAN.md Phase 7). Synthetic data only -- checks the report
+(docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 7). Synthetic data only -- checks the report
 is produced, is self-contained, and includes every required chart, not the
 pixel-level rendering of any individual chart.
 

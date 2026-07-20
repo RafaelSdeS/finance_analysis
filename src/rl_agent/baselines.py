@@ -1,5 +1,5 @@
 """
-baselines.py — the required baseline suite (docs/EIIE_AGENT_PLAN.md
+baselines.py — the required baseline suite (docs/eiie_agent/EIIE_AGENT_PLAN.md
 "Evaluation"), all running through the exact same environment.run_backtest
 loop, costs, and dates as the trained agent -- "the RL agent should never
 be evaluated in isolation."

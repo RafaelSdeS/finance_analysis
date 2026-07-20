@@ -1,6 +1,6 @@
 """
 environment.py — market mechanics shared by the trained agent AND every
-baseline (docs/EIIE_AGENT_PLAN.md "Transaction cost model" and "Global
+baseline (docs/eiie_agent/EIIE_AGENT_PLAN.md "Transaction cost model" and "Global
 asset indexing" sections). All math operates in GLOBAL space (cash + 171
 union tickers) -- this is what lets a departing ticker's forced sale price
 correctly even on its last day, without any special-casing: environment.py

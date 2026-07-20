@@ -1,6 +1,6 @@
 """
 Test: metrics.py's performance metrics and block-bootstrap CIs, checked
-against hand-computed values (docs/EIIE_AGENT_PLAN.md Phase 4). Synthetic
+against hand-computed values (docs/eiie_agent/EIIE_AGENT_PLAN.md Phase 4). Synthetic
 data only.
 
 Run from project root:

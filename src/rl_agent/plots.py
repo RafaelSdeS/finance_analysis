@@ -1,6 +1,6 @@
 """
 plots.py — one self-contained plotly HTML report per experiment
-(docs/EIIE_AGENT_PLAN.md "Evaluation" section: portfolio value vs every
+(docs/eiie_agent/EIIE_AGENT_PLAN.md "Evaluation" section: portfolio value vs every
 baseline, reward curves, allocation evolution, turnover/cost, weight
 distribution, metrics+CI table). plotly.js is embedded once in the first
 figure and reused by the rest -- the file opens standalone, no network

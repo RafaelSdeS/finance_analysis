@@ -1,6 +1,6 @@
 """
 pvm.py — Portfolio-Vector Memory (paper Sec. 5.2), extended for a dynamic
-top-50 universe (docs/EIIE_AGENT_PLAN.md "PVM, OSBL training, split
+top-50 universe (docs/eiie_agent/EIIE_AGENT_PLAN.md "PVM, OSBL training, split
 protocol" and "Global asset indexing" sections).
 
 The buffer stores each period's full GLOBAL portfolio-weight vector (cash +

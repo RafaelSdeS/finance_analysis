@@ -36,7 +36,7 @@ Output: `data/processed/ml_dataset.parquet`
 framework (`docs/papers/deep_reinforcement_learning_framework_financial_portfolio_management.pdf.pdf`)
 — price-only features, the top-50 dynamic quarterly universe, CDI-accruing cash, B3's 0.03%
 transaction cost — over the 2011–2026 pre-built top-50 window. Design, approved deviations from the
-paper, and phase-by-phase status: `docs/EIIE_AGENT_PLAN.md`.
+paper, and phase-by-phase status: `docs/eiie_agent/EIIE_AGENT_PLAN.md`.
 
 ```bash
 python tests/run_all.py --group fast                                             # rl_agent unit/integration tests
@@ -75,5 +75,5 @@ python src/visualizations/financial_view.py
 - `docs/TODO.md` — work roadmap
 - `docs/STAGE1_DATA_COLLECTION.md`, `docs/STAGE2_DATASET_BUILD.md`, `docs/STAGE3_ML_AGENT.md` — how each stage actually works, with formulas and citations
 - `docs/RESEARCH_REFERENCES.md` — papers behind the design choices
-- `docs/EIIE_AGENT_PLAN.md` — iteration-1 RL agent design, approved paper deviations, phase status (this branch)
+- `docs/eiie_agent/EIIE_AGENT_PLAN.md` — iteration-1 RL agent design, approved paper deviations, phase status (this branch)
 - `docs/ML_AGENT_ROADMAP.md` — phase-by-phase RL agent build plan (`ml_agent` branch)
