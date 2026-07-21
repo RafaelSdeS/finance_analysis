@@ -221,17 +221,17 @@ def _pool_embedding(branch_embeddings: dict) -> torch.Tensor:
     return torch.stack(list(branch_embeddings.values()), dim=1).mean(dim=1)
 
 
-def train_step(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
-                anchor_batch: dict, positive_batch: dict, negative_batch: dict,
-                temperature: float = 0.1, grad_clip_norm: float | None = None) -> float:
-    """One CPC gradient step. `anchor_batch`/`positive_batch`: each a dict
-    {'daily': [B,f,w], 'weekly': [B,f,w], 'monthly': [B,f,w],
-    'fundamentals': [B,f,w]} (data.py's window_tensor, batched) for the
-    anchor row and its t+k positive. `negative_batch`: same keys, each
-    [B,N,f,w] (N negatives per anchor, from sample_cpc_negatives) --
-    flattened to [B*N,f,w] to run through the encoder once, reshaped back to
-    [B,N,d] to match info_nce_loss's contract."""
-    optimizer.zero_grad()
+def _cpc_loss(model: torch.nn.Module, anchor_batch: dict, positive_batch: dict,
+              negative_batch: dict, temperature: float) -> torch.Tensor:
+    """Shared by train_step (grad) and score_holdout (no_grad): embed
+    anchor/positive/negative batches and compute the InfoNCE loss.
+    `anchor_batch`/`positive_batch`: each a dict {'daily': [B,f,w], 'weekly':
+    [B,f,w], 'monthly': [B,f,w], 'fundamentals': [B,f,w]} (data.py's
+    window_tensor, batched) for the anchor row and its t+k positive.
+    `negative_batch`: same keys, each [B,N,f,w] (N negatives per anchor, from
+    sample_cpc_negatives) -- flattened to [B*N,f,w] to run through the
+    encoder once, reshaped back to [B,N,d] to match info_nce_loss's
+    contract."""
     anchor_emb = _pool_embedding(model(**anchor_batch))
     positive_emb = _pool_embedding(model(**positive_batch))
 
@@ -241,9 +241,58 @@ def train_step(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
                        for name, t in negative_batch.items()}
     negative_emb = _pool_embedding(model(**flat_negatives)).reshape(batch_size, n_negatives, -1)
 
-    loss = info_nce_loss(anchor_emb, positive_emb, negative_emb, temperature)
+    return info_nce_loss(anchor_emb, positive_emb, negative_emb, temperature)
+
+
+def train_step(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
+                anchor_batch: dict, positive_batch: dict, negative_batch: dict,
+                temperature: float = 0.1, grad_clip_norm: float | None = None) -> float:
+    """One CPC gradient step -- see _cpc_loss for the batch dict shapes."""
+    optimizer.zero_grad()
+    loss = _cpc_loss(model, anchor_batch, positive_batch, negative_batch, temperature)
     loss.backward()
     if grad_clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
     optimizer.step()
     return float(loss.item())
+
+
+def split_train_holdout(panel: pd.DataFrame, holdout_days: int) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Per-ticker date-based split: the trailing `holdout_days` calendar days
+    of `panel`'s history become the holdout tail, carved out of CPC training
+    entirely (never an anchor, positive, or negative in a train_step call)
+    and used only to score checkpoints -- same purpose as
+    rl_agent/train.py's checkpoint_holdout_days (CLAUDE.md: caught a real
+    case where the same seed went from +47% return at 100k steps to -71% at
+    2M, pure overfitting past a peak that a fixed step count alone can't
+    detect). Each half is a per-ticker prefix/suffix, freshly RangeIndex'd,
+    so sample_cpc_anchor_positions/sample_cpc_negatives's contiguous-
+    per-ticker contract (position i+1 is the same ticker's next row) still
+    holds within each half."""
+    cutoff = panel["trade_date"].max() - pd.Timedelta(days=holdout_days)
+    train_panel = panel.loc[panel["trade_date"] <= cutoff].reset_index(drop=True)
+    holdout_panel = panel.loc[panel["trade_date"] > cutoff].reset_index(drop=True)
+    return train_panel, holdout_panel
+
+
+def score_holdout(model: torch.nn.Module, holdout_panel: pd.DataFrame, holdout_store,
+                   cfg, rng: np.random.Generator, n_eval_batches: int = 4) -> float:
+    """Mean CPC loss over `n_eval_batches` batches drawn from the holdout
+    panel, frozen weights (no gradient, model.eval()) -- lower is better
+    (it's a loss, unlike rl_agent's total_return score). Averaging a few
+    batches instead of one reduces sampling noise in the score used to pick
+    the "best" checkpoint. `cfg`: SSLConfig (batch_size, cpc_horizon,
+    negative-sampling params, temperature)."""
+    model.eval()
+    losses = []
+    with torch.no_grad():
+        for _ in range(n_eval_batches):
+            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, cfg.cpc_horizon, rng=rng)
+            anchor_batch, positive_batch, negative_batch = build_cpc_batch(
+                holdout_panel, holdout_store, anchors, cfg.cpc_horizon,
+                n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
+                regime_gap_days=cfg.regime_gap_days, rng=rng)
+            loss = _cpc_loss(model, anchor_batch, positive_batch, negative_batch, cfg.temperature)
+            losses.append(float(loss.item()))
+    model.train()
+    return sum(losses) / len(losses)

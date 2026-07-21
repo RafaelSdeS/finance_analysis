@@ -18,12 +18,19 @@ timestamped filenames under artifacts/{checkpoints,logs}/conviction_model/, not 
 (--checkpoint-every), not just at the end, so a killed/crashed run still leaves a usable
 checkpoint on disk.
 
+Checkpoint-at-peak (mirrors rl_agent/train.py::pretrain()): the trailing checkpoint_holdout_days
+of the panel are carved out of training entirely, scored every checkpoint_eval_every steps, and
+the best-scoring state is what actually gets restored into the final checkpoint -- not just
+whatever the last step happened to land on. See config.py's SSLConfig for the rationale (CLAUDE.md's
+measured rl_agent case: same seed, +47% at 100k steps -> -71% at 2M, pure overfitting).
+
 Run from project root:
     python -m src.conviction_model.run_stage1a
     python -m src.conviction_model.run_stage1a --steps 20000 --log-every 100 --checkpoint-every 500
 """
 
 import argparse
+import copy
 import logging
 import sys
 import time
@@ -40,7 +47,10 @@ from .config import SSLConfig
 from .data import DAILY_FEATURES, MONTHLY_FEATURES, QUARTERLY_FEATURES, WEEKLY_FEATURES, build_frame_cache
 from .encoder import EncoderCNN
 from .paths import DATASET_PATH, ROOT, TOP150_MEMBERSHIP_PATH
-from .ssl_pretrain import LazyPanelGatherer, build_cpc_batch, sample_cpc_anchor_positions, train_step
+from .ssl_pretrain import (
+    LazyPanelGatherer, build_cpc_batch, sample_cpc_anchor_positions, score_holdout,
+    split_train_holdout, train_step,
+)
 
 CHECKPOINT_DIR = ROOT / "artifacts/checkpoints/conviction_model"
 LOG_DIR = ROOT / "artifacts/logs/conviction_model"
@@ -76,10 +86,23 @@ def load_panel(tickers) -> pd.DataFrame:
     return table.to_pandas().sort_values(["ticker", "trade_date"]).reset_index(drop=True)
 
 
-def _save_checkpoint(path: Path, model, cfg, tickers, losses, step, total_steps) -> None:
+def _save_checkpoint(path: Path, state_dict, cfg, tickers, losses, step, total_steps,
+                      best_step=None, best_score=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model_state_dict": model.state_dict(), "config": asdict(cfg),
-                "tickers": tickers, "losses": losses, "step": step, "total_steps": total_steps}, path)
+    torch.save({"model_state_dict": state_dict, "config": asdict(cfg), "tickers": tickers,
+                "losses": losses, "step": step, "total_steps": total_steps,
+                "best_step": best_step, "best_score": best_score}, path)
+
+
+def _holdout_eligible_count(holdout_panel: pd.DataFrame, cpc_horizon: int) -> int:
+    """How many holdout rows could serve as a CPC anchor (mirrors
+    sample_cpc_anchor_positions' own eligibility rule) -- used only to
+    decide up front whether the holdout is big enough for even one eval
+    batch, without duplicating the sampling itself."""
+    if holdout_panel.empty:
+        return 0
+    remaining = holdout_panel.groupby("ticker").cumcount(ascending=False).to_numpy()
+    return int((remaining >= cpc_horizon).sum())
 
 
 def main() -> None:
@@ -110,23 +133,35 @@ def main() -> None:
     frame_cache = build_frame_cache(tickers)
     log.info(f"Frame cache built ({time.monotonic() - t0:.1f}s)")
 
+    train_panel, holdout_panel = split_train_holdout(panel, cfg.checkpoint_holdout_days)
+    holdout_enabled = _holdout_eligible_count(holdout_panel, cfg.cpc_horizon) >= cfg.batch_size
+    if not holdout_enabled:
+        log.warning(f"holdout too small for checkpoint_holdout_days={cfg.checkpoint_holdout_days} "
+                     "(not enough eligible rows) -- checkpoint-at-peak disabled, training on the full panel")
+        train_panel = panel
+    else:
+        log.info(f"Train: {len(train_panel)} rows. Holdout: {len(holdout_panel)} rows "
+                 f"(trailing {cfg.checkpoint_holdout_days} calendar days, never trained on)")
+
     # LazyPanelGatherer, not CPCPanelStore: a full precompute at this universe size (150
     # tickers, ~540k positions) is ~9GB resident (measured) -- adjacent windows for the same
     # ticker overlap almost entirely, so per-position storage is fundamentally redundant.
     # This computes each window on demand from the (tiny, ~tens of MB) per-ticker frame
     # cache instead -- slower per step, but bounded, safe memory.
-    store = LazyPanelGatherer(panel, frame_cache)
+    train_store = LazyPanelGatherer(train_panel, frame_cache)
+    holdout_store = LazyPanelGatherer(holdout_panel, frame_cache) if holdout_enabled else None
 
     model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
                         len(QUARTERLY_FEATURES), d_model=cfg.d_model, n_heads=cfg.n_heads)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
 
     losses = []
+    best_step, best_score, best_state = None, None, None
     t_start = time.monotonic()
     for step in range(args.steps):
-        anchors = sample_cpc_anchor_positions(panel, cfg.batch_size, cfg.cpc_horizon, rng=np_rng)
+        anchors = sample_cpc_anchor_positions(train_panel, cfg.batch_size, cfg.cpc_horizon, rng=np_rng)
         anchor_batch, positive_batch, negative_batch = build_cpc_batch(
-            panel, store, anchors, cfg.cpc_horizon,
+            train_panel, train_store, anchors, cfg.cpc_horizon,
             n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
             regime_gap_days=cfg.regime_gap_days, rng=np_rng)
         loss = train_step(model, optimizer, anchor_batch, positive_batch, negative_batch,
@@ -137,14 +172,30 @@ def main() -> None:
             log.info(f"step {step:>6}/{args.steps}  loss={loss:.4f}  "
                      f"mean_recent={sum(recent) / len(recent):.4f}  "
                      f"elapsed={time.monotonic() - t_start:.0f}s")
+
+        if holdout_enabled and ((step + 1) % cfg.checkpoint_eval_every == 0 or step == args.steps - 1):
+            score = score_holdout(model, holdout_panel, holdout_store, cfg, np_rng)
+            log.info(f"  holdout eval at step {step}: loss={score:.4f}"
+                     + (f" (new best, was {best_score:.4f})" if best_score is not None and score < best_score
+                        else " (new best)" if best_score is None else ""))
+            if best_score is None or score < best_score:
+                best_step, best_score = step, score
+                best_state = copy.deepcopy(model.state_dict())
+
         if step > 0 and (step % args.checkpoint_every == 0 or step == args.steps - 1):
-            _save_checkpoint(checkpoint_path, model, cfg, tickers, losses, step, args.steps)
-            log.info(f"checkpoint saved: {checkpoint_path} (step {step})")
+            _save_checkpoint(checkpoint_path, model.state_dict(), cfg, tickers, losses, step, args.steps,
+                              best_step, best_score)
+            log.info(f"checkpoint saved: {checkpoint_path} (step {step}, latest weights)")
 
     if not losses:
         return
-    _save_checkpoint(checkpoint_path, model, cfg, tickers, losses, args.steps - 1, args.steps)
+    final_state = best_state if best_state is not None else model.state_dict()
+    _save_checkpoint(checkpoint_path, final_state, cfg, tickers, losses, args.steps - 1, args.steps,
+                      best_step, best_score)
     log.info(f"Loss: first={losses[0]:.4f}  last={losses[-1]:.4f}  min={min(losses):.4f}")
+    if best_state is not None:
+        log.info(f"Final checkpoint holds the BEST-scoring weights: step {best_step}, "
+                 f"holdout loss={best_score:.4f} (not the last step's weights)")
     log.info(f"Final checkpoint: {checkpoint_path}")
     log.info(f"Log file: {LOG_DIR / f'stage1a-{run_id}.log'}")
 

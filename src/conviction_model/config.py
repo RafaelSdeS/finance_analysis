@@ -24,6 +24,14 @@ class SSLConfig:
     d_model: int = 64
     n_heads: int = 4
     seed: int = 0
+    # Checkpoint-at-peak (mirrors rl_agent/config.py's checkpoint_holdout_days/
+    # checkpoint_eval_every -- CLAUDE.md: caught a real case where the same seed went
+    # from +47% return at 100k steps to -71% at 2M, pure overfitting past a peak that a
+    # fixed step count alone can't detect). ~1 calendar year held out of CPC training
+    # entirely; scored every 250 steps here vs. rl_agent's 5000 since this run's default
+    # step budget (5000) is far smaller -- both arbitrary, adjustable.
+    checkpoint_holdout_days: int = 365
+    checkpoint_eval_every: int = 250
 
     def to_json(self, path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=2))

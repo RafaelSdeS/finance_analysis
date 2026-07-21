@@ -23,9 +23,10 @@ from src.conviction_model.data import (  # noqa: E402
     DAILY_FEATURES, MONTHLY_FEATURES, QUARTERLY_FEATURES, WEEKLY_FEATURES, resample_branch_frame,
 )
 from src.conviction_model.encoder import EncoderCNN  # noqa: E402
+from src.conviction_model.config import SSLConfig  # noqa: E402
 from src.conviction_model.ssl_pretrain import (  # noqa: E402
     CPCPanelStore, LazyPanelGatherer, build_cpc_batch, info_nce_loss, sample_cpc_anchor_positions,
-    sample_cpc_negatives, train_step,
+    sample_cpc_negatives, score_holdout, split_train_holdout, train_step,
 )
 from test_utils import print_check, print_header, print_section_end  # noqa: E402
 
@@ -175,6 +176,48 @@ def test_build_cpc_batch_positive_is_same_ticker_k_ahead(passed, failed):
     return passed + ok, failed + (not ok)
 
 
+def test_split_train_holdout_respects_cutoff_and_stays_contiguous(passed, failed):
+    panel, _ = _synthetic_frame_cache(["AAA", "BBB"], n_days=400)
+    cutoff = panel["trade_date"].max() - pd.Timedelta(days=180)
+    train_panel, holdout_panel = split_train_holdout(panel, holdout_days=180)
+
+    cutoff_ok = bool((train_panel["trade_date"] <= cutoff).all() and (holdout_panel["trade_date"] > cutoff).all())
+    coverage_ok = len(train_panel) + len(holdout_panel) == len(panel)
+    # contiguity: each ticker's train rows are exactly that ticker's earliest
+    # rows from the original panel, in the same order (a clean prefix, not a
+    # scattered subset) -- sample_cpc_anchor_positions/sample_cpc_negatives's
+    # shared "position i+1 is the same ticker's next row" contract needs this.
+    contiguous_ok = True
+    for t in ["AAA", "BBB"]:
+        expected_prefix = panel.loc[panel["ticker"] == t, "trade_date"].reset_index(drop=True)
+        actual_prefix = train_panel.loc[train_panel["ticker"] == t, "trade_date"].reset_index(drop=True)
+        contiguous_ok &= expected_prefix.iloc[:len(actual_prefix)].equals(actual_prefix)
+    ok = cutoff_ok and coverage_ok and contiguous_ok
+    print_check("split_train_holdout: train/holdout respect the date cutoff and stay per-ticker contiguous",
+                ok, f"train={len(train_panel)}, holdout={len(holdout_panel)}, "
+                    f"cutoff_ok={cutoff_ok}, coverage_ok={coverage_ok}, contiguous_ok={contiguous_ok}")
+    return passed + ok, failed + (not ok)
+
+
+def test_score_holdout_does_not_change_params_and_returns_finite_score(passed, failed):
+    panel, cache = _synthetic_frame_cache(["AAA", "BBB"], n_days=400)
+    _, holdout_panel = split_train_holdout(panel, holdout_days=180)
+    holdout_store = CPCPanelStore(holdout_panel, cache)
+    cfg = SSLConfig(cpc_horizon=10, batch_size=8, n_same_stock_negatives=2, n_diff_stock_negatives=2)
+
+    model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
+                        len(QUARTERLY_FEATURES), d_model=8, n_heads=2)
+    params_before = [p.clone() for p in model.parameters()]
+    score = score_holdout(model, holdout_panel, holdout_store, cfg, rng=np.random.default_rng(0), n_eval_batches=2)
+
+    unchanged = all(torch.equal(a, b) for a, b in zip(params_before, model.parameters()))
+    finite = score == score and score != float("inf")
+    ok = unchanged and finite
+    print_check("score_holdout: leaves model parameters unchanged (no_grad) and returns a finite score",
+                ok, f"score={score}, unchanged={unchanged}")
+    return passed + ok, failed + (not ok)
+
+
 def _tiny_batch(batch_size, n_negatives, n_features, window):
     return {
         "daily": torch.randn(batch_size, n_features, window),
@@ -222,6 +265,8 @@ def main() -> int:
         test_build_cpc_batch_shapes,
         test_lazy_panel_gatherer_matches_cpc_panel_store,
         test_build_cpc_batch_positive_is_same_ticker_k_ahead,
+        test_split_train_holdout_respects_cutoff_and_stays_contiguous,
+        test_score_holdout_does_not_change_params_and_returns_finite_score,
         test_train_step_updates_params_and_returns_finite_loss,
     ]:
         passed, failed = test_fn(passed, failed)
