@@ -8,7 +8,10 @@ rebalance. Union across all rebalance periods recovers delisted names without
 letting any single day's membership see future volume.
 
 Run: python -m src.build_dataset.build_top50_universe
+       python -m src.build_dataset.build_top50_universe --top-n 150 --membership-only
 """
+
+import argparse
 
 import pandas as pd
 
@@ -116,13 +119,21 @@ def zero_fill_missing_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def main():
+def main(top_n=TOP_N, membership_only=False):
     print("Loading data...")
     df = pd.read_parquet(OUTPUT_PATH)
     total_rows = len(df)
 
-    print("Building membership...")
-    membership = build_top50_membership(df[["ticker", "trade_date", "traded_amount"]])
+    print(f"Building membership (top_n={top_n})...")
+    membership = build_top50_membership(df[["ticker", "trade_date", "traded_amount"]], top_n=top_n)
+
+    membership_path = (TOP50_MEMBERSHIP_PATH if top_n == TOP_N
+                        else TOP50_MEMBERSHIP_PATH.with_name(f"top{top_n}_universe_membership.parquet"))
+    if membership_only:
+        membership.to_parquet(membership_path, index=False)
+        print(f"\n✓ tickers ever in top-{top_n}: {membership['ticker'].nunique()}")
+        print(f"✓ wrote {membership_path}")
+        return
 
     print("Filtering to top-50 universe...")
     universe_df = filter_to_top50_universe(df, membership)
@@ -138,14 +149,19 @@ def main():
 
     print("Writing outputs...")
     universe_df.to_parquet(TOP50_UNIVERSE_PATH, index=False)
-    membership.to_parquet(TOP50_MEMBERSHIP_PATH, index=False)
+    membership.to_parquet(membership_path, index=False)
 
-    print(f"\n✓ tickers ever in top-{TOP_N}: {membership['ticker'].nunique()}")
+    print(f"\n✓ tickers ever in top-{top_n}: {membership['ticker'].nunique()}")
     print(f"✓ rows after trim to earliest fundamental: {len(universe_df)} (removed {rows_before} pre-fundamental rows)")
     print(f"✓ coverage vs original full dataset: {len(universe_df) / total_rows:.1%}")
     print(f"✓ wrote {TOP50_UNIVERSE_PATH}")
-    print(f"✓ wrote {TOP50_MEMBERSHIP_PATH}")
+    print(f"✓ wrote {membership_path}")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--top-n", type=int, default=TOP_N)
+    parser.add_argument("--membership-only", action="store_true",
+                         help="skip the filtered wide-universe parquet, write only the membership table")
+    args = parser.parse_args()
+    main(top_n=args.top_n, membership_only=args.membership_only)

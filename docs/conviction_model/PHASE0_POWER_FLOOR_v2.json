@@ -1,0 +1,26 @@
+{
+  "n_monthly_obs": 305,
+  "n_assets": 150,
+  "t_threshold": 2.0,
+  "21": {
+    "hac_lag_months": 0,
+    "min_detectable_ic": 0.00938181666211908
+  },
+  "63": {
+    "hac_lag_months": 2,
+    "min_detectable_ic": 0.0162497831260865
+  },
+  "126": {
+    "hac_lag_months": 5,
+    "min_detectable_ic": 0.022980663682532994
+  },
+  "252": {
+    "hac_lag_months": 11,
+    "min_detectable_ic": 0.032499566252173
+  },
+  "504": {
+    "hac_lag_months": 23,
+    "min_detectable_ic": 0.04596132736506599
+  },
+  "decision": "UNDERPOWERED at horizon(s) 504 -- floor exceeds H1's lower bound (0.035). A null result at these horizons in Phase 4 would mean underpowered, not no signal."
+}

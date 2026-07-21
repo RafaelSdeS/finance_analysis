@@ -69,6 +69,13 @@ FAST = [
     "tests/h_series/test_milestone_h1.py",
     "tests/h_series/test_composite.py",
     "tests/h_series/test_milestone_h2.py",
+    "tests/conviction_model/test_labels.py",
+    "tests/conviction_model/test_walkforward.py",
+    "tests/conviction_model/test_data.py",
+    "tests/conviction_model/test_config.py",
+    "tests/conviction_model/test_encoder.py",
+    "tests/conviction_model/test_ssl_pretrain.py",
+    "tests/conviction_model/test_diagnostics.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
