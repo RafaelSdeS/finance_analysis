@@ -21,17 +21,66 @@ from sklearn.neighbors import NearestNeighbors
 
 
 def neighbor_outcome_variance_ratio(embeddings: np.ndarray, outcomes: np.ndarray,
-                                     k: int = 10, rng: np.random.Generator | None = None) -> float:
+                                     k: int = 10, rng: np.random.Generator | None = None,
+                                     tickers: np.ndarray | None = None,
+                                     dates: np.ndarray | None = None,
+                                     exclude_window_days: int = 365,
+                                     search_multiplier: int = 5) -> float:
     """Diagnostic 1: mean outcome variance among each point's k-nearest
     embedding neighbors, divided by mean outcome variance among k random
     points. <1 means nearby embeddings share more similar outcomes than
-    chance; gate (Phase 1 table): <=0.8."""
+    chance; gate (Phase 1 table): <=0.8.
+
+    `tickers`/`dates`: optional, same length/order as `embeddings` -- when
+    given, a candidate neighbor is excluded if it shares the query point's
+    ticker AND falls within `exclude_window_days` calendar days of it (the
+    plan's own wording: "excluding the same ticker within a short window, to
+    avoid trivially matching on autocorrelation"). Adjacent month-end
+    embeddings of the SAME ticker are near-duplicates (overlapping daily
+    windows) with near-identical forward outcomes (overlapping realized-
+    return windows) -- without this exclusion, a point's nearest neighbors
+    are dominated by its own past/future self, and the ratio mostly measures
+    autocorrelation, not genuine cross-sectional state-similarity. Passing
+    neither arg reproduces the original (no exclusion) behavior exactly.
+
+    The random-point comparison is deliberately NOT filtered the same way:
+    it's meant to reflect the population's natural, low base rate of
+    same-ticker temporal proximity, not have that rate artificially removed
+    too -- only the NEIGHBOR side is artificially enriched with same-ticker
+    pairs (that's what nearest-neighbor search does), so only that side
+    needs the correction.
+
+    `search_multiplier`: the neighbor-candidate pool is overfetched to
+    min(n, k*search_multiplier + 1) before filtering, since some candidates
+    get excluded. ponytail: bounded overfetch, not an exhaustive same-ticker-
+    excluding search -- a point whose exclusion leaves fewer than k valid
+    neighbors in that pool just uses however many remain (rare in practice
+    at this multiplier); revisit if that shortfall shows up for real."""
     rng = rng or np.random.default_rng()
     n = len(embeddings)
-    neighbors = NearestNeighbors(n_neighbors=k + 1).fit(embeddings)
-    _, idx = neighbors.kneighbors(embeddings)
-    idx = idx[:, 1:]  # drop self-match
-    neighbor_var = float(np.mean([np.var(outcomes[row]) for row in idx]))
+
+    if tickers is None:
+        neighbors = NearestNeighbors(n_neighbors=k + 1).fit(embeddings)
+        _, idx = neighbors.kneighbors(embeddings)
+        neighbor_rows = list(idx[:, 1:])  # drop self-match
+    else:
+        tickers = np.asarray(tickers)
+        dates = np.asarray(dates)
+        pool_size = min(n, k * search_multiplier + 1)
+        neighbors = NearestNeighbors(n_neighbors=pool_size).fit(embeddings)
+        _, candidate_idx = neighbors.kneighbors(embeddings)
+        neighbor_rows = []
+        for i, cands in enumerate(candidate_idx):
+            gap_days = np.abs((dates[cands] - dates[i]) / np.timedelta64(1, "D"))
+            same_ticker_near = (tickers[cands] == tickers[i]) & (gap_days < exclude_window_days)
+            valid = cands[(cands != i) & ~same_ticker_near]
+            if len(valid) >= 2:
+                neighbor_rows.append(valid[:k])
+        if not neighbor_rows:
+            raise ValueError("no point retained >=2 valid same-ticker-excluded neighbors -- "
+                              "increase search_multiplier or shrink exclude_window_days")
+
+    neighbor_var = float(np.mean([np.var(outcomes[row]) for row in neighbor_rows]))
     random_var = float(np.mean([np.var(outcomes[rng.choice(n, size=k, replace=False)]) for _ in range(n)]))
     return neighbor_var / random_var
 

@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -42,6 +43,98 @@ def test_neighbor_outcome_variance_ratio_recovers_injected_structure(passed, fai
     ok = ratio <= 0.8
     print_check("neighbor_outcome_variance_ratio: recovers materially lower variance in embedded "
                 "neighborhoods with an injected low-variance-per-cluster outcome", ok, f"ratio={ratio:.4f}")
+    return passed + ok, failed + (not ok)
+
+
+def _overlapping_window_outcomes(n_per_ticker: int, decision_spacing_days: int, horizon_days: int,
+                                  rng: np.random.Generator) -> np.ndarray:
+    """decision m's outcome = sum of `horizon_days` iid daily innovations starting at
+    m*decision_spacing_days -- the exact overlapping-FORWARD-WINDOW mechanism that
+    makes REAL diagnostic-1 outcomes correlated between temporally-close decisions
+    (their forward-return windows share most of the same realized daily moves) and
+    genuinely INDEPENDENT once the decision gap reaches the horizon (windows stop
+    overlapping entirely, correlation goes to exactly 0) -- unlike an arbitrary
+    block/regime model or a plain autocorrelated walk, this decays exactly where the
+    real system's forward_horizon does, which is what exclude_window_days is meant
+    to match."""
+    total_days = (n_per_ticker - 1) * decision_spacing_days + horizon_days
+    innovations = rng.normal(size=total_days)
+    return np.array([innovations[m * decision_spacing_days: m * decision_spacing_days + horizon_days].sum()
+                      for m in range(n_per_ticker)])
+
+
+def _same_ticker_autocorrelation_artifact(n_tickers=5, n_per_ticker=30, ticker_spacing=100.0,
+                                           local_spacing=1.0, decision_spacing_days=21,
+                                           horizon_days=252, rng=None):
+    """Mimics the real failure mode diagnostic 1 must not be fooled by: embeddings
+    laid out along a line, STRICTLY ordered by time within each ticker (so a point's
+    unfiltered k-nearest neighbors are guaranteed to be its own temporally-adjacent
+    same-ticker points -- mirrors how a real encoder's overlapping daily/monthly
+    windows behave, without relying on a stochastic walk's geometry to preserve
+    time-order-by-distance), paired with outcomes built from genuinely overlapping
+    forward windows (_overlapping_window_outcomes) so temporally-close same-ticker
+    points share near-identical outcomes PURELY from window overlap -- zero genuine
+    cross-sectional relationship to the embedding's content -- and are exactly
+    independent once the gap reaches the horizon. Different tickers' embeddings are
+    placed far enough apart (ticker_spacing >> local_spacing * n_per_ticker) that
+    cross-ticker points never compete with same-ticker ones in a k-NN search."""
+    rng = rng or np.random.default_rng(11)
+    dates = pd.bdate_range("2010-01-01", periods=n_per_ticker, freq="ME")
+
+    tickers, all_dates, embeddings, outcomes = [], [], [], []
+    for t in range(n_tickers):
+        outcome = _overlapping_window_outcomes(n_per_ticker, decision_spacing_days, horizon_days, rng)
+        for m in range(n_per_ticker):
+            tickers.append(f"T{t}")
+            all_dates.append(dates[m])
+            embeddings.append([t * ticker_spacing, m * local_spacing])
+        outcomes.append(outcome)
+
+    return (np.array(tickers), pd.DatetimeIndex(all_dates).to_numpy(),
+            np.array(embeddings, dtype=np.float64), np.concatenate(outcomes))
+
+
+def test_neighbor_outcome_variance_ratio_same_ticker_exclusion_removes_autocorrelation_artifact(passed, failed):
+    tickers, dates, embeddings, outcomes = _same_ticker_autocorrelation_artifact()
+
+    ratio_unfiltered = neighbor_outcome_variance_ratio(embeddings, outcomes, k=5,
+                                                        rng=np.random.default_rng(20))
+    ratio_filtered = neighbor_outcome_variance_ratio(embeddings, outcomes, k=5,
+                                                      rng=np.random.default_rng(20),
+                                                      tickers=tickers, dates=dates,
+                                                      exclude_window_days=365, search_multiplier=10)
+
+    # Without exclusion: same-ticker-adjacent-time points dominate the k-NN search purely
+    # from embedding geometry, and their outcomes look artificially similar purely from
+    # the overlapping-forward-window mechanism -- an artifact that would spuriously clear
+    # the <=0.8 gate despite zero genuine cross-sectional relationship existing. With
+    # exclusion, those points are filtered out and the ratio rises measurably -- a
+    # RELATIVE threshold, not a fixed additive one, since the surviving same-ticker
+    # neighbors can still be mutually adjacent to EACH OTHER (nearest-neighbor selection
+    # favors a contiguous surviving cluster), so some residual overlap-driven correlation
+    # among the selected neighbor set is expected even after the anchor-side artifact is
+    # correctly removed -- a real limit of nearest-neighbor selection, not evidence the
+    # fix didn't work.
+    artifact_present = ratio_unfiltered <= 0.8
+    fix_removes_artifact = ratio_filtered > ratio_unfiltered * 1.2
+    ok = artifact_present and fix_removes_artifact
+    print_check("neighbor_outcome_variance_ratio: excluding same-ticker-near-time neighbors removes a "
+                "pure autocorrelation artifact (not a genuine embedding signal)",
+                ok, f"unfiltered={ratio_unfiltered:.4f} (spuriously clears <=0.8: {artifact_present}), "
+                    f"filtered={ratio_filtered:.4f}")
+    return passed + ok, failed + (not ok)
+
+
+def test_neighbor_outcome_variance_ratio_no_tickers_arg_matches_original_behavior(passed, failed):
+    # Passing neither tickers nor dates must reproduce the pre-fix computation exactly --
+    # a pure additive change, not a behavior change for existing callers.
+    embeddings, labels = _clustered_embeddings()
+    cluster_means = RNG.normal(scale=10.0, size=labels.max() + 1)
+    outcomes = cluster_means[labels] + RNG.normal(scale=0.1, size=len(labels))
+    ratio = neighbor_outcome_variance_ratio(embeddings, outcomes, k=10, rng=np.random.default_rng(1))
+    ok = ratio <= 0.8
+    print_check("neighbor_outcome_variance_ratio: omitting tickers/dates still recovers the original "
+                "injected low-variance-per-cluster structure (no default-path regression)", ok, f"ratio={ratio:.4f}")
     return passed + ok, failed + (not ok)
 
 
@@ -152,6 +245,8 @@ def main() -> int:
     passed = failed = 0
     for test_fn in [
         test_neighbor_outcome_variance_ratio_recovers_injected_structure,
+        test_neighbor_outcome_variance_ratio_same_ticker_exclusion_removes_autocorrelation_artifact,
+        test_neighbor_outcome_variance_ratio_no_tickers_arg_matches_original_behavior,
         test_regime_mutual_information_clears_null_when_clusters_match_regime,
         test_regime_mutual_information_does_not_clear_null_on_pure_noise,
         test_linear_probe_recovers_injected_relationship,

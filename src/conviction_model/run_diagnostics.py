@@ -155,7 +155,9 @@ def diag1_neighbor_outcome(embeddings, points, rng):
     outcomes = np.array([value_map.get((t, d), np.nan) for t, d in zip(points["ticker"], points["trade_date"])])
 
     mask = np.isfinite(outcomes)
-    ratio = neighbor_outcome_variance_ratio(embeddings[mask], outcomes[mask], k=10, rng=rng)
+    ratio = neighbor_outcome_variance_ratio(
+        embeddings[mask], outcomes[mask], k=10, rng=rng,
+        tickers=points["ticker"].to_numpy()[mask], dates=points["trade_date"].to_numpy()[mask])
     return ratio, int(mask.sum())
 
 
