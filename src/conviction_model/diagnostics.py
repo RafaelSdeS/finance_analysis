@@ -100,12 +100,57 @@ def regime_mutual_information(embeddings: np.ndarray, regime_labels: np.ndarray,
     return mi, float(np.percentile(null, 95))
 
 
-def linear_probe_r2(embeddings: np.ndarray, target: np.ndarray, test_frac: float = 0.5) -> float:
-    """Diagnostics 3/4: fit LinearRegression(embeddings -> target) on the
-    first (1-test_frac) share, score R^2 out-of-sample on the rest -- an
-    out-of-sample split rather than in-sample R^2, since embeddings are
-    typically high-dimensional enough that in-sample R^2 would overstate
-    what the embedding actually encodes."""
+def group_blocked_train_mask(groups: np.ndarray, test_frac: float,
+                              rng: np.random.Generator) -> np.ndarray:
+    """Boolean TRAIN mask over `groups`' rows (True=train), splitting whole
+    groups (e.g. tickers) into train/test rather than individual rows -- the
+    fix for diagnostics 3/4's linear probes, which previously shuffled ROWS
+    with an iid rng.permutation before a positional split. Adjacent-month
+    rows of the SAME ticker are near-duplicate embeddings with near-
+    identical targets; an iid row shuffle can still land near-copies on
+    both sides of the split (a high-dimensional linear regression can
+    nearly interpolate a training near-duplicate and "predict" its held-out
+    twin well from proximity alone, not from any genuinely cross-sectional
+    relationship), inflating OOS R^2.
+
+    Groups are shuffled, then greedily assigned to the TEST set (in
+    shuffled order) until their combined row count reaches test_frac of the
+    total -- approximates the requested fraction of ROWS, not of groups, so
+    one ticker with much more history than another doesn't skew the split.
+    At least one group is kept on each side."""
+    groups = np.asarray(groups)
+    unique, counts = np.unique(groups, return_counts=True)
+    if len(unique) < 2:
+        raise ValueError("group_blocked_train_mask needs >=2 distinct groups to split")
+
+    order = rng.permutation(len(unique))
+    shuffled_unique, shuffled_counts = unique[order], counts[order]
+
+    target_test_rows = test_frac * len(groups)
+    cum = np.cumsum(shuffled_counts)
+    n_test_groups = int(np.searchsorted(cum, target_test_rows)) + 1
+    n_test_groups = min(max(n_test_groups, 1), len(unique) - 1)
+    test_groups = set(shuffled_unique[:n_test_groups])
+    return ~np.isin(groups, list(test_groups))
+
+
+def linear_probe_r2(embeddings: np.ndarray, target: np.ndarray, test_frac: float = 0.5,
+                     train_mask: np.ndarray | None = None) -> float:
+    """Diagnostics 3/4: fit LinearRegression(embeddings -> target), score R^2
+    out-of-sample -- an out-of-sample split rather than in-sample R^2, since
+    embeddings are typically high-dimensional enough that in-sample R^2
+    would overstate what the embedding actually encodes.
+
+    `train_mask`: optional pre-computed boolean TRAIN mask (e.g. from
+    group_blocked_train_mask) -- when given, used directly instead of the
+    default positional first-(1-test_frac)-share/last-test_frac-share split.
+    Passing neither `train_mask` reproduces the original (row-order) split
+    exactly, so existing callers are unaffected."""
+    if train_mask is not None:
+        model = LinearRegression().fit(embeddings[train_mask], target[train_mask])
+        pred = model.predict(embeddings[~train_mask])
+        return float(r2_score(target[~train_mask], pred))
+
     n = len(embeddings)
     split = int(n * (1 - test_frac))
     model = LinearRegression().fit(embeddings[:split], target[:split])
@@ -114,13 +159,16 @@ def linear_probe_r2(embeddings: np.ndarray, target: np.ndarray, test_frac: float
 
 
 def valuation_vs_volatility_probe(embeddings: np.ndarray, valuation_target: np.ndarray,
-                                   volatility_target: np.ndarray,
-                                   test_frac: float = 0.5) -> tuple[float, float]:
+                                   volatility_target: np.ndarray, test_frac: float = 0.5,
+                                   train_mask: np.ndarray | None = None) -> tuple[float, float]:
     """Diagnostic 3, the direct test of "SSL might learn volatility
     clustering instead of value" (Risks). Gate: valuation R^2 > volatility
-    R^2, AND valuation R^2 >= 0.05."""
-    val_r2 = linear_probe_r2(embeddings, valuation_target, test_frac)
-    vol_r2 = linear_probe_r2(embeddings, volatility_target, test_frac)
+    R^2, AND valuation R^2 >= 0.05. `train_mask` (optional, e.g. from
+    group_blocked_train_mask) is applied identically to BOTH probes so the
+    valuation-vs-volatility comparison isn't confounded by scoring them on
+    two different splits."""
+    val_r2 = linear_probe_r2(embeddings, valuation_target, test_frac, train_mask=train_mask)
+    vol_r2 = linear_probe_r2(embeddings, volatility_target, test_frac, train_mask=train_mask)
     return val_r2, vol_r2
 
 

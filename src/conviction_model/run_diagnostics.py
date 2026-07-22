@@ -38,9 +38,9 @@ from ..h_series.spine import monthly_decision_dates
 from .config import SSLConfig
 from .data import DAILY_FEATURES, MONTHLY_FEATURES, QUARTERLY_FEATURES, WEEKLY_FEATURES, build_frame_cache
 from .diagnostics import (
-    latent_similarity_significance, neighbor_outcome_variance_ratio, perturbation_sensitivity,
-    quality_persistence_autocorrelation, regime_mutual_information, temporal_smoothness_significance,
-    valuation_vs_volatility_probe,
+    group_blocked_train_mask, latent_similarity_significance, neighbor_outcome_variance_ratio,
+    perturbation_sensitivity, quality_persistence_autocorrelation, regime_mutual_information,
+    temporal_smoothness_significance, valuation_vs_volatility_probe,
 )
 from .encoder import EncoderCNN
 from .labels import (
@@ -189,8 +189,11 @@ def diag3_valuation_vs_volatility(embeddings, points, frame_cache, rng):
     val, vol = np.array(val), np.array(vol)
 
     mask = np.isfinite(val) & np.isfinite(vol)
-    order = rng.permutation(int(mask.sum()))  # iid random split, not points' ticker-grouped order
-    val_r2, vol_r2 = valuation_vs_volatility_probe(embeddings[mask][order], val[mask][order], vol[mask][order])
+    # Ticker-BLOCKED split (not an iid row shuffle): a whole ticker's rows land entirely on
+    # one side, so adjacent-month near-duplicate rows of the SAME ticker can't leak across
+    # train/test and inflate OOS R^2 (diagnostics review finding 6).
+    train_mask = group_blocked_train_mask(points["ticker"].to_numpy()[mask], test_frac=0.5, rng=rng)
+    val_r2, vol_r2 = valuation_vs_volatility_probe(embeddings[mask], val[mask], vol[mask], train_mask=train_mask)
     return val_r2, vol_r2, int(mask.sum())
 
 

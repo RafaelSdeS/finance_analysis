@@ -19,9 +19,9 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from src.conviction_model.diagnostics import (  # noqa: E402
-    latent_similarity_significance, linear_probe_r2, neighbor_outcome_variance_ratio,
-    perturbation_sensitivity, quality_persistence_autocorrelation, regime_mutual_information,
-    temporal_smoothness_significance,
+    group_blocked_train_mask, latent_similarity_significance, linear_probe_r2,
+    neighbor_outcome_variance_ratio, perturbation_sensitivity, quality_persistence_autocorrelation,
+    regime_mutual_information, temporal_smoothness_significance,
 )
 from test_utils import print_check, print_header, print_section_end  # noqa: E402
 
@@ -172,6 +172,88 @@ def test_linear_probe_recovers_injected_relationship(passed, failed):
     return passed + ok, failed + (not ok)
 
 
+def test_group_blocked_train_mask_never_splits_a_group(passed, failed):
+    groups = np.repeat([f"T{i}" for i in range(8)], [10, 15, 5, 20, 8, 12, 6, 9])
+    train_mask = group_blocked_train_mask(groups, test_frac=0.5, rng=np.random.default_rng(3))
+
+    train_groups = set(groups[train_mask])
+    test_groups = set(groups[~train_mask])
+    no_overlap = len(train_groups & test_groups) == 0
+    both_nonempty = len(train_groups) > 0 and len(test_groups) > 0
+    test_row_frac = (~train_mask).mean()
+    frac_reasonable = 0.3 <= test_row_frac <= 0.7  # approximates test_frac=0.5 by ROW count, not group count
+
+    ok = no_overlap and both_nonempty and frac_reasonable
+    print_check("group_blocked_train_mask: no group appears on both sides, and the row-count split "
+                "approximates test_frac despite uneven group sizes",
+                ok, f"no_overlap={no_overlap}, both_nonempty={both_nonempty}, test_row_frac={test_row_frac:.3f}")
+    return passed + ok, failed + (not ok)
+
+
+def _near_duplicate_leakage_fixture(n_tickers=10, n_per_ticker=25, d=8, ticker_spread=1.5,
+                                     walk_scale=0.5, ar1_phi=0.95, ar1_scale=0.5, rng=None):
+    """Mirrors the real linear-probe leakage concern (review finding 6): embeddings
+    that are per-ticker near-duplicates over TIME (a small per-step random walk in d
+    dims, so temporally-adjacent same-ticker rows sit almost on top of each other --
+    exactly how a real encoder's overlapping windows behave) paired with a target
+    that's genuinely autocorrelated WITHIN a ticker (AR(1), decays with lag) but
+    fully INDEPENDENT ACROSS tickers. A high-dimensional (d) linear regression,
+    given even a FEW of a ticker's rows in train, can nearly interpolate that
+    ticker's local target level and "predict" a temporally-adjacent held-out row of
+    the SAME ticker well -- purely from embedding proximity to its own training
+    near-duplicate, not from any genuinely cross-sectional, ticker-transferable
+    relationship. A ticker-BLOCKED split removes this: an entirely held-out ticker
+    was never seen in training at all, so there's nothing to interpolate from, and
+    each ticker's AR(1) is independent of every other's by construction -- the
+    honest OOS R^2 on a truly unseen ticker should be near zero."""
+    rng = rng or np.random.default_rng(31)
+    tickers, embeddings, targets = [], [], []
+    for t in range(n_tickers):
+        center = rng.normal(scale=ticker_spread, size=d)
+        walk = np.cumsum(rng.normal(scale=walk_scale, size=(n_per_ticker, d)), axis=0)
+        target = np.zeros(n_per_ticker)
+        for m in range(1, n_per_ticker):
+            target[m] = ar1_phi * target[m - 1] + rng.normal(scale=ar1_scale)
+        tickers.extend([f"T{t}"] * n_per_ticker)
+        embeddings.append(center + walk)
+        targets.append(target)
+    return np.array(tickers), np.concatenate(embeddings, axis=0), np.concatenate(targets)
+
+
+def test_linear_probe_ticker_blocked_split_removes_near_duplicate_leakage(passed, failed):
+    tickers, embeddings, target = _near_duplicate_leakage_fixture()
+
+    # Old behavior: iid row shuffle (mirrors run_diagnostics.py's pre-fix rng.permutation)
+    # then a plain positional split -- can place a ticker's near-duplicate adjacent-time
+    # rows on both sides.
+    order = np.random.default_rng(1).permutation(len(embeddings))
+    r2_iid = linear_probe_r2(embeddings[order], target[order], test_frac=0.5)
+
+    # New behavior: a whole ticker's rows land entirely on one side.
+    train_mask = group_blocked_train_mask(tickers, test_frac=0.5, rng=np.random.default_rng(1))
+    r2_blocked = linear_probe_r2(embeddings, target, train_mask=train_mask)
+
+    ok = r2_iid > r2_blocked + 0.1
+    print_check("linear_probe_r2: a ticker-blocked split reports materially lower (more honest) R^2 than "
+                "an iid row-shuffled split, on data with only within-ticker autocorrelation and no "
+                "genuine cross-ticker signal", ok, f"r2_iid={r2_iid:.4f}, r2_blocked={r2_blocked:.4f}")
+    return passed + ok, failed + (not ok)
+
+
+def test_linear_probe_no_train_mask_matches_original_behavior(passed, failed):
+    # Passing no train_mask must reproduce the pre-fix positional-split computation exactly.
+    n, d = 400, 5
+    embeddings = RNG.normal(size=(n, d))
+    true_weights = RNG.normal(size=d)
+    signal = embeddings @ true_weights
+    target = signal + RNG.normal(scale=0.5 * signal.std(), size=n)
+    r2 = linear_probe_r2(embeddings, target, test_frac=0.5)
+    ok = r2 > 0.5
+    print_check("linear_probe_r2: omitting train_mask still recovers the original injected linear "
+                "relationship (no default-path regression)", ok, f"r2={r2:.4f}")
+    return passed + ok, failed + (not ok)
+
+
 def test_quality_persistence_autocorrelation_high_for_persistent_series(passed, failed):
     n = 200
     slow_walk = np.cumsum(RNG.normal(scale=0.05, size=n))  # smooth, structurally persistent
@@ -250,6 +332,9 @@ def main() -> int:
         test_regime_mutual_information_clears_null_when_clusters_match_regime,
         test_regime_mutual_information_does_not_clear_null_on_pure_noise,
         test_linear_probe_recovers_injected_relationship,
+        test_group_blocked_train_mask_never_splits_a_group,
+        test_linear_probe_ticker_blocked_split_removes_near_duplicate_leakage,
+        test_linear_probe_no_train_mask_matches_original_behavior,
         test_quality_persistence_autocorrelation_high_for_persistent_series,
         test_perturbation_sensitivity_flags_discontinuous_encoder,
         test_perturbation_sensitivity_passes_smooth_encoder,
