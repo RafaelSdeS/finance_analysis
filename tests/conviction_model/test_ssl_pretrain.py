@@ -25,7 +25,7 @@ from src.conviction_model.data import (  # noqa: E402
 from src.conviction_model.encoder import EncoderCNN  # noqa: E402
 from src.conviction_model.config import SSLConfig  # noqa: E402
 from src.conviction_model.ssl_pretrain import (  # noqa: E402
-    CPCPanelStore, LazyPanelGatherer, _price_macro_state, build_cpc_batch, info_nce_loss,
+    CPCPanelStore, LazyPanelGatherer, _price_macro_state, build_cpc_batch, build_stage1b_batch, info_nce_loss,
     sample_cpc_anchor_positions, sample_cpc_negatives, score_holdout, score_holdout_stage1b,
     split_train_holdout, train_step, train_step_stage1b,
 )
@@ -269,16 +269,40 @@ def test_price_macro_state_ignores_fundamentals(passed, failed):
     return passed + ok, failed + (not ok)
 
 
+def test_build_stage1b_batch_positives_use_different_horizons(passed, failed):
+    panel, cache = _synthetic_frame_cache(["AAA", "BBB"], n_days=400)
+    store = CPCPanelStore(panel, cache)
+    cpc_horizon, alignment_horizon = 21, 63
+    max_horizon = max(cpc_horizon, alignment_horizon)
+    anchors = sample_cpc_anchor_positions(panel, batch_size=10, cpc_horizon=max_horizon,
+                                           rng=np.random.default_rng(5))
+    tickers = panel["ticker"].to_numpy()
+
+    anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch = build_stage1b_batch(
+        panel, store, anchors, cpc_horizon, alignment_horizon, rng=np.random.default_rng(6))
+
+    same_ticker_cpc = bool(np.all(tickers[anchors + cpc_horizon] == tickers[anchors]))
+    same_ticker_align = bool(np.all(tickers[anchors + alignment_horizon] == tickers[anchors]))
+    differ = not torch.allclose(cpc_positive_batch["daily"], align_positive_batch["daily"])
+    ok = same_ticker_cpc and same_ticker_align and differ
+    print_check("build_stage1b_batch: cpc/alignment positives are the same ticker, different "
+                "(cpc_horizon vs alignment_horizon) offsets ahead",
+                ok, f"same_ticker_cpc={same_ticker_cpc}, same_ticker_align={same_ticker_align}, differ={differ}")
+    return passed + ok, failed + (not ok)
+
+
 def test_train_step_stage1b_updates_params_and_returns_finite_losses(passed, failed):
     torch.manual_seed(0)
     n_features, window, batch_size, n_negatives = 5, 8, 4, 3
     model = EncoderCNN(n_features, n_features, n_features, n_features, d_model=8, n_heads=2)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
     anchor, negatives = _tiny_batch(batch_size, n_negatives, n_features, window)
-    positive, _ = _tiny_batch(batch_size, n_negatives, n_features, window)
+    cpc_positive, _ = _tiny_batch(batch_size, n_negatives, n_features, window)
+    align_positive, _ = _tiny_batch(batch_size, n_negatives, n_features, window)
 
     params_before = [p.clone() for p in model.parameters()]
-    losses = train_step_stage1b(model, optimizer, anchor, positive, negatives, alignment_weight=0.5)
+    losses = train_step_stage1b(model, optimizer, anchor, cpc_positive, align_positive, negatives,
+                                 alignment_weight=0.5)
 
     finite = all(v == v and v != float("inf") for v in losses.values())
     print_check("train_step_stage1b: returns finite total/cpc/alignment losses", finite, f"{losses}")
@@ -294,8 +318,8 @@ def test_score_holdout_stage1b_does_not_change_params_and_returns_finite_score(p
     panel, cache = _synthetic_frame_cache(["AAA", "BBB"], n_days=400)
     _, holdout_panel = split_train_holdout(panel, holdout_days=180)
     holdout_store = CPCPanelStore(holdout_panel, cache)
-    cfg = SSLConfig(cpc_horizon=10, batch_size=8, n_same_stock_negatives=2, n_diff_stock_negatives=2,
-                     alignment_weight=0.5)
+    cfg = SSLConfig(cpc_horizon=10, alignment_horizon=30, batch_size=8,
+                     n_same_stock_negatives=2, n_diff_stock_negatives=2, alignment_weight=0.5)
 
     model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
                         len(QUARTERLY_FEATURES), d_model=8, n_heads=2)
@@ -327,6 +351,7 @@ def main() -> int:
         test_score_holdout_does_not_change_params_and_returns_finite_score,
         test_train_step_updates_params_and_returns_finite_loss,
         test_price_macro_state_ignores_fundamentals,
+        test_build_stage1b_batch_positives_use_different_horizons,
         test_train_step_stage1b_updates_params_and_returns_finite_losses,
         test_score_holdout_stage1b_does_not_change_params_and_returns_finite_score,
     ]:

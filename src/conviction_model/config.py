@@ -36,10 +36,17 @@ class SSLConfig:
     # (Module layout: "weighted sum" -- loss = cpc + alignment_weight * alignment).
     # 1.0 = equal footing with CPC to start; arbitrary, adjustable like every other
     # loss weight in this plan (e.g. Phase 2's per-horizon regressor weights).
-    # Reuses cpc_horizon as the forward gap for "predict the fundamentals branch's
-    # embedding at t+k" -- the plan doesn't call for a separate horizon, and sharing
-    # it lets one build_cpc_batch() call serve both losses each step.
     alignment_weight: float = 1.0
+    # Deliberately NOT cpc_horizon (21 trading days, ~1 month). The fundamentals
+    # branch only updates on a filing cadence roughly 3x longer (~63 trading days/
+    # quarter, CLAUDE.md's documented ~45-90 day filing lag) -- at cpc_horizon, most
+    # (t, t+k) pairs span no real fundamentals transition at all, so the alignment
+    # loss was mostly testing "stay consistent with the still-current quarter," not
+    # real forward prediction (first real Stage 1B run, 2026-07-21: alignment train
+    # loss collapsed 0.30->0.05 in 50 steps while holdout never improved past step
+    # ~1500 -- a shortcut, not learning). 63 trading days = one fiscal quarter, so a
+    # (t, t+alignment_horizon) pair is far more likely to actually straddle a filing.
+    alignment_horizon: int = 63
 
     def to_json(self, path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=2))

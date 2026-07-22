@@ -646,15 +646,32 @@ Phase 2 does not start until Phase 1D is done and reported.
       2026-07-21 `drop_zero_adjclose`→`trailing_volatility` NaN-masking fix; numbers essentially
       unchanged from the pre-fix run, as expected — only 0.03% of rows were affected.)
 - [~] **Stage 1B — + forward cross-modal alignment.** Warm-start from 1A; retrain; rerun
-      diagnostics; compare against 1A. **Code written (2026-07-21):** `_price_macro_state`/
-      `_alignment_loss`/`_stage1b_loss`/`train_step_stage1b`/`score_holdout_stage1b`
-      (`ssl_pretrain.py`) -- reuses CPC's own (anchor, positive, negative) batches, scored
-      against a different branch selection (price/macro state predicts the fundamentals
-      branch's embedding at t+cpc_horizon) instead of a new data path. `alignment_weight`
-      added to `SSLConfig` (weighted sum with CPC, default 1.0). `run_stage1b.py` warm-starts
-      from the latest `stage1a-*.pt`, reusing its exact hyperparameters. Tests pass
-      (16/16 `test_ssl_pretrain.py`, 2/2 `test_config.py`). **Not yet run for real** -- the
-      warm-start training + rerun-diagnostics steps above are still open.
+      diagnostics; compare against 1A.
+      **v1 code + real run (2026-07-21), checkpoint `stage1b-20260721-215534.pt`:**
+      `_price_macro_state`/`_alignment_loss`/`_stage1b_loss`/`train_step_stage1b`/
+      `score_holdout_stage1b` (`ssl_pretrain.py`), `alignment_weight` in `SSLConfig`
+      (weighted sum, default 1.0), `run_stage1b.py` warm-starts from `stage1a-20260721-165853.pt`.
+      v1 reused `cpc_horizon` (21 trading days) as the alignment horizon. **Result: 4/7 gates,
+      same 3 failing as 1A (no gate flipped).** Mixed movement vs. 1A: [1] 0.7983→0.6788 better,
+      [3] valuation R² -0.0531→-0.0254 better (still fails the 0.05 floor), [6] 0.1406→0.2280
+      better; [4] quality persistence 0.0833→0.0532 **worse**; [2]/[7] roughly flat. Training
+      log showed a real overfitting signature distinct from 1A's own clean, still-improving
+      holdout curve: alignment's train loss collapsed 0.30→0.05 within 50 steps while holdout
+      never improved past step ~1500 (best 1.0587) and oscillated 1.06-1.38 for the remaining
+      3500 steps -- checkpoint-at-peak correctly restored the step-1499 weights, not the
+      overfit final ones.
+      **v2 diagnosis + fix (2026-07-21, code only, not yet retrained):** the horizon mismatch is
+      the likely cause -- `cpc_horizon`=21 trading days (~1 month) is short relative to the
+      fundamentals branch's ~63-trading-day/quarter filing cadence, so most (t, t+21) alignment
+      pairs spanned no real fundamentals transition at all; the loss was mostly learnable as
+      "stay consistent with the still-current quarter," not real forward prediction -- consistent
+      with the fast train-loss collapse. Added `alignment_horizon` (default 63) to `SSLConfig`,
+      decoupled from `cpc_horizon`; `build_stage1b_batch()` (`ssl_pretrain.py`) now builds two
+      separate positive batches off the same anchor/negatives, one per horizon.
+      `train_step_stage1b`/`score_holdout_stage1b`/`run_stage1b.py` updated to match. Tests pass
+      (17/17 `test_ssl_pretrain.py`, 2/2 `test_config.py`, 52/52 fast suite). **Not yet retrained
+      with the new horizon** -- rerunning `run_stage1b.py` (fresh warm-start from 1A, since v1's
+      checkpoint is already past its own peak) and rerunning diagnostics are still open.
 - [ ] **Stage 1C — + masked reconstruction.** Same pattern; compare against 1B.
 - [ ] **Stage 1D — + auxiliary valuation probe** (NaN-masked on rows without a defined
       `pl_zhist_5y`/`pvp_zhist_5y`). Same pattern; compare against 1C.

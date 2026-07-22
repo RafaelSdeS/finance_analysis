@@ -318,17 +318,45 @@ def _price_macro_state(branch_embeddings: dict) -> torch.Tensor:
     return torch.stack([branch_embeddings[k] for k in keys], dim=1).mean(dim=1)
 
 
-def _alignment_loss(model: torch.nn.Module, anchor_batch: dict, positive_batch: dict,
+def build_stage1b_batch(panel: pd.DataFrame, store, anchor_positions: np.ndarray,
+                         cpc_horizon: int, alignment_horizon: int,
+                         n_same_stock: int = 4, n_diff_stock: int = 4,
+                         regime_gap_days: int = 252,
+                         rng: np.random.Generator | None = None) -> tuple[dict, dict, dict, dict]:
+    """Stage 1B's batch assembly: CPC and forward cross-modal alignment read
+    DIFFERENT forward horizons off the SAME anchor -- alignment_horizon
+    (default ~63 trading days, one fiscal quarter) deliberately differs from
+    cpc_horizon (21 trading days), matching the fundamentals branch's actual
+    update cadence instead of a horizon picked for CPC's own reasons (see
+    SSLConfig.alignment_horizon for why sharing cpc_horizon was wrong).
+    Negatives ARE shared -- sample_cpc_negatives doesn't depend on horizon at
+    all, so the same same-stock-different-regime/different-stock-same-time
+    negatives serve both losses; only the positive differs. Returns
+    (anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch)."""
+    rng = rng or np.random.default_rng()
+    negative_positions = sample_cpc_negatives(panel, anchor_positions, n_same_stock,
+                                               n_diff_stock, regime_gap_days, rng)
+
+    anchor_batch = store.gather(anchor_positions)
+    cpc_positive_batch = store.gather(anchor_positions + cpc_horizon)
+    align_positive_batch = store.gather(anchor_positions + alignment_horizon)
+    flat_negatives = store.gather(negative_positions.reshape(-1))
+    n_negatives = n_same_stock + n_diff_stock
+    negative_batch = {name: t.reshape(len(anchor_positions), n_negatives, *t.shape[1:])
+                       for name, t in flat_negatives.items()}
+    return anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch
+
+
+def _alignment_loss(model: torch.nn.Module, anchor_batch: dict, align_positive_batch: dict,
                      negative_batch: dict, temperature: float) -> torch.Tensor:
-    """Stage 1B's forward cross-modal alignment loss. Reuses the exact same
-    (anchor, positive, negative) batches CPC's build_cpc_batch already
-    assembles -- only the branch selection differs: anchor pools price/macro
-    branches only (_price_macro_state), positive/negatives read the
-    FUNDAMENTALS branch alone (not pooled) at t+cpc_horizon. Same InfoNCE
-    contrastive form as CPC (info_nce_loss), scored against a different pair
-    of embeddings, not new machinery."""
+    """Stage 1B's forward cross-modal alignment loss. anchor pools price/macro
+    branches only (_price_macro_state) at t; align_positive_batch/negatives
+    read the FUNDAMENTALS branch alone (not pooled) at t+alignment_horizon
+    (build_stage1b_batch). Same InfoNCE contrastive form as CPC
+    (info_nce_loss), scored against a different pair of embeddings and a
+    different horizon, not new machinery."""
     anchor_emb = _price_macro_state(model(**anchor_batch))
-    positive_emb = model(**positive_batch)["fundamentals"]
+    positive_emb = model(**align_positive_batch)["fundamentals"]
 
     batch_size = anchor_batch["daily"].shape[0]
     n_negatives = negative_batch["daily"].shape[1]
@@ -339,30 +367,31 @@ def _alignment_loss(model: torch.nn.Module, anchor_batch: dict, positive_batch: 
     return info_nce_loss(anchor_emb, positive_emb, negative_emb, temperature)
 
 
-def _stage1b_loss(model: torch.nn.Module, anchor_batch: dict, positive_batch: dict,
-                   negative_batch: dict, temperature: float, alignment_weight: float) -> dict:
+def _stage1b_loss(model: torch.nn.Module, anchor_batch: dict, cpc_positive_batch: dict,
+                   align_positive_batch: dict, negative_batch: dict, temperature: float,
+                   alignment_weight: float) -> dict:
     """CPC + forward cross-modal alignment, combined as a weighted sum (Module
     layout: ssl_pretrain.py's losses combine as a weighted sum). Shared by
     train_step_stage1b (grad) and score_holdout_stage1b (no_grad) -- same
     split Stage 1A's _cpc_loss already uses. Returns all three terms (not
     just the total) so the training loop can log whether alignment is
     actually learning something, not just riding CPC's gradient."""
-    cpc = _cpc_loss(model, anchor_batch, positive_batch, negative_batch, temperature)
-    alignment = _alignment_loss(model, anchor_batch, positive_batch, negative_batch, temperature)
+    cpc = _cpc_loss(model, anchor_batch, cpc_positive_batch, negative_batch, temperature)
+    alignment = _alignment_loss(model, anchor_batch, align_positive_batch, negative_batch, temperature)
     total = cpc + alignment_weight * alignment
     return {"total": total, "cpc": cpc, "alignment": alignment}
 
 
 def train_step_stage1b(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
-                        anchor_batch: dict, positive_batch: dict, negative_batch: dict,
-                        temperature: float = 0.1, alignment_weight: float = 1.0,
+                        anchor_batch: dict, cpc_positive_batch: dict, align_positive_batch: dict,
+                        negative_batch: dict, temperature: float = 0.1, alignment_weight: float = 1.0,
                         grad_clip_norm: float | None = None) -> dict:
     """One Stage 1B gradient step. Returns {'total','cpc','alignment'} floats
     -- unlike Stage 1A's train_step (a single float), since seeing each term
     separately is the whole point of logging a combined-loss run."""
     optimizer.zero_grad()
-    losses = _stage1b_loss(model, anchor_batch, positive_batch, negative_batch,
-                            temperature, alignment_weight)
+    losses = _stage1b_loss(model, anchor_batch, cpc_positive_batch, align_positive_batch,
+                            negative_batch, temperature, alignment_weight)
     losses["total"].backward()
     if grad_clip_norm is not None:
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
@@ -378,15 +407,16 @@ def score_holdout_stage1b(model: torch.nn.Module, holdout_panel: pd.DataFrame, h
     alignment), not the two terms separately."""
     model.eval()
     totals = []
+    max_horizon = max(cfg.cpc_horizon, cfg.alignment_horizon)
     with torch.no_grad():
         for _ in range(n_eval_batches):
-            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, cfg.cpc_horizon, rng=rng)
-            anchor_batch, positive_batch, negative_batch = build_cpc_batch(
-                holdout_panel, holdout_store, anchors, cfg.cpc_horizon,
+            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, max_horizon, rng=rng)
+            anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch = build_stage1b_batch(
+                holdout_panel, holdout_store, anchors, cfg.cpc_horizon, cfg.alignment_horizon,
                 n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
                 regime_gap_days=cfg.regime_gap_days, rng=rng)
-            losses = _stage1b_loss(model, anchor_batch, positive_batch, negative_batch,
-                                    cfg.temperature, cfg.alignment_weight)
+            losses = _stage1b_loss(model, anchor_batch, cpc_positive_batch, align_positive_batch,
+                                    negative_batch, cfg.temperature, cfg.alignment_weight)
             totals.append(float(losses["total"].item()))
     model.train()
     return sum(totals) / len(totals)

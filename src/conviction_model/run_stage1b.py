@@ -29,7 +29,7 @@ from .data import DAILY_FEATURES, MONTHLY_FEATURES, QUARTERLY_FEATURES, WEEKLY_F
 from .encoder import EncoderCNN
 from .run_stage1a import CHECKPOINT_DIR, LOG_DIR, _holdout_eligible_count, _save_checkpoint, load_panel, setup_logging
 from .ssl_pretrain import (
-    LazyPanelGatherer, build_cpc_batch, sample_cpc_anchor_positions, score_holdout_stage1b, split_train_holdout,
+    LazyPanelGatherer, build_stage1b_batch, sample_cpc_anchor_positions, score_holdout_stage1b, split_train_holdout,
     train_step_stage1b,
 )
 
@@ -83,8 +83,9 @@ def main() -> None:
     frame_cache = build_frame_cache(tickers)
     log.info(f"Frame cache built ({time.monotonic() - t0:.1f}s)")
 
+    max_horizon = max(cfg.cpc_horizon, cfg.alignment_horizon)
     train_panel, holdout_panel = split_train_holdout(panel, cfg.checkpoint_holdout_days)
-    holdout_enabled = _holdout_eligible_count(holdout_panel, cfg.cpc_horizon) >= cfg.batch_size
+    holdout_enabled = _holdout_eligible_count(holdout_panel, max_horizon) >= cfg.batch_size
     if not holdout_enabled:
         log.warning(f"holdout too small for checkpoint_holdout_days={cfg.checkpoint_holdout_days} "
                      "(not enough eligible rows) -- checkpoint-at-peak disabled, training on the full panel")
@@ -105,13 +106,13 @@ def main() -> None:
     best_step, best_score, best_state = None, None, None
     t_start = time.monotonic()
     for step in range(args.steps):
-        anchors = sample_cpc_anchor_positions(train_panel, cfg.batch_size, cfg.cpc_horizon, rng=np_rng)
-        anchor_batch, positive_batch, negative_batch = build_cpc_batch(
-            train_panel, train_store, anchors, cfg.cpc_horizon,
+        anchors = sample_cpc_anchor_positions(train_panel, cfg.batch_size, max_horizon, rng=np_rng)
+        anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch = build_stage1b_batch(
+            train_panel, train_store, anchors, cfg.cpc_horizon, cfg.alignment_horizon,
             n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
             regime_gap_days=cfg.regime_gap_days, rng=np_rng)
-        loss = train_step_stage1b(model, optimizer, anchor_batch, positive_batch, negative_batch,
-                                   temperature=cfg.temperature, alignment_weight=cfg.alignment_weight)
+        loss = train_step_stage1b(model, optimizer, anchor_batch, cpc_positive_batch, align_positive_batch,
+                                   negative_batch, temperature=cfg.temperature, alignment_weight=cfg.alignment_weight)
         losses.append(loss)
         if step % args.log_every == 0 or step == args.steps - 1:
             recent = losses[-args.log_every:]
