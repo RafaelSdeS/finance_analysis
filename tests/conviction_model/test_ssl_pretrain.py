@@ -243,6 +243,24 @@ def test_cached_panel_gatherer_maxsize_zero_still_works(passed, failed):
     return passed + ok, failed + (not ok)
 
 
+def test_cached_panel_gatherer_stores_float32_not_float64(passed, failed):
+    # Regression test for a real bug: window_tensor's raw output is float64. An earlier
+    # version of CachedPanelGatherer cached that raw dict directly, silently DOUBLING the
+    # intended per-entry memory footprint (CPCPanelStore's own ~17KB/position figure already
+    # assumes a float32 cast) -- this caused a real OOM kill in production at the
+    # then-default cache size. Cached entries must be float32, matching CPCPanelStore's own
+    # convention, not whatever dtype the underlying computation happens to produce.
+    panel, cache = _synthetic_frame_cache(["AAA"], n_days=400)
+    gatherer = CachedPanelGatherer(panel, cache, maxsize=10)
+    gatherer.gather(np.array([100]))
+    cached_entry = next(iter(gatherer._cache.values()))
+    ok = all(arr.dtype == np.float32 for arr in cached_entry.values())
+    print_check("CachedPanelGatherer: cached entries are float32, not float64 (halves resident "
+                "memory vs. window_tensor's raw output dtype)", ok,
+                f"dtypes={[arr.dtype for arr in cached_entry.values()]}")
+    return passed + ok, failed + (not ok)
+
+
 def test_build_cpc_batch_positive_is_same_ticker_k_ahead(passed, failed):
     panel, cache = _synthetic_frame_cache(["AAA", "BBB"], n_days=400)
     cpc_horizon = 21
@@ -432,6 +450,7 @@ def main() -> int:
         test_cached_panel_gatherer_consistent_after_eviction,
         test_cached_panel_gatherer_evicts_least_recently_used,
         test_cached_panel_gatherer_maxsize_zero_still_works,
+        test_cached_panel_gatherer_stores_float32_not_float64,
         test_build_cpc_batch_positive_is_same_ticker_k_ahead,
         test_split_train_holdout_respects_cutoff_and_stays_contiguous,
         test_score_holdout_does_not_change_params_and_returns_finite_score,

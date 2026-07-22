@@ -223,19 +223,27 @@ class CachedPanelGatherer:
 
     CPC/alignment sample positions WITH REPLACEMENT from the same panel every step, so by
     later steps in a several-thousand-step run many positions have already been computed
-    at least once -- caching those results trades a BOUNDED amount of memory (maxsize
-    entries * ~17KB/position, e.g. 200_000 * 17KB =~ 3.4GB) for skipping the repeat
-    computation on a cache hit, without CPCPanelStore's unbounded-with-universe-size
-    memory risk. A pure memoization of a deterministic function (the underlying frame data
-    never changes mid-run) -- results are bit-identical to LazyPanelGatherer's, this only
-    changes wall-clock, never behavior (tested: test_ssl_pretrain.py).
+    at least once -- caching those results trades a BOUNDED amount of memory for skipping
+    the repeat computation on a cache hit, without CPCPanelStore's unbounded-with-universe-
+    size memory risk. A pure memoization of a deterministic function (the underlying frame
+    data never changes mid-run) -- results are bit-identical to LazyPanelGatherer's, this
+    only changes wall-clock, never behavior (tested: test_ssl_pretrain.py).
+
+    Cached entries are cast to float32 before storing (~17.65KB/entry, empirically measured
+    via tracemalloc) -- window_tensor's raw output is float64, and an earlier version of
+    this class cached that raw float64 dict directly, silently DOUBLING the intended
+    footprint and causing a real OOM kill in production at the (then-)default 200_000-entry
+    size across two independent stores (train + holdout each cache separately -- ~13.6GB
+    combined pre-fix, not the ~3.4GB a per-store-only estimate implied). Casting per-window
+    here vs. after gather()'s final stack+torch.tensor(..., dtype=torch.float32) produces
+    bit-identical values either way (elementwise rounding doesn't depend on stacking order).
 
     ponytail: a plain OrderedDict LRU keyed by (ticker, as_of), evicting the least-recently-
     used entry once maxsize is reached -- not thread-safe (fine, this training loop is
     single-threaded); revisit with a proper cache library only if this bookkeeping itself
     becomes a measurable cost, which is unlikely at these sizes."""
 
-    def __init__(self, panel: pd.DataFrame, frame_cache: dict, maxsize: int = 200_000):
+    def __init__(self, panel: pd.DataFrame, frame_cache: dict, maxsize: int = 50_000):
         self.tickers = panel["ticker"].to_numpy()
         self.dates = panel["trade_date"].to_numpy()
         self.frame_cache = frame_cache
@@ -252,6 +260,12 @@ class CachedPanelGatherer:
         daily_frame, weekly_frame, monthly_frame, quarterly_frame = self.frame_cache[ticker]
         windows = branch_windows_from_precomputed(daily_frame, weekly_frame, monthly_frame,
                                                     quarterly_frame, as_of)
+        # window_tensor returns float64 -- cast to float32 BEFORE caching (halves resident
+        # memory, matches CPCPanelStore's own float32 convention for its resident tensors).
+        # Casting per-window here vs. after gather()'s final stack+torch.tensor(...,
+        # dtype=torch.float32) produces bit-identical results either way (elementwise
+        # rounding doesn't depend on stacking order) -- verified in test_ssl_pretrain.py.
+        windows = {name: arr.astype(np.float32) for name, arr in windows.items()}
         self._cache[key] = windows
         if len(self._cache) > self.maxsize:
             self._cache.popitem(last=False)  # evict least-recently-used

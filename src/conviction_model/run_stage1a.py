@@ -72,8 +72,14 @@ CHECKPOINT_DIR = ROOT / "artifacts/checkpoints/conviction_model"
 LOG_DIR = ROOT / "artifacts/logs/conviction_model"
 DEFAULT_STEPS = 5000  # first-guess budget for this initial run -- arbitrary, adjustable via --steps
 DEFAULT_RESERVED_HOLDOUT_YEARS = 2.0  # matches the plan's Phase 7 "most recent ~1-2 years"
-DEFAULT_PANEL_CACHE_SIZE = 200_000  # positions; ~17KB/position -> ~3.4GB at this default
-BYTES_PER_CACHED_POSITION = 17_000  # ssl_pretrain.py's own measured per-position footprint
+DEFAULT_PANEL_CACHE_SIZE = 50_000  # positions PER STORE; train+holdout stores are independent,
+                                    # so total resident cache =~ 2x this (see BYTES_PER_CACHED_POSITION)
+BYTES_PER_CACHED_POSITION = 18_000  # empirically measured via tracemalloc (float32 cache entries,
+                                     # ~17.65KB observed; rounded up for a small safety margin) --
+                                     # NOT the ~17KB CPCPanelStore docstring figure blindly reused
+                                     # (that one already assumes float32; a prior version of this
+                                     # constant caused a real OOM by caching float64 arrays at ~2x
+                                     # this size before the float32 cast was added -- see git history)
 
 
 def setup_logging(run_id: str, stage: str = "stage1a") -> logging.Logger:
@@ -170,9 +176,12 @@ def main() -> None:
                               "holdout -- excluded from this run entirely (not just training, "
                               "also checkpoint-at-peak's holdout-eval anchor pool)")
     parser.add_argument("--panel-cache-size", type=int, default=DEFAULT_PANEL_CACHE_SIZE,
-                         help="max (ticker, date) positions memoized per store (train + holdout "
-                              "each get their own cache) -- bounds batch-assembly speedup memory "
-                              "at ~17KB/position; 0 effectively disables caching (every position "
+                         help="max (ticker, date) positions memoized PER STORE -- train and "
+                              "holdout each get their own independent cache, so total resident "
+                              "memory is ~2x this value at ~18KB/position (e.g. the default "
+                              f"{DEFAULT_PANEL_CACHE_SIZE} =~ "
+                              f"{2 * DEFAULT_PANEL_CACHE_SIZE * BYTES_PER_CACHED_POSITION / 1e9:.1f}GB "
+                              "combined); 0 effectively disables caching (every position "
                               "recomputed every time, lowest memory, slowest per-step)")
     args = parser.parse_args()
 
@@ -219,9 +228,14 @@ def main() -> None:
     # positions repeat over a multi-thousand-step run; a BOUNDED LRU cache captures those
     # repeat hits without the unbounded-with-universe-size memory risk (see
     # ssl_pretrain.py::CachedPanelGatherer).
-    est_gb = args.panel_cache_size * BYTES_PER_CACHED_POSITION / 1e9
-    log.info(f"Panel cache: up to {args.panel_cache_size} positions/store "
-             f"(~{est_gb:.1f}GB estimated peak, train+holdout stores each capped separately)")
+    n_stores = 2 if holdout_enabled else 1  # train_store + holdout_store are each capped
+                                             # INDEPENDENTLY -- report the COMBINED estimate,
+                                             # not a per-store number (a per-store-only estimate
+                                             # previously caused a real OOM: it silently implied
+                                             # half the actual peak)
+    est_gb = n_stores * args.panel_cache_size * BYTES_PER_CACHED_POSITION / 1e9
+    log.info(f"Panel cache: up to {args.panel_cache_size} positions/store x {n_stores} store(s) "
+             f"(~{est_gb:.1f}GB estimated COMBINED peak)")
     train_store = CachedPanelGatherer(train_panel, frame_cache, maxsize=args.panel_cache_size)
     holdout_store = CachedPanelGatherer(holdout_panel, frame_cache, maxsize=args.panel_cache_size) \
         if holdout_enabled else None

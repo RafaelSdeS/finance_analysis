@@ -69,9 +69,12 @@ def main() -> None:
                               "holdout -- excluded from this run entirely (not just training, "
                               "also checkpoint-at-peak's holdout-eval anchor pool)")
     parser.add_argument("--panel-cache-size", type=int, default=DEFAULT_PANEL_CACHE_SIZE,
-                         help="max (ticker, date) positions memoized per store (train + holdout "
-                              "each get their own cache) -- bounds batch-assembly speedup memory "
-                              "at ~17KB/position; 0 effectively disables caching (every position "
+                         help="max (ticker, date) positions memoized PER STORE -- train and "
+                              "holdout each get their own independent cache, so total resident "
+                              "memory is ~2x this value at ~18KB/position (e.g. the default "
+                              f"{DEFAULT_PANEL_CACHE_SIZE} =~ "
+                              f"{2 * DEFAULT_PANEL_CACHE_SIZE * BYTES_PER_CACHED_POSITION / 1e9:.1f}GB "
+                              "combined); 0 effectively disables caching (every position "
                               "recomputed every time, lowest memory, slowest per-step)")
     args = parser.parse_args()
 
@@ -118,9 +121,11 @@ def main() -> None:
         log.info(f"Train: {len(train_panel)} rows. Holdout: {len(holdout_panel)} rows "
                  f"(trailing {cfg.checkpoint_holdout_days} calendar days, never trained on)")
 
-    est_gb = args.panel_cache_size * BYTES_PER_CACHED_POSITION / 1e9
-    log.info(f"Panel cache: up to {args.panel_cache_size} positions/store "
-             f"(~{est_gb:.1f}GB estimated peak, train+holdout stores each capped separately)")
+    n_stores = 2 if holdout_enabled else 1  # train_store + holdout_store are each capped
+                                             # INDEPENDENTLY -- report the COMBINED estimate
+    est_gb = n_stores * args.panel_cache_size * BYTES_PER_CACHED_POSITION / 1e9
+    log.info(f"Panel cache: up to {args.panel_cache_size} positions/store x {n_stores} store(s) "
+             f"(~{est_gb:.1f}GB estimated COMBINED peak)")
     train_store = CachedPanelGatherer(train_panel, frame_cache, maxsize=args.panel_cache_size)
     holdout_store = CachedPanelGatherer(holdout_panel, frame_cache, maxsize=args.panel_cache_size) \
         if holdout_enabled else None
