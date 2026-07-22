@@ -8,7 +8,13 @@ only the model init (warm-start instead of random) and the train/score step
 Warm-start, not cold-restart: 1A already learned whatever CPC alone teaches; 1B's
 question is "does ADDING alignment improve the diagnostics from here," not "can the
 architecture learn from scratch under a different loss" (plan: "Warm-start from 1A;
-retrain; rerun diagnostics; compare against 1A").
+retrain; rerun diagnostics; compare against 1A"). Universe (review finding 1) is
+inherited unchanged from the warm-start checkpoint's own `tickers` field -- whatever
+universe 1A trained on, 1B continues on -- so no separate universe fix is needed here.
+
+Reserved Phase-7 holdout (review finding 11): same --reserved-holdout-years truncation
+as run_stage1a.py (truncate_to_development_window, reused not duplicated), applied
+here too so 1B's checkpoint-at-peak selection doesn't touch Phase 7's window either.
 
 Run from project root:
     python -m src.conviction_model.run_stage1b
@@ -27,7 +33,10 @@ import torch
 from .config import SSLConfig
 from .data import DAILY_FEATURES, MONTHLY_FEATURES, QUARTERLY_FEATURES, WEEKLY_FEATURES, build_frame_cache
 from .encoder import EncoderCNN
-from .run_stage1a import CHECKPOINT_DIR, LOG_DIR, _holdout_eligible_count, _save_checkpoint, load_panel, setup_logging
+from .run_stage1a import (
+    CHECKPOINT_DIR, DEFAULT_RESERVED_HOLDOUT_YEARS, LOG_DIR, _holdout_eligible_count, _save_checkpoint,
+    load_panel, setup_logging, truncate_to_development_window,
+)
 from .ssl_pretrain import (
     LazyPanelGatherer, build_stage1b_batch, sample_cpc_anchor_positions, score_holdout_stage1b, split_train_holdout,
     train_step_stage1b,
@@ -55,6 +64,10 @@ def main() -> None:
                          help="save a checkpoint every N steps, in addition to the final save")
     parser.add_argument("--checkpoint-path", type=str, default=None,
                          help="defaults to artifacts/checkpoints/conviction_model/stage1b-<run_id>.pt")
+    parser.add_argument("--reserved-holdout-years", type=float, default=DEFAULT_RESERVED_HOLDOUT_YEARS,
+                         help="years at the end of the dataset reserved for Phase 7's final "
+                              "holdout -- excluded from this run entirely (not just training, "
+                              "also checkpoint-at-peak's holdout-eval anchor pool)")
     args = parser.parse_args()
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -77,7 +90,13 @@ def main() -> None:
     log.info(f"Universe: {len(tickers)} tickers (inherited from warm-start checkpoint)")
     t0 = time.monotonic()
     panel = load_panel(tickers)
-    log.info(f"Panel: {len(panel)} rows, {panel['ticker'].nunique()} tickers ({time.monotonic() - t0:.1f}s)")
+    log.info(f"Panel (full history): {len(panel)} rows, {panel['ticker'].nunique()} tickers "
+             f"({time.monotonic() - t0:.1f}s)")
+
+    panel, dataset_end, dev_end = truncate_to_development_window(panel, args.reserved_holdout_years)
+    log.info(f"Reserved Phase-7 holdout: excluding {dev_end.date()} -> {dataset_end.date()} "
+             f"({args.reserved_holdout_years}y) from this run entirely. "
+             f"Development panel: {len(panel)} rows, ends {dev_end.date()}")
 
     t0 = time.monotonic()
     frame_cache = build_frame_cache(tickers)
