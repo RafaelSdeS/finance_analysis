@@ -175,19 +175,30 @@ encoder always saw all names; only labels are universe-restricted"). Fix the uni
 establish the true Phase-1 baseline using Phase-1's corrected diagnostics.
 
 **Implementation tasks**
-- [ ] `[IMPL]` **(1, High) Replace the snapshot universe.**
+- [x] `[IMPL]` **(1, High) Replace the snapshot universe.**
   `run_stage1a.py::top150_snapshot_tickers` pins the encoder to the most-recent rebalance
   period. Change the default to the **full-history, all-names** panel (or, if a size cap is
   wanted, the point-in-time *union* universe ~360 names from `top150_universe_membership`,
   which is survivorship-safe by construction). Keep the snapshot only behind an explicit
   `--debug-snapshot` flag for fast smoke tests. Trade-off: larger panel → slower per step and
   more memory; `LazyPanelGatherer` already handles the memory (it exists for exactly this).
-- [ ] `[IMPL]` **(11, Med) Move the SSL checkpoint holdout off the Phase-7 window.**
+  **Done** (commit `079d95c`): new `point_in_time_union_tickers()` is the default (~360
+  names, union across all rebalance periods); old snapshot behavior kept only behind
+  `--debug-snapshot`. Verified the wider universe can't crash on a ticker absent from
+  `ml_dataset.parquet` — `top150_universe_membership.parquet` is built by reading
+  `ml_dataset.parquet` directly, so membership is a subset of the dataset by construction.
+- [x] `[IMPL]` **(11, Med) Move the SSL checkpoint holdout off the Phase-7 window.**
   `split_train_holdout` carves the trailing calendar year — which overlaps Phase 7's reserved
   final holdout. Checkpoint-selecting on it leaks the final-eval window into the frozen
   encoder. Parameterize the holdout to sit *before* the reserved window (e.g. accept an
   explicit `holdout_end`/reserved-window cutoff). Trade-off: slightly less recent holdout for
-  checkpoint scoring; correctness win dominates.
+  checkpoint scoring; correctness win dominates. **Done** (commit `079d95c`): new
+  `truncate_to_development_window()` drops every row past `dataset_end -
+  reserved_holdout_years` (default 2y) before `split_train_holdout` ever runs; applied in
+  both `run_stage1a.py` and `run_stage1b.py` (new `--reserved-holdout-years` flag on each).
+  New `tests/conviction_model/test_run_stage1a.py` (fast group): boundary inclusivity, and a
+  synthetic membership fixture proving the union includes an earlier-period-only
+  ("delisted") name that the snapshot misses.
 
 **Experiments (user runs; code written here)**
 - [ ] `[EXP]` Retrain Stage 1A (CPC-only) on the corrected universe.
