@@ -203,20 +203,33 @@ def diag4_quality_persistence(embeddings, points, frame_cache, rng):
     quality = np.array([_anchor_value(frame_cache[t][3], d, "roe_zhist_5y")
                          for t, d in zip(points["ticker"], points["trade_date"])])
     mask = np.isfinite(quality)
-    order = rng.permutation(int(mask.sum()))
-    probe = LinearRegression().fit(embeddings[mask][order], quality[mask][order])
-    predicted = probe.predict(embeddings)
+    ticker_arr = points["ticker"].to_numpy()
+
+    # Ticker-BLOCKED OOS split: the quality probe is fit on TRAIN-ticker rows only and
+    # scored (persistence autocorrelation) only on HELD-OUT test-ticker rows -- a company
+    # never seen while fitting the probe. The original in-sample version (fit on
+    # everything, predict on everything, with an inert rng.permutation that never actually
+    # created a split -- row order doesn't affect what LinearRegression.fit learns) let an
+    # overfit probe potentially memorize per-company idiosyncrasies rather than a genuinely
+    # transferable quality signal.
+    train_mask = group_blocked_train_mask(ticker_arr[mask], test_frac=0.5, rng=rng)
+    masked_idx = np.flatnonzero(mask)  # original point positions where quality is defined
+    train_idx, test_idx = masked_idx[train_mask], masked_idx[~train_mask]
+
+    probe = LinearRegression().fit(embeddings[train_idx], quality[train_idx])
+    predicted_test = probe.predict(embeddings[test_idx])  # aligned with test_idx, same order
 
     autocorrs = []
-    ticker_arr = points["ticker"].to_numpy()
-    for t in points["ticker"].unique():
-        # points is ticker/date-sorted, so idx stays chronological even though quality
-        # NaNs (warm-up) may leave gaps -- lag=12 becomes "12 valid observations", a
-        # small approximation of a strict calendar lag when a ticker has gaps.
-        idx = np.flatnonzero((ticker_arr == t) & mask)
-        if len(idx) <= QUALITY_LAG_MONTHS + 1:
+    test_tickers = ticker_arr[test_idx]
+    for t in np.unique(test_tickers):
+        # points is ticker/date-sorted and masked_idx/test_idx preserve that relative
+        # order (boolean indexing never reorders), so a ticker's positions WITHIN
+        # test_idx stay chronological -- lag=12 becomes "12 valid observations", a small
+        # approximation of a strict calendar lag when a ticker has gaps.
+        pos = np.flatnonzero(test_tickers == t)
+        if len(pos) <= QUALITY_LAG_MONTHS + 1:
             continue
-        autocorrs.append(quality_persistence_autocorrelation(predicted[idx], lag=QUALITY_LAG_MONTHS))
+        autocorrs.append(quality_persistence_autocorrelation(predicted_test[pos], lag=QUALITY_LAG_MONTHS))
     return (float(np.mean(autocorrs)) if autocorrs else float("nan")), len(autocorrs)
 
 
