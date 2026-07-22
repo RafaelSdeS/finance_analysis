@@ -64,6 +64,25 @@ dataset fingerprint, package versions), `sanity_report.txt`, `model.pt` (checkpo
 (agent vs. all 7 baselines: PV, reward curves, allocation, turnover/cost, metrics + bootstrap CIs),
 `metrics_summary.json`, `report.json` (validation checklist).
 
+### Stage 4: Conviction Model (Phase 0-1, experimental)
+
+Prereq: Stage 2 complete + `top150_universe_membership.parquet` (`python -m
+src.build_dataset.build_top50_universe --top-n 150 --membership-only`). Self-supervised
+multi-resolution encoder (daily/weekly/monthly/fundamentals branches + cross-attention),
+pretrained with 4 losses added ONE STAGE AT A TIME (1A→1D), each stage's encoder scored
+against 7 intrinsic diagnostics before the next loss is added. Not yet past Phase 1 — no
+regressor, no backtest. Design: `docs/conviction_model/CONVICTION_MODEL_PLAN.md`.
+
+```bash
+python -m src.conviction_model.check_power_floor                          # Phase 0: power-floor prerequisite
+python -m src.conviction_model.run_stage1a                                # Stage 1A: CPC-only pretraining (random init)
+python -m src.conviction_model.run_stage1b                                # Stage 1B: + forward cross-modal alignment (warm-starts from the latest stage1a-*.pt)
+python -m src.conviction_model.run_diagnostics --checkpoint-path <path>   # score a checkpoint against the 7 intrinsic diagnostics + gate table
+```
+Output: `artifacts/checkpoints/conviction_model/{stage1a,stage1b}-<run_id>.pt` (checkpoint-at-peak:
+holds the best-scoring holdout weights, not necessarily the last step's), `artifacts/logs/conviction_model/`,
+`docs/conviction_model/PHASE1_DIAGNOSTICS_<run_id>.json`.
+
 ### Utilities
 
 ```bash
@@ -88,7 +107,7 @@ python tests/run_all.py --group all
 ```
 
 **Test groups:**
-- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`; `tests/rl_agent/{test_config,test_data,test_pvm,test_environment,test_metrics,test_baselines,test_networks,test_train,test_sanity,test_plots,test_experiment,test_sweep}.py` (all synthetic-data — `test_train`/`test_experiment` exercise real gradient steps and the full orchestrator, just on tiny fabricated markets, never the real dataset or a real training run)
+- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`; `tests/rl_agent/{test_config,test_data,test_pvm,test_environment,test_metrics,test_baselines,test_networks,test_train,test_sanity,test_plots,test_experiment,test_sweep}.py` (all synthetic-data — `test_train`/`test_experiment` exercise real gradient steps and the full orchestrator, just on tiny fabricated markets, never the real dataset or a real training run); `tests/conviction_model/{test_config,test_data,test_encoder,test_ssl_pretrain,test_diagnostics,test_labels,test_walkforward}.py` (same convention — synthetic data, real gradient/CPC steps on tiny fabricated panels, never the real dataset or a real training run)
 - **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_universe_integrity.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`, `tests/rl_agent/test_data_integration.py` (loads the real `PricePanel`: 172-wide global space, every in-window day has exactly 50 active members, no NaNs)
 
 **Linting:**
@@ -100,7 +119,7 @@ ruff check .          # reports undefined names, unused imports/variables, bare-
 
 - **main:** Stages 1–2 (data collection + dataset build). Latest stable.
 - **build_dataset:** Stage 2 focus.
-- **refactor:** adds Stage 3 iteration 1 (`src/rl_agent/`, this branch) — see `docs/eiie_agent/EIIE_AGENT_PLAN.md`.
+- **refactor:** adds Stage 3 iteration 1 (`src/rl_agent/`) — see `docs/eiie_agent/EIIE_AGENT_PLAN.md` — and Stage 4, the Conviction Model (`src/conviction_model/`, experimental, Phase 0-1 only) — see `docs/conviction_model/CONVICTION_MODEL_PLAN.md`. Both live on this branch.
 - **ml_agent:** a separate, earlier PPO agent (masked 279-ticker universe); not this branch's Stage 3.
 
 ## Architecture
@@ -176,6 +195,23 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 | `experiment.py` | CLI orchestrator: seed → load data → recompute a window-scoped split → sanity gate → pretrain → OSBL backtest → baselines → metrics → report → validation checklist |
 | `sweep.py` | Parallel launcher: runs several experiment subprocesses at once (seed ensembles / config sweeps), bounded by `-j`, per-job logs |
 
+**Stage 4 (Conviction Model, Phase 0-1, experimental)** — `src/conviction_model/`, self-supervised
+multi-resolution encoder (`docs/conviction_model/CONVICTION_MODEL_PLAN.md`):
+
+| File | Purpose |
+|------|---------|
+| `config.py` | Frozen-dataclass `SSLConfig` ↔ JSON; Stage 1A (CPC) + Stage 1B (`alignment_weight`, `alignment_horizon`) fields, more added per stage as their losses are written |
+| `paths.py` | Shared path constants for this package |
+| `data.py` | Per-ticker daily/weekly/monthly/quarterly window tensors from `ml_dataset.parquet`; `build_frame_cache()`, `resample_branch_frame()`, `branch_windows_from_precomputed()` |
+| `encoder.py` | `EncoderCNN` — 4 branch sub-networks (dilated `Conv1d`) + cross-attention update, returns 4 SEPARATE labeled sub-embeddings (not pooled), so a branch is ablatable without retraining fusion |
+| `labels.py` | `build_conviction_labels()` — 5 CDI-relative risk-adjusted excess-return horizons + drawdown severity, no aggregation; `trailing_volatility()` masks non-positive `adj_close` before `log()` (vendor rounding artifact, see Critical Caveats) |
+| `ssl_pretrain.py` | Stage 1A: `info_nce_loss`, `sample_cpc_negatives` (same-stock-different-regime + different-stock-same-time), `train_step`/`score_holdout`, `CPCPanelStore`/`LazyPanelGatherer` (precomputed vs. on-demand window batching). Stage 1B adds `_price_macro_state`, `_alignment_loss`, `build_stage1b_batch()`, `train_step_stage1b`/`score_holdout_stage1b` — reuses CPC's own batches, different branch selection + a separate `alignment_horizon` |
+| `diagnostics.py` | The 7 intrinsic embedding-quality diagnostic functions (neighbor-outcome variance, regime MI, valuation-vs-volatility probe, quality persistence, perturbation sensitivity, temporal smoothness, latent similarity) — pure, gate comparison left to the caller |
+| `run_stage1a.py` / `run_stage1b.py` | Real training runs (checkpoint-at-peak: holds out a calendar-date tail, scores periodically, restores the best-scoring `state_dict`); 1B warm-starts from the latest `stage1a-*.pt` |
+| `run_diagnostics.py` | Loads a checkpoint, computes embeddings over every (ticker, month-end) point in its training universe, scores diagnostics 1-7 against the plan's gate table |
+| `check_power_floor.py` | Phase 0: `min_detectable_ic()`-based power floor per horizon vs. realistic effect sizes, go/underpowered decision |
+| `walkforward.py` | Purge/embargo wrapper over `h_series.spine.iter_expanding_folds()` |
+
 
 ## Critical Caveats
 
@@ -184,6 +220,7 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 - **Real filing dates (July 2026):** Fundamentals visible via CVM's `DT_RECEB` (received date), not fiscal `reference_date`. 41,530 filings from 1,223 companies, 100% coverage of 293-ticker universe; 4,657 rows (0.7%) would have violated a fixed 45/90-day buffer. Sourced from free, keyless CVM open-data portal; integrated via `src/data_collection/cvm/filing_dates.py` (`python -m src.data_collection.cvm_statements --step filing_dates`).
 - **Unadjusted splits REPAIRED:** 53 corporate events in BolsAI's `adj_*` columns were never back-adjusted, causing fake returns up to −99.99%. `repair_unadjusted_splits()` detects and rescales all pre-event rows *and volumes*: a 1:4 split divides prices by 4 and multiplies `volume`/`volume_adjusted` by 4 (same economic activity, more shares). Rescaling is critical for `amihud_illiquidity` and `turnover_ratio` features. `hl_ratio` uses `adj_high/adj_low` (not raw scales). WDCN3 quarantined (unfixable data corruption). ✅ VERIFIED 2026-07-11. ✅ Volume scaling VERIFIED 2026-07-15.
 - **Ticker continuity & splicing (July 2026 fixes):** Renames/mergers/exchanges are spliced via `apply_ticker_continuity()` *after* `repair_unadjusted_splits()` (not before), so splits are repaired under each leg's original ticker name before being renamed onto the survivor. Splicing rules: (1) **rename** = same legal entity, splice prices + fundamentals, drop old ticker. (2) **merger** = exchange ratio, scale old-leg prices by ratio **and volume inversely by ratio** (keeps dollar volume = volume×price invariant across the splice, same rationale as split-repair volume scaling — otherwise `amihud_illiquidity` jumps by `ratio` right at the merger boundary), drop old-leg fundamentals. (3) **keep_separate** = parallel-trading acquirer (e.g., SulAmérica acquired by RDOR, which had its own IPO 2 years earlier), both legs stay as independent series; old treated as delisted. (4) **tender** = cash-out, no splice. Vendor aliases (ARZZ3→AZZA3, RRRP3→BRAV3, etc.) consolidated via `rename` entries where the new file contains full history under both names. Boundary-matching assumption (new ticker's first trade == splice point) is guarded: parallel-trading cases caught and rejected. Adj_close reconciliation factors (inherent basis mismatches between old/new vendor series) are validated [1/50, 50] sane range. Event rekeying: `repair.py` builds ticker-descendant chains from the map so splits recorded under old names (e.g., VVAR3) still match post-rename rows (BHIA3). ✅ All tests pass post-fix. ✅ TIMP3→TIMS3 factor sane (0.6963, not 6963).
+- **`adj_close` 2-decimal vendor precision floor (deep-history microcaps):** BolsAI stores `adj_close`/`adj_open`/`adj_high`/`adj_low` at 2-decimal precision. For a handful of tickers with a large cumulative split/dividend adjustment factor, the true adjusted price underflows that floor — it either rounds to exactly `0.00` (raw `close` stays a normal nonzero price; confirmed in `data/raw/prices/UNIP6.parquet`'s earliest ~33 rows, 2026-07-21) or gets pinned at a tiny nonzero constant across several consecutive days while the real price keeps moving. **Not fixable — flag or mask, never drop or reconstruct**: there's no way to recover the lost precision, and (per the caveat above) `adj_close` must not be rebuilt from `data/raw/dividends`. `build_dataset/features.py::compute_price_features()` already masks non-positive `adj_close` to NaN before `log()` and flags the pinned-nonzero case via `adj_close_precision_degraded` (0/1; exact-2dp-quantized AND `<0.05`, so a genuinely low-priced-but-full-precision ticker like TIMS3 isn't misflagged). Any OTHER consumer computing its own `log(adj_close)` off the raw dataset must apply the same non-positive mask — `conviction_model/labels.py::trailing_volatility()` was missing it (caught via a stray `divide by zero encountered in log` warning, 2026-07-21) and now mirrors `features.py`'s guard.
 - **Returns ARE dividend-adjusted (total return), not price-only:** `log_return`/`return_{1m,3m,6m,12m}`/`excess_return`/`real_return` (`features.py`) are all derived from `adj_close`, and `adj_close` empirically bakes in dividend reinvestment, not just splits — confirmed by testing `adj_close/close` ratio drift against known dividends on split-free windows (e.g. BBAS3 post-split: predicted vs. observed ratio jumps matched to within ~0.04 pp per ex-dividend date). `div_yield_12m`/`div_count_12m` remain separately-tracked features on top of this, not double-counted into returns.
   - **Known, undocumented-by-vendor limitation — BolsAI/yfinance dividend-adjustment methodology diverges:** confirmed by direct measurement (145 tickers, BolsAI-only rows, split-free windows): median 4.9pp divergence between BolsAI's observed `adj_close` ratio drift and what `data/raw/dividends` alone predicts, often 20pp+. BolsAI's adjustment consistently implies *more* cumulative discount than our dividends table explains — i.e. our dividends table is missing some distribution type BolsAI's adjustment already correctly captures (bonus shares/subscription rights suspected, unconfirmed). **Do not "fix" this by recomputing `adj_close` from `data/raw/dividends`** — that would systematically under-adjust and regress returns. `validate_vs_yfinance.py:7` already flags this by skipping `adj_close` cross-validation as "uninformative." No fix available with current data; flagged here so it isn't rediscovered as a bug.
   - **Staleness across `--mode update` runs — FIXED:** yfinance's `auto_adjust=True` backward-adjusts a fetch window relative to "now" at fetch time. If each update only fetched rows after the last checkpoint (like every other collector), each quarterly batch would freeze at its own anchor and never get revisited — a dividend paid after one quarter's fetch would permanently fail to propagate into that quarter's already-stored `adj_close`, one small discontinuity per update, forever. `collect_prices_yf` (`yf_collectors.py`) now re-fetches its *entire* yfinance-sourced span every run via `_prices_fetch_start()` (anchored to the earliest yfinance row on disk, marked by `NaN num_trades`, not the latest), so the whole yfinance era stays internally consistent. Empirically verified this wasn't yet causing damage before the fix (max BolsAI→yfinance gap across 285 tickers was 1–3 days — this was the first `--mode update` run for all of them), but the fix prevents it from starting to matter after a few more quarterly cycles.
@@ -252,7 +289,7 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
     - Error NaN: prefix-shaped (no interior holes per ticker in merged fundamentals), detected via test `test_final_dataset.py::T_prefix_rule`. NaN-count regression vs previous build warned via `nan_regressions()` in `manifest.py` (logged but non-fatal, allows legitimate coverage changes).
     - Extreme ratio (144 rows |pl| > 400,000 dataset-wide, 95 in-universe, top-50): kept intact — denominators near zero are valid distress signals. No filled or clipped in the dataset; scaler's fit is robust (median/IQR) but transform is linear, so raw 400k → ~26k after scaling (still extreme, intentionally preserved). Model training handles via loss functions / clipping in the env.
   - Consumer-side (ml_agent env, not this repo): flags + neutral fills (e.g. fill CAGR NaN with 0), any NaN→0 transformation, hard `assert np.isfinite(obs).all()` before agent sees state, global start-date trim for the top-50 universe to drop pre-full-history rows.
-- **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`.
+- **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`; Stage 4 `artifacts/checkpoints/conviction_model/{stage1a,stage1b}-<run_id>.pt`, `artifacts/logs/conviction_model/`.
 - **Paths:** absolute via `Path(__file__).resolve().parents[N]`; always run from project root.
 - **FutureWarnings suppressed:** `pct_change(fill_method=None)` for YoY growth; dropped all-NA columns per-file before concat.
 
