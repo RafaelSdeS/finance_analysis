@@ -34,12 +34,12 @@ from .config import SSLConfig
 from .data import DAILY_FEATURES, MONTHLY_FEATURES, QUARTERLY_FEATURES, WEEKLY_FEATURES, build_frame_cache
 from .encoder import EncoderCNN
 from .run_stage1a import (
-    CHECKPOINT_DIR, DEFAULT_RESERVED_HOLDOUT_YEARS, LOG_DIR, _holdout_eligible_count, _save_checkpoint,
-    load_panel, setup_logging, truncate_to_development_window,
+    BYTES_PER_CACHED_POSITION, CHECKPOINT_DIR, DEFAULT_PANEL_CACHE_SIZE, DEFAULT_RESERVED_HOLDOUT_YEARS,
+    LOG_DIR, _holdout_eligible_count, _save_checkpoint, load_panel, setup_logging, truncate_to_development_window,
 )
 from .ssl_pretrain import (
-    LazyPanelGatherer, build_stage1b_batch, sample_cpc_anchor_positions, score_holdout_stage1b, split_train_holdout,
-    train_step_stage1b,
+    CachedPanelGatherer, build_stage1b_batch, sample_cpc_anchor_positions, score_holdout_stage1b,
+    split_train_holdout, train_step_stage1b,
 )
 
 DEFAULT_STEPS = 5000  # matches run_stage1a.py's default budget -- same first-guess, adjustable via --steps
@@ -68,6 +68,11 @@ def main() -> None:
                          help="years at the end of the dataset reserved for Phase 7's final "
                               "holdout -- excluded from this run entirely (not just training, "
                               "also checkpoint-at-peak's holdout-eval anchor pool)")
+    parser.add_argument("--panel-cache-size", type=int, default=DEFAULT_PANEL_CACHE_SIZE,
+                         help="max (ticker, date) positions memoized per store (train + holdout "
+                              "each get their own cache) -- bounds batch-assembly speedup memory "
+                              "at ~17KB/position; 0 effectively disables caching (every position "
+                              "recomputed every time, lowest memory, slowest per-step)")
     args = parser.parse_args()
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -113,8 +118,12 @@ def main() -> None:
         log.info(f"Train: {len(train_panel)} rows. Holdout: {len(holdout_panel)} rows "
                  f"(trailing {cfg.checkpoint_holdout_days} calendar days, never trained on)")
 
-    train_store = LazyPanelGatherer(train_panel, frame_cache)
-    holdout_store = LazyPanelGatherer(holdout_panel, frame_cache) if holdout_enabled else None
+    est_gb = args.panel_cache_size * BYTES_PER_CACHED_POSITION / 1e9
+    log.info(f"Panel cache: up to {args.panel_cache_size} positions/store "
+             f"(~{est_gb:.1f}GB estimated peak, train+holdout stores each capped separately)")
+    train_store = CachedPanelGatherer(train_panel, frame_cache, maxsize=args.panel_cache_size)
+    holdout_store = CachedPanelGatherer(holdout_panel, frame_cache, maxsize=args.panel_cache_size) \
+        if holdout_enabled else None
 
     model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
                         len(QUARTERLY_FEATURES), d_model=cfg.d_model, n_heads=cfg.n_heads)

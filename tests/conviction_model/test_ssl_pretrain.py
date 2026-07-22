@@ -25,8 +25,8 @@ from src.conviction_model.data import (  # noqa: E402
 from src.conviction_model.encoder import EncoderCNN  # noqa: E402
 from src.conviction_model.config import SSLConfig  # noqa: E402
 from src.conviction_model.ssl_pretrain import (  # noqa: E402
-    CPCPanelStore, LazyPanelGatherer, _price_macro_state, build_cpc_batch, build_stage1b_batch, info_nce_loss,
-    sample_cpc_anchor_positions, sample_cpc_negatives, score_holdout, score_holdout_stage1b,
+    CachedPanelGatherer, CPCPanelStore, LazyPanelGatherer, _price_macro_state, build_cpc_batch, build_stage1b_batch,
+    info_nce_loss, sample_cpc_anchor_positions, sample_cpc_negatives, score_holdout, score_holdout_stage1b,
     split_train_holdout, train_step, train_step_stage1b,
 )
 from test_utils import print_check, print_header, print_section_end  # noqa: E402
@@ -187,6 +187,59 @@ def test_lazy_panel_gatherer_matches_cpc_panel_store(passed, failed):
     ok = all(torch.allclose(store_batch[k], lazy_batch[k], atol=1e-6) for k in store_batch)
     print_check("LazyPanelGatherer: gather() output matches CPCPanelStore's exactly (memory-light "
                 "path is not a behavior change)", ok)
+    return passed + ok, failed + (not ok)
+
+
+def test_cached_panel_gatherer_matches_lazy_panel_gatherer(passed, failed):
+    panel, cache = _synthetic_frame_cache(["AAA", "BBB", "CCC"], n_days=400)
+    positions = np.array([5, 120, 250, 399, 0])
+    lazy_batch = LazyPanelGatherer(panel, cache).gather(positions)
+    cached_batch = CachedPanelGatherer(panel, cache, maxsize=3).gather(positions)
+    ok = all(torch.allclose(lazy_batch[k], cached_batch[k], atol=1e-6) for k in lazy_batch)
+    print_check("CachedPanelGatherer: gather() output matches LazyPanelGatherer's exactly "
+                "(memoization is a pure speed fix, not a behavior change)", ok)
+    return passed + ok, failed + (not ok)
+
+
+def test_cached_panel_gatherer_consistent_after_eviction(passed, failed):
+    # maxsize smaller than the number of distinct positions touched -- forces eviction
+    # partway through, so re-querying an evicted position must still recompute correctly
+    # (not silently stale/wrong), not just "doesn't crash".
+    panel, cache = _synthetic_frame_cache(["AAA", "BBB"], n_days=400)
+    positions = np.array([5, 120, 250, 399, 0, 50, 150, 350])
+    gatherer = CachedPanelGatherer(panel, cache, maxsize=2)  # much smaller than 8 distinct positions
+    first = gatherer.gather(positions)
+    second = gatherer.gather(positions)  # some entries evicted+recomputed between calls
+    ok = all(torch.allclose(first[k], second[k], atol=1e-6) for k in first)
+    print_check("CachedPanelGatherer: repeated gather() after cache eviction still returns "
+                "consistent (correctly recomputed) results", ok)
+    return passed + ok, failed + (not ok)
+
+
+def test_cached_panel_gatherer_evicts_least_recently_used(passed, failed):
+    panel, cache = _synthetic_frame_cache(["AAA"], n_days=400)
+    gatherer = CachedPanelGatherer(panel, cache, maxsize=2)
+    gatherer.gather(np.array([10]))
+    gatherer.gather(np.array([20]))
+    gatherer.gather(np.array([10]))  # re-touch 10 -> 20 becomes the least-recently-used entry
+    gatherer.gather(np.array([30]))  # should evict 20, not 10
+
+    key10 = ("AAA", pd.Timestamp(panel.loc[10, "trade_date"]))
+    key20 = ("AAA", pd.Timestamp(panel.loc[20, "trade_date"]))
+    cache_keys = list(gatherer._cache.keys())
+    ok = key10 in cache_keys and key20 not in cache_keys
+    print_check("CachedPanelGatherer: evicts the LEAST-recently-used entry, not plain insertion order",
+                ok, f"cache_keys={cache_keys}")
+    return passed + ok, failed + (not ok)
+
+
+def test_cached_panel_gatherer_maxsize_zero_still_works(passed, failed):
+    panel, cache = _synthetic_frame_cache(["AAA", "BBB"], n_days=400)
+    gatherer = CachedPanelGatherer(panel, cache, maxsize=0)
+    batch = gatherer.gather(np.array([5, 10, 15]))
+    ok = batch["daily"].shape[0] == 3 and len(gatherer._cache) == 0
+    print_check("CachedPanelGatherer: maxsize=0 still produces correct output (cache stays "
+                "empty, effectively disabled)", ok, f"cache_len={len(gatherer._cache)}")
     return passed + ok, failed + (not ok)
 
 
@@ -375,6 +428,10 @@ def main() -> int:
         test_sample_cpc_anchor_positions_leaves_room_for_the_horizon,
         test_build_cpc_batch_shapes,
         test_lazy_panel_gatherer_matches_cpc_panel_store,
+        test_cached_panel_gatherer_matches_lazy_panel_gatherer,
+        test_cached_panel_gatherer_consistent_after_eviction,
+        test_cached_panel_gatherer_evicts_least_recently_used,
+        test_cached_panel_gatherer_maxsize_zero_still_works,
         test_build_cpc_batch_positive_is_same_ticker_k_ahead,
         test_split_train_holdout_respects_cutoff_and_stays_contiguous,
         test_score_holdout_does_not_change_params_and_returns_finite_score,

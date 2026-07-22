@@ -24,6 +24,8 @@ predictive, not just price-autocorrelation-predictive. Same InfoNCE machinery, s
 negative-sampling scheme, just scored against a different pair of embeddings.
 """
 
+from collections import OrderedDict
+
 import numpy as np
 import pandas as pd
 import torch
@@ -205,6 +207,60 @@ class LazyPanelGatherer:
             daily_frame, weekly_frame, monthly_frame, quarterly_frame = self.frame_cache[ticker]
             windows = branch_windows_from_precomputed(daily_frame, weekly_frame, monthly_frame,
                                                         quarterly_frame, as_of)
+            for name, arr in windows.items():
+                per_branch[name].append(arr)
+        return {name: torch.tensor(np.stack(arrs), dtype=torch.float32) for name, arrs in per_branch.items()}
+
+
+class CachedPanelGatherer:
+    """Same .gather(positions) interface as CPCPanelStore/LazyPanelGatherer (duck-typed),
+    but a middle ground between them: memoizes each (ticker, as_of) position's computed
+    window tensors in a bounded LRU cache instead of either recomputing every time
+    (LazyPanelGatherer, safe memory but pays the ~.loc-lookup-plus-normalize cost on every
+    single touch) or precomputing the ENTIRE panel upfront (CPCPanelStore, ~17KB/position --
+    ~9GB at the old 150-ticker snapshot universe, more at the current ~360-ticker
+    point-in-time union -- too large for most machines to hold resident).
+
+    CPC/alignment sample positions WITH REPLACEMENT from the same panel every step, so by
+    later steps in a several-thousand-step run many positions have already been computed
+    at least once -- caching those results trades a BOUNDED amount of memory (maxsize
+    entries * ~17KB/position, e.g. 200_000 * 17KB =~ 3.4GB) for skipping the repeat
+    computation on a cache hit, without CPCPanelStore's unbounded-with-universe-size
+    memory risk. A pure memoization of a deterministic function (the underlying frame data
+    never changes mid-run) -- results are bit-identical to LazyPanelGatherer's, this only
+    changes wall-clock, never behavior (tested: test_ssl_pretrain.py).
+
+    ponytail: a plain OrderedDict LRU keyed by (ticker, as_of), evicting the least-recently-
+    used entry once maxsize is reached -- not thread-safe (fine, this training loop is
+    single-threaded); revisit with a proper cache library only if this bookkeeping itself
+    becomes a measurable cost, which is unlikely at these sizes."""
+
+    def __init__(self, panel: pd.DataFrame, frame_cache: dict, maxsize: int = 200_000):
+        self.tickers = panel["ticker"].to_numpy()
+        self.dates = panel["trade_date"].to_numpy()
+        self.frame_cache = frame_cache
+        self.maxsize = maxsize
+        self._cache: OrderedDict = OrderedDict()
+
+    def _windows_for(self, pos: int) -> dict:
+        ticker, as_of = self.tickers[pos], pd.Timestamp(self.dates[pos])
+        key = (ticker, as_of)
+        cached = self._cache.get(key)
+        if cached is not None:
+            self._cache.move_to_end(key)
+            return cached
+        daily_frame, weekly_frame, monthly_frame, quarterly_frame = self.frame_cache[ticker]
+        windows = branch_windows_from_precomputed(daily_frame, weekly_frame, monthly_frame,
+                                                    quarterly_frame, as_of)
+        self._cache[key] = windows
+        if len(self._cache) > self.maxsize:
+            self._cache.popitem(last=False)  # evict least-recently-used
+        return windows
+
+    def gather(self, positions: np.ndarray) -> dict:
+        per_branch = {"daily": [], "weekly": [], "monthly": [], "fundamentals": []}
+        for pos in positions:
+            windows = self._windows_for(pos)
             for name, arr in windows.items():
                 per_branch[name].append(arr)
         return {name: torch.tensor(np.stack(arrs), dtype=torch.float32) for name, arrs in per_branch.items()}

@@ -64,7 +64,7 @@ from .data import DAILY_FEATURES, MONTHLY_FEATURES, QUARTERLY_FEATURES, WEEKLY_F
 from .encoder import EncoderCNN
 from .paths import DATASET_PATH, ROOT, TOP150_MEMBERSHIP_PATH
 from .ssl_pretrain import (
-    LazyPanelGatherer, build_cpc_batch, sample_cpc_anchor_positions, score_holdout,
+    CachedPanelGatherer, build_cpc_batch, sample_cpc_anchor_positions, score_holdout,
     split_train_holdout, train_step,
 )
 
@@ -72,6 +72,8 @@ CHECKPOINT_DIR = ROOT / "artifacts/checkpoints/conviction_model"
 LOG_DIR = ROOT / "artifacts/logs/conviction_model"
 DEFAULT_STEPS = 5000  # first-guess budget for this initial run -- arbitrary, adjustable via --steps
 DEFAULT_RESERVED_HOLDOUT_YEARS = 2.0  # matches the plan's Phase 7 "most recent ~1-2 years"
+DEFAULT_PANEL_CACHE_SIZE = 200_000  # positions; ~17KB/position -> ~3.4GB at this default
+BYTES_PER_CACHED_POSITION = 17_000  # ssl_pretrain.py's own measured per-position footprint
 
 
 def setup_logging(run_id: str, stage: str = "stage1a") -> logging.Logger:
@@ -167,6 +169,11 @@ def main() -> None:
                          help="years at the end of the dataset reserved for Phase 7's final "
                               "holdout -- excluded from this run entirely (not just training, "
                               "also checkpoint-at-peak's holdout-eval anchor pool)")
+    parser.add_argument("--panel-cache-size", type=int, default=DEFAULT_PANEL_CACHE_SIZE,
+                         help="max (ticker, date) positions memoized per store (train + holdout "
+                              "each get their own cache) -- bounds batch-assembly speedup memory "
+                              "at ~17KB/position; 0 effectively disables caching (every position "
+                              "recomputed every time, lowest memory, slowest per-step)")
     args = parser.parse_args()
 
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -205,14 +212,19 @@ def main() -> None:
         log.info(f"Train: {len(train_panel)} rows. Holdout: {len(holdout_panel)} rows "
                  f"(trailing {cfg.checkpoint_holdout_days} calendar days, never trained on)")
 
-    # LazyPanelGatherer, not CPCPanelStore: a full precompute was already ~9GB resident
+    # CachedPanelGatherer, not CPCPanelStore: a full precompute was already ~9GB resident
     # (measured) at the OLD 150-ticker snapshot universe; the ~360-name point-in-time union
-    # is larger still. Adjacent windows for the same ticker overlap almost entirely, so
-    # per-position storage is fundamentally redundant. This computes each window on demand
-    # from the (tiny, ~tens of MB) per-ticker frame cache instead -- slower per step, but
-    # bounded, safe memory.
-    train_store = LazyPanelGatherer(train_panel, frame_cache)
-    holdout_store = LazyPanelGatherer(holdout_panel, frame_cache) if holdout_enabled else None
+    # is larger still -- too large to precompute the whole panel upfront on most machines.
+    # CPC/alignment sample WITH REPLACEMENT from the same panel every step, so many
+    # positions repeat over a multi-thousand-step run; a BOUNDED LRU cache captures those
+    # repeat hits without the unbounded-with-universe-size memory risk (see
+    # ssl_pretrain.py::CachedPanelGatherer).
+    est_gb = args.panel_cache_size * BYTES_PER_CACHED_POSITION / 1e9
+    log.info(f"Panel cache: up to {args.panel_cache_size} positions/store "
+             f"(~{est_gb:.1f}GB estimated peak, train+holdout stores each capped separately)")
+    train_store = CachedPanelGatherer(train_panel, frame_cache, maxsize=args.panel_cache_size)
+    holdout_store = CachedPanelGatherer(holdout_panel, frame_cache, maxsize=args.panel_cache_size) \
+        if holdout_enabled else None
 
     model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
                         len(QUARTERLY_FEATURES), d_model=cfg.d_model, n_heads=cfg.n_heads)
