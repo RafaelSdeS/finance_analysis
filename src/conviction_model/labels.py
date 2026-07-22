@@ -130,7 +130,11 @@ def compute_drawdown_severity(prices_wide: pd.DataFrame, cdi_index: pd.Series,
     one row per (decision_date, ticker) in `universe`, column `drawdown_severity`."""
     calendar = prices_wide.index
     universe = universe.drop_duplicates(["decision_date", "ticker"])
-    log_prices = np.log(prices_wide)
+    # Mask non-positive adj_close before log -- same vendor-rounding-artifact guard as
+    # trailing_volatility() above (BolsAI's adj_close rounds to exactly 0.00 for a handful
+    # of deep-history microcaps; see adj_close_precision_degraded). Without this, log(0)=-inf
+    # poisons excess_path/running_max into +inf severities for those tickers.
+    log_prices = np.log(prices_wide.where(prices_wide > 0))
     log_cdi = np.log(cdi_index)
 
     rows = []

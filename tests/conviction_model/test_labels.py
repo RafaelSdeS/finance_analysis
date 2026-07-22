@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from src.conviction_model.labels import (  # noqa: E402
     DRAWDOWN_HORIZON, HORIZONS, build_conviction_labels, build_cdi_cumulative_index,
-    trailing_volatility,
+    compute_drawdown_severity, trailing_volatility,
 )
 from src.h_series.spine import build_forward_targets  # noqa: E402
 from test_utils import print_check, print_header, print_section_end  # noqa: E402
@@ -72,6 +72,45 @@ def test_trailing_volatility_masks_zero_price(passed, failed):
     ok = no_warning and pd.notna(last) and np.isfinite(last)
     print_check("trailing_volatility: a zero price is masked to NaN, not log(0)=-inf",
                 ok, "raised RuntimeWarning" if not no_warning else f"last={last}")
+    return passed + ok, failed + (not ok)
+
+
+def test_drawdown_severity_masks_interior_zero_price(passed, failed):
+    # A single vendor-rounding-artifact zero MID-WINDOW (adj_close underflows its 2dp
+    # floor -- see features.py::adj_close_precision_degraded) must not raise a
+    # divide-by-zero warning or poison the whole path to +inf via log(0)=-inf leaking
+    # into excess_path/running_max. Regression test for compute_drawdown_severity
+    # missing the same mask trailing_volatility already has (this file's own sibling
+    # function -- the exact caveat this bug was caught by, 2026-07-22).
+    import warnings
+
+    n_post = DRAWDOWN_HORIZON + 5
+    calendar = pd.bdate_range("2015-01-01", periods=n_post + 10)
+    decision_date = calendar[5]
+    decision_idx = calendar.get_loc(decision_date)
+
+    prices = np.full(len(calendar), 10.0)
+    prices[decision_idx:decision_idx + n_post] = np.linspace(10.0, 12.0, n_post)  # steady climb
+    prices[decision_idx + 50] = 0.0  # vendor-rounding zero, mid-window (not on decision_date itself)
+
+    prices_wide = pd.DataFrame({"ZEROED": prices}, index=calendar)
+    cdi_index = pd.Series(1.0, index=calendar)  # flat CDI
+    decision_dates = pd.DatetimeIndex([decision_date])
+    universe = pd.DataFrame({"decision_date": decision_dates, "ticker": ["ZEROED"]})
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        try:
+            out = compute_drawdown_severity(prices_wide, cdi_index, decision_dates, universe)
+            no_warning = True
+        except RuntimeWarning:
+            no_warning = False
+
+    severity = float(out["drawdown_severity"].iloc[0]) if no_warning else None
+    ok = no_warning and severity is not None and np.isfinite(severity)
+    print_check("compute_drawdown_severity: an interior zero price is masked to NaN, not log(0)=-inf "
+                "poisoning severity to inf", ok,
+                "raised RuntimeWarning" if not no_warning else f"severity={severity}")
     return passed + ok, failed + (not ok)
 
 
@@ -207,6 +246,7 @@ def main() -> int:
         test_trailing_volatility_exact,
         test_trailing_volatility_warmup_is_nan,
         test_trailing_volatility_masks_zero_price,
+        test_drawdown_severity_masks_interior_zero_price,
         test_cdi_cumulative_index_compounds_correctly,
         test_cdi_bench_integration,
         test_worked_examples_no_aggregation_six_columns,
