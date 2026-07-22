@@ -69,12 +69,24 @@ def _group_positions(keys: np.ndarray) -> dict:
 def sample_cpc_negatives(panel: pd.DataFrame, anchor_positions: np.ndarray,
                           n_same_stock: int = 4, n_diff_stock: int = 4,
                           regime_gap_days: int = 252,
-                          rng: np.random.Generator | None = None) -> np.ndarray:
+                          rng: np.random.Generator | None = None,
+                          exclude_positions: np.ndarray | None = None) -> np.ndarray:
     """`panel`: DataFrame with columns ['ticker', 'trade_date'], one row per
     (ticker, date) embedding position -- row position (0..len-1) IS the
     embedding batch index elsewhere in the training loop. `anchor_positions`:
     [B] int array of row positions to sample negatives for. Returns
     [B, n_same_stock + n_diff_stock] int array of negative row positions.
+
+    `exclude_positions`: optional [B, K] int array of extra row positions
+    (the CPC/alignment positive(s) for each anchor) to keep out of the
+    same-stock NEGATIVE pool. Without this, a ticker with less than
+    regime_gap_days of history falls back to `same_pool[same_pool != pos]`,
+    which can select the positive itself (pos + horizon) as a "negative" --
+    a contradictory InfoNCE label (the positive embedding would appear as
+    both the numerator and a member of the negative set). Only the fallback
+    branch needs this: regime_gap_days (252) is always larger than every
+    horizon in play (cpc_horizon=21, alignment_horizon=63), so the positive
+    can never satisfy `gap_days >= regime_gap_days` and land in `far`.
 
     ponytail: "different regime" is approximated by a plain time-gap
     threshold (>= regime_gap_days), not an actual valuation/volatility-bucket
@@ -98,6 +110,13 @@ def sample_cpc_negatives(panel: pd.DataFrame, anchor_positions: np.ndarray,
         far = same_pool[gap_days >= regime_gap_days]
         if len(far) == 0:
             far = same_pool[same_pool != pos]
+            if exclude_positions is not None:
+                # Last-resort: if excluding the positive(s) would empty the pool
+                # entirely (a ticker with almost no history beyond the anchor
+                # itself), keep the pre-exclusion pool rather than crashing --
+                # a rare degenerate case, not the common path this guards.
+                filtered = far[~np.isin(far, exclude_positions[row])]
+                far = filtered if len(filtered) else far
         out[row, :n_same_stock] = rng.choice(far, size=n_same_stock, replace=len(far) < n_same_stock)
 
         same_time_pool = positions_by_date[date]
@@ -207,8 +226,9 @@ def build_cpc_batch(panel: pd.DataFrame, store, anchor_positions: np.ndarray,
     """
     rng = rng or np.random.default_rng()
     positive_positions = anchor_positions + cpc_horizon
-    negative_positions = sample_cpc_negatives(panel, anchor_positions, n_same_stock,
-                                               n_diff_stock, regime_gap_days, rng)
+    negative_positions = sample_cpc_negatives(panel, anchor_positions, n_same_stock, n_diff_stock,
+                                               regime_gap_days, rng,
+                                               exclude_positions=positive_positions[:, None])
 
     anchor_batch = store.gather(anchor_positions)
     positive_batch = store.gather(positive_positions)
@@ -334,12 +354,15 @@ def build_stage1b_batch(panel: pd.DataFrame, store, anchor_positions: np.ndarray
     negatives serve both losses; only the positive differs. Returns
     (anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch)."""
     rng = rng or np.random.default_rng()
-    negative_positions = sample_cpc_negatives(panel, anchor_positions, n_same_stock,
-                                               n_diff_stock, regime_gap_days, rng)
+    cpc_positive_positions = anchor_positions + cpc_horizon
+    align_positive_positions = anchor_positions + alignment_horizon
+    exclude_positions = np.stack([cpc_positive_positions, align_positive_positions], axis=1)
+    negative_positions = sample_cpc_negatives(panel, anchor_positions, n_same_stock, n_diff_stock,
+                                               regime_gap_days, rng, exclude_positions=exclude_positions)
 
     anchor_batch = store.gather(anchor_positions)
-    cpc_positive_batch = store.gather(anchor_positions + cpc_horizon)
-    align_positive_batch = store.gather(anchor_positions + alignment_horizon)
+    cpc_positive_batch = store.gather(cpc_positive_positions)
+    align_positive_batch = store.gather(align_positive_positions)
     flat_negatives = store.gather(negative_positions.reshape(-1))
     n_negatives = n_same_stock + n_diff_stock
     negative_batch = {name: t.reshape(len(anchor_positions), n_negatives, *t.shape[1:])

@@ -79,6 +79,34 @@ def test_same_stock_negatives_are_same_ticker_and_far_in_time(passed, failed):
     return passed + ok, failed + (not ok)
 
 
+def test_sample_cpc_negatives_excludes_positive_for_short_history_ticker(passed, failed):
+    # A ticker with LESS history than regime_gap_days forces the same-stock fallback
+    # branch (`same_pool[same_pool != pos]`) on every draw, since no row can satisfy
+    # `gap_days >= regime_gap_days`. Without exclude_positions, that fallback could pick
+    # the positive itself (pos + cpc_horizon) as a "negative" -- a contradictory InfoNCE
+    # label (same embedding as both the numerator and a negative). exclude_positions
+    # must keep it out.
+    tickers = ["SHORT"] * 30 + ["OTHER"] * 30
+    dates = list(pd.bdate_range("2020-01-01", periods=30)) * 2
+    panel = pd.DataFrame({"ticker": tickers, "trade_date": dates}).sort_values(
+        ["ticker", "trade_date"]).reset_index(drop=True)
+
+    cpc_horizon = 5
+    short_positions = panel.index[panel["ticker"] == "SHORT"].to_numpy()
+    anchor_positions = short_positions[:-cpc_horizon]  # every valid anchor for this ticker
+    positive_positions = anchor_positions + cpc_horizon
+
+    neg = sample_cpc_negatives(panel, anchor_positions, n_same_stock=4, n_diff_stock=2,
+                                regime_gap_days=252, rng=np.random.default_rng(7),
+                                exclude_positions=positive_positions[:, None])
+    same_stock_neg = neg[:, :4]
+    leaked = np.array([positive_positions[i] in same_stock_neg[i] for i in range(len(anchor_positions))])
+    ok = not leaked.any()
+    print_check("sample_cpc_negatives: exclude_positions keeps the positive out of the same-stock "
+                "fallback pool for a short-history ticker", ok, f"leaked for {int(leaked.sum())} anchors")
+    return passed + ok, failed + (not ok)
+
+
 def test_diff_stock_negatives_are_other_tickers_same_date(passed, failed):
     panel = _synthetic_panel()
     anchor_pos = np.array([panel[(panel["ticker"] == "AAA")].index[400]])
@@ -342,6 +370,7 @@ def main() -> int:
         test_info_nce_near_zero_when_positive_matches_and_negatives_orthogonal,
         test_info_nce_equals_log_n_plus_1_when_all_candidates_tied,
         test_same_stock_negatives_are_same_ticker_and_far_in_time,
+        test_sample_cpc_negatives_excludes_positive_for_short_history_ticker,
         test_diff_stock_negatives_are_other_tickers_same_date,
         test_sample_cpc_anchor_positions_leaves_room_for_the_horizon,
         test_build_cpc_batch_shapes,
