@@ -18,8 +18,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
 from src.conviction_model.labels import (  # noqa: E402
-    DRAWDOWN_HORIZON, HORIZONS, build_conviction_labels, build_cdi_cumulative_index,
-    compute_drawdown_severity, trailing_volatility,
+    DRAWDOWN_HORIZON, HORIZONS, VOL_LOOKBACK_DAYS, build_conviction_labels, build_cdi_cumulative_index,
+    compute_drawdown_severity, compute_risk_adjusted_excess_returns, trailing_volatility,
 )
 from src.h_series.spine import build_forward_targets  # noqa: E402
 from test_utils import print_check, print_header, print_section_end  # noqa: E402
@@ -111,6 +111,44 @@ def test_drawdown_severity_masks_interior_zero_price(passed, failed):
     print_check("compute_drawdown_severity: an interior zero price is masked to NaN, not log(0)=-inf "
                 "poisoning severity to inf", ok,
                 "raised RuntimeWarning" if not no_warning else f"severity={severity}")
+    return passed + ok, failed + (not ok)
+
+
+def test_risk_adjusted_return_masks_degenerate_zero_vol(passed, failed):
+    # A pinned-price artifact: adj_close is EXACTLY flat (a stuck vendor-rounding
+    # constant, see adj_close_precision_degraded) for the entire trailing_vol lookback
+    # window before decision_date -- trailing_vol is exactly 0.0 (finite, past warm-up,
+    # NOT NaN). Dividing the forward return by that must be masked to NaN, not blown up
+    # to +-inf.
+    n_pre = VOL_LOOKBACK_DAYS + 5
+    n_post = 30
+    calendar = pd.bdate_range("2018-01-01", periods=n_pre + n_post)
+    decision_date = calendar[n_pre - 1]
+
+    prices = np.concatenate([
+        np.full(n_pre, 5.0),               # pinned/flat -> trailing_vol == 0.0 exactly
+        np.linspace(5.0, 5.5, n_post),      # real forward move after decision_date
+    ])
+    prices_wide = pd.DataFrame({"PINNED": prices}, index=calendar)
+    cdi_index = pd.Series(1.0, index=calendar)  # flat CDI
+    decision_dates = pd.DatetimeIndex([decision_date])
+    universe = pd.DataFrame({"decision_date": decision_dates, "ticker": ["PINNED"]})
+
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        try:
+            out = compute_risk_adjusted_excess_returns(prices_wide, cdi_index, decision_dates, universe,
+                                                         horizons=(21,))
+            no_warning = True
+        except RuntimeWarning:
+            no_warning = False
+
+    val = out["risk_adj_excess_return_k21"].iloc[0] if no_warning else None
+    ok = no_warning and pd.isna(val)
+    print_check("compute_risk_adjusted_excess_returns: a pinned (trailing_vol==0) ticker's ratio is "
+                "masked to NaN before dividing, not blown up to inf via a divide-by-zero",
+                ok, "raised RuntimeWarning" if not no_warning else f"got {val}")
     return passed + ok, failed + (not ok)
 
 
@@ -247,6 +285,7 @@ def main() -> int:
         test_trailing_volatility_warmup_is_nan,
         test_trailing_volatility_masks_zero_price,
         test_drawdown_severity_masks_interior_zero_price,
+        test_risk_adjusted_return_masks_degenerate_zero_vol,
         test_cdi_cumulative_index_compounds_correctly,
         test_cdi_bench_integration,
         test_worked_examples_no_aggregation_six_columns,

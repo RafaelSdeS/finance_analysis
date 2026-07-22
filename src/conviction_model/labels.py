@@ -27,6 +27,10 @@ from .paths import CDI_PATH, DATASET_PATH
 HORIZONS = (21, 63, 126, 252, 504)  # trading days: ~1/3/6/12/24 months
 DRAWDOWN_HORIZON = 504              # the longest horizon -- see plan Labels, point 3
 VOL_LOOKBACK_DAYS = 60              # trailing window for the risk-adjustment denominator
+DEGENERATE_VOL_EPS = 1e-8           # trailing_vol at/below this is a pinned-price data
+                                     # artifact (adj_close_precision_degraded), not a
+                                     # genuinely low-risk name -- see
+                                     # compute_risk_adjusted_excess_returns
 
 
 # --- I/O -----------------------------------------------------------------
@@ -112,9 +116,17 @@ def compute_risk_adjusted_excess_returns(prices_wide: pd.DataFrame, cdi_index: p
         raw = raw[["decision_date", "ticker", "fwd_rel_return"]]
         merged = out[["decision_date", "ticker"]].merge(raw, on=["decision_date", "ticker"], how="left")
         merged = merged.merge(vol_long, on=["decision_date", "ticker"], how="left")
-        out[f"risk_adj_excess_return_k{k}"] = (
-            merged["fwd_rel_return"].to_numpy() / merged["trailing_vol"].to_numpy()
-        )
+        vol_arr = merged["trailing_vol"].to_numpy()
+        # A near-zero but FINITE trailing_vol (i.e. already past warm-up, so not already
+        # NaN) means a pinned/degenerate price series (adj_close_precision_degraded), not
+        # a genuinely low-risk name -- dividing by it would blow the label up to a
+        # huge/inf outlier instead of a meaningful risk-adjusted return. NaN'd out BEFORE
+        # dividing (not clipped after) so this never triggers an actual divide-by-zero
+        # warning -- same "mask, don't let it happen" discipline as trailing_volatility's
+        # own zero-price guard above.
+        degenerate = np.isfinite(vol_arr) & (vol_arr <= DEGENERATE_VOL_EPS)
+        safe_vol = np.where(degenerate, np.nan, vol_arr)
+        out[f"risk_adj_excess_return_k{k}"] = merged["fwd_rel_return"].to_numpy() / safe_vol
 
     return out
 
