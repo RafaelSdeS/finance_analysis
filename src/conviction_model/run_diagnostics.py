@@ -113,20 +113,29 @@ def build_sample_points(tickers, frame_cache: dict) -> pd.DataFrame:
 
 
 def compute_embeddings(model, points: pd.DataFrame, frame_cache: dict, chunk_size: int = 512):
-    """Pooled [N, d] embedding per point (positionally aligned with `points`), plus the
+    """Two representations per point (both positionally aligned with `points`), plus the
     raw batched branch tensors (diagnostic 5's perturbation probe reuses them directly
-    instead of re-gathering). One LazyPanelGatherer pass, chunked through the model to
-    bound peak activation memory."""
+    instead of re-gathering):
+      - POOLED [N, d]: mean of the 4 branch embeddings (ssl_pretrain._pool_embedding) --
+        the representation CPC's own loss trains against.
+      - UNPOOLED [N, 4*d]: the 4 branch embeddings concatenated, in BRANCHES order (dict
+        insertion order from EncoderCNN.forward) -- the representation Phase 2's regressor
+        actually consumes (Architecture: "4 labeled sub-embeddings ... fed to the
+        downstream model as separate, ablatable blocks"). Phase 1's gate scoring only the
+        pooled vector was measuring the wrong object relative to what Phase 2 uses
+        (review finding 5, docs/conviction_model/REVIEW_REMEDIATION_PLAN.md Phase 1).
+    One LazyPanelGatherer pass, chunked through the model to bound peak activation memory."""
     gatherer = LazyPanelGatherer(points, frame_cache)
     batch = gatherer.gather(np.arange(len(points)))
-    embeddings = []
+    pooled, unpooled = [], []
     with torch.no_grad():
         for start in range(0, len(points), chunk_size):
             sl = slice(start, start + chunk_size)
             chunk = {name: t[sl] for name, t in batch.items()}
             out = model(**chunk)
-            embeddings.append(_pool_embedding(out).numpy())
-    return np.concatenate(embeddings, axis=0), batch
+            pooled.append(_pool_embedding(out).numpy())
+            unpooled.append(torch.cat(list(out.values()), dim=-1).numpy())
+    return np.concatenate(pooled, axis=0), np.concatenate(unpooled, axis=0), batch
 
 
 def _anchor_value(frame: pd.DataFrame, as_of: pd.Timestamp, col: str) -> float:
@@ -235,7 +244,7 @@ def diag4_quality_persistence(embeddings, points, frame_cache, rng):
 
 # --- diagnostic 5: stability under small perturbations -----------------------
 
-def diag5_perturbation(model, batch, rng):
+def diag5_perturbation(model, batch, rng, pooled: bool = True):
     n = min(PERTURBATION_N_POINTS, batch["daily"].shape[0])
     idx = rng.choice(batch["daily"].shape[0], size=n, replace=False)
     daily = batch["daily"][idx].numpy()
@@ -245,7 +254,9 @@ def diag5_perturbation(model, batch, rng):
         with torch.no_grad():
             out = model(torch.tensor(daily_arr, dtype=torch.float32),
                         fixed["weekly"], fixed["monthly"], fixed["fundamentals"])
-        return _pool_embedding(out).numpy()
+        if pooled:
+            return _pool_embedding(out).numpy()
+        return torch.cat(list(out.values()), dim=-1).numpy()
 
     return perturbation_sensitivity(embed_fn, daily, rng=rng), n
 
@@ -314,6 +325,74 @@ def diag7_latent_similarity(embeddings, points, frame_cache, rng):
     return gap, p, len(matched)
 
 
+def run_diagnostic_battery(rep_label: str, embeddings: np.ndarray, points: pd.DataFrame,
+                            frame_cache: dict, model, batch: dict, rng: np.random.Generator,
+                            log: logging.Logger) -> dict:
+    """Runs all 7 intrinsic diagnostics against ONE embedding representation
+    (`rep_label`: "pooled" or "unpooled", logged as a prefix so the two runs'
+    output lines are distinguishable) -- factored out of main() so both
+    representations (review finding 5: Phase 1 previously only scored the
+    mean-pooled vector, not the concatenated 4-branch representation Phase 2's
+    regressor actually consumes) share one code path instead of duplicating
+    all 7 diagnostics' logging/gate logic. `embeddings` must already be the
+    chosen representation; diag5_perturbation's own pooling choice is passed
+    separately since it re-embeds from raw branch tensors, not from `embeddings`."""
+    results = {}
+    pooled = rep_label == "pooled"
+    tag = f"[{rep_label}]"
+
+    ratio, n1 = diag1_neighbor_outcome(embeddings, points, rng)
+    results["1_neighbor_outcome_variance_ratio"] = {
+        "value": ratio, "n": n1, "gate": "<=0.8", "pass": bool(GATES[1](ratio))}
+    log.info(f"{tag} [1] neighbor-outcome variance ratio = {ratio:.4f} (n={n1}) -- "
+             f"{'PASS' if GATES[1](ratio) else 'FAIL'}")
+
+    mi, thresh, n2 = diag2_regime_clustering(embeddings, points, rng)
+    results["2_regime_mutual_information"] = {
+        "mi": mi, "null_p95": thresh, "n": n2, "gate": "mi > null_p95", "pass": bool(GATES[2](mi, thresh))}
+    log.info(f"{tag} [2] regime MI = {mi:.4f} vs null_p95={thresh:.4f} (n={n2}) -- "
+             f"{'PASS' if GATES[2](mi, thresh) else 'FAIL'}")
+
+    val_r2, vol_r2, n3 = diag3_valuation_vs_volatility(embeddings, points, frame_cache, rng)
+    results["3_valuation_vs_volatility_probe"] = {
+        "valuation_r2": val_r2, "volatility_r2": vol_r2, "n": n3,
+        "gate": "val_r2 > vol_r2 and val_r2 >= 0.05", "pass": bool(GATES[3](val_r2, vol_r2))}
+    log.info(f"{tag} [3] valuation R2 = {val_r2:.4f} vs volatility R2 = {vol_r2:.4f} (n={n3}) -- "
+             f"{'PASS' if GATES[3](val_r2, vol_r2) else 'FAIL'}")
+
+    persist, n4 = diag4_quality_persistence(embeddings, points, frame_cache, rng)
+    gate4_pass = np.isfinite(persist) and GATES[4](persist)
+    results["4_quality_persistence_autocorrelation"] = {
+        "value": persist, "n_tickers": n4, "gate": ">=0.3", "pass": bool(gate4_pass)}
+    log.info(f"{tag} [4] quality persistence autocorr = {persist:.4f} (n_tickers={n4}) -- "
+             f"{'PASS' if gate4_pass else 'FAIL'}")
+
+    sensitivity, n5 = diag5_perturbation(model, batch, rng, pooled=pooled)
+    results["5_perturbation_sensitivity"] = {
+        "value": sensitivity, "n": n5, "gate": "<=1.0", "pass": bool(GATES[5](sensitivity))}
+    log.info(f"{tag} [5] perturbation sensitivity = {sensitivity:.4f} (n={n5}) -- "
+             f"{'PASS' if GATES[5](sensitivity) else 'FAIL'}")
+
+    corr, p6, n6 = diag6_temporal_smoothness(embeddings, points, frame_cache, rng)
+    results["6_temporal_smoothness"] = {
+        "correlation": corr, "p_value": p6, "n": n6,
+        "gate": "corr > 0 and p < 0.05", "pass": bool(GATES[6](corr, p6))}
+    log.info(f"{tag} [6] temporal smoothness corr = {corr:.4f}, p = {p6:.4f} (n={n6}) -- "
+             f"{'PASS' if GATES[6](corr, p6) else 'FAIL'}")
+
+    gap7, p7, n7 = diag7_latent_similarity(embeddings, points, frame_cache, rng)
+    gate7_pass = np.isfinite(gap7) and GATES[7](gap7, p7)
+    results["7_latent_similarity"] = {
+        "gap": gap7, "p_value": p7, "n_pairs": n7,
+        "gate": "gap > 0 and p < 0.05", "pass": bool(gate7_pass)}
+    log.info(f"{tag} [7] latent similarity gap = {gap7:.4f}, p = {p7:.4f} (n_pairs={n7}) -- "
+             f"{'PASS' if gate7_pass else 'FAIL'}")
+
+    n_pass = sum(1 for r in results.values() if r["pass"])
+    log.info(f"{tag} Diagnostics 1-7: {n_pass}/7 gates passed.")
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint-path", type=str, default=None)
@@ -323,7 +402,6 @@ def main() -> None:
     run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
     log = setup_logging(run_id)
     checkpoint_path = Path(args.checkpoint_path) if args.checkpoint_path else _latest_checkpoint()
-    rng = np.random.default_rng(args.seed)
 
     log.info(f"Checkpoint: {checkpoint_path}")
     model, cfg, tickers = load_checkpoint(checkpoint_path)
@@ -333,60 +411,21 @@ def main() -> None:
     points = build_sample_points(tickers, frame_cache)
     log.info(f"Sample points: {len(points)} (ticker, month-end) pairs")
 
-    embeddings, batch = compute_embeddings(model, points, frame_cache)
-    log.info(f"Embeddings computed: {embeddings.shape}")
+    pooled_emb, unpooled_emb, batch = compute_embeddings(model, points, frame_cache)
+    log.info(f"Embeddings computed: pooled={pooled_emb.shape}, unpooled={unpooled_emb.shape}")
 
-    results = {}
+    # Two independent rng streams (not one shared rng) so neither representation's run
+    # order affects the other's random draws -- each is reproducible on its own given the
+    # same --seed, regardless of whether both are run or just one.
+    seed_seq = np.random.SeedSequence(args.seed)
+    pooled_rng, unpooled_rng = (np.random.default_rng(s) for s in seed_seq.spawn(2))
 
-    ratio, n1 = diag1_neighbor_outcome(embeddings, points, rng)
-    results["1_neighbor_outcome_variance_ratio"] = {
-        "value": ratio, "n": n1, "gate": "<=0.8", "pass": bool(GATES[1](ratio))}
-    log.info(f"[1] neighbor-outcome variance ratio = {ratio:.4f} (n={n1}) -- "
-             f"{'PASS' if GATES[1](ratio) else 'FAIL'}")
-
-    mi, thresh, n2 = diag2_regime_clustering(embeddings, points, rng)
-    results["2_regime_mutual_information"] = {
-        "mi": mi, "null_p95": thresh, "n": n2, "gate": "mi > null_p95", "pass": bool(GATES[2](mi, thresh))}
-    log.info(f"[2] regime MI = {mi:.4f} vs null_p95={thresh:.4f} (n={n2}) -- "
-             f"{'PASS' if GATES[2](mi, thresh) else 'FAIL'}")
-
-    val_r2, vol_r2, n3 = diag3_valuation_vs_volatility(embeddings, points, frame_cache, rng)
-    results["3_valuation_vs_volatility_probe"] = {
-        "valuation_r2": val_r2, "volatility_r2": vol_r2, "n": n3,
-        "gate": "val_r2 > vol_r2 and val_r2 >= 0.05", "pass": bool(GATES[3](val_r2, vol_r2))}
-    log.info(f"[3] valuation R2 = {val_r2:.4f} vs volatility R2 = {vol_r2:.4f} (n={n3}) -- "
-             f"{'PASS' if GATES[3](val_r2, vol_r2) else 'FAIL'}")
-
-    persist, n4 = diag4_quality_persistence(embeddings, points, frame_cache, rng)
-    gate4_pass = np.isfinite(persist) and GATES[4](persist)
-    results["4_quality_persistence_autocorrelation"] = {
-        "value": persist, "n_tickers": n4, "gate": ">=0.3", "pass": bool(gate4_pass)}
-    log.info(f"[4] quality persistence autocorr = {persist:.4f} (n_tickers={n4}) -- "
-             f"{'PASS' if gate4_pass else 'FAIL'}")
-
-    sensitivity, n5 = diag5_perturbation(model, batch, rng)
-    results["5_perturbation_sensitivity"] = {
-        "value": sensitivity, "n": n5, "gate": "<=1.0", "pass": bool(GATES[5](sensitivity))}
-    log.info(f"[5] perturbation sensitivity = {sensitivity:.4f} (n={n5}) -- "
-             f"{'PASS' if GATES[5](sensitivity) else 'FAIL'}")
-
-    corr, p6, n6 = diag6_temporal_smoothness(embeddings, points, frame_cache, rng)
-    results["6_temporal_smoothness"] = {
-        "correlation": corr, "p_value": p6, "n": n6,
-        "gate": "corr > 0 and p < 0.05", "pass": bool(GATES[6](corr, p6))}
-    log.info(f"[6] temporal smoothness corr = {corr:.4f}, p = {p6:.4f} (n={n6}) -- "
-             f"{'PASS' if GATES[6](corr, p6) else 'FAIL'}")
-
-    gap7, p7, n7 = diag7_latent_similarity(embeddings, points, frame_cache, rng)
-    gate7_pass = np.isfinite(gap7) and GATES[7](gap7, p7)
-    results["7_latent_similarity"] = {
-        "gap": gap7, "p_value": p7, "n_pairs": n7,
-        "gate": "gap > 0 and p < 0.05", "pass": bool(gate7_pass)}
-    log.info(f"[7] latent similarity gap = {gap7:.4f}, p = {p7:.4f} (n_pairs={n7}) -- "
-             f"{'PASS' if gate7_pass else 'FAIL'}")
-
-    n_pass = sum(1 for r in results.values() if r["pass"])
-    log.info(f"Diagnostics 1-7: {n_pass}/7 gates passed.")
+    results = {
+        "pooled": run_diagnostic_battery("pooled", pooled_emb, points, frame_cache, model, batch,
+                                          pooled_rng, log),
+        "unpooled": run_diagnostic_battery("unpooled", unpooled_emb, points, frame_cache, model, batch,
+                                            unpooled_rng, log),
+    }
 
     out_path = DOCS_DIR / f"PHASE1_DIAGNOSTICS_{run_id}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
