@@ -119,10 +119,18 @@ Pure code + synthetic tests; no training run needed to land this phase.
   (uses ~half the tickers, as expected from a 50/50 split) and a finite result. The
   primitives it calls (`group_blocked_train_mask`, `quality_persistence_autocorrelation`)
   are already fully unit-tested in `test_diagnostics.py`.
-- [ ] `[IMPL]` **(5, Med) Score diagnostics on the unpooled representation too.**
+- [x] `[IMPL]` **(5, Med) Score diagnostics on the unpooled representation too.**
   Diagnostics run on the mean-pooled vector; Phase 2's regressor consumes the 4 *separate*
   branch embeddings. Add a second pass over the concatenated 4-branch vector and report both
-  in `run_diagnostics`' JSON. Trade-off: ~2× diagnostic runtime; cheap.
+  in `run_diagnostics`' JSON. Trade-off: ~2× diagnostic runtime; cheap. **Done** (commit
+  `d1cf4b2`): `compute_embeddings` returns both `pooled [N,d]`/`unpooled [N,4*d]` from one
+  model forward pass; `diag5_perturbation` gets a `pooled: bool` switch (it re-embeds from
+  raw branch tensors, not from the precomputed array); the 7-diagnostic loop is factored
+  into `run_diagnostic_battery(rep_label, ...)`, called once per representation with
+  independent rng streams, output JSON nested under `"pooled"`/`"unpooled"` keys. Verified
+  via a synthetic smoke check of the new shape/pooling logic (the full battery isn't
+  smoke-tested end-to-end — diag1/diag2 need real data files, same as this file's existing
+  non-fast-test status).
 - [ ] `[IMPL]` **(10, Low/Med) Add practical effect-size floors to the gates.**
   Gates 2/6 currently pass on significant-but-negligible effects (MI 0.0006, corr 0.14). Add
   a minimum-magnitude bar alongside the significance bar in the `GATES` table and record the
