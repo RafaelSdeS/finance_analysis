@@ -195,7 +195,7 @@ def test_build_cpc_batch_positive_is_same_ticker_k_ahead(passed, failed):
     cpc_horizon = 21
     anchors = sample_cpc_anchor_positions(panel, batch_size=10, cpc_horizon=cpc_horizon,
                                            rng=np.random.default_rng(4))
-    tickers, dates = panel["ticker"].to_numpy(), panel["trade_date"].to_numpy()
+    tickers = panel["ticker"].to_numpy()
     positive_positions = anchors + cpc_horizon
     same_ticker = bool(np.all(tickers[positive_positions] == tickers[anchors]))
     gap_trading_days = positive_positions - anchors
