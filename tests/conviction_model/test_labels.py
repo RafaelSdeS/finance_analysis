@@ -50,6 +50,31 @@ def test_trailing_volatility_warmup_is_nan(passed, failed):
     return passed + ok, failed + (not ok)
 
 
+def test_trailing_volatility_masks_zero_price(passed, failed):
+    # A single vendor-rounding-artifact zero (adj_close underflows its 2dp
+    # floor -- see features.py::adj_close_precision_degraded) must not raise
+    # a divide-by-zero warning or poison the whole window with -inf/NaN.
+    import warnings
+
+    vals = np.linspace(10, 11, 10)
+    vals[4] = 0.0
+    prices = pd.DataFrame({"X": vals}, index=pd.bdate_range("2020-01-01", periods=10))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        try:
+            vol = trailing_volatility(prices, window=4)
+            no_warning = True
+        except RuntimeWarning:
+            no_warning = False
+
+    last = vol["X"].iloc[-1] if no_warning else None
+    ok = no_warning and pd.notna(last) and np.isfinite(last)
+    print_check("trailing_volatility: a zero price is masked to NaN, not log(0)=-inf",
+                ok, "raised RuntimeWarning" if not no_warning else f"last={last}")
+    return passed + ok, failed + (not ok)
+
+
 def test_cdi_cumulative_index_compounds_correctly(passed, failed):
     # 11 calendar points, every one carrying rate r -> cumprod applies r 11
     # times by the last position (index 10 is the 11th element), not 10 --
@@ -181,6 +206,7 @@ def main() -> int:
     for test_fn in [
         test_trailing_volatility_exact,
         test_trailing_volatility_warmup_is_nan,
+        test_trailing_volatility_masks_zero_price,
         test_cdi_cumulative_index_compounds_correctly,
         test_cdi_bench_integration,
         test_worked_examples_no_aggregation_six_columns,

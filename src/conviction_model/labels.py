@@ -80,8 +80,15 @@ def trailing_volatility(prices_wide: pd.DataFrame, window: int = VOL_LOOKBACK_DA
     the risk-adjustment denominator (plan Labels, point 2). NaN until `window`
     days of a ticker's own history exist -- the same warm-up convention as
     every other rolling feature in this dataset (a leading prefix, not an
-    interior hole)."""
-    log_ret = np.log(prices_wide).diff()
+    interior hole).
+
+    Masks non-positive adj_close to NaN before log -- mirrors
+    build_dataset/features.py::compute_price_features's identical guard for
+    the same vendor artifact (BolsAI's adj_close rounds to exactly 0.00 for a
+    handful of deep-history microcaps once their cumulative split/dividend
+    adjustment factor pushes the true price below its 2-decimal precision
+    floor -- see adj_close_precision_degraded)."""
+    log_ret = np.log(prices_wide.where(prices_wide > 0)).diff()
     return log_ret.rolling(window, min_periods=window).std()
 
 
