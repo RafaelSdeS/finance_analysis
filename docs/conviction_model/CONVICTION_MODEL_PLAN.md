@@ -622,17 +622,29 @@ Phase 2 does not start until Phase 1D is done and reported.
       behavior change). One-time `CPCPanelStore` precompute: ~32s for this 5-ticker/27k-position
       pilot slice — scales with universe size, revisit (chunking) before the full ~515-ticker run
       if that becomes materially slower than acceptable.
-- [ ] **Stage 1A-1D training loop (the real, full-scale run)** — not started. The pilot above
-      de-risked the plumbing; still needed: decide the real training-universe scope (full 515 vs.
-      some subset) and step count/duration budget, then run Stage 1A for real (diagnostics 1-7 +
-      the baseline form of 8), before writing Stages 1B-1D's losses (masked reconstruction, forward
-      cross-modal alignment, valuation probe) or the trajectory-visualization/report machinery.
+- [x] **Stage 1A-1D training loop (the real, full-scale run)** — Stage 1A done (below); 1B-1D
+      remain (their losses -- masked reconstruction, forward cross-modal alignment, valuation
+      probe -- aren't written yet).
 - [ ] **Pilot/dry-run** (same convention as `rl_agent/experiment.py --dry-run`): rehearse
       the full Phase 1 loop — all 4 stages, all diagnostics, the trajectory plot — on a
       small slice (a handful of tickers, a few years) before the full 50-name/~15-year
-      run, to catch plumbing bugs and get a real wall-clock estimate.
-- [ ] **Stage 1A — CPC only.** Train; run diagnostics 1-7 + the trivial form of 8 (vs.
+      run, to catch plumbing bugs and get a real wall-clock estimate. (The CPC-only
+      `pretrain_pilot.py` dry-run above covers Stage 1A; this item is about rehearsing all 4
+      stages together once 1B-1D exist.)
+- [x] **Stage 1A — CPC only.** Train; run diagnostics 1-7 + the trivial form of 8 (vs.
       raw features only). Record as the baseline the other 3 stages must beat.
+      **Real run (2026-07-21), checkpoint `stage1a-20260721-165853.pt`, 150-ticker universe,
+      27006 (ticker, month-end) points, `run_diagnostics.py`:** 4/7 gates passed.
+      PASS: [1] neighbor-outcome variance ratio 0.7983 (gate ≤0.8), [2] regime MI 0.0006 vs.
+      null_p95 0.0002, [5] perturbation sensitivity 0.0101 (gate ≤1.0), [6] temporal smoothness
+      corr 0.1406, p<0.0001. FAIL: [3] valuation R² -0.0531 vs. volatility R² -0.1582 (gate:
+      val_r2 > vol_r2 and ≥0.05 -- expected at 1A, nothing in CPC pushes toward valuation
+      structure until 1D's valuation-probe loss), [4] quality persistence autocorr 0.0833 (gate
+      ≥0.3, same reasoning), [7] latent similarity gap 1.8922, p=0.18 (gate p<0.05 -- correct
+      sign, underpowered at n=426 matched pairs, not clearly wrong). Baseline 1B must beat:
+      `docs/conviction_model/PHASE1_DIAGNOSTICS_20260721-211343.json`. (Rerun after the
+      2026-07-21 `drop_zero_adjclose`→`trailing_volatility` NaN-masking fix; numbers essentially
+      unchanged from the pre-fix run, as expected — only 0.03% of rows were affected.)
 - [ ] **Stage 1B — + forward cross-modal alignment.** Warm-start from 1A; retrain; rerun
       diagnostics; compare against 1A.
 - [ ] **Stage 1C — + masked reconstruction.** Same pattern; compare against 1B.
