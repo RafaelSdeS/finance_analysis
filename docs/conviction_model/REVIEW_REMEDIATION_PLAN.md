@@ -76,14 +76,21 @@ contaminated. Fix the diagnostics so a "pass" means what it claims — **before*
 Pure code + synthetic tests; no training run needed to land this phase.
 
 **Implementation tasks**
-- [ ] `[IMPL]` **(2, High) Exclude same-ticker temporal neighbors in diagnostic 1.**
+- [x] `[IMPL]` **(2, High) Exclude same-ticker temporal neighbors in diagnostic 1.**
   `neighbor_outcome_variance_ratio` drops only the self-match; the plan requires excluding
   same-ticker points within a short window. Nearest neighbors are dominated by the same
   ticker at adjacent month-ends (near-duplicate embeddings, overlapping 252-day outcomes),
   so the current PASS (0.798, gate ≤0.8) is largely an autocorrelation artifact. Thread
   `tickers` (and dates) into the function; over-fetch neighbors and filter out any neighbor
   with the same ticker within ±N months before taking `k`. Trade-off: fewer usable neighbors
-  per point → slightly noisier ratio; acceptable and correct.
+  per point → slightly noisier ratio; acceptable and correct. **Done** (commit `0983d98`):
+  optional `tickers`/`dates`/`exclude_window_days`/`search_multiplier` params, omitting them
+  reproduces the original behavior exactly; `run_diagnostics.py`'s diag1 caller wired through.
+  Regression test uses an overlapping-forward-window outcome model (mirrors the real
+  `FORWARD_HORIZON` mechanism) to prove the artifact is real unfiltered and measurably
+  weaker (not necessarily eliminated — surviving neighbors can still correlate with each
+  other, just not with the anchor) after exclusion. Re-scoring the real Stage 1A checkpoint
+  with this fix is deferred to Phase 2 (needs the encoder-universe fix first).
 - [ ] `[IMPL]` **(6, Med) Block the linear-probe split by ticker.**
   `diag3/diag4` pre-shuffle into an iid split (`rng.permutation`), placing near-duplicate
   adjacent-month rows of one ticker on both sides → inflated OOS R². Replace with a
