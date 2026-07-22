@@ -76,6 +76,7 @@ FAST = [
     "tests/conviction_model/test_encoder.py",
     "tests/conviction_model/test_ssl_pretrain.py",
     "tests/conviction_model/test_diagnostics.py",
+    "tests/conviction_model/test_run_diagnostics.py",
 ]
 
 # Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.

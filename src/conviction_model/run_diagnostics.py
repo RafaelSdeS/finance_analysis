@@ -60,13 +60,23 @@ MATCHED_PAIR_GAP_DAYS = 365   # diagnostic 7's "far apart in time" threshold
 MATCHED_PAIRS_PER_TICKER = 3  # diagnostic 7's cap on matched pairs per ticker
 VALUATION_MATCH_TOLERANCE = 0.5  # z-score units counted as "similar" valuation reading
 
+# Practical effect-size floors (review finding 10) -- a permutation-null/p-value test alone
+# answers "is this distinguishable from noise," not "is this big enough to matter." The
+# first real Stage 1A run cleared gates 2 and 6 on magnitudes (MI=0.0006 vs null_p95=0.0002;
+# corr=0.14) that are technically significant but read as near-zero in practical terms.
+# Both floors are arbitrary/adjustable, like every other first-guess number in this table
+# (Phase 1's own gate table already flags several this way) -- not principled, just a forced
+# decision so a "pass" can't be read as bigger than it is.
+MIN_REGIME_MI = 0.02        # gate 2: mutual information floor
+MIN_SMOOTHNESS_CORR = 0.1   # gate 6: Cohen's conventional "small effect" correlation floor
+
 GATES = {
     1: lambda v: v <= 0.8,
-    2: lambda mi, thresh: mi > thresh,
+    2: lambda mi, thresh: mi > thresh and mi >= MIN_REGIME_MI,
     3: lambda val_r2, vol_r2: val_r2 > vol_r2 and val_r2 >= 0.05,
     4: lambda v: v >= 0.3,
     5: lambda v: v <= 1.0,
-    6: lambda corr, p: corr > 0 and p < 0.05,
+    6: lambda corr, p: corr > 0 and p < 0.05 and corr >= MIN_SMOOTHNESS_CORR,
     7: lambda gap, p: gap > 0 and p < 0.05,
 }
 
@@ -349,7 +359,8 @@ def run_diagnostic_battery(rep_label: str, embeddings: np.ndarray, points: pd.Da
 
     mi, thresh, n2 = diag2_regime_clustering(embeddings, points, rng)
     results["2_regime_mutual_information"] = {
-        "mi": mi, "null_p95": thresh, "n": n2, "gate": "mi > null_p95", "pass": bool(GATES[2](mi, thresh))}
+        "mi": mi, "null_p95": thresh, "n": n2, "gate": f"mi > null_p95 and mi >= {MIN_REGIME_MI}",
+        "pass": bool(GATES[2](mi, thresh))}
     log.info(f"{tag} [2] regime MI = {mi:.4f} vs null_p95={thresh:.4f} (n={n2}) -- "
              f"{'PASS' if GATES[2](mi, thresh) else 'FAIL'}")
 
@@ -376,7 +387,7 @@ def run_diagnostic_battery(rep_label: str, embeddings: np.ndarray, points: pd.Da
     corr, p6, n6 = diag6_temporal_smoothness(embeddings, points, frame_cache, rng)
     results["6_temporal_smoothness"] = {
         "correlation": corr, "p_value": p6, "n": n6,
-        "gate": "corr > 0 and p < 0.05", "pass": bool(GATES[6](corr, p6))}
+        "gate": f"corr > 0 and p < 0.05 and corr >= {MIN_SMOOTHNESS_CORR}", "pass": bool(GATES[6](corr, p6))}
     log.info(f"{tag} [6] temporal smoothness corr = {corr:.4f}, p = {p6:.4f} (n={n6}) -- "
              f"{'PASS' if GATES[6](corr, p6) else 'FAIL'}")
 
