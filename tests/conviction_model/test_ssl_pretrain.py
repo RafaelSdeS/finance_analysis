@@ -25,8 +25,9 @@ from src.conviction_model.data import (  # noqa: E402
 from src.conviction_model.encoder import EncoderCNN  # noqa: E402
 from src.conviction_model.config import SSLConfig  # noqa: E402
 from src.conviction_model.ssl_pretrain import (  # noqa: E402
-    CPCPanelStore, LazyPanelGatherer, build_cpc_batch, info_nce_loss, sample_cpc_anchor_positions,
-    sample_cpc_negatives, score_holdout, split_train_holdout, train_step,
+    CPCPanelStore, LazyPanelGatherer, _price_macro_state, build_cpc_batch, info_nce_loss,
+    sample_cpc_anchor_positions, sample_cpc_negatives, score_holdout, score_holdout_stage1b,
+    split_train_holdout, train_step, train_step_stage1b,
 )
 from test_utils import print_check, print_header, print_section_end  # noqa: E402
 
@@ -253,8 +254,65 @@ def test_train_step_updates_params_and_returns_finite_loss(passed, failed):
     return passed, failed
 
 
+def test_price_macro_state_ignores_fundamentals(passed, failed):
+    branch_embeddings = {
+        "daily": torch.tensor([[1.0, 2.0]]),
+        "weekly": torch.tensor([[3.0, 4.0]]),
+        "monthly": torch.tensor([[5.0, 6.0]]),
+        "fundamentals": torch.tensor([[999.0, -999.0]]),  # must not move the result
+    }
+    state = _price_macro_state(branch_embeddings)
+    expected = torch.tensor([[3.0, 4.0]])  # mean of (1,2),(3,4),(5,6)
+    ok = bool(torch.allclose(state, expected))
+    print_check("_price_macro_state: pools daily/weekly/monthly only, ignores fundamentals",
+                ok, f"got {state.tolist()}, expected {expected.tolist()}")
+    return passed + ok, failed + (not ok)
+
+
+def test_train_step_stage1b_updates_params_and_returns_finite_losses(passed, failed):
+    torch.manual_seed(0)
+    n_features, window, batch_size, n_negatives = 5, 8, 4, 3
+    model = EncoderCNN(n_features, n_features, n_features, n_features, d_model=8, n_heads=2)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-2)
+    anchor, negatives = _tiny_batch(batch_size, n_negatives, n_features, window)
+    positive, _ = _tiny_batch(batch_size, n_negatives, n_features, window)
+
+    params_before = [p.clone() for p in model.parameters()]
+    losses = train_step_stage1b(model, optimizer, anchor, positive, negatives, alignment_weight=0.5)
+
+    finite = all(v == v and v != float("inf") for v in losses.values())
+    print_check("train_step_stage1b: returns finite total/cpc/alignment losses", finite, f"{losses}")
+    passed, failed = passed + finite, failed + (not finite)
+
+    changed = any(not torch.allclose(a, b) for a, b in zip(params_before, model.parameters()))
+    print_check("train_step_stage1b: model parameters change after one gradient step", changed)
+    passed, failed = passed + changed, failed + (not changed)
+    return passed, failed
+
+
+def test_score_holdout_stage1b_does_not_change_params_and_returns_finite_score(passed, failed):
+    panel, cache = _synthetic_frame_cache(["AAA", "BBB"], n_days=400)
+    _, holdout_panel = split_train_holdout(panel, holdout_days=180)
+    holdout_store = CPCPanelStore(holdout_panel, cache)
+    cfg = SSLConfig(cpc_horizon=10, batch_size=8, n_same_stock_negatives=2, n_diff_stock_negatives=2,
+                     alignment_weight=0.5)
+
+    model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
+                        len(QUARTERLY_FEATURES), d_model=8, n_heads=2)
+    params_before = [p.clone() for p in model.parameters()]
+    score = score_holdout_stage1b(model, holdout_panel, holdout_store, cfg,
+                                   rng=np.random.default_rng(0), n_eval_batches=2)
+
+    unchanged = all(torch.equal(a, b) for a, b in zip(params_before, model.parameters()))
+    finite = score == score and score != float("inf")
+    ok = unchanged and finite
+    print_check("score_holdout_stage1b: leaves model parameters unchanged (no_grad) and returns a finite score",
+                ok, f"score={score}, unchanged={unchanged}")
+    return passed + ok, failed + (not ok)
+
+
 def main() -> int:
-    print_header("conviction_model/ssl_pretrain.py (Stage 1A: CPC)")
+    print_header("conviction_model/ssl_pretrain.py (Stage 1A: CPC, Stage 1B: + forward cross-modal alignment)")
     passed = failed = 0
     for test_fn in [
         test_info_nce_near_zero_when_positive_matches_and_negatives_orthogonal,
@@ -268,6 +326,9 @@ def main() -> int:
         test_split_train_holdout_respects_cutoff_and_stays_contiguous,
         test_score_holdout_does_not_change_params_and_returns_finite_score,
         test_train_step_updates_params_and_returns_finite_loss,
+        test_price_macro_state_ignores_fundamentals,
+        test_train_step_stage1b_updates_params_and_returns_finite_losses,
+        test_score_holdout_stage1b_does_not_change_params_and_returns_finite_score,
     ]:
         passed, failed = test_fn(passed, failed)
     print_section_end(passed, failed)

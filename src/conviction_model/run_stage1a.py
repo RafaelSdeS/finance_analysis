@@ -57,18 +57,20 @@ LOG_DIR = ROOT / "artifacts/logs/conviction_model"
 DEFAULT_STEPS = 5000  # first-guess budget for this initial run -- arbitrary, adjustable via --steps
 
 
-def setup_logging(run_id: str) -> logging.Logger:
+def setup_logging(run_id: str, stage: str = "stage1a") -> logging.Logger:
     """Same convention as data_collection/pipeline.py::setup_logging(): dual
     stdout + file handler, so everything printed during a run is also saved
-    for later study, not just visible while the terminal is open."""
+    for later study, not just visible while the terminal is open. `stage`
+    param (default "stage1a") lets run_stage1b.py and later stages reuse this
+    exact setup instead of duplicating it, just naming their own log file."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    logfile = LOG_DIR / f"stage1a-{run_id}.log"
+    logfile = LOG_DIR / f"{stage}-{run_id}.log"
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler(logfile)],
     )
-    return logging.getLogger("stage1a")
+    return logging.getLogger(stage)
 
 
 def top150_snapshot_tickers(membership_path=TOP150_MEMBERSHIP_PATH) -> list:

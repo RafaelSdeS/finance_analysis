@@ -645,8 +645,16 @@ Phase 2 does not start until Phase 1D is done and reported.
       `docs/conviction_model/PHASE1_DIAGNOSTICS_20260721-211343.json`. (Rerun after the
       2026-07-21 `drop_zero_adjclose`→`trailing_volatility` NaN-masking fix; numbers essentially
       unchanged from the pre-fix run, as expected — only 0.03% of rows were affected.)
-- [ ] **Stage 1B — + forward cross-modal alignment.** Warm-start from 1A; retrain; rerun
-      diagnostics; compare against 1A.
+- [~] **Stage 1B — + forward cross-modal alignment.** Warm-start from 1A; retrain; rerun
+      diagnostics; compare against 1A. **Code written (2026-07-21):** `_price_macro_state`/
+      `_alignment_loss`/`_stage1b_loss`/`train_step_stage1b`/`score_holdout_stage1b`
+      (`ssl_pretrain.py`) -- reuses CPC's own (anchor, positive, negative) batches, scored
+      against a different branch selection (price/macro state predicts the fundamentals
+      branch's embedding at t+cpc_horizon) instead of a new data path. `alignment_weight`
+      added to `SSLConfig` (weighted sum with CPC, default 1.0). `run_stage1b.py` warm-starts
+      from the latest `stage1a-*.pt`, reusing its exact hyperparameters. Tests pass
+      (16/16 `test_ssl_pretrain.py`, 2/2 `test_config.py`). **Not yet run for real** -- the
+      warm-start training + rerun-diagnostics steps above are still open.
 - [ ] **Stage 1C — + masked reconstruction.** Same pattern; compare against 1B.
 - [ ] **Stage 1D — + auxiliary valuation probe** (NaN-masked on rows without a defined
       `pl_zhist_5y`/`pvp_zhist_5y`). Same pattern; compare against 1C.

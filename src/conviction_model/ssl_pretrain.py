@@ -1,11 +1,10 @@
 """
-ssl_pretrain.py -- Phase 1, Stage 1A (docs/conviction_model/CONVICTION_MODEL_PLAN.md):
-the CPC (Contrastive Predictive Coding) loss, the first of the 4 SSL losses,
-introduced alone per the plan's staged 1A->1D design (isolate one loss at a
-time so any diagnostic change is attributable to the loss just added).
-Stages 1B-1D (forward cross-modal alignment, masked reconstruction, the
-auxiliary valuation-probe nudge) are added incrementally in later work, not
-this file yet.
+ssl_pretrain.py -- Phase 1, Stages 1A-1B (docs/conviction_model/CONVICTION_MODEL_PLAN.md):
+CPC (Contrastive Predictive Coding) and forward cross-modal alignment, the first two of
+the 4 SSL losses, introduced one at a time per the plan's staged 1A->1D design (isolate
+one loss at a time so any diagnostic change is attributable to the loss just added).
+Stages 1C-1D (masked reconstruction, the auxiliary valuation-probe nudge) are added
+incrementally in later work, not this file yet.
 
 CPC predicts FUTURE LATENT STATE (an embedding k steps ahead), not future
 price -- pushes the encoder toward temporal consistency of "market state"
@@ -15,6 +14,14 @@ in the plan rather than left generic:
   - same-stock-different-regime: same ticker, a distant time window
   - different-stock-same-time: a different ticker at the same date, so
     market-wide co-movement alone can't trivially satisfy the objective
+
+Forward cross-modal alignment (Stage 1B) reuses CPC's own (anchor, positive, negative)
+batches -- same underlying (t, t+cpc_horizon) pairs, just a different branch selection:
+price/macro state (daily+weekly+monthly, pooled) at t must predict the FUNDAMENTALS
+branch's embedding at t+k, not merely agree with it at t (Architecture / "What the latent
+representation is for") -- biases the representation toward what's fundamentally
+predictive, not just price-autocorrelation-predictive. Same InfoNCE machinery, same
+negative-sampling scheme, just scored against a different pair of embeddings.
 """
 
 import numpy as np
@@ -296,3 +303,90 @@ def score_holdout(model: torch.nn.Module, holdout_panel: pd.DataFrame, holdout_s
             losses.append(float(loss.item()))
     model.train()
     return sum(losses) / len(losses)
+
+
+# --- Stage 1B: + forward cross-modal alignment -------------------------------
+
+def _price_macro_state(branch_embeddings: dict) -> torch.Tensor:
+    """Price/macro state = daily+weekly+monthly branches pooled, deliberately
+    EXCLUDING fundamentals -- Stage 1B's alignment anchor ("price/macro state
+    at t must predict the fundamentals branch's future embedding"). Distinct
+    from _pool_embedding (CPC's "market state"), which pools all 4 branches
+    including fundamentals -- that inclusion would let the anchor trivially
+    see a piece of the very thing it's supposed to predict."""
+    keys = ("daily", "weekly", "monthly")
+    return torch.stack([branch_embeddings[k] for k in keys], dim=1).mean(dim=1)
+
+
+def _alignment_loss(model: torch.nn.Module, anchor_batch: dict, positive_batch: dict,
+                     negative_batch: dict, temperature: float) -> torch.Tensor:
+    """Stage 1B's forward cross-modal alignment loss. Reuses the exact same
+    (anchor, positive, negative) batches CPC's build_cpc_batch already
+    assembles -- only the branch selection differs: anchor pools price/macro
+    branches only (_price_macro_state), positive/negatives read the
+    FUNDAMENTALS branch alone (not pooled) at t+cpc_horizon. Same InfoNCE
+    contrastive form as CPC (info_nce_loss), scored against a different pair
+    of embeddings, not new machinery."""
+    anchor_emb = _price_macro_state(model(**anchor_batch))
+    positive_emb = model(**positive_batch)["fundamentals"]
+
+    batch_size = anchor_batch["daily"].shape[0]
+    n_negatives = negative_batch["daily"].shape[1]
+    flat_negatives = {name: t.reshape(batch_size * n_negatives, *t.shape[2:])
+                       for name, t in negative_batch.items()}
+    negative_emb = model(**flat_negatives)["fundamentals"].reshape(batch_size, n_negatives, -1)
+
+    return info_nce_loss(anchor_emb, positive_emb, negative_emb, temperature)
+
+
+def _stage1b_loss(model: torch.nn.Module, anchor_batch: dict, positive_batch: dict,
+                   negative_batch: dict, temperature: float, alignment_weight: float) -> dict:
+    """CPC + forward cross-modal alignment, combined as a weighted sum (Module
+    layout: ssl_pretrain.py's losses combine as a weighted sum). Shared by
+    train_step_stage1b (grad) and score_holdout_stage1b (no_grad) -- same
+    split Stage 1A's _cpc_loss already uses. Returns all three terms (not
+    just the total) so the training loop can log whether alignment is
+    actually learning something, not just riding CPC's gradient."""
+    cpc = _cpc_loss(model, anchor_batch, positive_batch, negative_batch, temperature)
+    alignment = _alignment_loss(model, anchor_batch, positive_batch, negative_batch, temperature)
+    total = cpc + alignment_weight * alignment
+    return {"total": total, "cpc": cpc, "alignment": alignment}
+
+
+def train_step_stage1b(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
+                        anchor_batch: dict, positive_batch: dict, negative_batch: dict,
+                        temperature: float = 0.1, alignment_weight: float = 1.0,
+                        grad_clip_norm: float | None = None) -> dict:
+    """One Stage 1B gradient step. Returns {'total','cpc','alignment'} floats
+    -- unlike Stage 1A's train_step (a single float), since seeing each term
+    separately is the whole point of logging a combined-loss run."""
+    optimizer.zero_grad()
+    losses = _stage1b_loss(model, anchor_batch, positive_batch, negative_batch,
+                            temperature, alignment_weight)
+    losses["total"].backward()
+    if grad_clip_norm is not None:
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+    optimizer.step()
+    return {k: float(v.item()) for k, v in losses.items()}
+
+
+def score_holdout_stage1b(model: torch.nn.Module, holdout_panel: pd.DataFrame, holdout_store,
+                           cfg, rng: np.random.Generator, n_eval_batches: int = 4) -> float:
+    """Same purpose/shape as Stage 1A's score_holdout, scoring the combined
+    Stage 1B loss -- checkpoint-at-peak needs one scalar to compare
+    checkpoints by, so this returns the combined total (cpc + weighted
+    alignment), not the two terms separately."""
+    model.eval()
+    totals = []
+    with torch.no_grad():
+        for _ in range(n_eval_batches):
+            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, cfg.cpc_horizon, rng=rng)
+            anchor_batch, positive_batch, negative_batch = build_cpc_batch(
+                holdout_panel, holdout_store, anchors, cfg.cpc_horizon,
+                n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
+                regime_gap_days=cfg.regime_gap_days, rng=rng)
+            losses = _stage1b_loss(model, anchor_batch, positive_batch, negative_batch,
+                                    cfg.temperature, cfg.alignment_weight)
+            totals.append(float(losses["total"].item()))
+    model.train()
+    return sum(totals) / len(totals)

@@ -2,8 +2,8 @@
 config.py -- Phase 1 (docs/conviction_model/CONVICTION_MODEL_PLAN.md): frozen-dataclass
 pretraining config, JSON round-trippable, mirrors rl_agent/config.py's convention.
 
-Only Stage 1A (CPC) fields exist yet. Masked-reconstruction / forward-cross-modal-
-alignment / valuation-probe fields (Stages 1B-1D) get added when those losses are
+Stage 1A (CPC) + Stage 1B (forward cross-modal alignment) fields exist. Masked-
+reconstruction / valuation-probe fields (Stages 1C-1D) get added when those losses are
 written, not speculatively now -- see Module layout's ssl_pretrain.py row.
 """
 
@@ -32,6 +32,14 @@ class SSLConfig:
     # step budget (5000) is far smaller -- both arbitrary, adjustable.
     checkpoint_holdout_days: int = 365
     checkpoint_eval_every: int = 250
+    # Stage 1B: forward cross-modal alignment, combined with CPC as a weighted sum
+    # (Module layout: "weighted sum" -- loss = cpc + alignment_weight * alignment).
+    # 1.0 = equal footing with CPC to start; arbitrary, adjustable like every other
+    # loss weight in this plan (e.g. Phase 2's per-horizon regressor weights).
+    # Reuses cpc_horizon as the forward gap for "predict the fundamentals branch's
+    # embedding at t+k" -- the plan doesn't call for a separate horizon, and sharing
+    # it lets one build_cpc_batch() call serve both losses each step.
+    alignment_weight: float = 1.0
 
     def to_json(self, path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=2))
