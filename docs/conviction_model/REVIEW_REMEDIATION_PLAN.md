@@ -91,11 +91,33 @@ Pure code + synthetic tests; no training run needed to land this phase.
   weaker (not necessarily eliminated — surviving neighbors can still correlate with each
   other, just not with the anchor) after exclusion. Re-scoring the real Stage 1A checkpoint
   with this fix is deferred to Phase 2 (needs the encoder-universe fix first).
-- [ ] `[IMPL]` **(6, Med) Block the linear-probe split by ticker.**
+- [x] `[IMPL]` **(6, Med) Block the linear-probe split by ticker — diag3 done, diag4 is a
+  separate open question (see below).**
   `diag3/diag4` pre-shuffle into an iid split (`rng.permutation`), placing near-duplicate
   adjacent-month rows of one ticker on both sides → inflated OOS R². Replace with a
   **ticker-disjoint** split (GroupShuffle by ticker) in `linear_probe_r2`'s callers.
-  Trade-off: R² drops toward its honest value; that is the point.
+  Trade-off: R² drops toward its honest value; that is the point. **diag3 done** (commit
+  `a022380`): `diagnostics.py::group_blocked_train_mask` + a `train_mask` param on
+  `linear_probe_r2`/`valuation_vs_volatility_probe` (omitting it reproduces the original
+  positional split exactly); `diag3_valuation_vs_volatility` now builds one ticker-blocked
+  mask shared by both probes. Regression test confirms an iid split reports a deceptively
+  decent R² (0.37) on data with zero genuine cross-ticker signal, while a ticker-blocked
+  split on the same data honestly reports ≈0/negative R² (−0.23).
+  **diag4 discovered to have a DIFFERENT issue, not literally "block the split":**
+  `quality_persistence_autocorrelation`'s caller (`diag4_quality_persistence`) never
+  actually implements a train/test split — its `rng.permutation` shuffles row order, then
+  `LinearRegression().fit()` is called on the **entire** masked set (order doesn't affect
+  what a linear fit learns), and `predict()` runs over **all** points, including the
+  training rows themselves (in-sample). "Block the split by ticker" doesn't literally apply
+  because there is no split to block. Two options, not yet decided (see chat for the
+  question posed to the user):
+  (a) add a genuine ticker-blocked OOS split to diag4 (fit the quality probe on train-ticker
+  rows only, compute the reported persistence autocorrelation only on held-out test-ticker
+  rows) — consistent with diag3's now-established OOS discipline, a real improvement beyond
+  the plan's original wording;
+  (b) leave the in-sample fit as diag4's original design intent (the goal may only be "is
+  the recovered signal smooth," not "does it generalize") and simply remove the dead/
+  misleading `rng.permutation` call so it doesn't imply a rigor that isn't there.
 - [ ] `[IMPL]` **(5, Med) Score diagnostics on the unpooled representation too.**
   Diagnostics run on the mean-pooled vector; Phase 2's regressor consumes the 4 *separate*
   branch embeddings. Add a second pass over the concatenated 4-branch vector and report both
