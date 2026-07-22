@@ -131,19 +131,26 @@ Pure code + synthetic tests; no training run needed to land this phase.
   via a synthetic smoke check of the new shape/pooling logic (the full battery isn't
   smoke-tested end-to-end — diag1/diag2 need real data files, same as this file's existing
   non-fast-test status).
-- [ ] `[IMPL]` **(10, Low/Med) Add practical effect-size floors to the gates.**
+- [x] `[IMPL]` **(10, Low/Med) Add practical effect-size floors to the gates.**
   Gates 2/6 currently pass on significant-but-negligible effects (MI 0.0006, corr 0.14). Add
   a minimum-magnitude bar alongside the significance bar in the `GATES` table and record the
   absolute magnitude in the pass rationale. Trade-off: some current "passes" become
-  "significant but below effect-size floor" — a more honest ledger.
+  "significant but below effect-size floor" — a more honest ledger. **Done** (commit
+  `b4cc766`): `MIN_REGIME_MI=0.02` / `MIN_SMOOTHNESS_CORR=0.1` (Cohen's small-effect
+  convention) AND-ed into `GATES[2]`/`GATES[6]`; gate description strings updated to state
+  the combined criterion. New `tests/conviction_model/test_run_diagnostics.py` (added to
+  the fast group) — unlike the other `diagN_*` functions, `GATES` is pure lambda logic with
+  no data dependency, so it's directly unit-tested (fails below the magnitude floor even
+  when significant, passes above both bars, still fails when not significant even above
+  the floor).
 
 **Validation**
-- [ ] Extend `test_diagnostics.py`: (a) diagnostic 1 with an injected same-ticker
+- [x] Extend `test_diagnostics.py`: (a) diagnostic 1 with an injected same-ticker
   autocorrelated cluster shows the ratio *rises toward 1* once same-ticker neighbors are
   excluded; (b) a ticker-blocked probe on data where signal lives only cross-sectionally
   yields lower R² than the old iid split; (c) each gate's magnitude+significance combination
   evaluates correctly just above/below threshold.
-- [ ] `python tests/run_all.py --group fast` green.
+- [x] `python tests/run_all.py --group fast` green (53/53 as of this phase's last commit).
 
 **Expected outcome:** Diagnostic scores reflect genuine embedding structure, not
 near-duplicate leakage; the gate table distinguishes "real effect" from "detectable but
@@ -152,6 +159,11 @@ trivial".
 **Exit criteria:** New synthetic tests pass; `run_diagnostics.py` emits both pooled and
 unpooled results plus magnitude-annotated gate decisions. (Re-scoring the *real* checkpoint
 is deferred to Phase 2, since the checkpoint itself is on a biased universe.)
+
+**Phase 1 status: COMPLETE** (2026-07-22). All four tasks landed
+(`0983d98`, `a022380`, `1e5cddb`, `d1cf4b2`, `b4cc766`); fast suite 53/53, `ruff` clean
+throughout. Next: Phase 2 (correct the encoder training universe + re-baseline Stage 1A —
+requires a real training run, user-executed).
 
 ---
 
