@@ -633,7 +633,11 @@ Phase 2 does not start until Phase 1D is done and reported.
       stages together once 1B-1D exist.)
 - [x] **Stage 1A — CPC only.** Train; run diagnostics 1-7 + the trivial form of 8 (vs.
       raw features only). Record as the baseline the other 3 stages must beat.
-      **Real run (2026-07-21), checkpoint `stage1a-20260721-165853.pt`, 150-ticker universe,
+      **SUPERSEDED 2026-07-22 — the 2026-07-21 run below was on a survivorship-biased
+      universe AND scored with contaminated diagnostics (`REVIEW_REMEDIATION_PLAN.md`
+      findings 1/2/6/10); do not compare later stages against the old 4/7 number.** Kept
+      below only for history.
+      ~~**Real run (2026-07-21), checkpoint `stage1a-20260721-165853.pt`, 150-ticker universe,
       27006 (ticker, month-end) points, `run_diagnostics.py`:** 4/7 gates passed.
       PASS: [1] neighbor-outcome variance ratio 0.7983 (gate ≤0.8), [2] regime MI 0.0006 vs.
       null_p95 0.0002, [5] perturbation sensitivity 0.0101 (gate ≤1.0), [6] temporal smoothness
@@ -644,9 +648,54 @@ Phase 2 does not start until Phase 1D is done and reported.
       sign, underpowered at n=426 matched pairs, not clearly wrong). Baseline 1B must beat:
       `docs/conviction_model/PHASE1_DIAGNOSTICS_20260721-211343.json`. (Rerun after the
       2026-07-21 `drop_zero_adjclose`→`trailing_volatility` NaN-masking fix; numbers essentially
-      unchanged from the pre-fix run, as expected — only 0.03% of rows were affected.)
+      unchanged from the pre-fix run, as expected — only 0.03% of rows were affected.)~~
+
+      **CORRECTED real run (2026-07-22), checkpoint `stage1a-20260722-183854.pt`,
+      point-in-time-union universe (360 tickers, survivorship-safe), 68318 (ticker,
+      month-end) points, both pooled AND unpooled representations scored (Phase 1 fix),
+      ticker-blocked/effect-size-floored gates (Phase 1 fixes) — `run_diagnostics.py`:
+      1/7 gates passed (both representations). PASS: [5] perturbation sensitivity (pooled
+      0.0091, unpooled 0.0203, gate ≤1.0 — a low bar; a near-constant function passes this
+      too, so on its own this is not strong evidence of anything). FAIL (all): [1] neighbor-
+      outcome variance ratio pooled 1.1506 / unpooled 1.1634 (gate ≤0.8) — **ratio is now
+      >1**, meaning embedding-nearest neighbors have *higher* outcome variance than random
+      points once the same-ticker-near-time exclusion is applied; the old 0.7983 "pass" was
+      the autocorrelation artifact the fix targeted. [2] regime MI pooled/unpooled ≈0.0001,
+      right at the permutation-null floor — no detectable regime structure now that gate 2's
+      effect-size floor (0.02) is applied. [3] valuation vs. volatility probe: both deeply
+      negative and unstable (pooled val=-56083.89/vol=-2002.05; unpooled val=-3527.18/
+      vol=-15750.86) — val_r2 is not just failing the ≥0.05 floor but also failing
+      val_r2>vol_r2. **Caveat, not a retraction of the FAIL:** magnitudes this extreme are
+      consistent with the linear-probe-instability failure mode this session's own Phase-1
+      test design surfaced (a plain unregularized `LinearRegression` on 64-256-dim embeddings
+      against a ticker-blocked split with ~150-180 distinct held-out tickers is exactly the
+      "more dimensions than effectively-independent clusters" regime that produces wildly
+      unstable OOS R² — measured as low as -4275 on a *synthetic* fixture built to study
+      exactly this in `test_diagnostics.py`). The FAIL verdict is trustworthy; the specific
+      magnitude is probably not meaningfully interpretable as "56000x worse than guessing" —
+      a future refinement should consider a regularized (Ridge) probe for diagnostic 3
+      specifically, flagged here rather than silently changed. [4] quality persistence
+      autocorr pooled 0.0902 / unpooled 0.0571 (gate ≥0.3) — same failure as before, and
+      still far below the bar. [6] temporal smoothness corr pooled 0.0514 / unpooled 0.0418,
+      p<0.0001 — **exactly the case gate 6's new effect-size floor (0.1) exists for**: both
+      are "significant" at p<0.0001 (n≈66k makes almost anything significant) but below the
+      floor; the old baseline's 0.1406 would have passed here, a direct demonstration of
+      why the floor was added. [7] latent similarity: pooled gap=-24.75 (p=0.89), unpooled
+      gap=+22.05 (p=0.425) — **sign is no longer consistently positive** (old baseline had a
+      correct-sign-but-underpowered +1.89); neither representation shows a real matched-pairs-
+      closer-than-random effect now.
+      **Interpretation:** this is the honest baseline the review's remediation work was meant
+      to produce — expected to look weaker than the old 4/7, since that number was inflated by
+      survivorship bias + diagnostic contamination on multiple axes at once (not a sign the
+      fixes were wrong; the opposite). Baseline 1B/1C/1D must beat:
+      `docs/conviction_model/PHASE1_DIAGNOSTICS_20260722-210655.json`.
 - [~] **Stage 1B — + forward cross-modal alignment.** Warm-start from 1A; retrain; rerun
       diagnostics; compare against 1A.
+      **The v1/v2 work below also warm-started from the now-superseded biased 1A checkpoint
+      (`stage1a-20260721-165853.pt`) — needs a fresh warm-start from the corrected
+      `stage1a-20260722-183854.pt` before its results are comparable to anything. Kept below
+      only for the horizon-mismatch diagnosis, which is still valid reasoning independent of
+      which checkpoint it's applied to.**
       **v1 code + real run (2026-07-21), checkpoint `stage1b-20260721-215534.pt`:**
       `_price_macro_state`/`_alignment_loss`/`_stage1b_loss`/`train_step_stage1b`/
       `score_holdout_stage1b` (`ssl_pretrain.py`), `alignment_weight` in `SSLConfig`

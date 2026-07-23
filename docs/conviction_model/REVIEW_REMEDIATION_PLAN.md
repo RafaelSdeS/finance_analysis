@@ -201,10 +201,32 @@ establish the true Phase-1 baseline using Phase-1's corrected diagnostics.
   ("delisted") name that the snapshot misses.
 
 **Experiments (user runs; code written here)**
-- [ ] `[EXP]` Retrain Stage 1A (CPC-only) on the corrected universe.
-- [ ] `[EXP]` Re-score with Phase-1's corrected diagnostics (pooled + unpooled).
-- [ ] Record the result as **the** Stage 1A baseline that 1B/1C/1D must beat, replacing the
-  biased `PHASE1_DIAGNOSTICS_20260721-*.json` numbers in the plan.
+- [x] `[EXP]` Retrain Stage 1A (CPC-only) on the corrected universe. **Done** (2026-07-22):
+  `stage1a-20260722-183854.pt`, 360-ticker point-in-time-union universe, 5000 steps,
+  checkpoint-at-peak restored step 3749 (holdout loss 0.6087, not the final step's weights).
+  A mid-run OOM crash from `CachedPanelGatherer` caching float64 arrays (a real bug
+  introduced by this session's performance work, not a Phase-2 issue) was caught and fixed
+  first — see commit `0b51246`.
+- [x] `[EXP]` Re-score with Phase-1's corrected diagnostics (pooled + unpooled). **Done**:
+  1/7 gates passed on BOTH representations (only diagnostic 5, perturbation sensitivity — a
+  low bar). Down from the old (contaminated) baseline's reported 4/7.
+- [x] Record the result as **the** Stage 1A baseline that 1B/1C/1D must beat, replacing the
+  biased `PHASE1_DIAGNOSTICS_20260721-*.json` numbers in the plan. **Done**: full breakdown
+  recorded in `CONVICTION_MODEL_PLAN.md`'s Stage 1A status block (old 4/7 struck through and
+  marked superseded, not deleted); new baseline file
+  `docs/conviction_model/PHASE1_DIAGNOSTICS_20260722-210655.json`. Notable: diagnostic 1's
+  ratio flipped from a "passing" 0.7983 to a failing >1 (1.15/1.16) once the same-ticker
+  exclusion fix is applied — confirms the old pass was the autocorrelation artifact the
+  fix targeted, not a coincidence. Diagnostic 6 similarly flips from "passing" 0.1406 to
+  failing 0.05/0.04 once the effect-size floor is applied — the exact case that gate exists
+  for. Diagnostic 3's magnitudes (val R² as low as -56,083) are likely inflated by the same
+  high-dimensional-linear-probe instability this session's own `test_diagnostics.py` fixture
+  work identified (unregularized `LinearRegression` on 64-256 dims vs. a ticker-blocked split
+  with ~150-180 distinct held-out tickers) — the FAIL verdict is trustworthy, the exact
+  magnitude probably isn't; a regularized (Ridge) probe is a candidate future refinement for
+  diagnostic 3, not applied here. Stage 1B's existing recorded run (`stage1b-20260721-215534.pt`)
+  also warm-started from the now-superseded 1A checkpoint and needs a fresh warm-start before
+  its own numbers mean anything.
 
 **Validation**
 - [ ] Assert the training panel contains names absent from the current snapshot (i.e.
