@@ -80,11 +80,26 @@ def _group_positions(keys: np.ndarray) -> dict:
     return dict(zip(unique_keys, groups))
 
 
+def precompute_position_groups(panel: pd.DataFrame) -> tuple[dict, dict]:
+    """(positions_by_ticker, positions_by_date) via _group_positions -- the two lookup
+    tables sample_cpc_negatives rebuilds from `panel` on every call. Both depend only on
+    `panel`'s ('ticker', 'trade_date') columns, which don't change across an entire
+    training run, so compute this ONCE before the loop and pass the result into
+    sample_cpc_negatives (directly or via build_cpc_batch/build_stage1b_batch)'s
+    positions_by_ticker/positions_by_date params instead of paying the argsort cost
+    again every single step."""
+    tickers = panel["ticker"].to_numpy()
+    dates = panel["trade_date"].to_numpy()
+    return _group_positions(tickers), _group_positions(dates)
+
+
 def sample_cpc_negatives(panel: pd.DataFrame, anchor_positions: np.ndarray,
                           n_same_stock: int = 4, n_diff_stock: int = 4,
                           regime_gap_days: int = 252,
                           rng: np.random.Generator | None = None,
-                          exclude_positions: np.ndarray | None = None) -> np.ndarray:
+                          exclude_positions: np.ndarray | None = None,
+                          positions_by_ticker: dict | None = None,
+                          positions_by_date: dict | None = None) -> np.ndarray:
     """`panel`: DataFrame with columns ['ticker', 'trade_date'], one row per
     (ticker, date) embedding position -- row position (0..len-1) IS the
     embedding batch index elsewhere in the training loop. `anchor_positions`:
@@ -102,6 +117,11 @@ def sample_cpc_negatives(panel: pd.DataFrame, anchor_positions: np.ndarray,
     horizon in play (cpc_horizon=21, alignment_horizon=63), so the positive
     can never satisfy `gap_days >= regime_gap_days` and land in `far`.
 
+    `positions_by_ticker`/`positions_by_date`: precomputed via precompute_position_groups(panel),
+    reused across calls sharing the same `panel` (an entire training run's train_panel/
+    holdout_panel never changes step to step) -- skips rebuilding these argsort-based
+    lookups from scratch on every call. None (default) computes them here, same as before.
+
     ponytail: "different regime" is approximated by a plain time-gap
     threshold (>= regime_gap_days), not an actual valuation/volatility-bucket
     match -- the plan's own wording ("a distant time window in a different
@@ -112,8 +132,8 @@ def sample_cpc_negatives(panel: pd.DataFrame, anchor_positions: np.ndarray,
     rng = rng or np.random.default_rng()
     tickers = panel["ticker"].to_numpy()
     dates = panel["trade_date"].to_numpy()
-    positions_by_ticker = _group_positions(tickers)
-    positions_by_date = _group_positions(dates)
+    if positions_by_ticker is None or positions_by_date is None:
+        positions_by_ticker, positions_by_date = precompute_position_groups(panel)
 
     out = np.empty((len(anchor_positions), n_same_stock + n_diff_stock), dtype=np.int64)
     for row, pos in enumerate(anchor_positions):
@@ -141,16 +161,33 @@ def sample_cpc_negatives(panel: pd.DataFrame, anchor_positions: np.ndarray,
     return out
 
 
+def eligible_anchor_positions(panel: pd.DataFrame, cpc_horizon: int) -> np.ndarray:
+    """Row positions from `panel` with a valid same-ticker positive at
+    position + cpc_horizon (excludes each ticker's trailing `cpc_horizon` rows) --
+    the part of sample_cpc_anchor_positions that only depends on `panel`/`cpc_horizon`,
+    not on the RNG draw. Pulled out so it can be computed ONCE before a training loop
+    (panel doesn't change step to step) instead of every single call."""
+    remaining = panel.groupby("ticker").cumcount(ascending=False).to_numpy()
+    return np.flatnonzero(remaining >= cpc_horizon)
+
+
 def sample_cpc_anchor_positions(panel: pd.DataFrame, batch_size: int, cpc_horizon: int,
-                                 rng: np.random.Generator | None = None) -> np.ndarray:
+                                 rng: np.random.Generator | None = None,
+                                 eligible: np.ndarray | None = None) -> np.ndarray:
     """Random row positions from `panel` (must be sorted by
     ['ticker','trade_date'] and RangeIndex'd -- same contract as
     sample_cpc_negatives, since each ticker's rows need to be contiguous)
     that have a valid same-ticker positive at position + cpc_horizon, i.e.
-    excludes each ticker's trailing `cpc_horizon` rows."""
+    excludes each ticker's trailing `cpc_horizon` rows.
+
+    `eligible`: precomputed via eligible_anchor_positions(panel, cpc_horizon), reused
+    across calls sharing the same `panel`/`cpc_horizon` -- rebuilding it via a fresh
+    `panel.groupby("ticker").cumcount()` every step of a several-thousand-step training
+    loop was pure repeat work (`panel` never changes step to step). None (default)
+    computes it here, same as before."""
     rng = rng or np.random.default_rng()
-    remaining = panel.groupby("ticker").cumcount(ascending=False).to_numpy()
-    eligible = np.flatnonzero(remaining >= cpc_horizon)
+    if eligible is None:
+        eligible = eligible_anchor_positions(panel, cpc_horizon)
     if len(eligible) < batch_size:
         raise ValueError(f"only {len(eligible)} eligible anchors for cpc_horizon={cpc_horizon}, "
                           f"need batch_size={batch_size}")
@@ -295,7 +332,9 @@ class CachedPanelGatherer:
 def build_cpc_batch(panel: pd.DataFrame, store, anchor_positions: np.ndarray,
                      cpc_horizon: int, n_same_stock: int = 4, n_diff_stock: int = 4,
                      regime_gap_days: int = 252,
-                     rng: np.random.Generator | None = None) -> tuple[dict, dict, dict]:
+                     rng: np.random.Generator | None = None,
+                     positions_by_ticker: dict | None = None,
+                     positions_by_date: dict | None = None) -> tuple[dict, dict, dict]:
     """Assemble one real CPC train_step's (anchor_batch, positive_batch,
     negative_batch) from a real (ticker, trade_date) panel + a `store`
     exposing .gather(positions) -> dict (CPCPanelStore, fast/memory-heavy, or
@@ -310,7 +349,9 @@ def build_cpc_batch(panel: pd.DataFrame, store, anchor_positions: np.ndarray,
     positive_positions = anchor_positions + cpc_horizon
     negative_positions = sample_cpc_negatives(panel, anchor_positions, n_same_stock, n_diff_stock,
                                                regime_gap_days, rng,
-                                               exclude_positions=positive_positions[:, None])
+                                               exclude_positions=positive_positions[:, None],
+                                               positions_by_ticker=positions_by_ticker,
+                                               positions_by_date=positions_by_date)
 
     anchor_batch = store.gather(anchor_positions)
     positive_batch = store.gather(positive_positions)
@@ -319,6 +360,18 @@ def build_cpc_batch(panel: pd.DataFrame, store, anchor_positions: np.ndarray,
     negative_batch = {name: t.reshape(len(anchor_positions), n_negatives, *t.shape[1:])
                        for name, t in flat_negatives.items()}
     return anchor_batch, positive_batch, negative_batch
+
+
+def _encode(model: torch.nn.Module, batch: dict) -> tuple[torch.Tensor, dict]:
+    """(pre-attention tokens, post-attention per-branch embeddings) for one batch -- the
+    same two things branch_tokens()/forward() compute separately, bundled so a batch that
+    gets reused by more than one loss in the same step (Stage 1B/1C's anchor_batch and
+    negative_batch are each fed to both CPC and alignment, and anchor_batch's PRE-attention
+    tokens are also Stage 1C's reconstruction target) only runs through the branch CNNs
+    once, not once per loss that touches it. The embeddings half is bit-identical to
+    model(**batch) (EncoderCNN.forward literally is branch_tokens + forward_from_tokens)."""
+    tokens = model.branch_tokens(batch["daily"], batch["weekly"], batch["monthly"], batch["fundamentals"])
+    return tokens, model.forward_from_tokens(tokens)
 
 
 def _pool_embedding(branch_embeddings: dict) -> torch.Tensor:
@@ -330,8 +383,14 @@ def _pool_embedding(branch_embeddings: dict) -> torch.Tensor:
     return torch.stack(list(branch_embeddings.values()), dim=1).mean(dim=1)
 
 
+def _flatten_negatives(negative_batch: dict, batch_size: int, n_negatives: int) -> dict:
+    return {name: t.reshape(batch_size * n_negatives, *t.shape[2:]) for name, t in negative_batch.items()}
+
+
 def _cpc_loss(model: torch.nn.Module, anchor_batch: dict, positive_batch: dict,
-              negative_batch: dict, temperature: float) -> torch.Tensor:
+              negative_batch: dict, temperature: float,
+              anchor_embeddings: dict | None = None,
+              negative_embeddings: dict | None = None) -> torch.Tensor:
     """Shared by train_step (grad) and score_holdout (no_grad): embed
     anchor/positive/negative batches and compute the InfoNCE loss.
     `anchor_batch`/`positive_batch`: each a dict {'daily': [B,f,w], 'weekly':
@@ -340,15 +399,21 @@ def _cpc_loss(model: torch.nn.Module, anchor_batch: dict, positive_batch: dict,
     `negative_batch`: same keys, each [B,N,f,w] (N negatives per anchor, from
     sample_cpc_negatives) -- flattened to [B*N,f,w] to run through the
     encoder once, reshaped back to [B,N,d] to match info_nce_loss's
-    contract."""
-    anchor_emb = _pool_embedding(model(**anchor_batch))
+    contract.
+
+    `anchor_embeddings`/`negative_embeddings`: precomputed via _encode(model, ...) on
+    anchor_batch / the flattened negative_batch, reused when the caller (Stage 1B/1C's
+    _stage1b_loss/_stage1c_loss) already ran the SAME anchor_batch/negative_batch through
+    the encoder for another loss this step -- skips a second identical forward pass.
+    None (default) recomputes internally, e.g. Stage 1A's standalone CPC-only usage."""
+    anchor_emb = _pool_embedding(anchor_embeddings if anchor_embeddings is not None else _encode(model, anchor_batch)[1])
     positive_emb = _pool_embedding(model(**positive_batch))
 
     batch_size = anchor_batch["daily"].shape[0]
     n_negatives = negative_batch["daily"].shape[1]
-    flat_negatives = {name: t.reshape(batch_size * n_negatives, *t.shape[2:])
-                       for name, t in negative_batch.items()}
-    negative_emb = _pool_embedding(model(**flat_negatives)).reshape(batch_size, n_negatives, -1)
+    if negative_embeddings is None:
+        negative_embeddings = _encode(model, _flatten_negatives(negative_batch, batch_size, n_negatives))[1]
+    negative_emb = _pool_embedding(negative_embeddings).reshape(batch_size, n_negatives, -1)
 
     return info_nce_loss(anchor_emb, positive_emb, negative_emb, temperature)
 
@@ -385,22 +450,32 @@ def split_train_holdout(panel: pd.DataFrame, holdout_days: int) -> tuple[pd.Data
 
 
 def score_holdout(model: torch.nn.Module, holdout_panel: pd.DataFrame, holdout_store,
-                   cfg, rng: np.random.Generator, n_eval_batches: int = 4) -> float:
+                   cfg, rng: np.random.Generator, n_eval_batches: int = 4,
+                   eligible: np.ndarray | None = None,
+                   positions_by_ticker: dict | None = None,
+                   positions_by_date: dict | None = None) -> float:
     """Mean CPC loss over `n_eval_batches` batches drawn from the holdout
     panel, frozen weights (no gradient, model.eval()) -- lower is better
     (it's a loss, unlike rl_agent's total_return score). Averaging a few
     batches instead of one reduces sampling noise in the score used to pick
     the "best" checkpoint. `cfg`: SSLConfig (batch_size, cpc_horizon,
-    negative-sampling params, temperature)."""
+    negative-sampling params, temperature).
+
+    `eligible`/`positions_by_ticker`/`positions_by_date`: same precomputed-reuse contract
+    as sample_cpc_anchor_positions/sample_cpc_negatives -- holdout_panel is fixed for the
+    whole run too, so the caller can precompute these once instead of every
+    checkpoint_eval_every-th call recomputing them from scratch."""
     model.eval()
     losses = []
     with torch.no_grad():
         for _ in range(n_eval_batches):
-            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, cfg.cpc_horizon, rng=rng)
+            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, cfg.cpc_horizon,
+                                                   rng=rng, eligible=eligible)
             anchor_batch, positive_batch, negative_batch = build_cpc_batch(
                 holdout_panel, holdout_store, anchors, cfg.cpc_horizon,
                 n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
-                regime_gap_days=cfg.regime_gap_days, rng=rng)
+                regime_gap_days=cfg.regime_gap_days, rng=rng,
+                positions_by_ticker=positions_by_ticker, positions_by_date=positions_by_date)
             loss = _cpc_loss(model, anchor_batch, positive_batch, negative_batch, cfg.temperature)
             losses.append(float(loss.item()))
     model.train()
@@ -424,7 +499,9 @@ def build_stage1b_batch(panel: pd.DataFrame, store, anchor_positions: np.ndarray
                          cpc_horizon: int, alignment_horizon: int,
                          n_same_stock: int = 4, n_diff_stock: int = 4,
                          regime_gap_days: int = 252,
-                         rng: np.random.Generator | None = None) -> tuple[dict, dict, dict, dict]:
+                         rng: np.random.Generator | None = None,
+                         positions_by_ticker: dict | None = None,
+                         positions_by_date: dict | None = None) -> tuple[dict, dict, dict, dict]:
     """Stage 1B's batch assembly: CPC and forward cross-modal alignment read
     DIFFERENT forward horizons off the SAME anchor -- alignment_horizon
     (default ~63 trading days, one fiscal quarter) deliberately differs from
@@ -440,7 +517,9 @@ def build_stage1b_batch(panel: pd.DataFrame, store, anchor_positions: np.ndarray
     align_positive_positions = anchor_positions + alignment_horizon
     exclude_positions = np.stack([cpc_positive_positions, align_positive_positions], axis=1)
     negative_positions = sample_cpc_negatives(panel, anchor_positions, n_same_stock, n_diff_stock,
-                                               regime_gap_days, rng, exclude_positions=exclude_positions)
+                                               regime_gap_days, rng, exclude_positions=exclude_positions,
+                                               positions_by_ticker=positions_by_ticker,
+                                               positions_by_date=positions_by_date)
 
     anchor_batch = store.gather(anchor_positions)
     cpc_positive_batch = store.gather(cpc_positive_positions)
@@ -453,21 +532,28 @@ def build_stage1b_batch(panel: pd.DataFrame, store, anchor_positions: np.ndarray
 
 
 def _alignment_loss(model: torch.nn.Module, anchor_batch: dict, align_positive_batch: dict,
-                     negative_batch: dict, temperature: float) -> torch.Tensor:
+                     negative_batch: dict, temperature: float,
+                     anchor_embeddings: dict | None = None,
+                     negative_embeddings: dict | None = None) -> torch.Tensor:
     """Stage 1B's forward cross-modal alignment loss. anchor pools price/macro
     branches only (_price_macro_state) at t; align_positive_batch/negatives
     read the FUNDAMENTALS branch alone (not pooled) at t+alignment_horizon
     (build_stage1b_batch). Same InfoNCE contrastive form as CPC
     (info_nce_loss), scored against a different pair of embeddings and a
-    different horizon, not new machinery."""
-    anchor_emb = _price_macro_state(model(**anchor_batch))
+    different horizon, not new machinery.
+
+    `anchor_embeddings`/`negative_embeddings`: same precomputed-reuse contract as
+    _cpc_loss's -- anchor_batch and negative_batch are the SAME batches CPC just embedded
+    this step (build_stage1b_batch shares negatives between the two losses), so
+    _stage1b_loss/_stage1c_loss compute them once and pass them to both."""
+    anchor_emb = _price_macro_state(anchor_embeddings if anchor_embeddings is not None else _encode(model, anchor_batch)[1])
     positive_emb = model(**align_positive_batch)["fundamentals"]
 
     batch_size = anchor_batch["daily"].shape[0]
     n_negatives = negative_batch["daily"].shape[1]
-    flat_negatives = {name: t.reshape(batch_size * n_negatives, *t.shape[2:])
-                       for name, t in negative_batch.items()}
-    negative_emb = model(**flat_negatives)["fundamentals"].reshape(batch_size, n_negatives, -1)
+    if negative_embeddings is None:
+        negative_embeddings = _encode(model, _flatten_negatives(negative_batch, batch_size, n_negatives))[1]
+    negative_emb = negative_embeddings["fundamentals"].reshape(batch_size, n_negatives, -1)
 
     return info_nce_loss(anchor_emb, positive_emb, negative_emb, temperature)
 
@@ -480,9 +566,23 @@ def _stage1b_loss(model: torch.nn.Module, anchor_batch: dict, cpc_positive_batch
     train_step_stage1b (grad) and score_holdout_stage1b (no_grad) -- same
     split Stage 1A's _cpc_loss already uses. Returns all three terms (not
     just the total) so the training loop can log whether alignment is
-    actually learning something, not just riding CPC's gradient."""
-    cpc = _cpc_loss(model, anchor_batch, cpc_positive_batch, negative_batch, temperature)
-    alignment = _alignment_loss(model, anchor_batch, align_positive_batch, negative_batch, temperature)
+    actually learning something, not just riding CPC's gradient.
+
+    anchor_batch and negative_batch are each embedded ONCE here and shared between
+    _cpc_loss/_alignment_loss (build_stage1b_batch's own docstring: negatives ARE shared
+    between the two losses, only the positive differs) -- previously each loss
+    independently re-ran the encoder over these same two batches, doubling the dominant
+    per-step compute (negative_batch alone is n_same_stock+n_diff_stock times the anchor
+    batch's size) for identical results."""
+    batch_size = anchor_batch["daily"].shape[0]
+    n_negatives = negative_batch["daily"].shape[1]
+    _, anchor_embeddings = _encode(model, anchor_batch)
+    _, negative_embeddings = _encode(model, _flatten_negatives(negative_batch, batch_size, n_negatives))
+
+    cpc = _cpc_loss(model, anchor_batch, cpc_positive_batch, negative_batch, temperature,
+                     anchor_embeddings=anchor_embeddings, negative_embeddings=negative_embeddings)
+    alignment = _alignment_loss(model, anchor_batch, align_positive_batch, negative_batch, temperature,
+                                 anchor_embeddings=anchor_embeddings, negative_embeddings=negative_embeddings)
     total = cpc + alignment_weight * alignment
     return {"total": total, "cpc": cpc, "alignment": alignment}
 
@@ -505,21 +605,29 @@ def train_step_stage1b(model: torch.nn.Module, optimizer: torch.optim.Optimizer,
 
 
 def score_holdout_stage1b(model: torch.nn.Module, holdout_panel: pd.DataFrame, holdout_store,
-                           cfg, rng: np.random.Generator, n_eval_batches: int = 4) -> float:
+                           cfg, rng: np.random.Generator, n_eval_batches: int = 4,
+                           eligible: np.ndarray | None = None,
+                           positions_by_ticker: dict | None = None,
+                           positions_by_date: dict | None = None) -> float:
     """Same purpose/shape as Stage 1A's score_holdout, scoring the combined
     Stage 1B loss -- checkpoint-at-peak needs one scalar to compare
     checkpoints by, so this returns the combined total (cpc + weighted
-    alignment), not the two terms separately."""
+    alignment), not the two terms separately.
+
+    `eligible`/`positions_by_ticker`/`positions_by_date`: same precomputed-reuse contract
+    as score_holdout's."""
     model.eval()
     totals = []
     max_horizon = max(cfg.cpc_horizon, cfg.alignment_horizon)
     with torch.no_grad():
         for _ in range(n_eval_batches):
-            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, max_horizon, rng=rng)
+            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, max_horizon,
+                                                   rng=rng, eligible=eligible)
             anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch = build_stage1b_batch(
                 holdout_panel, holdout_store, anchors, cfg.cpc_horizon, cfg.alignment_horizon,
                 n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
-                regime_gap_days=cfg.regime_gap_days, rng=rng)
+                regime_gap_days=cfg.regime_gap_days, rng=rng,
+                positions_by_ticker=positions_by_ticker, positions_by_date=positions_by_date)
             losses = _stage1b_loss(model, anchor_batch, cpc_positive_batch, align_positive_batch,
                                     negative_batch, cfg.temperature, cfg.alignment_weight)
             totals.append(float(losses["total"].item()))
@@ -564,17 +672,28 @@ def _branch_token(model: torch.nn.Module, batch: dict, branch_name: str) -> torc
 
 
 def _reconstruction_loss(model: torch.nn.Module, recon_heads: ReconstructionHeads,
-                          anchor_batch: dict, masked_branch: str) -> torch.Tensor:
+                          anchor_batch: dict, masked_branch: str,
+                          anchor_tokens: torch.Tensor | None = None) -> torch.Tensor:
     """Mask `masked_branch` out of the anchor, run the encoder, and try to recover that
     branch's true (unmasked) pre-attention token from the masked post-attention embedding
     -- see module docstring. `.detach()` on the target: a plain stop-gradient so the
     encoder can't lower this loss by dragging the target token toward whatever the
     prediction already says, only by making the OTHER branches' information (visible via
-    cross-attention) actually predictive of the masked one."""
+    cross-attention) actually predictive of the masked one.
+
+    `anchor_tokens`: precomputed pre-attention tokens for the UNMASKED anchor_batch, from
+    the same _encode(model, anchor_batch) call _stage1c_loss already made to feed
+    CPC/alignment -- this loss's target is just one slot of that, so reuses it instead of
+    running the (unmasked) anchor through the branch CNNs a second time. The MASKED
+    forward pass below is genuinely different input and can't be shared. None (default)
+    recomputes via _branch_token, e.g. a standalone caller."""
     masked_batch = _mask_branch(anchor_batch, masked_branch)
     masked_embedding = model(**masked_batch)[masked_branch]
     predicted = recon_heads(masked_embedding, masked_branch)
-    target = _branch_token(model, anchor_batch, masked_branch).detach()
+    if anchor_tokens is not None:
+        target = anchor_tokens[:, BRANCHES.index(masked_branch), :].detach()
+    else:
+        target = _branch_token(model, anchor_batch, masked_branch).detach()
     return F.mse_loss(predicted, target)
 
 
@@ -585,10 +704,25 @@ def _stage1c_loss(model: torch.nn.Module, recon_heads: ReconstructionHeads, anch
     """CPC + alignment + masked reconstruction, combined as a weighted sum (same
     "weighted sum" convention as _stage1b_loss). Shared by train_step_stage1c (grad) and
     score_holdout_stage1c (no_grad). Returns all four terms, not just the total, so a
-    training loop can log whether reconstruction is actually learning anything."""
-    cpc = _cpc_loss(model, anchor_batch, cpc_positive_batch, negative_batch, temperature)
-    alignment = _alignment_loss(model, anchor_batch, align_positive_batch, negative_batch, temperature)
-    reconstruction = _reconstruction_loss(model, recon_heads, anchor_batch, masked_branch)
+    training loop can log whether reconstruction is actually learning anything.
+
+    anchor_batch and negative_batch are each embedded ONCE here (same reasoning as
+    _stage1b_loss) and shared across all three losses -- previously CPC, alignment, and
+    reconstruction's target each independently re-ran the (unmasked) anchor through the
+    encoder, and CPC/alignment each independently re-ran the negatives; only
+    reconstruction's MASKED forward pass is genuinely unique input and still runs on its
+    own."""
+    batch_size = anchor_batch["daily"].shape[0]
+    n_negatives = negative_batch["daily"].shape[1]
+    anchor_tokens, anchor_embeddings = _encode(model, anchor_batch)
+    _, negative_embeddings = _encode(model, _flatten_negatives(negative_batch, batch_size, n_negatives))
+
+    cpc = _cpc_loss(model, anchor_batch, cpc_positive_batch, negative_batch, temperature,
+                     anchor_embeddings=anchor_embeddings, negative_embeddings=negative_embeddings)
+    alignment = _alignment_loss(model, anchor_batch, align_positive_batch, negative_batch, temperature,
+                                 anchor_embeddings=anchor_embeddings, negative_embeddings=negative_embeddings)
+    reconstruction = _reconstruction_loss(model, recon_heads, anchor_batch, masked_branch,
+                                           anchor_tokens=anchor_tokens)
     total = cpc + alignment_weight * alignment + reconstruction_weight * reconstruction
     return {"total": total, "cpc": cpc, "alignment": alignment, "reconstruction": reconstruction}
 
@@ -615,23 +749,31 @@ def train_step_stage1c(model: torch.nn.Module, recon_heads: ReconstructionHeads,
 
 def score_holdout_stage1c(model: torch.nn.Module, recon_heads: ReconstructionHeads,
                            holdout_panel: pd.DataFrame, holdout_store, cfg,
-                           rng: np.random.Generator, n_eval_batches: int = 4) -> float:
+                           rng: np.random.Generator, n_eval_batches: int = 4,
+                           eligible: np.ndarray | None = None,
+                           positions_by_ticker: dict | None = None,
+                           positions_by_date: dict | None = None) -> float:
     """Same purpose/shape as score_holdout_stage1b, scoring the combined Stage 1C loss
     (cpc + weighted alignment + weighted reconstruction). `masked_branch` is re-sampled
     per eval batch (same rng, same "average a few batches to cut sampling noise"
     reasoning n_eval_batches already uses elsewhere in this file) rather than fixed to one
-    branch, so the score isn't skewed by whichever single branch happened to be picked."""
+    branch, so the score isn't skewed by whichever single branch happened to be picked.
+
+    `eligible`/`positions_by_ticker`/`positions_by_date`: same precomputed-reuse contract
+    as score_holdout's."""
     model.eval()
     recon_heads.eval()
     totals = []
     max_horizon = max(cfg.cpc_horizon, cfg.alignment_horizon)
     with torch.no_grad():
         for _ in range(n_eval_batches):
-            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, max_horizon, rng=rng)
+            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, max_horizon,
+                                                   rng=rng, eligible=eligible)
             anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch = build_stage1b_batch(
                 holdout_panel, holdout_store, anchors, cfg.cpc_horizon, cfg.alignment_horizon,
                 n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
-                regime_gap_days=cfg.regime_gap_days, rng=rng)
+                regime_gap_days=cfg.regime_gap_days, rng=rng,
+                positions_by_ticker=positions_by_ticker, positions_by_date=positions_by_date)
             masked_branch = BRANCHES[int(rng.integers(len(BRANCHES)))]
             losses = _stage1c_loss(model, recon_heads, anchor_batch, cpc_positive_batch, align_positive_batch,
                                     negative_batch, masked_branch, cfg.temperature, cfg.alignment_weight,

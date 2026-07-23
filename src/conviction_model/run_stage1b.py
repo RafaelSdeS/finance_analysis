@@ -38,8 +38,8 @@ from .run_stage1a import (
     LOG_DIR, _holdout_eligible_count, _save_checkpoint, load_panel, setup_logging, truncate_to_development_window,
 )
 from .ssl_pretrain import (
-    CachedPanelGatherer, build_stage1b_batch, sample_cpc_anchor_positions, score_holdout_stage1b,
-    split_train_holdout, train_step_stage1b,
+    CachedPanelGatherer, build_stage1b_batch, eligible_anchor_positions, precompute_position_groups,
+    sample_cpc_anchor_positions, score_holdout_stage1b, split_train_holdout, train_step_stage1b,
 )
 
 DEFAULT_STEPS = 5000  # matches run_stage1a.py's default budget -- same first-guess, adjustable via --steps
@@ -130,6 +130,14 @@ def main() -> None:
     holdout_store = CachedPanelGatherer(holdout_panel, frame_cache, maxsize=args.panel_cache_size) \
         if holdout_enabled else None
 
+    # train_panel/holdout_panel never change once the loop starts -- see run_stage1a.py's
+    # matching comment for why this is hoisted out instead of recomputed every step/eval.
+    train_eligible = eligible_anchor_positions(train_panel, max_horizon)
+    train_positions_by_ticker, train_positions_by_date = precompute_position_groups(train_panel)
+    if holdout_enabled:
+        holdout_eligible = eligible_anchor_positions(holdout_panel, max_horizon)
+        holdout_positions_by_ticker, holdout_positions_by_date = precompute_position_groups(holdout_panel)
+
     model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
                         len(QUARTERLY_FEATURES), d_model=cfg.d_model, n_heads=cfg.n_heads)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -139,11 +147,13 @@ def main() -> None:
     best_step, best_score, best_state = None, None, None
     t_start = time.monotonic()
     for step in range(args.steps):
-        anchors = sample_cpc_anchor_positions(train_panel, cfg.batch_size, max_horizon, rng=np_rng)
+        anchors = sample_cpc_anchor_positions(train_panel, cfg.batch_size, max_horizon,
+                                               rng=np_rng, eligible=train_eligible)
         anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch = build_stage1b_batch(
             train_panel, train_store, anchors, cfg.cpc_horizon, cfg.alignment_horizon,
             n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
-            regime_gap_days=cfg.regime_gap_days, rng=np_rng)
+            regime_gap_days=cfg.regime_gap_days, rng=np_rng,
+            positions_by_ticker=train_positions_by_ticker, positions_by_date=train_positions_by_date)
         loss = train_step_stage1b(model, optimizer, anchor_batch, cpc_positive_batch, align_positive_batch,
                                    negative_batch, temperature=cfg.temperature, alignment_weight=cfg.alignment_weight)
         losses.append(loss)
@@ -157,7 +167,10 @@ def main() -> None:
                      f"elapsed={time.monotonic() - t_start:.0f}s")
 
         if holdout_enabled and ((step + 1) % cfg.checkpoint_eval_every == 0 or step == args.steps - 1):
-            score = score_holdout_stage1b(model, holdout_panel, holdout_store, cfg, np_rng)
+            score = score_holdout_stage1b(model, holdout_panel, holdout_store, cfg, np_rng,
+                                           eligible=holdout_eligible,
+                                           positions_by_ticker=holdout_positions_by_ticker,
+                                           positions_by_date=holdout_positions_by_date)
             log.info(f"  holdout eval at step {step}: loss={score:.4f}"
                      + (f" (new best, was {best_score:.4f})" if best_score is not None and score < best_score
                         else " (new best)" if best_score is None else ""))

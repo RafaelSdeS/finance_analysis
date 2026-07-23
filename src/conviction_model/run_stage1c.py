@@ -39,11 +39,13 @@ from .data import DAILY_FEATURES, MONTHLY_FEATURES, QUARTERLY_FEATURES, WEEKLY_F
 from .encoder import BRANCHES, EncoderCNN
 from .run_stage1a import (
     BYTES_PER_CACHED_POSITION, CHECKPOINT_DIR, DEFAULT_PANEL_CACHE_SIZE, DEFAULT_RESERVED_HOLDOUT_YEARS,
-    LOG_DIR, _holdout_eligible_count, _save_checkpoint, load_panel, setup_logging, truncate_to_development_window,
+    LOG_DIR, _holdout_eligible_count, _save_checkpoint, _trim_memory, load_panel, setup_logging,
+    truncate_to_development_window,
 )
 from .ssl_pretrain import (
-    CachedPanelGatherer, ReconstructionHeads, build_stage1b_batch, sample_cpc_anchor_positions,
-    score_holdout_stage1c, split_train_holdout, train_step_stage1c,
+    CachedPanelGatherer, ReconstructionHeads, build_stage1b_batch, eligible_anchor_positions,
+    precompute_position_groups, sample_cpc_anchor_positions, score_holdout_stage1c, split_train_holdout,
+    train_step_stage1c,
 )
 
 DEFAULT_STEPS = 5000  # matches run_stage1a.py/run_stage1b.py's default budget -- same first-guess
@@ -132,6 +134,14 @@ def main() -> None:
     holdout_store = CachedPanelGatherer(holdout_panel, frame_cache, maxsize=args.panel_cache_size) \
         if holdout_enabled else None
 
+    # train_panel/holdout_panel never change once the loop starts -- see run_stage1a.py's
+    # matching comment for why this is hoisted out instead of recomputed every step/eval.
+    train_eligible = eligible_anchor_positions(train_panel, max_horizon)
+    train_positions_by_ticker, train_positions_by_date = precompute_position_groups(train_panel)
+    if holdout_enabled:
+        holdout_eligible = eligible_anchor_positions(holdout_panel, max_horizon)
+        holdout_positions_by_ticker, holdout_positions_by_date = precompute_position_groups(holdout_panel)
+
     model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
                         len(QUARTERLY_FEATURES), d_model=cfg.d_model, n_heads=cfg.n_heads)
     model.load_state_dict(ckpt["model_state_dict"])
@@ -142,11 +152,13 @@ def main() -> None:
     best_step, best_score, best_state, best_recon_state = None, None, None, None
     t_start = time.monotonic()
     for step in range(args.steps):
-        anchors = sample_cpc_anchor_positions(train_panel, cfg.batch_size, max_horizon, rng=np_rng)
+        anchors = sample_cpc_anchor_positions(train_panel, cfg.batch_size, max_horizon,
+                                               rng=np_rng, eligible=train_eligible)
         anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch = build_stage1b_batch(
             train_panel, train_store, anchors, cfg.cpc_horizon, cfg.alignment_horizon,
             n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
-            regime_gap_days=cfg.regime_gap_days, rng=np_rng)
+            regime_gap_days=cfg.regime_gap_days, rng=np_rng,
+            positions_by_ticker=train_positions_by_ticker, positions_by_date=train_positions_by_date)
         masked_branch = BRANCHES[int(np_rng.integers(len(BRANCHES)))]
         loss = train_step_stage1c(model, recon_heads, optimizer, anchor_batch, cpc_positive_batch,
                                    align_positive_batch, negative_batch, masked_branch,
@@ -159,12 +171,18 @@ def main() -> None:
             mean_cpc = sum(l["cpc"] for l in recent) / len(recent)
             mean_align = sum(l["alignment"] for l in recent) / len(recent)
             mean_recon = sum(l["reconstruction"] for l in recent) / len(recent)
+            rss_mb = _trim_memory() / 1024  # also releases glibc's ratcheted-up heap back
+                                             # to the OS at this same cadence -- see run_stage1a.py::_trim_memory
             log.info(f"step {step:>6}/{args.steps}  total={loss['total']:.4f}  "
                      f"mean_recent(total={mean_total:.4f}, cpc={mean_cpc:.4f}, alignment={mean_align:.4f}, "
-                     f"reconstruction={mean_recon:.4f})  elapsed={time.monotonic() - t_start:.0f}s")
+                     f"reconstruction={mean_recon:.4f})  elapsed={time.monotonic() - t_start:.0f}s  "
+                     f"rss={rss_mb:.0f}MB")
 
         if holdout_enabled and ((step + 1) % cfg.checkpoint_eval_every == 0 or step == args.steps - 1):
-            score = score_holdout_stage1c(model, recon_heads, holdout_panel, holdout_store, cfg, np_rng)
+            score = score_holdout_stage1c(model, recon_heads, holdout_panel, holdout_store, cfg, np_rng,
+                                           eligible=holdout_eligible,
+                                           positions_by_ticker=holdout_positions_by_ticker,
+                                           positions_by_date=holdout_positions_by_date)
             log.info(f"  holdout eval at step {step}: loss={score:.4f}"
                      + (f" (new best, was {best_score:.4f})" if best_score is not None and score < best_score
                         else " (new best)" if best_score is None else ""))

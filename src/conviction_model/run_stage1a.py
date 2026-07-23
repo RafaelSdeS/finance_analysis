@@ -47,7 +47,10 @@ Run from project root:
 
 import argparse
 import copy
+import ctypes
+import gc
 import logging
+import resource
 import sys
 import time
 from dataclasses import asdict
@@ -64,8 +67,8 @@ from .data import DAILY_FEATURES, MONTHLY_FEATURES, QUARTERLY_FEATURES, WEEKLY_F
 from .encoder import EncoderCNN
 from .paths import DATASET_PATH, ROOT, TOP150_MEMBERSHIP_PATH
 from .ssl_pretrain import (
-    CachedPanelGatherer, build_cpc_batch, sample_cpc_anchor_positions, score_holdout,
-    split_train_holdout, train_step,
+    CachedPanelGatherer, build_cpc_batch, eligible_anchor_positions, precompute_position_groups,
+    sample_cpc_anchor_positions, score_holdout, split_train_holdout, train_step,
 )
 
 CHECKPOINT_DIR = ROOT / "artifacts/checkpoints/conviction_model"
@@ -80,6 +83,30 @@ BYTES_PER_CACHED_POSITION = 18_000  # empirically measured via tracemalloc (floa
                                      # (that one already assumes float32; a prior version of this
                                      # constant caused a real OOM by caching float64 arrays at ~2x
                                      # this size before the float32 cast was added -- see git history)
+
+
+def _trim_memory() -> int:
+    """gc.collect() + glibc malloc_trim(0), return current RSS in KB. The panel caches
+    are hard-bounded (BYTES_PER_CACHED_POSITION), but a long CPU-bound training loop
+    whose per-step tensor shapes vary (e.g. Stage 1C's randomly-masked branch changing
+    which shapes get allocated each step) makes glibc's heap ratchet up to the largest
+    peak seen so far and rarely give that back on its own -- gc.collect() only frees
+    Python-level objects, it doesn't touch the C allocator's already-grown arenas.
+    Root cause of a real OOM kill (Stage 1C run, 2026-07-23: RSS crept to 8.5GB over
+    ~4300 steps despite both panel caches being capped at ~1.8GB combined) -- confirmed
+    via dmesg's oom-kill record (anon-rss:8510544kB) against a run that showed no
+    unusual cache config, while Stage 1B's own run a day earlier completed the full
+    5000 steps with the same cache sizing and no crash, isolating the extra Stage-1C-
+    only forward passes (not the caches) as what pushed RSS past the ceiling.
+    ponytail: only called periodically from run_stage1c.py's loop, not 1a/1b's --
+    those have one fewer forward pass per step and have already run full budgets
+    clean; wire in there too if a future longer/bigger run repeats this."""
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except OSError:
+        pass
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 
 def setup_logging(run_id: str, stage: str = "stage1a") -> logging.Logger:
@@ -245,6 +272,16 @@ def main() -> None:
     holdout_store = CachedPanelGatherer(holdout_panel, frame_cache, maxsize=args.panel_cache_size) \
         if holdout_enabled else None
 
+    # train_panel/holdout_panel never change once the loop starts -- eligibility and the
+    # negative-sampling position groups are pure functions of the panel, so compute them
+    # ONCE here instead of every single step/eval rebuilding the same groupby/argsort work
+    # from scratch (measured as the dominant per-step cost before this).
+    train_eligible = eligible_anchor_positions(train_panel, cfg.cpc_horizon)
+    train_positions_by_ticker, train_positions_by_date = precompute_position_groups(train_panel)
+    if holdout_enabled:
+        holdout_eligible = eligible_anchor_positions(holdout_panel, cfg.cpc_horizon)
+        holdout_positions_by_ticker, holdout_positions_by_date = precompute_position_groups(holdout_panel)
+
     model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
                         len(QUARTERLY_FEATURES), d_model=cfg.d_model, n_heads=cfg.n_heads)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate)
@@ -253,11 +290,13 @@ def main() -> None:
     best_step, best_score, best_state = None, None, None
     t_start = time.monotonic()
     for step in range(args.steps):
-        anchors = sample_cpc_anchor_positions(train_panel, cfg.batch_size, cfg.cpc_horizon, rng=np_rng)
+        anchors = sample_cpc_anchor_positions(train_panel, cfg.batch_size, cfg.cpc_horizon,
+                                               rng=np_rng, eligible=train_eligible)
         anchor_batch, positive_batch, negative_batch = build_cpc_batch(
             train_panel, train_store, anchors, cfg.cpc_horizon,
             n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
-            regime_gap_days=cfg.regime_gap_days, rng=np_rng)
+            regime_gap_days=cfg.regime_gap_days, rng=np_rng,
+            positions_by_ticker=train_positions_by_ticker, positions_by_date=train_positions_by_date)
         loss = train_step(model, optimizer, anchor_batch, positive_batch, negative_batch,
                            temperature=cfg.temperature)
         losses.append(loss)
@@ -268,7 +307,10 @@ def main() -> None:
                      f"elapsed={time.monotonic() - t_start:.0f}s")
 
         if holdout_enabled and ((step + 1) % cfg.checkpoint_eval_every == 0 or step == args.steps - 1):
-            score = score_holdout(model, holdout_panel, holdout_store, cfg, np_rng)
+            score = score_holdout(model, holdout_panel, holdout_store, cfg, np_rng,
+                                   eligible=holdout_eligible,
+                                   positions_by_ticker=holdout_positions_by_ticker,
+                                   positions_by_date=holdout_positions_by_date)
             log.info(f"  holdout eval at step {step}: loss={score:.4f}"
                      + (f" (new best, was {best_score:.4f})" if best_score is not None and score < best_score
                         else " (new best)" if best_score is None else ""))

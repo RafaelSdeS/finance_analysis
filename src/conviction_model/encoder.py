@@ -74,8 +74,16 @@ class EncoderCNN(nn.Module):
             self.branch_monthly(monthly), self.branch_fundamentals(fundamentals),
         ], dim=1)
 
+    def forward_from_tokens(self, tokens: torch.Tensor) -> dict:
+        """Cross-attention + split, given tokens already computed by branch_tokens() --
+        the second half of forward(), split out so a caller that needs BOTH the
+        pre-attention tokens (e.g. Stage 1C's reconstruction target) and the
+        post-attention embeddings for the SAME input only runs the branch CNNs once
+        (ssl_pretrain.py::_encode)."""
+        updated, _ = self.cross_attn(tokens, tokens, tokens)
+        return {name: updated[:, i, :] for i, name in enumerate(BRANCHES)}
+
     def forward(self, daily: torch.Tensor, weekly: torch.Tensor,
                 monthly: torch.Tensor, fundamentals: torch.Tensor) -> dict:
         tokens = self.branch_tokens(daily, weekly, monthly, fundamentals)
-        updated, _ = self.cross_attn(tokens, tokens, tokens)
-        return {name: updated[:, i, :] for i, name in enumerate(BRANCHES)}
+        return self.forward_from_tokens(tokens)
