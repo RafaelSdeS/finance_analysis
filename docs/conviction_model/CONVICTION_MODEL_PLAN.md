@@ -689,13 +689,12 @@ Phase 2 does not start until Phase 1D is done and reported.
       survivorship bias + diagnostic contamination on multiple axes at once (not a sign the
       fixes were wrong; the opposite). Baseline 1B/1C/1D must beat:
       `docs/conviction_model/PHASE1_DIAGNOSTICS_20260722-210655.json`.
-- [~] **Stage 1B — + forward cross-modal alignment.** Warm-start from 1A; retrain; rerun
+- [x] **Stage 1B — + forward cross-modal alignment.** Warm-start from 1A; retrain; rerun
       diagnostics; compare against 1A.
-      **The v1/v2 work below also warm-started from the now-superseded biased 1A checkpoint
-      (`stage1a-20260721-165853.pt`) — needs a fresh warm-start from the corrected
-      `stage1a-20260722-183854.pt` before its results are comparable to anything. Kept below
-      only for the horizon-mismatch diagnosis, which is still valid reasoning independent of
-      which checkpoint it's applied to.**
+      **The v1/v2 runs below warm-started from the now-superseded biased 1A checkpoint
+      (`stage1a-20260721-165853.pt`) — kept only for the horizon-mismatch diagnosis, which is
+      still valid reasoning independent of which checkpoint it's applied to. Superseded by the
+      corrected run further below.**
       **v1 code + real run (2026-07-21), checkpoint `stage1b-20260721-215534.pt`:**
       `_price_macro_state`/`_alignment_loss`/`_stage1b_loss`/`train_step_stage1b`/
       `score_holdout_stage1b` (`ssl_pretrain.py`), `alignment_weight` in `SSLConfig`
@@ -718,10 +717,41 @@ Phase 2 does not start until Phase 1D is done and reported.
       decoupled from `cpc_horizon`; `build_stage1b_batch()` (`ssl_pretrain.py`) now builds two
       separate positive batches off the same anchor/negatives, one per horizon.
       `train_step_stage1b`/`score_holdout_stage1b`/`run_stage1b.py` updated to match. Tests pass
-      (17/17 `test_ssl_pretrain.py`, 2/2 `test_config.py`, 52/52 fast suite). **Not yet retrained
-      with the new horizon** -- rerunning `run_stage1b.py` (fresh warm-start from 1A, since v1's
-      checkpoint is already past its own peak) and rerunning diagnostics are still open.
-- [ ] **Stage 1C — + masked reconstruction.** Same pattern; compare against 1B.
+      (17/17 `test_ssl_pretrain.py`, 2/2 `test_config.py`, 52/52 fast suite).
+
+      **CORRECTED real run (2026-07-22), checkpoint `stage1b-20260722-213728.pt`, fresh
+      warm-start from the corrected `stage1a-20260722-183854.pt` (360-ticker point-in-time
+      union), `alignment_horizon=63` (v2 fix, already baked into the warm-start checkpoint's
+      saved config) — `run_diagnostics.py`: **2/7 gates passed, both representations** (up
+      from 1A's 1/7). PASS: [5] perturbation sensitivity (unchanged, low bar), **[6] temporal
+      smoothness — a real gate flip** (pooled 0.0514→0.2544, unpooled 0.0418→0.1951, both
+      comfortably clear the 0.1 floor, not borderline). Mechanistically sensible: alignment
+      forces price/macro state to predict FUTURE fundamentals, plausibly making the embedding
+      move more in response to genuine informational surprise, exactly what this diagnostic
+      measures. FAIL (unchanged verdict, mixed magnitude movement): [1] neighbor-outcome ratio
+      pooled 1.1506→1.1012 (slightly better, still far above the 0.8 gate), unpooled
+      1.1634→1.2433 (worse); [2] regime MI pooled 0.0001→0.0011, unpooled 0.0001→0.0003 (both
+      still ~20x below the 0.02 floor); [7] latent similarity pooled -24.75→-3.48, unpooled
+      +22.05→+3.18 (both converging toward 0/noise, no clearer signal either way). **FAIL but
+      a real directional shift worth tracking:** [3] valuation vs. volatility — pooled still
+      wrong-ordered (val=-74927 vs vol=-508, worse than 1A), but **unpooled's ordering flipped
+      correct for the first time** (val=-270 vs vol=-22338, i.e. val_r2 > vol_r2 — still fails
+      the ≥0.05 floor by a wide margin, so no gate change, but this is the specific direction
+      alignment is designed to push, on the representation Phase 2 actually uses downstream).
+      **FAIL and a real regression:** [4] quality persistence pooled 0.0902→0.0447, unpooled
+      0.0571→0.0421 (worse on both representations) — matches the same direction the v1 run
+      (on the old universe) already found, so this looks like a real, reproducible cost of
+      alignment, not noise; worth tracking through 1C/1D as alignment's downside.
+      **Keep-or-drop decision (v9 rule: net gate movement vs. the previous stage):** KEEP —
+      net +1 gate on both representations is a real, if narrow, improvement; diagnostic 6's
+      flip is unambiguous. Caution: 2/7 is still a very weak encoder overall (one of the two
+      passes is a low-bar diagnostic); this is not evidence the encoder is working, only that
+      alignment is a net positive over CPC alone. Baseline 1C must beat:
+      `docs/conviction_model/PHASE1_DIAGNOSTICS_20260722-231326.json`.
+- [ ] **Stage 1C — + masked reconstruction.** Same pattern; compare against 1B. **Not yet
+      implemented** -- `ssl_pretrain.py` only has Stages 1A/1B's losses written; the masked-
+      reconstruction loss, its batch assembly, and a `run_stage1c.py` orchestrator don't exist
+      yet. This is real feature work, not a rerun of existing code.
 - [ ] **Stage 1D — + auxiliary valuation probe** (NaN-masked on rows without a defined
       `pl_zhist_5y`/`pvp_zhist_5y`). Same pattern; compare against 1C.
 - [ ] For each of 1B/1C/1D: explicit keep-or-drop decision against the quantitative gate
