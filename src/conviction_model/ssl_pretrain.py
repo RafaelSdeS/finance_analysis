@@ -1,10 +1,10 @@
 """
-ssl_pretrain.py -- Phase 1, Stages 1A-1B (docs/conviction_model/CONVICTION_MODEL_PLAN.md):
-CPC (Contrastive Predictive Coding) and forward cross-modal alignment, the first two of
-the 4 SSL losses, introduced one at a time per the plan's staged 1A->1D design (isolate
-one loss at a time so any diagnostic change is attributable to the loss just added).
-Stages 1C-1D (masked reconstruction, the auxiliary valuation-probe nudge) are added
-incrementally in later work, not this file yet.
+ssl_pretrain.py -- Phase 1, Stages 1A-1C (docs/conviction_model/CONVICTION_MODEL_PLAN.md):
+CPC (Contrastive Predictive Coding), forward cross-modal alignment, and masked
+reconstruction across branches -- the first 3 of the 4 SSL losses, introduced one at a
+time per the plan's staged 1A->1D design (isolate one loss at a time so any diagnostic
+change is attributable to the loss just added). Stage 1D (the auxiliary valuation-probe
+nudge) is added incrementally in later work, not this file yet.
 
 CPC predicts FUTURE LATENT STATE (an embedding k steps ahead), not future
 price -- pushes the encoder toward temporal consistency of "market state"
@@ -22,6 +22,16 @@ branch's embedding at t+k, not merely agree with it at t (Architecture / "What t
 representation is for") -- biases the representation toward what's fundamentally
 predictive, not just price-autocorrelation-predictive. Same InfoNCE machinery, same
 negative-sampling scheme, just scored against a different pair of embeddings.
+
+Masked reconstruction (Stage 1C) reuses Stage 1B's own anchor batch too -- no new batch
+assembly, no new negative sampling (it isn't a contrastive loss). One branch of the
+ANCHOR is zeroed out; a small per-branch linear head must recover that branch's TRUE
+pre-attention token from the post-attention embedding the encoder produces at the masked
+slot -- which, with its own input zeroed, can only be built from what cross-attention
+pulled in from the OTHER 3 branches. That's "reconstruction across branches": can the
+encoder infer a missing branch's content from the rest of the state. Target is
+`.detach()`-ed (stop-gradient) so the loss can't cheat by moving the target to match the
+prediction instead of the other way around.
 """
 
 from collections import OrderedDict
@@ -30,11 +40,13 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn.functional as F
+from torch import nn
 
 from .data import (
     DAILY_FEATURES, DAILY_WINDOW, MONTHLY_FEATURES, MONTHLY_WINDOW, QUARTERLY_FEATURES,
     QUARTERLY_WINDOW, WEEKLY_FEATURES, WEEKLY_WINDOW, branch_windows_from_precomputed,
 )
+from .encoder import BRANCHES
 
 
 def info_nce_loss(anchor: torch.Tensor, positive: torch.Tensor,
@@ -512,4 +524,119 @@ def score_holdout_stage1b(model: torch.nn.Module, holdout_panel: pd.DataFrame, h
                                     negative_batch, cfg.temperature, cfg.alignment_weight)
             totals.append(float(losses["total"].item()))
     model.train()
+    return sum(totals) / len(totals)
+
+
+# --- Stage 1C: + masked reconstruction across branches -----------------------
+
+class ReconstructionHeads(nn.Module):
+    """One small Linear(d_model, d_model) per branch (BRANCHES). CPC/alignment compare
+    embeddings that already live in the same space (post-attention vs. post-attention, or
+    a pooled vector vs. the raw fundamentals token) -- no head needed there. Here the two
+    sides genuinely differ: the prediction is a POST-attention embedding built from the
+    other 3 branches, the target is that branch's own PRE-attention token
+    (encoder.py::EncoderCNN.branch_tokens) -- a small linear bridge between the two spaces,
+    not a full decoder back to the raw [n_features, window] input (reconstructing a
+    d_model-wide token is the design's actual goal; the plan never asks for pixel/tick-level
+    input recovery)."""
+
+    def __init__(self, d_model: int = 64):
+        super().__init__()
+        self.heads = nn.ModuleDict({name: nn.Linear(d_model, d_model) for name in BRANCHES})
+
+    def forward(self, embedding: torch.Tensor, branch_name: str) -> torch.Tensor:
+        return self.heads[branch_name](embedding)
+
+
+def _mask_branch(batch: dict, branch_name: str) -> dict:
+    """Zero out one branch's window tensor -- matches this pipeline's existing NaN->0 fill
+    convention (CLAUDE.md's NaN policy) rather than a learned mask-token parameter; no new
+    encoder.py machinery needed for this."""
+    return {name: (torch.zeros_like(t) if name == branch_name else t) for name, t in batch.items()}
+
+
+def _branch_token(model: torch.nn.Module, batch: dict, branch_name: str) -> torch.Tensor:
+    """The TRUE pre-attention token for one branch of `batch` -- the reconstruction
+    target. Runs all 4 branch CNNs (encoder.py::branch_tokens doesn't expose a
+    single-branch shortcut); tiny CNNs, not worth a special-cased path."""
+    tokens = model.branch_tokens(batch["daily"], batch["weekly"], batch["monthly"], batch["fundamentals"])
+    return tokens[:, BRANCHES.index(branch_name), :]
+
+
+def _reconstruction_loss(model: torch.nn.Module, recon_heads: ReconstructionHeads,
+                          anchor_batch: dict, masked_branch: str) -> torch.Tensor:
+    """Mask `masked_branch` out of the anchor, run the encoder, and try to recover that
+    branch's true (unmasked) pre-attention token from the masked post-attention embedding
+    -- see module docstring. `.detach()` on the target: a plain stop-gradient so the
+    encoder can't lower this loss by dragging the target token toward whatever the
+    prediction already says, only by making the OTHER branches' information (visible via
+    cross-attention) actually predictive of the masked one."""
+    masked_batch = _mask_branch(anchor_batch, masked_branch)
+    masked_embedding = model(**masked_batch)[masked_branch]
+    predicted = recon_heads(masked_embedding, masked_branch)
+    target = _branch_token(model, anchor_batch, masked_branch).detach()
+    return F.mse_loss(predicted, target)
+
+
+def _stage1c_loss(model: torch.nn.Module, recon_heads: ReconstructionHeads, anchor_batch: dict,
+                   cpc_positive_batch: dict, align_positive_batch: dict, negative_batch: dict,
+                   masked_branch: str, temperature: float, alignment_weight: float,
+                   reconstruction_weight: float) -> dict:
+    """CPC + alignment + masked reconstruction, combined as a weighted sum (same
+    "weighted sum" convention as _stage1b_loss). Shared by train_step_stage1c (grad) and
+    score_holdout_stage1c (no_grad). Returns all four terms, not just the total, so a
+    training loop can log whether reconstruction is actually learning anything."""
+    cpc = _cpc_loss(model, anchor_batch, cpc_positive_batch, negative_batch, temperature)
+    alignment = _alignment_loss(model, anchor_batch, align_positive_batch, negative_batch, temperature)
+    reconstruction = _reconstruction_loss(model, recon_heads, anchor_batch, masked_branch)
+    total = cpc + alignment_weight * alignment + reconstruction_weight * reconstruction
+    return {"total": total, "cpc": cpc, "alignment": alignment, "reconstruction": reconstruction}
+
+
+def train_step_stage1c(model: torch.nn.Module, recon_heads: ReconstructionHeads,
+                        optimizer: torch.optim.Optimizer, anchor_batch: dict, cpc_positive_batch: dict,
+                        align_positive_batch: dict, negative_batch: dict, masked_branch: str,
+                        temperature: float = 0.1, alignment_weight: float = 1.0,
+                        reconstruction_weight: float = 1.0, grad_clip_norm: float | None = None) -> dict:
+    """One Stage 1C gradient step. `optimizer` must cover BOTH model.parameters() and
+    recon_heads.parameters() -- the caller builds one optimizer over both (run_stage1c.py),
+    same as any other multi-module training loop. Returns
+    {'total','cpc','alignment','reconstruction'} floats."""
+    optimizer.zero_grad()
+    losses = _stage1c_loss(model, recon_heads, anchor_batch, cpc_positive_batch, align_positive_batch,
+                            negative_batch, masked_branch, temperature, alignment_weight, reconstruction_weight)
+    losses["total"].backward()
+    if grad_clip_norm is not None:
+        torch.nn.utils.clip_grad_norm_(
+            list(model.parameters()) + list(recon_heads.parameters()), grad_clip_norm)
+    optimizer.step()
+    return {k: float(v.item()) for k, v in losses.items()}
+
+
+def score_holdout_stage1c(model: torch.nn.Module, recon_heads: ReconstructionHeads,
+                           holdout_panel: pd.DataFrame, holdout_store, cfg,
+                           rng: np.random.Generator, n_eval_batches: int = 4) -> float:
+    """Same purpose/shape as score_holdout_stage1b, scoring the combined Stage 1C loss
+    (cpc + weighted alignment + weighted reconstruction). `masked_branch` is re-sampled
+    per eval batch (same rng, same "average a few batches to cut sampling noise"
+    reasoning n_eval_batches already uses elsewhere in this file) rather than fixed to one
+    branch, so the score isn't skewed by whichever single branch happened to be picked."""
+    model.eval()
+    recon_heads.eval()
+    totals = []
+    max_horizon = max(cfg.cpc_horizon, cfg.alignment_horizon)
+    with torch.no_grad():
+        for _ in range(n_eval_batches):
+            anchors = sample_cpc_anchor_positions(holdout_panel, cfg.batch_size, max_horizon, rng=rng)
+            anchor_batch, cpc_positive_batch, align_positive_batch, negative_batch = build_stage1b_batch(
+                holdout_panel, holdout_store, anchors, cfg.cpc_horizon, cfg.alignment_horizon,
+                n_same_stock=cfg.n_same_stock_negatives, n_diff_stock=cfg.n_diff_stock_negatives,
+                regime_gap_days=cfg.regime_gap_days, rng=rng)
+            masked_branch = BRANCHES[int(rng.integers(len(BRANCHES)))]
+            losses = _stage1c_loss(model, recon_heads, anchor_batch, cpc_positive_batch, align_positive_batch,
+                                    negative_batch, masked_branch, cfg.temperature, cfg.alignment_weight,
+                                    cfg.reconstruction_weight)
+            totals.append(float(losses["total"].item()))
+    model.train()
+    recon_heads.train()
     return sum(totals) / len(totals)

@@ -25,9 +25,10 @@ from src.conviction_model.data import (  # noqa: E402
 from src.conviction_model.encoder import EncoderCNN  # noqa: E402
 from src.conviction_model.config import SSLConfig  # noqa: E402
 from src.conviction_model.ssl_pretrain import (  # noqa: E402
-    CachedPanelGatherer, CPCPanelStore, LazyPanelGatherer, _price_macro_state, build_cpc_batch, build_stage1b_batch,
-    info_nce_loss, sample_cpc_anchor_positions, sample_cpc_negatives, score_holdout, score_holdout_stage1b,
-    split_train_holdout, train_step, train_step_stage1b,
+    CachedPanelGatherer, CPCPanelStore, LazyPanelGatherer, ReconstructionHeads, _mask_branch, _price_macro_state,
+    build_cpc_batch, build_stage1b_batch, info_nce_loss, sample_cpc_anchor_positions, sample_cpc_negatives,
+    score_holdout, score_holdout_stage1b, score_holdout_stage1c, split_train_holdout, train_step, train_step_stage1b,
+    train_step_stage1c,
 )
 from test_utils import print_check, print_header, print_section_end  # noqa: E402
 
@@ -434,8 +435,114 @@ def test_score_holdout_stage1b_does_not_change_params_and_returns_finite_score(p
     return passed + ok, failed + (not ok)
 
 
+def test_mask_branch_zeros_only_the_target_branch(passed, failed):
+    batch = {
+        "daily": torch.randn(2, 3, 4),
+        "weekly": torch.randn(2, 3, 4),
+        "monthly": torch.randn(2, 3, 4),
+        "fundamentals": torch.randn(2, 3, 4),
+    }
+    masked = _mask_branch(batch, "weekly")
+    zeroed = bool(torch.all(masked["weekly"] == 0))
+    others_untouched = all(torch.equal(masked[k], batch[k]) for k in batch if k != "weekly")
+    ok = zeroed and others_untouched
+    print_check("_mask_branch: zeros only the target branch, leaves the others untouched",
+                ok, f"zeroed={zeroed}, others_untouched={others_untouched}")
+    return passed + ok, failed + (not ok)
+
+
+def test_reconstruction_heads_output_shape(passed, failed):
+    d_model = 8
+    heads = ReconstructionHeads(d_model)
+    embedding = torch.randn(5, d_model)
+    out = heads(embedding, "fundamentals")
+    ok = out.shape == (5, d_model)
+    print_check("ReconstructionHeads: output shape matches [B, d_model] for the requested branch",
+                ok, f"shape={tuple(out.shape)}")
+    return passed + ok, failed + (not ok)
+
+
+def test_train_step_stage1c_updates_params_and_returns_finite_losses(passed, failed):
+    torch.manual_seed(0)
+    n_features, window, batch_size, n_negatives, d_model = 5, 8, 4, 3, 8
+    model = EncoderCNN(n_features, n_features, n_features, n_features, d_model=d_model, n_heads=2)
+    recon_heads = ReconstructionHeads(d_model)
+    optimizer = torch.optim.Adam(list(model.parameters()) + list(recon_heads.parameters()), lr=1e-2)
+    anchor, negatives = _tiny_batch(batch_size, n_negatives, n_features, window)
+    cpc_positive, _ = _tiny_batch(batch_size, n_negatives, n_features, window)
+    align_positive, _ = _tiny_batch(batch_size, n_negatives, n_features, window)
+
+    params_before = [p.clone() for p in list(model.parameters()) + list(recon_heads.parameters())]
+    losses = train_step_stage1c(model, recon_heads, optimizer, anchor, cpc_positive, align_positive,
+                                 negatives, masked_branch="fundamentals", alignment_weight=0.5,
+                                 reconstruction_weight=0.5)
+
+    finite = all(v == v and v != float("inf") for v in losses.values())
+    print_check("train_step_stage1c: returns finite total/cpc/alignment/reconstruction losses",
+                finite, f"{losses}")
+    passed, failed = passed + finite, failed + (not finite)
+
+    changed = any(not torch.allclose(a, b)
+                  for a, b in zip(params_before, list(model.parameters()) + list(recon_heads.parameters())))
+    print_check("train_step_stage1c: parameters (encoder + recon heads) change after one gradient step", changed)
+    passed, failed = passed + changed, failed + (not changed)
+    return passed, failed
+
+
+def test_score_holdout_stage1c_does_not_change_params_and_returns_finite_score(passed, failed):
+    panel, cache = _synthetic_frame_cache(["AAA", "BBB"], n_days=400)
+    _, holdout_panel = split_train_holdout(panel, holdout_days=180)
+    holdout_store = CPCPanelStore(holdout_panel, cache)
+    cfg = SSLConfig(cpc_horizon=10, alignment_horizon=30, batch_size=8,
+                     n_same_stock_negatives=2, n_diff_stock_negatives=2, alignment_weight=0.5,
+                     reconstruction_weight=0.5, d_model=8, n_heads=2)
+
+    model = EncoderCNN(len(DAILY_FEATURES), len(WEEKLY_FEATURES), len(MONTHLY_FEATURES),
+                        len(QUARTERLY_FEATURES), d_model=cfg.d_model, n_heads=cfg.n_heads)
+    recon_heads = ReconstructionHeads(cfg.d_model)
+    params_before = [p.clone() for p in list(model.parameters()) + list(recon_heads.parameters())]
+    score = score_holdout_stage1c(model, recon_heads, holdout_panel, holdout_store, cfg,
+                                   rng=np.random.default_rng(0), n_eval_batches=2)
+
+    unchanged = all(torch.equal(a, b)
+                     for a, b in zip(params_before, list(model.parameters()) + list(recon_heads.parameters())))
+    finite = score == score and score != float("inf")
+    ok = unchanged and finite
+    print_check("score_holdout_stage1c: leaves parameters unchanged (no_grad) and returns a finite score",
+                ok, f"score={score}, unchanged={unchanged}")
+    return passed + ok, failed + (not ok)
+
+
+def test_reconstruction_loss_decreases_with_training(passed, failed):
+    # Non-trivial-logic check: masked reconstruction must actually be learnable, not just
+    # finite -- train on a FIXED tiny batch for a few dozen steps and confirm the
+    # reconstruction term drops.
+    torch.manual_seed(1)
+    n_features, window, batch_size, n_negatives, d_model = 5, 8, 6, 2, 8
+    model = EncoderCNN(n_features, n_features, n_features, n_features, d_model=d_model, n_heads=2)
+    recon_heads = ReconstructionHeads(d_model)
+    optimizer = torch.optim.Adam(list(model.parameters()) + list(recon_heads.parameters()), lr=5e-3)
+    anchor, negatives = _tiny_batch(batch_size, n_negatives, n_features, window)
+    cpc_positive, _ = _tiny_batch(batch_size, n_negatives, n_features, window)
+    align_positive, _ = _tiny_batch(batch_size, n_negatives, n_features, window)
+
+    first_recon = last_recon = None
+    for step in range(60):
+        losses = train_step_stage1c(model, recon_heads, optimizer, anchor, cpc_positive, align_positive,
+                                     negatives, masked_branch="daily")
+        if step == 0:
+            first_recon = losses["reconstruction"]
+        last_recon = losses["reconstruction"]
+
+    ok = last_recon < first_recon
+    print_check("train_step_stage1c: reconstruction loss decreases over training steps on a fixed batch",
+                ok, f"first={first_recon:.4f}, last={last_recon:.4f}")
+    return passed + ok, failed + (not ok)
+
+
 def main() -> int:
-    print_header("conviction_model/ssl_pretrain.py (Stage 1A: CPC, Stage 1B: + forward cross-modal alignment)")
+    print_header("conviction_model/ssl_pretrain.py (Stage 1A: CPC, Stage 1B: + forward cross-modal alignment, "
+                 "Stage 1C: + masked reconstruction)")
     passed = failed = 0
     for test_fn in [
         test_info_nce_near_zero_when_positive_matches_and_negatives_orthogonal,
@@ -459,6 +566,11 @@ def main() -> int:
         test_build_stage1b_batch_positives_use_different_horizons,
         test_train_step_stage1b_updates_params_and_returns_finite_losses,
         test_score_holdout_stage1b_does_not_change_params_and_returns_finite_score,
+        test_mask_branch_zeros_only_the_target_branch,
+        test_reconstruction_heads_output_shape,
+        test_train_step_stage1c_updates_params_and_returns_finite_losses,
+        test_score_holdout_stage1c_does_not_change_params_and_returns_finite_score,
+        test_reconstruction_loss_decreases_with_training,
     ]:
         passed, failed = test_fn(passed, failed)
     print_section_end(passed, failed)

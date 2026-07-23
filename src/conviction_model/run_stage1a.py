@@ -141,11 +141,16 @@ def truncate_to_development_window(panel: pd.DataFrame,
 
 
 def _save_checkpoint(path: Path, state_dict, cfg, tickers, losses, step, total_steps,
-                      best_step=None, best_score=None) -> None:
+                      best_step=None, best_score=None, extra: dict | None = None) -> None:
+    """`extra`: additional top-level keys merged into the saved dict (e.g. Stage 1C's
+    recon_heads_state_dict) -- optional so 1A/1B's calls are unaffected."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save({"model_state_dict": state_dict, "config": asdict(cfg), "tickers": tickers,
-                "losses": losses, "step": step, "total_steps": total_steps,
-                "best_step": best_step, "best_score": best_score}, path)
+    payload = {"model_state_dict": state_dict, "config": asdict(cfg), "tickers": tickers,
+               "losses": losses, "step": step, "total_steps": total_steps,
+               "best_step": best_step, "best_score": best_score}
+    if extra:
+        payload.update(extra)
+    torch.save(payload, path)
 
 
 def _holdout_eligible_count(holdout_panel: pd.DataFrame, cpc_horizon: int) -> int:

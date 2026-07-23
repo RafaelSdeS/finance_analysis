@@ -2,9 +2,9 @@
 config.py -- Phase 1 (docs/conviction_model/CONVICTION_MODEL_PLAN.md): frozen-dataclass
 pretraining config, JSON round-trippable, mirrors rl_agent/config.py's convention.
 
-Stage 1A (CPC) + Stage 1B (forward cross-modal alignment) fields exist. Masked-
-reconstruction / valuation-probe fields (Stages 1C-1D) get added when those losses are
-written, not speculatively now -- see Module layout's ssl_pretrain.py row.
+Stage 1A (CPC) + Stage 1B (forward cross-modal alignment) + Stage 1C (masked
+reconstruction) fields exist. The valuation-probe field (Stage 1D) gets added when that
+loss is written, not speculatively now -- see Module layout's ssl_pretrain.py row.
 """
 
 import json
@@ -47,6 +47,14 @@ class SSLConfig:
     # ~1500 -- a shortcut, not learning). 63 trading days = one fiscal quarter, so a
     # (t, t+alignment_horizon) pair is far more likely to actually straddle a filing.
     alignment_horizon: int = 63
+    # Stage 1C: masked reconstruction across branches, combined with CPC + alignment as a
+    # weighted sum (Module layout: "weighted sum" -- loss = cpc + alignment_weight*alignment
+    # + reconstruction_weight*reconstruction). 1.0 = equal footing with the other two losses
+    # to start, matching alignment_weight's own default; arbitrary, adjustable. The plan
+    # calls this the "weakest of the three" losses for the encoder's actual goal ("What the
+    # latent representation is for") -- kept as a regularizer, not expected to drive
+    # diagnostic gains on its own.
+    reconstruction_weight: float = 1.0
 
     def to_json(self, path) -> None:
         Path(path).write_text(json.dumps(asdict(self), indent=2))

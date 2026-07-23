@@ -748,10 +748,23 @@ Phase 2 does not start until Phase 1D is done and reported.
       passes is a low-bar diagnostic); this is not evidence the encoder is working, only that
       alignment is a net positive over CPC alone. Baseline 1C must beat:
       `docs/conviction_model/PHASE1_DIAGNOSTICS_20260722-231326.json`.
-- [ ] **Stage 1C — + masked reconstruction.** Same pattern; compare against 1B. **Not yet
-      implemented** -- `ssl_pretrain.py` only has Stages 1A/1B's losses written; the masked-
-      reconstruction loss, its batch assembly, and a `run_stage1c.py` orchestrator don't exist
-      yet. This is real feature work, not a rerun of existing code.
+- [ ] **Stage 1C — + masked reconstruction.** Same pattern; compare against 1B.
+      **Implemented, not yet trained** (2026-07-23): `ssl_pretrain.py` adds
+      `ReconstructionHeads` (one `Linear(d_model,d_model)` per branch), `train_step_stage1c`/
+      `score_holdout_stage1c`. Design: per step, one of the 4 branches is chosen at random
+      and zeroed out of the anchor batch; the encoder runs on the masked anchor, and a
+      reconstruction head tries to recover that branch's TRUE pre-attention token
+      (`EncoderCNN.branch_tokens`) from the masked post-attention embedding — the only
+      information available to it at that point came from the other 3 branches via
+      cross-attention. Target is `.detach()`-ed (stop-gradient), and combined with CPC +
+      alignment as a weighted sum (`reconstruction_weight`, default 1.0, `config.py`). Reuses
+      Stage 1B's own anchor batch (`build_stage1b_batch`) — no new negative sampling, since
+      reconstruction isn't contrastive. `run_stage1c.py` warm-starts from the latest
+      `stage1b-*.pt` (mirrors `run_stage1b.py`'s warm-start from 1A); `ReconstructionHeads` has
+      no warm-start source and is always initialized fresh, saved under a separate
+      `recon_heads_state_dict` checkpoint key. Run:
+      `python -m src.conviction_model.run_stage1c`. Not yet run against the real dataset or
+      scored against the 7 diagnostics — that's the next step.
 - [ ] **Stage 1D — + auxiliary valuation probe** (NaN-masked on rows without a defined
       `pl_zhist_5y`/`pvp_zhist_5y`). Same pattern; compare against 1C.
 - [ ] For each of 1B/1C/1D: explicit keep-or-drop decision against the quantitative gate
