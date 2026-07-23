@@ -166,8 +166,8 @@ def validate(df):
         checks.append((f"macro {col} merged", present))
 
     # Stage 2 keeps sparse tickers (MIN_PRICE_ROWS=10 in build_ml_dataset.py);
-    # the 252-row (1 trading year) full-history bar is a Stage 3 concern,
-    # enforced by MIN_ROWS_PER_TICKER in src/agent/data_pipeline.py.
+    # the 252-row (1 trading year) full-history bar is a downstream-consumer
+    # concern, not enforced here.
     row_counts = df.groupby("ticker").size()
     min_rows = row_counts.min()
     n_short = (row_counts < 252).sum()

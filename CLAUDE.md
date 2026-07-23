@@ -46,42 +46,17 @@ python tests/build_dataset/test_final_dataset.py        # schema, shape, lookahe
 python -m src.build_dataset.scale_features               # → data/processed/scalers/{feature_scaler.joblib,scaler_metadata.json}
 ```
 
-### Stage 3: Train RL Agent (Iteration 1)
+### Stage 3+: Modeling (not yet started)
 
-Prereq: Stage 2 complete (`data/processed/ml_dataset.parquet` + `top50_universe_membership.parquet`
-on disk). EIIE portfolio-management agent (Jiang, Xu & Liang 2017), price-only, top-50 dynamic
-quarterly universe, CDI-accruing cash, 2011–2026 window. Design + approved paper deviations:
-`docs/eiie_agent/EIIE_AGENT_PLAN.md`.
-
-```bash
-python -m src.rl_agent.experiment --config configs/eiie_baseline.json --dry-run   # data + sanity checks only
-python -m src.rl_agent.experiment --config configs/eiie_baseline.json             # full run: pretrain → OSBL backtest → baselines → report
-python -m src.rl_agent.experiment --config configs/eiie_baseline.json --eval-split test  # final run (train+val pretrain, test backtest)
-python -m src.rl_agent.sweep --config configs/eiie_baseline.json --seeds 1 2 3 4 -j 4    # parallel seed-ensemble / config sweep (per-job logs in experiments/sweep_logs/)
-```
-Output: `experiments/{run_name}_{timestamp}/` — `config.json`, `run_manifest.json` (seed, git commit,
-dataset fingerprint, package versions), `sanity_report.txt`, `model.pt` (checkpoint), `report.html`
-(agent vs. all 7 baselines: PV, reward curves, allocation, turnover/cost, metrics + bootstrap CIs),
-`metrics_summary.json`, `report.json` (validation checklist).
-
-### Stage 4: Conviction Model (Phase 0-1, experimental)
-
-Prereq: Stage 2 complete + `top150_universe_membership.parquet` (`python -m
-src.build_dataset.build_top50_universe --top-n 150 --membership-only`). Self-supervised
-multi-resolution encoder (daily/weekly/monthly/fundamentals branches + cross-attention),
-pretrained with 4 losses added ONE STAGE AT A TIME (1A→1D), each stage's encoder scored
-against 7 intrinsic diagnostics before the next loss is added. Not yet past Phase 1 — no
-regressor, no backtest. Design: `docs/conviction_model/CONVICTION_MODEL_PLAN.md`.
-
-```bash
-python -m src.conviction_model.check_power_floor                          # Phase 0: power-floor prerequisite
-python -m src.conviction_model.run_stage1a                                # Stage 1A: CPC-only pretraining (random init)
-python -m src.conviction_model.run_stage1b                                # Stage 1B: + forward cross-modal alignment (warm-starts from the latest stage1a-*.pt)
-python -m src.conviction_model.run_diagnostics --checkpoint-path <path>   # score a checkpoint against the 7 intrinsic diagnostics + gate table
-```
-Output: `artifacts/checkpoints/conviction_model/{stage1a,stage1b}-<run_id>.pt` (checkpoint-at-peak:
-holds the best-scoring holdout weights, not necessarily the last step's), `artifacts/logs/conviction_model/`,
-`docs/conviction_model/PHASE1_DIAGNOSTICS_<run_id>.json`.
+No model or agent implementation exists in this repo. Prior modeling work on this branch (a
+Stage 3 EIIE RL agent, a Stage 4 self-supervised conviction-model encoder, and an M-series →
+risk_mandate → H-series research lineage exploring alpha/portfolio policies) was deleted on
+2026-07-23 in a full reset — none of it produced a working, deployable result, and starting
+over from Stage 2's output was judged cleaner than carrying that design forward. It remains
+recoverable from git history (`git log` on `refactor` before that date) if ever needed for
+reference, but nothing about its design should be assumed or reused without deliberately
+re-reading it. Stage 2's output (`data/processed/ml_dataset.parquet` + the raw data in
+`data/raw/`) is the only carryover — it's untouched by this reset.
 
 ### Utilities
 
@@ -107,8 +82,8 @@ python tests/run_all.py --group all
 ```
 
 **Test groups:**
-- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`; `tests/rl_agent/{test_config,test_data,test_pvm,test_environment,test_metrics,test_baselines,test_networks,test_train,test_sanity,test_plots,test_experiment,test_sweep}.py` (all synthetic-data — `test_train`/`test_experiment` exercise real gradient steps and the full orchestrator, just on tiny fabricated markets, never the real dataset or a real training run); `tests/conviction_model/{test_config,test_data,test_encoder,test_ssl_pretrain,test_diagnostics,test_labels,test_walkforward}.py` (same convention — synthetic data, real gradient/CPC steps on tiny fabricated panels, never the real dataset or a real training run)
-- **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_universe_integrity.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`, `tests/rl_agent/test_data_integration.py` (loads the real `PricePanel`: 172-wide global space, every in-window day has exactly 50 active members, no NaNs)
+- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`
+- **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_universe_integrity.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`
 
 **Linting:**
 ```bash
@@ -119,8 +94,8 @@ ruff check .          # reports undefined names, unused imports/variables, bare-
 
 - **main:** Stages 1–2 (data collection + dataset build). Latest stable.
 - **build_dataset:** Stage 2 focus.
-- **refactor:** adds Stage 3 iteration 1 (`src/rl_agent/`) — see `docs/eiie_agent/EIIE_AGENT_PLAN.md` — and Stage 4, the Conviction Model (`src/conviction_model/`, experimental, Phase 0-1 only) — see `docs/conviction_model/CONVICTION_MODEL_PLAN.md`. Both live on this branch.
-- **ml_agent:** a separate, earlier PPO agent (masked 279-ticker universe); not this branch's Stage 3.
+- **refactor:** Stages 1–2 only, same as main, as of the 2026-07-23 reset (see Stage 3+ note above). Modeling work restarts here from zero.
+- **ml_agent:** a separate, earlier PPO agent (masked 279-ticker universe); unrelated to this branch's reset.
 
 ## Architecture
 
@@ -177,42 +152,6 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 | `cagr_handler.py` | CAGR calc/fill (BolsAI first, backfill from earnings/revenue) |
 | `scale_features.py` | Fits `ColumnTransformer` (RobustScaler on ratio columns, passthrough elsewhere) train-only, per `split_config.json`; saves `feature_scaler.joblib` + `scaler_metadata.json` |
 
-**Stage 3 (RL Agent, iteration 1)** — `src/rl_agent/`, price-only EIIE reproduction (`docs/eiie_agent/EIIE_AGENT_PLAN.md`):
-
-| File | Purpose |
-|------|---------|
-| `config.py` | Frozen-dataclass `ExperimentConfig` ↔ JSON; every hyperparameter/date/cost rate config-driven, nothing hardcoded downstream |
-| `paths.py` | Shared path constants for this package |
-| `data.py` | `GlobalAssetIndex` (permanent 172-wide map, cash=0); `PricePanel.window_tensor()` (X_t, eq. 18) / `.price_relative()` (y_t, eq. 1, CDI-accruing cash); `validate_cdi_daily_percent()` units guard; observation prices read from the full `ml_dataset.parquet` (not the pre-built top50 file) so an entrant's lookback history isn't missing; `FEATURE_NORM` table lets `DataConfig.features` mix price-level channels (`close/high/low`, ÷value-at-t, paper eq. 18) with technical channels (`return_1m/3m/6m`, `price_vs_ma60`, `volatility_ratio_20_60`, `rsi_14`, `drawdown`, `volume_ratio_20d` — passthrough, a per-feature scale, masked/NaN→0) via `PricePanel.extra` |
-| `pvm.py` | `PortfolioVectorMemory` — global-space `[T, 172]` weight buffer; `read_slots()`/`write()` bridge slot-space (network's fixed 50 inputs) and global space via `torch.gather`/`scatter`; a departing ticker's forced-sale liquidation falls out of the data structure, no special-case code |
-| `environment.py` | `solve_mu`/`solve_mu_torch` (eq. 14, Theorem 1 fixed-point, converged vs. differentiable k-step); `drift_weights`/`drift_weights_torch` (eq. 7); `run_backtest()` — the one loop shared by the agent and every baseline |
-| `networks.py` | `EIIECNN` (paper Fig. 2): kernel-height-1 convs keep each asset's stream independent, `w_{t-1}` inserted as an extra feature map before the final 1×1 conv, softmax over masked logits; `n_features` (conv1's input width) is just `len(cfg.data.features)`, so adding technical channels needs no network change |
-| `train.py` | OSBL (Sec. 5.3): `sample_batch_starts()` (eq. 26 geometric recency bias), `train_step()` (entropy bonus scale-annealed per step, `entropy_schedule()`), `pretrain()` (held-out checkpoint-at-peak: scores the frozen policy every `checkpoint_eval_every` steps on a `checkpoint_holdout_days` slice carved off the train split's tail via `_score_holdout()`, restores + refreshes the PVM under the best-scoring `state_dict` at the end — returns `(losses, best_step, best_score)`), `run_online_backtest()` (interleaves `rolling_steps` updates via `run_backtest`'s `on_step` hook), checkpointing; `_PanelStore` precomputes all window tensors/price relatives once, GPU-resident (scales with channel count, ~200 MB at 3 channels), so per-step data prep is pure tensor indexing — verified bit-identical to the per-step numpy path |
-| `sanity.py` | `run_sanity_checks()` — pre-training invariant gate (determinism, simplex weights, finite gradients/loss, baselines running cleanly); a dominant-asset toy market is a diagnostic, never a pass/fail gate |
-| `baselines.py` | UBAH, UCRP, Best-Stock (hindsight), Random Portfolio/Rebalancing, Constant-Cash, BOVA11 — all through `run_backtest` except BOVA11 (evaluated directly from its own price series) |
-| `metrics.py` | Full metrics suite (Sharpe/Sortino vs. CDI, Calmar, VaR/CVaR, turnover, cost drag, information ratio vs. BOVA11) + `block_bootstrap_ci()` |
-| `plots.py` | `write_report()` — one self-contained HTML report (plotly.js embedded once): PV vs. every baseline, reward curves, allocation evolution, turnover/cost, metrics + CI table |
-| `experiment.py` | CLI orchestrator: seed → load data → recompute a window-scoped split → sanity gate → pretrain → OSBL backtest → baselines → metrics → report → validation checklist |
-| `sweep.py` | Parallel launcher: runs several experiment subprocesses at once (seed ensembles / config sweeps), bounded by `-j`, per-job logs |
-
-**Stage 4 (Conviction Model, Phase 0-1, experimental)** — `src/conviction_model/`, self-supervised
-multi-resolution encoder (`docs/conviction_model/CONVICTION_MODEL_PLAN.md`):
-
-| File | Purpose |
-|------|---------|
-| `config.py` | Frozen-dataclass `SSLConfig` ↔ JSON; Stage 1A (CPC) + Stage 1B (`alignment_weight`, `alignment_horizon`) fields, more added per stage as their losses are written |
-| `paths.py` | Shared path constants for this package |
-| `data.py` | Per-ticker daily/weekly/monthly/quarterly window tensors from `ml_dataset.parquet`; `build_frame_cache()`, `resample_branch_frame()`, `branch_windows_from_precomputed()` |
-| `encoder.py` | `EncoderCNN` — 4 branch sub-networks (dilated `Conv1d`) + cross-attention update, returns 4 SEPARATE labeled sub-embeddings (not pooled), so a branch is ablatable without retraining fusion |
-| `labels.py` | `build_conviction_labels()` — 5 CDI-relative risk-adjusted excess-return horizons + drawdown severity, no aggregation; `trailing_volatility()` masks non-positive `adj_close` before `log()` (vendor rounding artifact, see Critical Caveats) |
-| `ssl_pretrain.py` | Stage 1A: `info_nce_loss`, `sample_cpc_negatives` (same-stock-different-regime + different-stock-same-time), `train_step`/`score_holdout`, `CPCPanelStore`/`LazyPanelGatherer` (precomputed vs. on-demand window batching). Stage 1B adds `_price_macro_state`, `_alignment_loss`, `build_stage1b_batch()`, `train_step_stage1b`/`score_holdout_stage1b` — reuses CPC's own batches, different branch selection + a separate `alignment_horizon` |
-| `diagnostics.py` | The 7 intrinsic embedding-quality diagnostic functions (neighbor-outcome variance, regime MI, valuation-vs-volatility probe, quality persistence, perturbation sensitivity, temporal smoothness, latent similarity) — pure, gate comparison left to the caller |
-| `run_stage1a.py` / `run_stage1b.py` | Real training runs (checkpoint-at-peak: holds out a calendar-date tail, scores periodically, restores the best-scoring `state_dict`); 1B warm-starts from the latest `stage1a-*.pt` |
-| `run_diagnostics.py` | Loads a checkpoint, computes embeddings over every (ticker, month-end) point in its training universe, scores diagnostics 1-7 against the plan's gate table |
-| `check_power_floor.py` | Phase 0: `min_detectable_ic()`-based power floor per horizon vs. realistic effect sizes, go/underpowered decision |
-| `walkforward.py` | Purge/embargo wrapper over `h_series.spine.iter_expanding_folds()` |
-
-
 ## Critical Caveats
 
 - **CAGR backfill is ON:** `fill_missing_cagr()` (which calls `fill_cagr_columns()` per ticker) runs unconditionally in `build_ml_dataset.py`'s main pipeline → dataset has `cagr_{earnings,revenue}_5y_final` populated. Coverage is ~60% from BolsAI; the backfill recovers an additional ~7%.
@@ -220,55 +159,15 @@ multi-resolution encoder (`docs/conviction_model/CONVICTION_MODEL_PLAN.md`):
 - **Real filing dates (July 2026):** Fundamentals visible via CVM's `DT_RECEB` (received date), not fiscal `reference_date`. 41,530 filings from 1,223 companies, 100% coverage of 293-ticker universe; 4,657 rows (0.7%) would have violated a fixed 45/90-day buffer. Sourced from free, keyless CVM open-data portal; integrated via `src/data_collection/cvm/filing_dates.py` (`python -m src.data_collection.cvm_statements --step filing_dates`).
 - **Unadjusted splits REPAIRED:** 53 corporate events in BolsAI's `adj_*` columns were never back-adjusted, causing fake returns up to −99.99%. `repair_unadjusted_splits()` detects and rescales all pre-event rows *and volumes*: a 1:4 split divides prices by 4 and multiplies `volume`/`volume_adjusted` by 4 (same economic activity, more shares). Rescaling is critical for `amihud_illiquidity` and `turnover_ratio` features. `hl_ratio` uses `adj_high/adj_low` (not raw scales). WDCN3 quarantined (unfixable data corruption). ✅ VERIFIED 2026-07-11. ✅ Volume scaling VERIFIED 2026-07-15.
 - **Ticker continuity & splicing (July 2026 fixes):** Renames/mergers/exchanges are spliced via `apply_ticker_continuity()` *after* `repair_unadjusted_splits()` (not before), so splits are repaired under each leg's original ticker name before being renamed onto the survivor. Splicing rules: (1) **rename** = same legal entity, splice prices + fundamentals, drop old ticker. (2) **merger** = exchange ratio, scale old-leg prices by ratio **and volume inversely by ratio** (keeps dollar volume = volume×price invariant across the splice, same rationale as split-repair volume scaling — otherwise `amihud_illiquidity` jumps by `ratio` right at the merger boundary), drop old-leg fundamentals. (3) **keep_separate** = parallel-trading acquirer (e.g., SulAmérica acquired by RDOR, which had its own IPO 2 years earlier), both legs stay as independent series; old treated as delisted. (4) **tender** = cash-out, no splice. Vendor aliases (ARZZ3→AZZA3, RRRP3→BRAV3, etc.) consolidated via `rename` entries where the new file contains full history under both names. Boundary-matching assumption (new ticker's first trade == splice point) is guarded: parallel-trading cases caught and rejected. Adj_close reconciliation factors (inherent basis mismatches between old/new vendor series) are validated [1/50, 50] sane range. Event rekeying: `repair.py` builds ticker-descendant chains from the map so splits recorded under old names (e.g., VVAR3) still match post-rename rows (BHIA3). ✅ All tests pass post-fix. ✅ TIMP3→TIMS3 factor sane (0.6963, not 6963).
-- **`adj_close` 2-decimal vendor precision floor (deep-history microcaps):** BolsAI stores `adj_close`/`adj_open`/`adj_high`/`adj_low` at 2-decimal precision. For a handful of tickers with a large cumulative split/dividend adjustment factor, the true adjusted price underflows that floor — it either rounds to exactly `0.00` (raw `close` stays a normal nonzero price; confirmed in `data/raw/prices/UNIP6.parquet`'s earliest ~33 rows, 2026-07-21) or gets pinned at a tiny nonzero constant across several consecutive days while the real price keeps moving. **Not fixable — flag or mask, never drop or reconstruct**: there's no way to recover the lost precision, and (per the caveat above) `adj_close` must not be rebuilt from `data/raw/dividends`. `build_dataset/features.py::compute_price_features()` already masks non-positive `adj_close` to NaN before `log()` and flags the pinned-nonzero case via `adj_close_precision_degraded` (0/1; exact-2dp-quantized AND `<0.05`, so a genuinely low-priced-but-full-precision ticker like TIMS3 isn't misflagged). Any OTHER consumer computing its own `log(adj_close)` off the raw dataset must apply the same non-positive mask — `conviction_model/labels.py::trailing_volatility()` was missing it (caught via a stray `divide by zero encountered in log` warning, 2026-07-21) and now mirrors `features.py`'s guard.
+- **`adj_close` 2-decimal vendor precision floor (deep-history microcaps):** BolsAI stores `adj_close`/`adj_open`/`adj_high`/`adj_low` at 2-decimal precision. For a handful of tickers with a large cumulative split/dividend adjustment factor, the true adjusted price underflows that floor — it either rounds to exactly `0.00` (raw `close` stays a normal nonzero price; confirmed in `data/raw/prices/UNIP6.parquet`'s earliest ~33 rows, 2026-07-21) or gets pinned at a tiny nonzero constant across several consecutive days while the real price keeps moving. **Not fixable — flag or mask, never drop or reconstruct**: there's no way to recover the lost precision, and (per the caveat above) `adj_close` must not be rebuilt from `data/raw/dividends`. `build_dataset/features.py::compute_price_features()` already masks non-positive `adj_close` to NaN before `log()` and flags the pinned-nonzero case via `adj_close_precision_degraded` (0/1; exact-2dp-quantized AND `<0.05`, so a genuinely low-priced-but-full-precision ticker like TIMS3 isn't misflagged). Any OTHER consumer computing its own `log(adj_close)` off the raw dataset must apply the same non-positive mask.
 - **Returns ARE dividend-adjusted (total return), not price-only:** `log_return`/`return_{1m,3m,6m,12m}`/`excess_return`/`real_return` (`features.py`) are all derived from `adj_close`, and `adj_close` empirically bakes in dividend reinvestment, not just splits — confirmed by testing `adj_close/close` ratio drift against known dividends on split-free windows (e.g. BBAS3 post-split: predicted vs. observed ratio jumps matched to within ~0.04 pp per ex-dividend date). `div_yield_12m`/`div_count_12m` remain separately-tracked features on top of this, not double-counted into returns.
   - **Known, undocumented-by-vendor limitation — BolsAI/yfinance dividend-adjustment methodology diverges:** confirmed by direct measurement (145 tickers, BolsAI-only rows, split-free windows): median 4.9pp divergence between BolsAI's observed `adj_close` ratio drift and what `data/raw/dividends` alone predicts, often 20pp+. BolsAI's adjustment consistently implies *more* cumulative discount than our dividends table explains — i.e. our dividends table is missing some distribution type BolsAI's adjustment already correctly captures (bonus shares/subscription rights suspected, unconfirmed). **Do not "fix" this by recomputing `adj_close` from `data/raw/dividends`** — that would systematically under-adjust and regress returns. `validate_vs_yfinance.py:7` already flags this by skipping `adj_close` cross-validation as "uninformative." No fix available with current data; flagged here so it isn't rediscovered as a bug.
   - **Staleness across `--mode update` runs — FIXED:** yfinance's `auto_adjust=True` backward-adjusts a fetch window relative to "now" at fetch time. If each update only fetched rows after the last checkpoint (like every other collector), each quarterly batch would freeze at its own anchor and never get revisited — a dividend paid after one quarter's fetch would permanently fail to propagate into that quarter's already-stored `adj_close`, one small discontinuity per update, forever. `collect_prices_yf` (`yf_collectors.py`) now re-fetches its *entire* yfinance-sourced span every run via `_prices_fetch_start()` (anchored to the earliest yfinance row on disk, marked by `NaN num_trades`, not the latest), so the whole yfinance era stays internally consistent. Empirically verified this wasn't yet causing damage before the fix (max BolsAI→yfinance gap across 285 tickers was 1–3 days — this was the first `--mode update` run for all of them), but the fix prevents it from starting to matter after a few more quarterly cycles.
-- **Valuation ratios re-anchored daily:** BolsAI computes `pl/pvp/market_cap/p_*/ev_*` at filing date; `recompute_valuation_daily()` rescales to current close (keeps `fundamentals_available_date` in output for agent state). Known ceiling: mid-quarter splits skew ratios until next filing (build warns).
-- **All feature engineering is in Stage 2**, not deferred to the agent (technicals, fundamental ratios, macro-adjusted, CAGR backfill, split repair, volatility rolling rank).
+- **Valuation ratios re-anchored daily:** BolsAI computes `pl/pvp/market_cap/p_*/ev_*` at filing date; `recompute_valuation_daily()` rescales to current close (keeps `fundamentals_available_date` in output for any downstream consumer). Known ceiling: mid-quarter splits skew ratios until next filing (build warns).
+- **All feature engineering is in Stage 2**, not deferred downstream (technicals, fundamental ratios, macro-adjusted, CAGR backfill, split repair, volatility rolling rank).
 - **Per-ticker own-history z-scores (`*_zhist_5y`, July 2026):** `compute_history_relative_features()` (`features.py`) adds a causal rolling robust z-score — `(x - rolling_median) / rolling_IQR`, 5y window — for 11 fundamental ratios (`pl`, `pvp`, `roe`, `net_margin`, `ebitda_margin`, `debt_equity`, `net_debt_ebitda`, `earnings_yield`, `book_to_market`, `current_ratio`, `asset_turnover`) and 2 daily liquidity ratios (`amihud_illiquidity`, `turnover_ratio`). Answers "how unusual is this value for *this company*," distinct from the global `RobustScaler`'s cross-sectional level view (`scale_features.py`) and `cross_sectional.py`'s peer-relative view — see `docs/PER_TICKER_SCALING_PLAN.md`. Stateless (a plain trailing rolling stat, not a fitted transform): no train/test split to manage, valid unchanged under any evaluation methodology. Fundamentals are deduped to one row per `reference_date` before rolling (rolling the daily-forward-filled panel directly would be ~65x redundant), then mapped back onto every daily row of that quarter. Warm-up (< `FUND_ZHIST_MIN_QUARTERS`=8 quarters / `DAILY_ZHIST_MIN_DAYS`=252 days of history) is NaN, a leading prefix like every other rolling-window feature in this pipeline.
 - **Scaler fit boundary is injected, not hardcoded (`iter_fit_windows()`, July 2026):** `scale_features.py`'s `fit_scaler(dataset, window)` takes a `FitWindow` (`manifest.py`) resolved from the active `split_config.json` via `iter_fit_windows()` — the one seam between the evaluation methodology (today: a single fixed split) and scaler fitting. A future rolling/expanding/multi-fold split format only changes `iter_fit_windows()`; `fit_scaler_on_train_split()` remains as a back-compat wrapper reproducing today's single-window behavior exactly. `sync_dataset_version()` now also snapshots `data/processed/scalers/` into `dataset_v{N}/`.
-- **Stage 3 training performance & reproducibility (July 2026, `TRAINING_SPEEDUP_PLAN.md`):**
-  training was CPU-bound (tiny ~3k-param CNN, per-step numpy prep dominated); `train.py`'s
-  `_PanelStore` now precomputes everything GPU-resident once — verified bit-identical, ~2×
-  faster (~6 ms → ~2.5–3.4 ms/step). `train.compile` (`torch.compile`, config flag, default
-  **off**) measured only 1.13× here and is NOT bit-identical to eager — leave off for runs
-  that must reproduce exactly. Same-seed GPU runs drift *across processes* (cuDNN picks conv
-  algorithms per-process; the sanity determinism gate only compares within-process) — CPU runs
-  are exactly reproducible; `torch.use_deterministic_algorithms(True)` is deliberately not
-  enabled. For seed ensembles / hyperparameter sweeps use `python -m src.rl_agent.sweep`
-  (parallel subprocesses, ~0.5 GB GPU each; run-dir timestamps carry microseconds so
-  same-second launches can't collide).
-- **Stage 3 cash-attractor diagnosis (July 2026, `docs/eiie_agent/EIIE_DIAGNOSIS_PLAN.md`):** the agent's default
-  failure mode is converging to 100% cash — CDI accrues ~8.65%/yr in log-space vs. equal-weight's
-  ~8.22%, so unlike the paper's 0%-return cash asset, the training gradient has no restoring force
-  pushing back once every asset score drifts down; softmax saturates (~1e-9/asset), the gradient
-  vanishes, and more training makes it worse, not better. Fixes, both in `TrainConfig`:
-  `entropy_beta_start/end/anneal_frac` (linear decay over the first `anneal_frac` of pretrain,
-  flat at `entropy_beta_end` after — including through the whole online/live phase) forces early
-  exploration instead of hoping a fixed value gets lucky; `checkpoint_holdout_days`/
-  `checkpoint_eval_every` (`train.pretrain()`) periodically scores the frozen policy on a
-  held-out tail of the TRAIN split (never val/test) and restores the best-scoring checkpoint
-  instead of trusting wherever `pretrain_steps` happens to land — measured case: the same seed
-  went from +47% (100k steps) to −71% (2M steps) on identical config, budget alone overfitting
-  the policy past its peak. Even with both fixes, escaped policies are bistable (all-cash or
-  all-in, no steady diversified sleeve) and gravitate to the highest-volatility names in the
-  universe — a raw price CNN can't distinguish a real trend from a dead-cat bounce. Motivated the
-  July 2026 technical-feature-channel work below.
-- **Stage 3 technical feature channels (July 2026):** `DataConfig.features` can mix `close/high/low`
-  with technical columns already computed by Stage 2 (`return_1m/3m/6m`, `price_vs_ma60`,
-  `volatility_ratio_20_60`, `rsi_14`, `drawdown`, `volume_ratio_20d` — see `configs/eiie_features.json`).
-  `data.FEATURE_NORM` routes each by kind: price levels divide by value-at-t (paper eq. 18); technicals
-  passthrough (optionally rescaled, e.g. `rsi_14` ÷100) since they're already stationary — dividing a
-  return by "the return at t" would be meaningless. **Technical columns are `ffill`-only, NOT `bfill`'d**
-  in `load_price_panel`, unlike `close/high/low`: a price's pre-listing days are always masked out
-  downstream so backfilling them is harmless, but a technical feature's own warm-up NaN (e.g.
-  `return_6m` before 126 days of a ticker's own history) can still land on a day its slot IS active —
-  bfilling would leak a later, now-defined value backward into that unmasked training row, a lookahead
-  bug specific to technicals that prices never had. `pl`/`pvp` (PE/PB) are deliberately NOT wired in yet
-  — 27–30% NaN and tails to ±2000 need a non-linear squash (pseudo-log or cross-sectional rank) plus a
-  companion `*_isnan` mask channel, not plain clipping, or they blow out conv gradients.
-- **FIIs deferred:** stocks only (prices/fundamentals/dividends). FIIs are a separate asset class; add if agent scope expands to mixed-asset.
+- **FIIs deferred:** stocks only (prices/fundamentals/dividends). FIIs are a separate asset class; add if scope expands to mixed-asset.
 - **BolsAI:** key in `.env`, loaded by `config.load_env()` (stdlib parser). Backfill only — paid ~€0.10/1K calls. Caps: prices `limit<=5000` (date-window paginated), fundamentals `limit<=88` (use 80).
 - **yfinance:** free incremental refresh. Prices/dividends full history to 2000; fundamentals only ~4–6 quarters (enough for quarterly refresh).
 - **BCB series:** selic=11 (daily), cdi=12, ipca=433 — **NOT 432** (that's the annual meta target).
@@ -289,7 +188,7 @@ multi-resolution encoder (`docs/conviction_model/CONVICTION_MODEL_PLAN.md`):
     - Error NaN: prefix-shaped (no interior holes per ticker in merged fundamentals), detected via test `test_final_dataset.py::T_prefix_rule`. NaN-count regression vs previous build warned via `nan_regressions()` in `manifest.py` (logged but non-fatal, allows legitimate coverage changes).
     - Extreme ratio (144 rows |pl| > 400,000 dataset-wide, 95 in-universe, top-50): kept intact — denominators near zero are valid distress signals. No filled or clipped in the dataset; scaler's fit is robust (median/IQR) but transform is linear, so raw 400k → ~26k after scaling (still extreme, intentionally preserved). Model training handles via loss functions / clipping in the env.
   - Consumer-side (ml_agent env, not this repo): flags + neutral fills (e.g. fill CAGR NaN with 0), any NaN→0 transformation, hard `assert np.isfinite(obs).all()` before agent sees state, global start-date trim for the top-50 universe to drop pre-full-history rows.
-- **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`; Stage 4 `artifacts/checkpoints/conviction_model/{stage1a,stage1b}-<run_id>.pt`, `artifacts/logs/conviction_model/`.
+- **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`.
 - **Paths:** absolute via `Path(__file__).resolve().parents[N]`; always run from project root.
 - **FutureWarnings suppressed:** `pct_change(fill_method=None)` for YoY growth; dropped all-NA columns per-file before concat.
 
@@ -307,7 +206,7 @@ multi-resolution encoder (`docs/conviction_model/CONVICTION_MODEL_PLAN.md`):
 - **Data:** pandas, numpy, pyarrow.
 - **APIs:** BolsAI REST (`httpx`, backfill), BCB SGS (requests, macro), `yfinance` (incremental).
 - **Config:** stdlib `.env` parser (BolsAI key only).
-- **Preprocessing:** scikit-learn (`ColumnTransformer`/`RobustScaler` in `scale_features.py`), `joblib` (scaler serialization) — both were already installed for Stage 3 (agent), now also a Stage 2 direct dependency.
+- **Preprocessing:** scikit-learn (`ColumnTransformer`/`RobustScaler` in `scale_features.py`), `joblib` (scaler serialization) — Stage 2 direct dependencies.
 - **Viz:** Plotly.
 - **No test framework:** standalone `python script.py`.
 

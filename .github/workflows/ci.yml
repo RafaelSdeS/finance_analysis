@@ -25,11 +25,5 @@ jobs:
       - name: Build Stage 2 dataset from git-tracked raw data
         run: python -m src.build_dataset.build_ml_dataset
 
-      - name: Prepare agent training dataset
-        run: python src/agent/feature_engineering.py
-
-      - name: Build agent tensors and scaler
-        run: python -m src.agent.data_pipeline
-
       - name: Validate built dataset and data tests
         run: python tests/run_all.py --group data
