@@ -24,10 +24,22 @@ from .paths import OUTPUT_PATH, ROOT, SCALER_DIR, SPLIT_CONFIG_PATH
 # confirmed 100% constant per ticker across its full history (2026-07-14
 # audit, test_universe_integrity.py). Recorded here (not just as prose in
 # CLAUDE.md) so any future training/scaling consumer can check this list
-# programmatically instead of re-deriving or forgetting it. `sector` is the
-# same kind of static join but carries far less outcome information (see
-# CLAUDE.md) and is deliberately NOT included here.
-LOOKAHEAD_TAINTED_COLS = ["status"]
+# programmatically instead of re-deriving or forgetting it. `sector` itself
+# (the raw join) is the same kind of static join but carries far less outcome
+# information (see CLAUDE.md) and is deliberately NOT included here.
+#
+# The 6 columns below (cross_sectional.py) are ENGINEERED FROM that same
+# static, current-day `sector` join -- a consumer who dutifully drops raw
+# `status`/`sector` but keeps these numeric features still trains on the
+# taint, just laundered into a z-score/percentile/momentum figure that looks
+# clean (2026-07-24 audit). Recorded here for the same reason `status` is:
+# so the taint travels with the derived columns, not just the input.
+LOOKAHEAD_TAINTED_COLS = [
+    "status",
+    "pl_zscore_sector", "pvp_zscore_sector", "roe_zscore_sector", "debt_equity_zscore_sector",
+    "div_yield_sector_percentile",
+    "momentum_vs_sector_1m", "momentum_vs_sector_3m", "momentum_vs_sector_12m",
+]
 
 # Raw macro columns carry heterogeneous units by construction (BCB's own SGS
 # series definitions -- see data_collection/config.py's BCB_SERIES comment).

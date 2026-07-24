@@ -37,6 +37,32 @@ def test_manifest_records_lookahead_tainted_columns_present_in_dataset(tmp_path,
     assert manifest["lookahead_tainted_columns"] == ["status"]
 
 
+def test_manifest_flags_sector_derived_columns_as_tainted(tmp_path, monkeypatch) -> None:
+    """The 6 cross_sectional.py columns engineered from the same static,
+    current-day `sector` join (pl_zscore_sector, div_yield_sector_percentile,
+    momentum_vs_sector_*) must be recorded alongside `status` -- dropping
+    only raw status/sector isn't enough, since these numeric features carry
+    the same taint laundered into a clean-looking z-score/percentile/
+    momentum figure (2026-07-24 audit)."""
+    monkeypatch.setattr(bmd, "OUTPUT_PATH", tmp_path / "ml_dataset.parquet")
+
+    dataset = pd.DataFrame({
+        "ticker": ["A", "B"],
+        "trade_date": pd.to_datetime(["2020-01-01", "2020-01-01"]),
+        "status": ["ATIVO", "CANCELADA"],
+        "pl_zscore_sector": [0.5, -0.5],
+        "div_yield_sector_percentile": [0.2, 0.8],
+        "momentum_vs_sector_1m": [0.01, -0.01],
+        "pl": [10.0, 5.0],
+    })
+
+    manifest = bmd.write_manifest(dataset)
+
+    assert set(manifest["lookahead_tainted_columns"]) == {
+        "status", "pl_zscore_sector", "div_yield_sector_percentile", "momentum_vs_sector_1m",
+    }
+
+
 def test_manifest_lookahead_tainted_columns_empty_when_absent(tmp_path, monkeypatch) -> None:
     """A dataset that never joined company_info (e.g. a narrow test fixture)
     must not claim status is tainted if the column doesn't even exist."""
