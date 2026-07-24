@@ -41,6 +41,9 @@ FAST = [
     "tests/build_dataset/test_top50_universe.py",
     "tests/build_dataset/test_loaders.py",
     "tests/build_dataset/test_manifest.py",
+    "tests/portfolio/test_labels.py",
+    "tests/portfolio/test_backtest.py",
+    "tests/portfolio/test_metrics.py",
     "tests/data_collection/test_merge_save_new_rows_only.py",
     "tests/data_collection/test_macro_bare_object.py",
     "tests/data_collection/test_prices_concat_dtype.py",
@@ -61,6 +64,8 @@ DATA = [
     "tests/data_collection/validate_vs_yfinance.py",
     "tests/data_collection/test_collect_delisted.py",
     "tests/data_collection/test_cvm_statements.py",
+    "tests/portfolio/test_universe.py",
+    "tests/portfolio/test_features.py",
 ]
 
 # Hits a live external vendor (yfinance) rather than only local/synthetic

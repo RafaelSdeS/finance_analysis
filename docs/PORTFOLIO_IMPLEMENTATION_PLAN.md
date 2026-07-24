@@ -40,28 +40,23 @@ no premature abstraction.
 
 ### 2.1 — Point-in-time liquid universe  *(proposal Phase 1 — mostly done)*
 - [x] **Pre-existing pipeline validated end-to-end on real data (2026-07-24), before building on it:** `python -m src.build_dataset.build_top50_universe` ran clean on the real `ml_dataset.parquet` in 3s — 171 tickers ever qualified for top-50, 190,951 rows after the earliest-fundamental trim (14.6% of the full dataset, a sane share). Membership churn confirmed on real dates: 103 quarterly periods from 2001-03-30 to 2026-07-14; comparing period 4 (2001) vs period 100 (2025), overlap was 11 of ~50 members — real, expected churn, not a static list. No errors, no latent bugs found in this dependency.
-- [ ] `src/portfolio/universe.py`: thin wrapper over the **existing** `build_top50_membership` / `filter_to_top50_universe`. Expose `liquid_universe(df, top_n=50) -> membership` and the rebalance-date list (the membership `start` dates *are* the quarterly rebalance calendar — reuse them, don't recompute).
-- [ ] Smoke test on **real** `ml_dataset.parquet` (not just the synthetic unit test): assert membership churns over time (2015 members ≠ 2020 members), every member has ≥252 trailing days as of its qualifying date, and no member's first qualifying date precedes its first trade.
-- Done when: universe membership table materializes for the real dataset and the churn/no-lookahead asserts pass.
+- [x] `src/portfolio/universe.py`: thin wrapper over the **existing** `build_top50_membership` / `filter_to_top50_universe`. Exposes `liquid_universe()`, `rebalance_dates()`, `universe_at()`.
+- [x] Smoke test on **real** `ml_dataset.parquet`: `tests/portfolio/test_universe.py` (data group) — 103 rebalance periods 2001-03-30→2026-07-14, churn confirmed (2001 vs 2025 overlap 11/~50), every member has ≥252 trailing days as of its qualifying date (min observed exactly 252), no qualifying period starts before that ticker's first row. All pass.
+- **Done — 2026-07-24.**
 
 ### 2.2 — Forward label + feature matrix  *(prereq for 2b; fixes P7)*
-- [ ] `src/portfolio/labels.py::forward_excess_return(prices, horizon_td)`:
-  - Per ticker, date-sorted: `fwd_ret = adj_close.shift(-H) / adj_close - 1`.
-  - `fwd_cdi = rolling forward product of (1 + cdi/100) over the next H trading days − 1` (cdi is %/day).
-  - `label = fwd_ret − fwd_cdi`.
-  - `H`: 252 td (12m) as default, 126 td (6m) as an ablation switch.
-  - Mask `label = NaN` where `adj_close_precision_degraded == 1` on the base row.
-  - Last H rows per ticker are NaN (no forward window) → excluded from training. **This is the leakage boundary; nothing downstream may impute them.**
-- [ ] `src/portfolio/features.py::feature_columns()`: return the **§4.4-E keep list (121 cols)** as a literal, minus `sector` unless one-hot is explicitly wanted. Import `manifest.LOOKAHEAD_TAINTED_COLS` and `assert` none of them are in the keep list (a live guard, so a future dataset change can't silently leak a tainted column in).
-- Done when: label column builds, the tainted-column `assert` passes, and a spot check confirms the last-H-rows-per-ticker are NaN.
+- [x] `src/portfolio/labels.py::forward_excess_return(df, horizon_td)`: implemented exactly as specced (shift-based fwd_ret, log1p-cumsum-based fwd_cdi over the same H-row window, `adj_close_precision_degraded` mask, non-positive-price mask). `tests/portfolio/test_labels.py` (fast) checks every value against an independently hand-computed reference (not the implementation's own logic), confirms the last-H-rows-per-ticker are NaN, and confirms output realigns correctly regardless of input row order. All pass.
+- [x] `src/portfolio/features.py::feature_columns()`: the literal 120-numeric (+1 `sector`) keep-list, with a live `assert` against `manifest.LOOKAHEAD_TAINTED_COLS`. `tests/portfolio/test_features.py` (data group) additionally verifies against the real dataset: exact counts (120/121), zero tainted-column overlap, and every listed column actually exists in `ml_dataset.parquet`. All pass.
+- **Done — 2026-07-24.**
 
 ### 2.3 — Backtest harness + equal-weight baseline  *(proposal Phase 2a — the real foundation)*
-- [ ] `src/portfolio/backtest.py`: given a `weights_fn(date, universe, state) -> weights`, walk quarterly rebalance dates, apply weights, accrue daily portfolio returns between rebalances (equities via `adj_close`, cash via `cdi`), charge cost on `Δw` at each rebalance (incl. forced-sale turnover from P6). Returns a per-day equity curve + per-rebalance weight/turnover log.
-- [ ] `src/portfolio/metrics.py`: annualized return, Sharpe, **deflated Sharpe** (López de Prado — small, self-contained), max drawdown, annual turnover, avg holding period (yrs), no-trade fraction, regime-sliced returns (SELIC median split + explicit crisis windows).
-- [ ] First `weights_fn`: **equal-weight** the current liquid universe. This is the floor everything must beat.
-- [ ] Baselines in the same harness: buy-and-hold BOVA11, 100% CDI.
-- [ ] Test: on a 2-ticker synthetic panel, assert equity curve compounding, turnover accounting (incl. a forced exit), and that a zero-cost / no-rebalance run reproduces buy-and-hold exactly.
-- Done when: equal-weight, BOVA11, and 100%-CDI curves + the §8 metric table print out-of-sample on the real universe.
+- [x] `src/portfolio/backtest.py`: `run_backtest()` implemented as specced — genuine buy-and-hold-with-share-drift between rebalances (not daily renormalization, which would erase the "winners run" behavior §4.3 depends on), universe-exit force-liquidation counted in turnover (P6), cost applied one-way to equities only (not the cash leg). Plus `equal_weight_fn`, `buy_and_hold_curve`, `cdi_curve`.
+- [x] `src/portfolio/metrics.py`: `annualized_return`, `sharpe_ratio`, `deflated_sharpe_ratio` (Bailey & López de Prado, `scipy.stats.norm`), `max_drawdown`, `turnover_stats` (annual turnover, avg holding period, no-trade fraction), `regime_slice` (SELIC median split + `CRISIS_WINDOWS`), `full_report()`.
+- [x] `equal_weight_fn` is the first/reference `weights_fn`.
+- [x] Baselines: `buy_and_hold_curve` (BOVA11) and `cdi_curve` (100% CDI), same harness/metrics.
+- [x] `tests/portfolio/test_backtest.py` (fast): a 2-ticker synthetic panel checked against an independent, non-vectorized reference simulator — equity curve, per-rebalance turnover (incl. the forced-exit case, verified nonzero even though `equal_weight_fn` never mentions the exiting ticker), and a zero-cost no-op run reproducing a static buy-and-hold exactly. `tests/portfolio/test_metrics.py` (fast) checks each stat against direct formulas, plus DSR sanity (bounded in [0,1], ranks a clear edge above noise, exactly 0.5 for a deterministic zero-Sharpe series, monotonic in `n_trials`). All pass.
+- [x] `src/portfolio/run_baseline.py` — real end-to-end run (`python -m src.portfolio.run_baseline`, 1.6s): equal-weight liquid universe (2001–2026, 6279 daily obs) returned 14.1% annualized / 0.65 Sharpe / -62% max drawdown / 0.90 annual turnover / 2.23y avg holding period; BOVA11 buy-and-hold (rebased to its 2008 inception) 9.4% / 0.49 Sharpe / -50% max drawdown; 100% CDI 12.0% / near-riskless (max drawdown exactly 0, as it must be for a monotonically-compounding cash accrual). All directionally sane, no NaN/crashes. Regime slices correctly show both equity strategies deeply negative through GFC/COVID while CDI stays positive throughout.
+- **Done — 2026-07-24.** `python tests/run_all.py --group all`: 38/38 passed (25 fast + 13 data, up from 25/8 before this phase).
 
 ### 2.4 — Cost-aware convex optimizer  *(proposal Phase 4 — needs Σ from 2.5 and α from 2b, but the program is standalone)*
 - [ ] Add `cvxpy` to `requirements.txt`.
