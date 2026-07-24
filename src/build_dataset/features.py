@@ -222,17 +222,25 @@ def compute_price_features(df):
         # Short-vs-long vol regime ratio: expanding (>1) or contracting (<1)
         # volatility, independent of any ticker's absolute vol level.
         g["volatility_ratio_20_60"] = g["volatility_20d"] / g["volatility_60d"]
-        g["ma_20"]          = g["adj_close"].rolling(20).mean()
-        g["ma_60"]          = g["adj_close"].rolling(60).mean()
+        # `adj` (masked >0, defined above for log_return) not raw adj_close:
+        # a handful of deep-history microcaps hit the 2-decimal vendor
+        # precision floor and round to exactly 0.00 (see module docstring /
+        # CLAUDE.md). Reading raw adj_close here produced a fake -100%
+        # drawdown, ma_20/60 dragged toward 0, rsi_14->0, and contaminated
+        # every rolling window for the following 19-59 rows too (2026-07-24
+        # audit). log_return/hl_ratio/drawdown/rsi/percentiles all route
+        # through this masked series now, same as the log path already did.
+        g["ma_20"]          = adj.rolling(20).mean()
+        g["ma_60"]          = adj.rolling(60).mean()
         # Price relative to its own trend, not the raw MA level (which is an
         # absolute price and not comparable across tickers) -- same pattern
         # as hl_ratio below.
-        g["price_vs_ma20"]  = g["adj_close"] / g["ma_20"]
-        g["price_vs_ma60"]  = g["adj_close"] / g["ma_60"]
+        g["price_vs_ma20"]  = adj / g["ma_20"]
+        g["price_vs_ma60"]  = adj / g["ma_60"]
         # adj_high/adj_low, not raw high/low: raw and adjusted prices live on
         # different scales whenever the cumulative split adjustment != 1, and
         # mixing them made hl_ratio meaningless around splits.
-        g["hl_ratio"]       = (g["adj_high"] - g["adj_low"]) / g["adj_close"]
+        g["hl_ratio"]       = (g["adj_high"] - g["adj_low"]) / adj
         # True range: hl_ratio's blind spot is a gap day (price gaps overnight
         # then trades in a tight intraday range) -- true range also counts the
         # distance from the prior close, same guard as overnight_gap since it
@@ -242,10 +250,10 @@ def compute_price_features(df):
             (g["adj_high"] - prev_adj_close).abs(),
             (g["adj_low"] - prev_adj_close).abs(),
         ], axis=1).max(axis=1)
-        g["true_range_ratio"] = true_range / g["adj_close"]
+        g["true_range_ratio"] = true_range / adj
         g.loc[large_gap, "true_range_ratio"] = np.nan
-        g["drawdown"]       = (g["adj_close"] - g["adj_close"].cummax()) / g["adj_close"].cummax()
-        g["rsi_14"]         = _rsi(g["adj_close"], 14)
+        g["drawdown"]       = (adj - adj.cummax()) / adj.cummax()
+        g["rsi_14"]         = _rsi(adj, 14)
         # Volume relative to its own trailing average -- raw volume spans
         # orders of magnitude across the universe (blue chip vs. microcap)
         # and isn't comparable across tickers; this ratio is.
@@ -584,7 +592,11 @@ def compute_advanced_features(df):
         ).rank(method="max", pct=True)
 
         # Price percentile: is price high/low vs own history (last 5 years)?
-        g["price_percentile_5y"] = g["adj_close"].rolling(
+        # Masked (>0), same reason as compute_price_features: a raw 0.00
+        # precision-floor row would rank as the window's all-time minimum
+        # and drag every window it's a member of for the next 1-5 years.
+        adj = g["adj_close"].where(g["adj_close"] > 0)
+        g["price_percentile_5y"] = adj.rolling(
             window=window_252, min_periods=PERCENTILE_MIN_PERIODS
         ).rank(method="max", pct=True)
 
@@ -592,7 +604,7 @@ def compute_advanced_features(df):
         # signal from the 5y version for younger listings or a recent regime
         # change that 5 years of history would dilute. Same window as
         # drawdown_percentile below, for consistency.
-        g["price_percentile_1y"] = g["adj_close"].rolling(
+        g["price_percentile_1y"] = adj.rolling(
             window=252, min_periods=PERCENTILE_MIN_PERIODS
         ).rank(method="max", pct=True)
 

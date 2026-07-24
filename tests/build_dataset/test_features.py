@@ -88,6 +88,44 @@ def test_log_return_nan_across_large_calendar_gap() -> None:
     assert MAX_RETURN_GAP_DAYS < (dates[3] - dates[2]).days
 
 
+def test_nonpositive_adjclose_masks_all_price_technicals() -> None:
+    """A 2-decimal vendor-precision-floor adj_close of exactly 0.00 mid-series
+    (BIOM3/LUXM4/NUTR3/UNIP6 in the real dataset, 2026-07-24 audit) must NaN
+    out every technical derived from adj_close on that row -- not silently
+    rank/average a literal 0 in as a real price. Previously only the
+    log-return path was masked; ma_20/60, drawdown, rsi_14, hl_ratio,
+    true_range_ratio, and price_vs_ma20/60 all read raw adj_close and
+    produced a fake -100% drawdown, ma dragged toward 0, and rsi_14 -> 0."""
+    n = 30
+    prices = [5.0] * n
+    prices[25] = 0.0  # precision-floor underflow row
+
+    df = pd.DataFrame({
+        "ticker": ["A"] * n,
+        "trade_date": pd.date_range("2026-01-01", periods=n),
+        "adj_close": prices,
+        "adj_high": prices,
+        "adj_low": prices,
+        "adj_open": prices,
+        "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
+    })
+    result = compute_price_features(df)
+    zero_row = result.iloc[25]
+
+    for col in ("hl_ratio", "true_range_ratio", "drawdown", "rsi_14",
+                "price_vs_ma20", "ma_20"):
+        assert pd.isna(zero_row[col]), f"{col} should be NaN on the masked (adj_close<=0) row"
+
+    # ma_20 must never be dragged toward the precision-floor zero on any row
+    assert (result["ma_20"].dropna() > 0).all(), "ma_20 polluted by a masked zero"
+    # drawdown must never read a fake -100% off the masked zero
+    assert (result["drawdown"].dropna() > -0.99).all(), "drawdown polluted by a masked zero"
+    # cummax used for drawdown skips the masked NaN, so the row right after
+    # recovers cleanly (constant-price series -> drawdown back to 0)
+    assert approx(result.iloc[26]["drawdown"], 0.0)
+
+
 def test_moving_averages() -> None:
     """MA20/60: rolling mean of prices. First 19/59 rows should be NaN."""
     prices = [100.0 + i * 0.5 for i in range(100)]  # Linear increase
@@ -1191,6 +1229,27 @@ def test_price_percentile_1y_no_lookahead() -> None:
     # legitimately hit 1.0 once the window is dominated by the monotonic
     # trend) -- the no-lookahead property above is the meaningful check.
     assert full["price_percentile_1y"].dropna().is_monotonic_increasing
+
+
+def test_price_percentile_masks_nonpositive_adjclose() -> None:
+    """A precision-floor adj_close of exactly 0.00 must not rank as the
+    window's all-time low in price_percentile_1y/5y (2026-07-24 audit --
+    same masking bug as compute_price_features' ma_20/drawdown/rsi_14)."""
+    df = _advanced_features_fixture(100)
+    df.loc[70, "adj_close"] = 0.0  # otherwise-monotonic increasing series
+
+    result = compute_advanced_features(df)
+
+    assert pd.isna(result.iloc[70]["price_percentile_1y"]), \
+        "price_percentile_1y should be NaN on the masked (adj_close<=0) row"
+    assert pd.isna(result.iloc[70]["price_percentile_5y"]), \
+        "price_percentile_5y should be NaN on the masked (adj_close<=0) row"
+    # every other row's percentile must still be > 0 -- a raw 0 in the window
+    # would previously rank as the minimum, pinning percentile toward 0 for
+    # every subsequent row that still has it in its rolling window.
+    others = result.drop(index=70)
+    assert (others["price_percentile_1y"].dropna() > 0).all()
+    assert (others["price_percentile_5y"].dropna() > 0).all()
 
 
 def test_turnover_ratio() -> None:
