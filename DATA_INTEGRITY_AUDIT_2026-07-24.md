@@ -194,8 +194,9 @@ can't be silently "repaired".
 - [x] C1: regression guard passes (`VALIDATION PASSED`).
 - [ ] C1 (optional): once a verified rename date is known, move `ALOS3`/`ALSO3` and `MEGA3`/`SRNA3` into `ticker_continuity.json` proper instead of relying on the CNPJ-match exclusion.
 - [x] C2: route price technicals + percentiles through the masked `adj`; regression tests added, fast-group green.
-- [x] C2: rebuild landed externally (manifest `git_commit: 4b865ce`) — `drawdown < -0.999` dropped by exactly 62 rows, matching the original audit's zero-`adj_close`-caused count; `BAHI3` confirmed absent (0 rows). `ATOM3`/`MBLY3`/`LVTC3`/`ARND3`/`PORT3` quarantine postdates that rebuild — **dataset needs one more rebuild** to drop these 5.
+- [x] C2: rebuild landed (manifest `git_commit: 520bd4c`, 510 tickers / 1,308,104 rows) —
+      `BAHI3`/`ATOM3`/`MBLY3`/`LVTC3`/`ARND3`/`PORT3` all confirmed absent (0 rows each), `CGRA3`
+      confirmed kept (4319 rows). `test_universe_integrity.py --group all` passes.
 - [ ] L2: optional beta degenerate-variance guard.
 - [ ] L3: optional split-repair persistence test.
 - [ ] L4: verify `T_prefix_rule` excludes gap-guarded derived columns.
-```
