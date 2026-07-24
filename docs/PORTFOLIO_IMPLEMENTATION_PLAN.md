@@ -59,18 +59,17 @@ no premature abstraction.
 - **Done — 2026-07-24.** `python tests/run_all.py --group all`: 38/38 passed (25 fast + 13 data, up from 25/8 before this phase).
 
 ### 2.4 — Cost-aware convex optimizer  *(proposal Phase 4 — needs Σ from 2.5 and α from 2b, but the program is standalone)*
-- [ ] Add `cvxpy` to `requirements.txt`.
-- [ ] `src/portfolio/optimizer.py::solve(alpha, Sigma, w_prev, c1, c2, lam, w_max)` implementing §5 exactly:
-  `max αᵀw − (λ/2)wᵀΣw − c₁‖Δw‖₁ − (c₂/2)‖Δw‖₂²`, s.t. long-only, `w_i ≤ w_max`, `Σw + w_cash = 1`, `w_cash ≥ 0`.
-  - **Index = `union(w_prev.index, current_universe)`** (P6). Names not in the current universe pinned `w=0`. Cash column: `α_cash = forward CDI carry`, `Σ` row/col ≈ 0.
-  - `c₁` = **one-way** cost (§5 note: not the round-trip 0.06% — that double-counts), per-asset liquidity-scaled via `amihud_illiquidity`/`turnover_ratio` (§6). `c₂` starts at 0.
-- [ ] Test: a 3-asset toy where the analytic no-trade band is known — assert a below-band α improvement produces **exactly** zero trade, and above-band produces a trade.
-- Done when: the solver returns feasible long-only weights summing to 1 (incl. cash) and the no-trade-band test passes.
+- [x] Added `cvxpy==1.7.4` to `requirements.txt` (installed via `pip install --user --break-system-packages` — the user's own choice when asked, matching how scikit-learn/scipy etc. already sit in `~/.local/lib/python3.12/site-packages` on this machine; a plain `--user` install alone was rejected by Debian's PEP 668 guard).
+- [x] `src/portfolio/optimizer.py::solve(alpha, sigma, w_prev, c1, c2, lam, w_max)` implementing §5 exactly via `cvxpy` (`cp.psd_wrap` on Σ since `risk.py` already guarantees PSD — skips cvxpy's own, more conservative curvature check).
+  - **Index = `alpha.index ∪ w_prev.index`** (P6). Names in `w_prev` but absent from `alpha` (a universe exit) are **hard-constrained `w==0`**, not left to the objective — there's no current alpha estimate to justify holding them, so it's a forced liquidation by construction, still counted in realized turnover downstream. Cash: `α_cash` passed in directly (the CDI carry), `Σ` row/col ≈ 0 via `risk.add_cash_row_col`.
+  - `c₁` = **one-way** cost (scalar or per-asset Series), forced to 0 for cash internally regardless of what's passed. `c₂` defaults to 0.
+- [x] `tests/portfolio/test_optimizer.py` (fast): a 1-risky-asset+cash toy where the no-trade band is analytically derived by hand (`|α − λΣw_prev| ≤ c₁` ⇒ no trade). **All three cases matched the hand-derived target to the solver's own numerical tolerance**: in-band → `w` unchanged (0.5→0.50000), above-band → traded to the exact analytic target (0.75000), below-band → exact analytic target (0.37500). Plus a forced-exit case: a held name absent from `alpha` pinned to `w≈1.5e-8` (~0) while weights still summed to 1.
+- **Done — 2026-07-24.**
 
 ### 2.5 — Risk model Σ  *(proposal Phase 3 — no new dep, P8)*
-- [ ] `src/portfolio/risk.py::shrinkage_cov(returns_window)` = `sklearn.covariance.LedoitWolf` on trailing daily equity returns of the current universe. Cash row/col ≈ 0.
-- [ ] Validate conditioning (condition number, PSD) vs raw sample cov on a real window.
-- Done when: Σ is PSD and well-conditioned on a real trailing window; wired into 2.4.
+- [x] `src/portfolio/risk.py`: `shrinkage_cov()` (`sklearn.covariance.LedoitWolf`), `add_cash_row_col()`, `condition_number()`, `is_psd()`.
+- [x] `tests/portfolio/test_risk.py` (data group): (1) a synthetic n=5<p=10 degenerate case — raw sample cov confirmed rank-deficient (rank 4/10) by construction, shrinkage still PSD and well-conditioned (cond≈3.79); (2) cash-row/col augmentation stays PSD; (3) **real trailing-252-day window** from the actual point-in-time top-50 universe (as of 2026-06-30): raw sample cov condition number **9.32e+16** (exactly the "numerically garbage" the proposal warned about) vs shrinkage's **3.58e+02** — a dramatic, real-data confirmation of §2's claim, not just a synthetic illustration.
+- **Done — 2026-07-24.** Wired into 2.4 (`optimizer.solve` consumes `risk.py`'s output directly).
 
 ### 2.6 — Forecaster (Stage A)  *(proposal Phase 2b)*
 - [ ] Add `lightgbm` to `requirements.txt`.

@@ -44,6 +44,7 @@ FAST = [
     "tests/portfolio/test_labels.py",
     "tests/portfolio/test_backtest.py",
     "tests/portfolio/test_metrics.py",
+    "tests/portfolio/test_optimizer.py",
     "tests/data_collection/test_merge_save_new_rows_only.py",
     "tests/data_collection/test_macro_bare_object.py",
     "tests/data_collection/test_prices_concat_dtype.py",
@@ -66,6 +67,7 @@ DATA = [
     "tests/data_collection/test_cvm_statements.py",
     "tests/portfolio/test_universe.py",
     "tests/portfolio/test_features.py",
+    "tests/portfolio/test_risk.py",
 ]
 
 # Hits a live external vendor (yfinance) rather than only local/synthetic

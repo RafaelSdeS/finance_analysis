@@ -15,6 +15,8 @@ scikit-learn==1.9.0
 joblib==1.5.3
 # Stage 3 portfolio (src/portfolio/) -- scipy.stats for the deflated Sharpe ratio
 scipy==1.18.0
+# Stage 3 portfolio -- the cost-aware convex optimizer (proposal §5)
+cvxpy==1.7.4
 # Testing
 pytest==8.3.4
 ruff==0.15.20
