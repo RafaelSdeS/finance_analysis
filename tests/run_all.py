@@ -46,6 +46,7 @@ FAST = [
     "tests/portfolio/test_metrics.py",
     "tests/portfolio/test_optimizer.py",
     "tests/portfolio/test_alpha.py",
+    "tests/portfolio/test_pipeline.py",
     "tests/data_collection/test_merge_save_new_rows_only.py",
     "tests/data_collection/test_macro_bare_object.py",
     "tests/data_collection/test_prices_concat_dtype.py",

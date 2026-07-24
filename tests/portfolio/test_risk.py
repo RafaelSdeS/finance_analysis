@@ -56,6 +56,19 @@ def test_degenerate_case():
     return passed, failed
 
 
+def test_empty_window():
+    """A 0-row returns window (e.g. a rebalance right at the very start of
+    history, before any return can even be computed) must return empty,
+    like the 0-column case already does -- not crash inside LedoitWolf."""
+    passed = failed = 0
+    empty = pd.DataFrame(columns=["A", "B", "C"], dtype=float)
+    result = shrinkage_cov(empty)
+    ok = result.empty
+    print_check("shrinkage_cov on a 0-row window returns empty instead of crashing", bool(ok))
+    passed, failed = passed + ok, failed + (not ok)
+    return passed, failed
+
+
 def test_cash_row_col():
     passed = failed = 0
     sigma = pd.DataFrame([[0.04, 0.01], [0.01, 0.09]], index=["A", "B"], columns=["A", "B"])
@@ -113,9 +126,10 @@ def test_real_window():
 def main():
     print_header("test_risk")
     p1, f1 = test_degenerate_case()
-    p2, f2 = test_cash_row_col()
-    p3, f3 = test_real_window()
-    passed, failed = p1 + p2 + p3, f1 + f2 + f3
+    p2, f2 = test_empty_window()
+    p3, f3 = test_cash_row_col()
+    p4, f4 = test_real_window()
+    passed, failed = p1 + p2 + p3 + p4, f1 + f2 + f3 + f4
     print_section_end(passed, failed)
     return failed == 0
 

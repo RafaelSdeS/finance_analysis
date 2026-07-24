@@ -18,7 +18,7 @@ def shrinkage_cov(returns_window: pd.DataFrame) -> pd.DataFrame:
     (LedoitWolf needs a complete matrix) -- returns a DataFrame indexed and
     columned by the surviving tickers, same order."""
     clean = returns_window.dropna(axis=1, how="any")
-    if clean.shape[1] == 0:
+    if clean.shape[1] == 0 or clean.shape[0] == 0:
         return pd.DataFrame(index=[], columns=[])
     lw = LedoitWolf().fit(clean.to_numpy())
     return pd.DataFrame(lw.covariance_, index=clean.columns, columns=clean.columns)
