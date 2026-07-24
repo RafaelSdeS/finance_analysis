@@ -754,7 +754,7 @@ def test_div_yield_12m_window_is_calendar_year_not_252_days() -> None:
     must still be counted.
     """
     dates = pd.date_range("2020-01-01", periods=370, freq="D")
-    dataset = pd.DataFrame({"ticker": "A", "trade_date": dates, "adj_close": 10.0})
+    dataset = pd.DataFrame({"ticker": "A", "trade_date": dates, "adj_close": 10.0, "close": 10.0})
     dividends = pd.DataFrame({
         "ticker": ["A"], "ex_date": [pd.Timestamp("2020-01-01")], "value_per_share": [1.0],
     })
@@ -769,6 +769,66 @@ def test_div_yield_12m_window_is_calendar_year_not_252_days() -> None:
     row_366d = result[result["trade_date"] == pd.Timestamp("2020-01-01") + pd.Timedelta(days=366)]
     assert row_366d["div_count_12m"].iloc[0] == 0
     assert approx(row_366d["div_yield_12m"].iloc[0], 0.0)
+
+
+def test_div_yield_12m_uses_nominal_price_at_ex_date_not_todays_adj_close() -> None:
+    """div_yield_12m must divide each dividend by the nominal (raw "close")
+    price AT ITS OWN ex-date, not by today's adj_close.
+
+    Regression test (2026-07-23 audit): adj_close is discounted backward by
+    every dividend/split since, so dividing a historical nominal payment by
+    it overstates yield the further back in time the row sits. Fixture: a
+    stock whose raw close is flat at 10.0 throughout (no split), but whose
+    adj_close has since been discounted to 4.0 by later dividends (simulating
+    a heavily-adjusted deep-history row). The true yield on the R$1.00
+    dividend was always 1.0/10.0 = 10% -- never 1.0/4.0 = 25%, which is what
+    dividing by adj_close would (wrongly) produce.
+    """
+    dates = pd.date_range("2020-01-01", periods=200, freq="D")
+    dataset = pd.DataFrame({
+        "ticker": "A", "trade_date": dates,
+        "close": 10.0,       # nominal price, flat -- no split ever happened
+        "adj_close": 4.0,    # heavily discounted by dividends paid AFTER this window
+    })
+    dividends = pd.DataFrame({
+        "ticker": ["A"], "ex_date": [pd.Timestamp("2020-01-01")], "value_per_share": [1.0],
+    })
+
+    result = compute_dividend_features(dataset, dividends)
+
+    row_100d = result[result["trade_date"] == pd.Timestamp("2020-01-01") + pd.Timedelta(days=100)]
+    assert approx(row_100d["div_yield_12m"].iloc[0], 0.10)   # 1.0 / close(10.0), not 1.0 / adj_close(4.0)
+
+
+def test_div_yield_12m_unaffected_by_split_inside_trailing_window() -> None:
+    """A split falling inside the trailing 365-day window must not distort
+    div_yield_12m: each dividend's yield is computed against the raw close
+    AT ITS OWN ex-date, so a pre-split (large nominal) and a post-split
+    (small nominal) dividend are each correctly normalized before summing --
+    unlike summing raw value_per_share and dividing by one post-split price,
+    which overstates yield for up to a year after every split.
+    """
+    dates = pd.date_range("2020-01-01", periods=200, freq="D")
+    # Simulate a 1:10 split on day 100: raw close drops from 100 to 10.
+    close = [100.0] * 100 + [10.0] * 100
+    dataset = pd.DataFrame({
+        "ticker": "A", "trade_date": dates, "close": close, "adj_close": 10.0,
+    })
+    dividends = pd.DataFrame({
+        "ticker": ["A", "A"],
+        # Pre-split dividend (large nominal, matches the R$100 pre-split price)
+        # and post-split dividend (small nominal, matches the R$10 post-split price).
+        "ex_date": [pd.Timestamp("2020-01-01"), pd.Timestamp("2020-04-20")],
+        "value_per_share": [5.0, 0.5],
+    })
+
+    result = compute_dividend_features(dataset, dividends)
+
+    # Both dividends represent the same true 5% yield at their own ex-date price
+    # (5.0/100.0 and 0.5/10.0) -- summed trailing yield should be ~10%, not the
+    # distorted ~55% that (5.0 + 0.5) / 10.0 (today's post-split price) would give.
+    last_row = result.iloc[-1]
+    assert approx(last_row["div_yield_12m"], 0.10, tol=1e-3)
 
 
 def test_earnings_yield_recomputed_from_reanchored_pl() -> None:

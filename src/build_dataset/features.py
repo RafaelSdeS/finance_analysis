@@ -90,21 +90,31 @@ def compute_dividend_features(dataset, dividends):
             result.append(g)
             continue
 
+        # Per-event yield at the dividend's OWN ex-date close, not today's
+        # adj_close: adj_close is discounted backward by every dividend/split
+        # since, so dividing a historical nominal payment by it overstates
+        # yield the further back in time the row sits -- confirmed on BBAS3,
+        # 2010 read a 6.8% yield vs the true 2.9% (2026-07-23 audit). "close"
+        # (raw, unadjusted) shares value_per_share's own nominal basis at
+        # that date, so this ratio is immune to any later adjustment and to
+        # a split falling inside the trailing window (previously mixed
+        # pre/post-split nominal payments over one post-split price).
+        px = g[["trade_date", "close"]].rename(columns={"trade_date": "ex_date"})
+        div = pd.merge_asof(div, px, on="ex_date", direction="backward")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            event_yield = np.where(div["close"] > 0, div["value_per_share"] / div["close"], 0.0)
+
         # Trailing-252-day dividend sum/count at each trade_date, vectorized.
         # Window is (trade_date - 252d, trade_date]; searchsorted over sorted ex_dates
         # gives the count in O(log n), and cumulative sums give the value in the window.
         ex = div["ex_date"].to_numpy()
-        cum_val = np.concatenate([[0.0], np.cumsum(div["value_per_share"].to_numpy())])
+        cum_yield = np.concatenate([[0.0], np.cumsum(event_yield)])
         td = g["trade_date"].to_numpy()
 
         hi = np.searchsorted(ex, td, side="right")           # ex_date <= trade_date
         lo = np.searchsorted(ex, td - window, side="right")  # ex_date <= trade_date - 252d
         count = hi - lo
-        summed = cum_val[hi] - cum_val[lo]
-
-        price = g["adj_close"].to_numpy()
-        with np.errstate(divide="ignore", invalid="ignore"):
-            g["div_yield_12m"] = np.where(price > 0, summed / price, 0.0)
+        g["div_yield_12m"] = cum_yield[hi] - cum_yield[lo]
         g["div_count_12m"] = count
 
         result.append(g)
@@ -314,10 +324,27 @@ def compute_macro_features(df):
     print("COMPUTING MACRO FEATURES")
     print("=" * 80)
 
-    # ponytail: selic/ipca are annual %; divide by 252 trading days for daily equivalent
-    df["excess_return"]    = df["log_return"] - df["selic"] / 252
-    df["real_return"]      = df["log_return"] - df["ipca"] / 252
-    df["selic_trend_20d"]  = df["selic"] - df["selic"].shift(20)
+    # selic (SGS 11) is already a DAILY rate in percent (e.g. 0.0692 means
+    # 0.0692%/day) -- NOT annual. ipca (SGS 433) is a MONTHLY rate in percent.
+    # The previous version treated both as annual and divided by 252, which
+    # under-subtracted the daily risk-free rate by ~2.5x (excess_return) and
+    # over-subtracted daily inflation by ~8.3x (real_return) -- confirmed via
+    # 2026-07-23 audit against the built dataset (mean real_return read
+    # -0.165%/day, an economically impossible sustained real loss).
+    df["excess_return"]    = df["log_return"] - np.log1p(df["selic"] / 100)
+    df["real_return"]      = df["log_return"] - np.log1p(df["ipca"] / 100) / 21
+
+    # selic_trend_20d is NOT computed here: it's merged in by merge_macro()
+    # (merge.py) directly off the raw daily selic series, before any
+    # ticker-batching exists. Computing it here on a ticker-blocked batch
+    # (all of ticker A's rows, then all of ticker B's) was found to leak
+    # across the batch boundary regardless of how it was windowed -- a plain
+    # df["selic"].shift(20) mixed unrelated tickers' dates outright, and even
+    # a per-batch date-dedup approach still mixed dates that happen to be
+    # decades apart whenever a batch's own ticker composition left gaps in
+    # its observed calendar (confirmed 2026-07-23 audit + regression check).
+    # The raw macro series has one row per real trading day independent of
+    # any ticker, which is the only grid this can be computed correctly on.
 
     return df
 
@@ -541,9 +568,13 @@ def compute_advanced_features(df):
     # P/VP (P/B) relative to ROE (value signal: low P/VP + high ROE = cheap quality)
     df["pvp_to_roe_ratio"] = _safe_ratio(df["pvp"], df["roe"])
 
-    # Earnings yield (inverse P/L) vs macro rates
+    # Earnings yield (inverse P/L) vs macro rates. selic is a daily rate
+    # (see compute_macro_features) -- annualize it before comparing to the
+    # already-annual earnings_yield, or the macro term is ~250x too small
+    # to mean anything.
     df["earnings_yield"] = _safe_ratio(1.0, df["pl"])
-    df["earnings_yield_vs_selic"] = df["earnings_yield"] - (df["selic"] / 100)
+    selic_annualized = (1 + df["selic"] / 100) ** 252 - 1
+    df["earnings_yield_vs_selic"] = df["earnings_yield"] - selic_annualized
 
     # Flag columns: CAGR defined (only if *_final columns exist; they're populated
     # by fill_missing_cagr before this pipeline in production, but test fixtures may omit them)

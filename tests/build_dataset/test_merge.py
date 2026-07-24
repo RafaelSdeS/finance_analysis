@@ -174,10 +174,88 @@ def test_merge_macro_aligns_by_date_no_lookahead(tmp_path, monkeypatch) -> None:
     # Same date, independent ticker "B": identical macro value (ticker-independent)
     assert approx(result.loc[("B", pd.Timestamp("2026-01-05")), "selic"], 0.10)
 
-    # cdi/ipca merged independently, correct column names, no cross-contamination
+    # cdi merged independently, correct column name, no cross-contamination
     assert pd.isna(result.loc[("A", pd.Timestamp("2025-12-31")), "cdi"])
     assert approx(result.loc[("A", pd.Timestamp("2026-01-05")), "cdi"], 0.09)
-    assert approx(result.loc[("A", pd.Timestamp("2026-01-01")), "ipca"], 0.005)
+
+    # ipca must NOT be visible on its own reference_date (2026-01-01) or even
+    # by 2026-01-08 -- IBGE doesn't actually publish that reading until
+    # ~mid-February. Every trade_date in this fixture predates the real
+    # release, so ipca must read NaN throughout (would have read 0.005 with
+    # the pre-fix reference_date-direct merge -- that was the lookahead bug).
+    assert pd.isna(result.loc[("A", pd.Timestamp("2026-01-01")), "ipca"])
+    assert pd.isna(result.loc[("A", pd.Timestamp("2026-01-08")), "ipca"])
+
+
+def test_merge_macro_ipca_visible_only_after_publication_lag(tmp_path, monkeypatch) -> None:
+    """ipca's reference_date (month start, per SGS convention) must not be used
+    directly as its availability date -- IBGE publishes month M's reading
+    around day 8-11 of month M+1, so using reference_date leaks ~40 days of
+    future inflation into every day of month M (2026-07-23 audit finding).
+    merge_macro instead shifts to reference_date + 1 month + IPCA_PUBLICATION_LAG_DAYS."""
+    monkeypatch.setattr(merge, "MACRO_DIR", tmp_path)
+
+    pd.DataFrame({"reference_date": pd.to_datetime(["2026-01-01"]),
+                  "selic": [0.10]}).to_parquet(tmp_path / "selic.parquet")
+    pd.DataFrame({"reference_date": pd.to_datetime(["2026-01-01"]),
+                  "cdi": [0.09]}).to_parquet(tmp_path / "cdi.parquet")
+    pd.DataFrame({"reference_date": pd.to_datetime(["2026-01-01"]),
+                  "ipca": [0.005]}).to_parquet(tmp_path / "ipca.parquet")
+
+    available_date = (
+        pd.Timestamp("2026-01-01") + pd.DateOffset(months=1)
+        + pd.Timedelta(days=merge.IPCA_PUBLICATION_LAG_DAYS)
+    )
+    dataset = pd.DataFrame({
+        "ticker": ["A"] * 3,
+        "trade_date": [
+            available_date - pd.Timedelta(days=1),
+            available_date,
+            available_date + pd.Timedelta(days=1),
+        ],
+    })
+
+    result = merge_macro(dataset).set_index(["ticker", "trade_date"])
+
+    assert pd.isna(result.loc[("A", available_date - pd.Timedelta(days=1)), "ipca"])
+    assert approx(result.loc[("A", available_date), "ipca"], 0.005)
+    assert approx(result.loc[("A", available_date + pd.Timedelta(days=1)), "ipca"], 0.005)
+
+
+def test_merge_macro_selic_trend_no_ticker_boundary_leak(tmp_path, monkeypatch) -> None:
+    """selic_trend_20d must be computed on the raw daily selic series (one row
+    per real trading day, ticker-independent), not per ticker downstream --
+    a per-ticker-batch computation was found to leak trailing selic values
+    across ticker/batch boundaries however it was windowed (2026-07-23 audit
+    + regression check: two tickers with entirely non-overlapping historical
+    date ranges must each get their OWN correct trend, not one bleeding into
+    the other's)."""
+    monkeypatch.setattr(merge, "MACRO_DIR", tmp_path)
+
+    dates = pd.bdate_range("2026-01-01", periods=40)
+    selic_vals = [0.05 + 0.001 * i for i in range(40)]
+    pd.DataFrame({"reference_date": dates, "selic": selic_vals}).to_parquet(tmp_path / "selic.parquet")
+    pd.DataFrame({"reference_date": dates[:1], "cdi": [0.04]}).to_parquet(tmp_path / "cdi.parquet")
+    pd.DataFrame({"reference_date": dates[:1], "ipca": [0.4]}).to_parquet(tmp_path / "ipca.parquet")
+
+    # Ticker A only trades the first 20 days, ticker B only the last 20 --
+    # entirely disjoint, the worst case for any per-batch/per-ticker leak.
+    dataset = pd.DataFrame({
+        "ticker": ["A"] * 20 + ["B"] * 20,
+        "trade_date": list(dates[:20]) + list(dates[20:]),
+    })
+
+    result = merge_macro(dataset).set_index(["ticker", "trade_date"])
+
+    # A's own first 20 days: never 20 real trading days of history behind
+    # anything in this fixture -> NaN throughout, never B's future values.
+    assert result.loc["A", "selic_trend_20d"].isna().all()
+
+    # B's first row (dates[20]) is the dataset's 21st real trading day --
+    # exactly one full 20-day window of history exists on the TRUE calendar,
+    # regardless of which ticker owns which rows.
+    expected = selic_vals[20] - selic_vals[0]
+    assert approx(result.loc[("B", dates[20]), "selic_trend_20d"], expected)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,17 @@ from .quality_filters import _statutory_available_date
 # price recency: traded within this many days of the dataset's last date = ATIVO.
 STATUS_INFERENCE_WINDOW_DAYS = 180
 
+# SGS 433 stamps a month's IPCA reading at reference_date = that month's first
+# day, but IBGE actually publishes it around day 8-11 of the FOLLOWING month.
+# Buffer beyond a full month so the assumed availability date always lands
+# safely after the real release (a few days of extra staleness, never lookahead).
+IPCA_PUBLICATION_LAG_DAYS = 15
+
+# selic_trend_20d's lookback, in real trading days on the raw daily selic
+# series -- must be computed here (before any ticker batching exists), not
+# downstream per-batch, or it leaks across ticker boundaries. See merge_macro.
+SELIC_TREND_LOOKBACK_DAYS = 20
+
 
 # =============================================================================
 # MERGE DAILY PRICES + QUARTERLY FUNDAMENTALS
@@ -216,6 +227,24 @@ def merge_macro(dataset):
     for name in ("selic", "cdi", "ipca"):
         print(f"Merging {name}")
         m = pd.read_parquet(MACRO_DIR / f"{name}.parquet")[["reference_date", name]]
+        if name == "selic":
+            # Trend on the raw daily series itself (one row per real trading
+            # day, ticker-independent) -- computing this later, per ticker
+            # batch, was found to leak across batch/ticker boundaries however
+            # it was windowed (confirmed 2026-07-23 audit). This is the only
+            # grid where a 20-trading-day diff is unambiguous.
+            m = m.sort_values("reference_date").copy()
+            m["selic_trend_20d"] = m["selic"] - m["selic"].shift(SELIC_TREND_LOOKBACK_DAYS)
+        if name == "ipca":
+            # Shift to a conservative availability date (real publication lag,
+            # not the SGS reference_date) before this joins the shared date
+            # grid below -- otherwise the asof-merge leaks up to ~40 days of
+            # future inflation data into every day of the reference month
+            # (confirmed 2026-07-23 audit).
+            m = m.copy()
+            m["reference_date"] = (
+                m["reference_date"] + pd.DateOffset(months=1) + pd.Timedelta(days=IPCA_PUBLICATION_LAG_DAYS)
+            )
         macro = m if macro is None else macro.merge(m, on="reference_date", how="outer")
 
     macro = macro.sort_values("reference_date").ffill().rename(columns={"reference_date": "macro_date"})

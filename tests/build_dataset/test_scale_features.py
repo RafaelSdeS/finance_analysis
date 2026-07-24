@@ -138,6 +138,28 @@ def test_write_scaler_metadata_records_fit_window(tmp_path) -> None:
     assert metadata["fit_window"]["fit_end"] == str(window.fit_end.date())
 
 
+def test_write_scaler_metadata_flags_lookahead_tainted_columns_present() -> None:
+    """status passes through the scaler untouched (not a ratio column) but
+    must never be fed to a model as a feature -- merge_company_info() joins
+    TODAY's status onto every historical row (survivorship leakage). The
+    scaler metadata is the closest thing this repo has to a feature spec, so
+    it must record this mechanically, not rely on CLAUDE.md prose alone."""
+    df = _synthetic_dataset_full_ratio_columns(n=40)
+    df["status"] = "ATIVO"
+    window = sf.FitWindow(fold_id="full", fit_start=None, fit_end=df["trade_date"].iloc[29])
+    ct = sf.fit_scaler(df, window)
+
+    metadata = {}
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        metadata_path = Path(tmp) / "scaler_metadata.json"
+        sf.write_scaler_metadata(ct, window, metadata_path)
+        metadata = json.loads(metadata_path.read_text())
+
+    assert "status" in metadata["passthrough_columns"]
+    assert metadata["lookahead_tainted_columns"] == ["status"]
+
+
 def test_ratio_columns_never_include_already_bounded_columns() -> None:
     # Guards the real module-level column list: percentiles/z-scores/binary
     # flags are already [0,1] or already unit-scaled and must stay passthrough.

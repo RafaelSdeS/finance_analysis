@@ -40,6 +40,7 @@ FAST = [
     "tests/build_dataset/test_ticker_continuity.py",
     "tests/build_dataset/test_top50_universe.py",
     "tests/build_dataset/test_loaders.py",
+    "tests/build_dataset/test_manifest.py",
     "tests/data_collection/test_merge_save_new_rows_only.py",
     "tests/data_collection/test_macro_bare_object.py",
     "tests/data_collection/test_prices_concat_dtype.py",

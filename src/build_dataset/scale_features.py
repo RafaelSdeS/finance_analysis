@@ -36,7 +36,7 @@ import pandas as pd
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import RobustScaler
 
-from .manifest import FitWindow, iter_fit_windows
+from .manifest import LOOKAHEAD_TAINTED_COLS, FitWindow, iter_fit_windows
 from .paths import OUTPUT_PATH, SCALER_DIR, SPLIT_CONFIG_PATH
 
 SCALER_PATH = SCALER_DIR / "feature_scaler.joblib"
@@ -139,6 +139,9 @@ def write_scaler_metadata(ct: ColumnTransformer, window: FitWindow, metadata_pat
         "center": dict(zip(RATIO_COLUMNS, robust.center_.tolist())),
         "scale": dict(zip(RATIO_COLUMNS, robust.scale_.tolist())),
         "passthrough_columns": [c for c in ct.feature_names_in_ if c not in RATIO_COLUMNS],
+        # Passed through by the scaler (not scaled, not dropped) but must never
+        # be fed to a model as a feature -- see manifest.LOOKAHEAD_TAINTED_COLS.
+        "lookahead_tainted_columns": [c for c in LOOKAHEAD_TAINTED_COLS if c in ct.feature_names_in_],
     }
     metadata_path.write_text(json.dumps(metadata, indent=1))
     print(f"Scaler metadata saved to: {metadata_path}")

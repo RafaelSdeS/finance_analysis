@@ -17,6 +17,18 @@ import pandas as pd
 
 from .paths import OUTPUT_PATH, ROOT, SCALER_DIR, SPLIT_CONFIG_PATH
 
+# Columns present in the dataset that must be excluded from any model's
+# feature set: merge_company_info() joins TODAY's status onto every
+# historical row of a ticker, so a row from 2012 carries 2026 knowledge of
+# whether the company survived -- feature-level survivorship leakage,
+# confirmed 100% constant per ticker across its full history (2026-07-14
+# audit, test_universe_integrity.py). Recorded here (not just as prose in
+# CLAUDE.md) so any future training/scaling consumer can check this list
+# programmatically instead of re-deriving or forgetting it. `sector` is the
+# same kind of static join but carries far less outcome information (see
+# CLAUDE.md) and is deliberately NOT included here.
+LOOKAHEAD_TAINTED_COLS = ["status"]
+
 
 # =============================================================================
 # BUILD MANIFEST
@@ -51,6 +63,7 @@ def write_manifest(dataset):
         "date_min": str(dataset["trade_date"].min().date()),
         "date_max": str(dataset["trade_date"].max().date()),
         "columns": list(dataset.columns),
+        "lookahead_tainted_columns": [c for c in LOOKAHEAD_TAINTED_COLS if c in dataset.columns],
         "column_stats": {
             c: {
                 "nan_pct": round(float(numeric[c].isna().mean()) * 100, 2),
