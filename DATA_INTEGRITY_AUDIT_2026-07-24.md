@@ -130,16 +130,26 @@ interior NaN holes and break the prefix-NaN invariant (`test_final_dataset::T_pr
   quarantined instead (see C1's `BAHI3`/`CGRA3` entry), and a general regression guard
   (`check_no_price_oscillation`, §3.7) now scans every active ticker's raw price file for this same
   signature so the next occurrence is caught automatically instead of by manual investigation.
-- 🟡 **L3 — Split-repair has no persistence guard (by design).** The single-day jump/tolerance matcher
-  can't distinguish a permanent split from a coincidental large in-window move; both guard designs were
-  reverted (see `repair.py` comment). Data shows the matcher isn't over-firing — 2,703 transient
-  `|lr|>0.35` spikes that reverse next day were correctly left un-repaired — but there's no regression
-  test asserting a repaired jump actually *persisted*. Residual risk, not an observed defect.
-- 🟡 **L4 — Interior NaNs in gap-guarded derived features are expected, not error-NaN** —
-  `revenue_growth_yoy` (6,956), `roe_qoq` (8,139), `cagr_earnings_5y_final` (66,054). These come from
-  the calendar-gap guards and CAGR-undefined (negative-earnings) cases, all flagged
-  (`cagr_*_defined`, `n_quarters_available`). Confirm `T_prefix_rule` scopes to merged raw fundamentals
-  only and does **not** assert prefix-shape over these columns (would be a false failure).
+- ✅ **L3 — Split-repair persistence check investigated a third time, still not viable (closed, no
+  code change).** Tried the specific design proposed below: for each of the real 67 applied repair
+  events, check whether the post-jump price level (20-row median) held within 50% of the jump-day
+  price. Result: 14/67 (21%) flagged — reproducing the *exact* false-positive rate the project's own
+  two prior (pre-emptive, blocking) guard-design attempts already hit and reverted, just in
+  post-hoc/audit form instead. Traced two concretely to confirm it's not a bug in the check itself:
+  `PDGR3` 2025-11-03 (81× "deviation") is a genuine subsequent speculative price recovery, unrelated
+  to whether the repair was correct; `AZEV4` 2005-06-13 (653× "deviation") traded so infrequently in
+  2005 that "20 rows later" spans 6 calendar years (2005→2011) — an illiquidity artifact, not a bad
+  repair. No threshold-based persistence check (pre-emptive or post-hoc) survives contact with this
+  dataset's genuinely volatile/illiquid micro-caps. Zero actual misfires found across all three
+  attempts (two prior + this one). Not implemented; recorded in `CLAUDE.md`'s existing caveat rather
+  than re-discovered next time. Revisit only if a future repair is found to have actually misfired.
+- ✅ **L4 — Interior NaNs in gap-guarded derived features are expected, not error-NaN — confirmed,
+  no fix needed.** `revenue_growth_yoy` (6,956), `roe_qoq` (8,139), `cagr_earnings_5y_final`
+  (66,054) come from the calendar-gap guards and CAGR-undefined (negative-earnings) cases, all
+  flagged (`cagr_*_defined`, `n_quarters_available`). Verified `test_final_dataset.py`'s
+  `T_prefix_rule` (`prefix_cols`, line 224): scoped to only `equity`/`net_income`/`total_assets` —
+  the raw merged fundamentals columns — and never touches any gap-guarded derived column, so there
+  is no false-failure risk from this check.
 - 🟡 **L5 — Extreme ratios preserved by policy** (`pl` up to 1.6e6, `earnings_yield` 9.2e4,
   `payout_ratio` 4.4e3). Documented as intentional (near-zero denominators = distress signal); scaler is
   robust. Noted for completeness, no action.
@@ -198,10 +208,10 @@ row), flagging any ticker at ≥8% of rows AND ≥20 such events (the fraction a
 a handful of thin ~10–80-row stubs; the count floor fixed that without missing real defects, which
 sit at 270+). Currently green — no other active ticker exhibits this.
 
-### L3 — persistence regression test (optional, guards future repairs)
-For each event `repair_unadjusted_splits` fixes, assert the post-jump price level holds
-(median of next ~20 rows within, say, 25% of the jump-day close) so a coincidental one-day move
-can't be silently "repaired".
+### L3 — tried, reverted (see the writeup above and `CLAUDE.md`'s caveat)
+The proposed design (post-jump price level within 50% of jump-day close, 20-row median) was
+implemented and tested against all 67 real repaired events: 21% false-positive rate, root-caused to
+genuine illiquidity/volatility, not repair defects. No code landed.
 
 ---
 
@@ -218,5 +228,5 @@ can't be silently "repaired".
       `BAHI3`/`ATOM3`/`MBLY3`/`LVTC3`/`ARND3`/`PORT3` all confirmed absent (0 rows each). Postdates
       the `CGRA3` quarantine — **one more rebuild needed** to drop `CGRA3` too.
 - [x] L2: root-caused (not a beta formula bug) — `CGRA3` quarantined, general `check_no_price_oscillation()` guard (§3.7) added instead of a beta-specific fix.
-- [ ] L3: optional split-repair persistence test.
-- [ ] L4: verify `T_prefix_rule` excludes gap-guarded derived columns.
+- [x] L3: investigated a third time (post-hoc audit design), reverted — 21% false-positive rate on the real 67-event dataset, root-caused to genuine illiquidity/volatility. Recorded in `CLAUDE.md`'s existing caveat.
+- [x] L4: verified `T_prefix_rule` excludes gap-guarded derived columns — no fix needed.
