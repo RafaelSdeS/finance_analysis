@@ -170,9 +170,10 @@ can't be silently "repaired".
 ---
 
 ## Action checklist
-- [ ] C1: land `test_no_duplicate_price_series` (regression guard).
+- [x] C1: land duplicate-price-series regression guard (`test_universe_integrity.py` §3.6, commit `476585c`).
 - [ ] C1: yfinance-confirm impostor in each pair; add copied-price tickers to `QUARANTINED_TICKERS`; rebuild.
-- [ ] C2: route price technicals + percentiles through the masked `adj`; add assertion; rebuild.
+- [x] C2: route price technicals + percentiles through the masked `adj`; regression tests added (commit `f00c6f1`).
+- [ ] C2: rebuild `ml_dataset.parquet` so the fix reaches the shipped dataset (code fix alone doesn't touch `dataset_v1`).
 - [ ] L2: optional beta degenerate-variance guard.
 - [ ] L3: optional split-repair persistence test.
 - [ ] L4: verify `T_prefix_rule` excludes gap-guarded derived columns.
