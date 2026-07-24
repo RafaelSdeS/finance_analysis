@@ -15,7 +15,22 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.build_dataset.cross_sectional import compute_cross_sectional_features, _exclude_self_mean
+from src.build_dataset.cross_sectional import compute_cross_sectional_features
+
+
+def _benchmark(dates, log_return=0.0015, return_1m=0.015, return_3m=0.04, return_12m=0.08):
+    """Synthetic BOVA11-style benchmark series: one row per date, constant
+    values unless overridden -- momentum_vs_market_*/beta_1y now read this
+    directly instead of an equal-weighted panel mean, so tests supply it
+    explicitly rather than deriving it from the tickers under test."""
+    dates = pd.DatetimeIndex(dates).unique()
+    return pd.DataFrame({
+        "trade_date": dates,
+        "log_return": log_return,
+        "return_1m": return_1m,
+        "return_3m": return_3m,
+        "return_12m": return_12m,
+    })
 
 
 def _fill_advanced_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -68,7 +83,7 @@ def test_momentum_vs_sector_nan_for_sector_of_one() -> None:
         "pl": [10.0, 12.0, 8.0],
     })
     df = _fill_advanced_feature_columns(df)
-    result = compute_cross_sectional_features(df).set_index("ticker")
+    result = compute_cross_sectional_features(df, _benchmark([date])).set_index("ticker")
 
     lone = result.loc["LONE"]
     assert pd.isna(lone["momentum_vs_sector_1m"])
@@ -85,38 +100,15 @@ def test_momentum_vs_sector_nan_for_sector_of_one() -> None:
     assert not pd.isna(result.loc["PEER2", "pl_zscore_sector"])
 
 
-def test_exclude_self_mean_denominator_ignores_nan_peers() -> None:
-    """The (total - self) / (n - 1) exclude-self mean must derive BOTH total
-    and n from value_col's own non-NaN count -- not from a blanket group
-    size that counts rows where value_col is undefined (e.g. a ticker still
-    in its warm-up year, return_1m NaN). Mixing a NaN-skipping sum with a
-    NaN-counting size silently dilutes the mean toward zero on any date with
-    at least one undefined peer -- worse the thinner/younger the universe,
-    exactly where momentum/beta matter most (2026-07-24 audit).
-
-    4 tickers same date: T1=0.02, T2=0.04, T3=-0.01, T4=NaN.
-    Mean excluding T1 (correct) = mean of T2,T3 only = (0.04-0.01)/2 = 0.015.
-    A blanket-size-denominator bug would instead compute
-    (0.05-0.02)/(4-1) = 0.01 -- diluted by T4's undefined value."""
-    df = pd.DataFrame({
-        "trade_date": [pd.Timestamp("2026-01-01")] * 4,
-        "val": [0.02, 0.04, -0.01, np.nan],
-    })
-    result = _exclude_self_mean(df, "trade_date", "val")
-
-    assert approx(result.iloc[0], (0.04 + -0.01) / 2), "T1: mean of T2,T3 only"
-    assert approx(result.iloc[1], (0.02 + -0.01) / 2), "T2: mean of T1,T3 only"
-    assert approx(result.iloc[2], (0.02 + 0.04) / 2), "T3: mean of T1,T2 only"
-    # T4's own value is NaN -- excluding "itself" is a no-op (nothing defined
-    # to subtract), so its reference mean is the other 3's straight mean
-    assert approx(result.iloc[3], (0.02 + 0.04 + -0.01) / 3), "T4: mean of T1,T2,T3"
-
-
-def test_momentum_vs_market_excludes_nan_peer_from_denominator() -> None:
-    """Same bug as test_exclude_self_mean_denominator_ignores_nan_peers, but
-    through the public compute_cross_sectional_features entry point: a
-    ticker with NaN return_1m (e.g. still in warm-up) must not dilute the
-    market-mean denominator used for every OTHER ticker's momentum_vs_market_1m."""
+def test_momentum_vs_market_reads_benchmark_directly_unaffected_by_panel_composition() -> None:
+    """momentum_vs_market_1m must be exactly return_1m - benchmark's own
+    return_1m on the same date -- a fixed external series (BOVA11), not a
+    mean over whatever tickers happen to be in the collected panel that day
+    (2026-07-24 audit, Issue 2: the previous equal-weighted-panel-mean
+    definition silently redefined "the market" as "the companies that
+    survived to dataset-end," a benchmark-level survivorship bias). Proof:
+    changing another ticker's return (even to NaN) must not move T1's
+    momentum_vs_market_1m at all, since the panel is no longer consulted."""
     date = pd.Timestamp("2026-01-01")
     df = pd.DataFrame({
         "ticker": ["T1", "T2", "T3", "T4"],
@@ -129,10 +121,15 @@ def test_momentum_vs_market_excludes_nan_peer_from_denominator() -> None:
         "log_return": [0.001, 0.002, -0.0005, np.nan],
     })
     df = _fill_advanced_feature_columns(df)
-    result = compute_cross_sectional_features(df).set_index("ticker")
+    bench = _benchmark([date], return_1m=0.015)
+    result = compute_cross_sectional_features(df, bench).set_index("ticker")
 
-    market_mean_excl_t1 = (0.04 + -0.01) / 2  # T4 (NaN) must not enter this
-    assert approx(result.loc["T1", "momentum_vs_market_1m"], 0.02 - market_mean_excl_t1)
+    assert approx(result.loc["T1", "momentum_vs_market_1m"], 0.02 - 0.015)
+    assert approx(result.loc["T2", "momentum_vs_market_1m"], 0.04 - 0.015)
+    assert approx(result.loc["T3", "momentum_vs_market_1m"], -0.01 - 0.015)
+    # T4's own return_1m is NaN -> its momentum is NaN too, but this must not
+    # perturb any OTHER ticker's value (no panel dependency left at all)
+    assert pd.isna(result.loc["T4", "momentum_vs_market_1m"])
 
 
 def test_cross_sectional_values_hand_computed_multi_peer() -> None:
@@ -161,7 +158,8 @@ def test_cross_sectional_values_hand_computed_multi_peer() -> None:
         "return_12m": [0.02, 0.04, -0.01, 0.03],
         "log_return": [0.001, 0.002, -0.0005, 0.0015],
     })
-    result = compute_cross_sectional_features(df).set_index("ticker")
+    bench = _benchmark([date], return_1m=0.015, return_3m=0.045)
+    result = compute_cross_sectional_features(df, bench).set_index("ticker")
 
     # z-score: pandas groupby std uses ddof=1 -> sector X [10,14]: mean=12, std=sqrt(8)
     std_x = ((10.0 - 12.0) ** 2 + (14.0 - 12.0) ** 2) ** 0.5  # ddof=1, n=2 -> /1
@@ -177,14 +175,12 @@ def test_cross_sectional_values_hand_computed_multi_peer() -> None:
     assert approx(result.loc["T4", "div_yield_sector_percentile"], 0.5)   # sector Y: T4 (0.01) lower
     assert approx(result.loc["T3", "div_yield_sector_percentile"], 1.0)
 
-    # momentum vs market: subtract the mean return_1m of the OTHER 3 tickers
-    # (self-excluded, 2026-07-23 fix -- a ticker's own return no longer pulls
-    # its own benchmark toward itself). (total - self) / (n - 1).
-    total_1m = 0.02 + 0.04 - 0.01 + 0.03
-    market_mean_1m_excl_t1 = (total_1m - 0.02) / 3
-    market_mean_1m_excl_t3 = (total_1m - (-0.01)) / 3
-    assert approx(result.loc["T1", "momentum_vs_market_1m"], 0.02 - market_mean_1m_excl_t1)
-    assert approx(result.loc["T3", "momentum_vs_market_1m"], -0.01 - market_mean_1m_excl_t3)
+    # momentum vs market: subtract BOVA11's own return_1m on the same date
+    # (2026-07-24 audit, Issue 2 -- replaces the equal-weighted panel mean,
+    # which was survivor-biased toward whichever tickers happened to be
+    # collected).
+    assert approx(result.loc["T1", "momentum_vs_market_1m"], 0.02 - 0.015)
+    assert approx(result.loc["T3", "momentum_vs_market_1m"], -0.01 - 0.015)
 
     # momentum vs sector: subtract the mean within the 2-ticker sector only.
     # Unchanged by the self-exclusion fix -- only momentum_vs_MARKET/beta_1y
@@ -198,17 +194,16 @@ def test_cross_sectional_values_hand_computed_multi_peer() -> None:
     assert approx(result.loc["T4", "momentum_vs_sector_1m"], 0.03 - sector_y_mean_1m)
 
     # return_3m uses independent values -> proves the 1m/3m/12m columns aren't aliased
-    total_3m = 0.05 + 0.09 - 0.02 + 0.06
-    market_mean_3m_excl_t2 = (total_3m - 0.09) / 3
     sector_x_mean_3m = (0.05 + 0.09) / 2
-    assert approx(result.loc["T2", "momentum_vs_market_3m"], 0.09 - market_mean_3m_excl_t2)
+    assert approx(result.loc["T2", "momentum_vs_market_3m"], 0.09 - 0.045)
     assert approx(result.loc["T2", "momentum_vs_sector_3m"], 0.09 - sector_x_mean_3m)
 
 
 def _beta_fixture(n_days: int = 80, seed: int = 0):
     """3 tickers, n_days of independent log_return, one sector (sector isn't
-    relevant to beta -- only market_log_return, the mean across ALL tickers
-    on each date, is)."""
+    relevant to beta), plus an INDEPENDENTLY-generated benchmark series
+    (BOVA11 stand-in) -- beta_1y is now computed against this fixed external
+    series, not a mean derived from A/B/C themselves."""
     dates = pd.date_range("2026-01-01", periods=n_days)
     rng = np.random.default_rng(seed)
     returns = {
@@ -216,6 +211,7 @@ def _beta_fixture(n_days: int = 80, seed: int = 0):
         "B": rng.normal(0, 0.015, n_days),
         "C": rng.normal(0, 0.008, n_days),
     }
+    market_return = rng.normal(0, 0.012, n_days)
     rows = []
     for t, ret in returns.items():
         for i, d in enumerate(dates):
@@ -224,29 +220,31 @@ def _beta_fixture(n_days: int = 80, seed: int = 0):
                 "log_return": ret[i],
             })
     df = pd.DataFrame(rows)
-    return _fill_advanced_feature_columns(df), returns, dates
+    bench = pd.DataFrame({
+        "trade_date": dates, "log_return": market_return,
+        "return_1m": 0.0, "return_3m": 0.0, "return_12m": 0.0,
+    })
+    return _fill_advanced_feature_columns(df), returns, market_return, dates, bench
 
 
 def test_beta_vs_market_matches_direct_computation() -> None:
-    """beta_1y = rolling_cov(ticker_return, market_return) / rolling_var(market_return),
-    market_return = mean log_return of the OTHER tickers in the full universe
-    per date -- self-EXCLUDED (2026-07-23 fix: a ticker's own return
-    previously pulled its own benchmark toward itself, artificially shrinking
-    its measured beta). With 3 tickers, ticker A's market series is the mean
-    of B and C only (a DIFFERENT series per ticker), not one shared market
-    series across all three. Checked against an independently-built reference
-    market series and pandas rolling cov/var call -- not the same code path
-    as the per-ticker groupby/index-alignment loop in the implementation, so
-    this catches misalignment/windowing bugs a purely-internal check couldn't."""
-    df, returns, dates = _beta_fixture()
+    """beta_1y = rolling_cov(ticker_return, benchmark_return) /
+    rolling_var(benchmark_return), where benchmark_return is BOVA11's own
+    log_return series (2026-07-24 audit, Issue 2 -- replaces the prior
+    self-excluded-panel-mean definition, which was survivor-biased toward
+    whichever tickers happened to be collected). All 3 tickers share the
+    SAME benchmark series now (unlike the old per-ticker-different
+    exclude-self mean). Checked against an independently-built pandas
+    rolling cov/var call -- not the same code path as the per-ticker
+    groupby/merge loop in the implementation, so this catches misalignment/
+    windowing bugs a purely-internal check couldn't."""
+    df, returns, market_return, dates, bench = _beta_fixture()
 
-    result = compute_cross_sectional_features(df)
+    result = compute_cross_sectional_features(df, bench)
 
-    others = {"A": ("B", "C"), "B": ("A", "C"), "C": ("A", "B")}
+    market = pd.Series(market_return)
     for t in ("A", "B", "C"):
         s = pd.Series(returns[t])
-        o1, o2 = others[t]
-        market = (pd.Series(returns[o1]) + pd.Series(returns[o2])) / 2
         expected = (
             s.rolling(252, min_periods=60).cov(market)
             / market.rolling(252, min_periods=60).var()
@@ -269,9 +267,9 @@ def test_beta_nan_before_min_periods_then_no_lookahead() -> None:
     full-universe cross-sectional pass."""
     from src.build_dataset.cross_sectional import BETA_MIN_PERIODS
 
-    df, returns, dates = _beta_fixture(n_days=80)
+    df, returns, market_return, dates, bench = _beta_fixture(n_days=80)
 
-    full = compute_cross_sectional_features(df.copy())
+    full = compute_cross_sectional_features(df.copy(), bench)
     a_full = full[full["ticker"] == "A"].sort_values("trade_date").reset_index(drop=True)
 
     assert a_full.loc[: BETA_MIN_PERIODS - 2, "beta_1y"].isna().all(), (
@@ -283,7 +281,8 @@ def test_beta_nan_before_min_periods_then_no_lookahead() -> None:
 
     cutoff = dates[60]  # keep the first 61 dates only
     truncated_df = df[df["trade_date"] <= cutoff].copy()
-    truncated = compute_cross_sectional_features(truncated_df)
+    truncated_bench = bench[bench["trade_date"] <= cutoff].copy()
+    truncated = compute_cross_sectional_features(truncated_df, truncated_bench)
     a_trunc = truncated[truncated["ticker"] == "A"].sort_values("trade_date").reset_index(drop=True)
 
     pd.testing.assert_series_equal(

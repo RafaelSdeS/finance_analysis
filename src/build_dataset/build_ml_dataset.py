@@ -35,6 +35,7 @@ import pyarrow.parquet as pq
 from .clean import clean_dataset
 from .continuity import apply_ticker_continuity
 from .cross_sectional import (
+    BENCHMARK_COLS,
     CROSS_SECTIONAL_INPUT_COLS,
     CROSS_SECTIONAL_OUTPUT_COLS,
     compute_cross_sectional_features,
@@ -61,12 +62,19 @@ from .quality_filters import (
 )
 from .repair import repair_unadjusted_splits
 
+# IBOV-proxy ETF, used as the true market benchmark for beta_1y/
+# momentum_vs_market_* (cross_sectional.py) -- collected the same as every
+# other ticker (data_collection.config.BENCHMARK_TICKERS) but excluded from
+# the dataset's own rows since it has no fundamentals (an ETF, not an
+# operating company).
+BENCHMARK_TICKER = "BOVA11"
+
 
 # =============================================================================
 # FEATURE COMPUTATION
 # =============================================================================
 
-def compute_features_chunked(dataset, dividends, output_path, chunk_size=150):
+def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_size=150):
     """Three-pass, memory-bounded feature computation.
 
     A fully unchunked pass OOM'd in practice — the dataset's dense-numeric
@@ -93,6 +101,11 @@ def compute_features_chunked(dataset, dividends, output_path, chunk_size=150):
     encoding resets every row group — 25 tickers/batch measured at ~4% size
     reduction vs. ~75% for a single row group), too large risks OOM again.
     150 tickers/batch gives ~4-5 row groups for the full universe.
+
+    `benchmark`: BOVA11's own price-feature series (trade_date + log_return/
+    return_1m/3m/12m), passed through unchanged into Pass 2's
+    compute_cross_sectional_features -- see BENCHMARK_TICKER / that
+    function's docstring.
     """
     tmp_path = output_path.with_suffix(".tmp.parquet")
 
@@ -140,7 +153,7 @@ def compute_features_chunked(dataset, dividends, output_path, chunk_size=150):
 
     slim = pd.concat(slim_parts, ignore_index=True)
     del slim_parts
-    slim = compute_cross_sectional_features(slim)
+    slim = compute_cross_sectional_features(slim, benchmark)
     slim = slim[["ticker", "trade_date"] + CROSS_SECTIONAL_OUTPUT_COLS].set_index(
         ["ticker", "trade_date"]
     )
@@ -198,6 +211,23 @@ def main():
     # splice AFTER split repair: each leg is now internally continuous; splicing
     # them together preserves that invariant.
     prices, fundamentals = apply_ticker_continuity(prices, fundamentals)
+
+    # Capture BOVA11 (market benchmark) BEFORE the fundamentals-coverage
+    # filter drops it below -- it has none by design (an ETF, not an
+    # operating company) but has already had the same split-repair/continuity
+    # treatment as every other ticker above, so its own compute_price_features
+    # run here is methodologically identical to the rest of the universe's.
+    # Never becomes a row in the output dataset; threaded through purely as
+    # an external reference series for cross_sectional.py's beta_1y/
+    # momentum_vs_market_* (2026-07-24 audit, Issue 2).
+    benchmark_prices = prices[prices["ticker"] == BENCHMARK_TICKER].copy()
+    if benchmark_prices.empty:
+        raise ValueError(
+            f"{BENCHMARK_TICKER} not found in prices -- required as the market "
+            f"benchmark for beta_1y/momentum_vs_market_* (cross_sectional.py)"
+        )
+    benchmark = compute_price_features(benchmark_prices)[BENCHMARK_COLS]
+
     prices, dropped_no_fundamentals = filter_tickers_with_no_fundamentals(prices, fundamentals)
     fundamentals = compute_fundamental_features(fundamentals)
     fundamentals = fill_missing_cagr(fundamentals)
@@ -213,7 +243,7 @@ def main():
     del company_info
     dataset = merge_macro(dataset)
     dataset = merge_dividends(dataset, dividends)
-    compute_features_chunked(dataset, dividends, OUTPUT_PATH, chunk_size=150)
+    compute_features_chunked(dataset, dividends, benchmark, OUTPUT_PATH, chunk_size=150)
     del dataset
 
     print()

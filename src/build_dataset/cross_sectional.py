@@ -19,6 +19,12 @@ CROSS_SECTIONAL_OUTPUT_COLS = [
     "beta_1y",
 ]
 
+# Columns compute_price_features leaves on the benchmark (BOVA11) series that
+# this module actually needs -- build_ml_dataset.main() computes these the
+# same way as every other ticker (same function, same methodology) before
+# passing the result in as `benchmark`.
+BENCHMARK_COLS = ["trade_date", "log_return", "return_1m", "return_3m", "return_12m"]
+
 # Rolling window for beta vs. market, in trading days (~1 calendar year,
 # matching return_12m/price_percentile_1y's convention elsewhere). min_periods
 # is deliberately less than the full window (unlike a fixed-length sum like
@@ -28,54 +34,39 @@ BETA_WINDOW = 252
 BETA_MIN_PERIODS = 60
 
 
-def _exclude_self_mean(df, group_col, value_col):
-    """Equal-weighted mean of value_col within each group_col group, EXCLUDING
-    the row's own value -- (group_sum - x) / (n - 1). A plain groupby(...).mean()
-    (the previous convention here) is self-inclusive: a ticker's own return
-    pulls its own "market"/"sector" reference toward itself, artificially
-    shrinking every momentum/beta figure -- materially so on thin dates with
-    few tickers (2026-07-23 audit). NaN when there's no other member to
-    compare against (n <= 1), not a division by zero.
+def compute_cross_sectional_features(df, benchmark):
+    """Sector/market-relative features: how does this stock compare to its
+    sector peers and to the true market index on the same date. Must run on
+    the full dataset in one shot — computing this per ticker-batch (as an
+    earlier version did) silently compares each stock against whichever
+    handful of tickers landed in its batch instead of the true sector,
+    corrupting every sector-relative column.
 
-    n/total are both derived from value_col's own non-NaN count (groupby
-    "count"/"sum" both skip NaN) -- NOT a blanket ticker-count like
-    groupby(...).transform("size"), which counts every row in the group
-    including ones where value_col is NaN. Using "size" as the denominator
-    while "sum" already dropped the NaN rows silently dilutes the mean
-    toward zero on any date where some tickers have an undefined value
-    (e.g. still in return_12m's warm-up year) -- worse the thinner/younger
-    the universe on that date, exactly where this feature matters most
-    (2026-07-24 audit)."""
-    grp = df.groupby(group_col)[value_col]
-    total = grp.transform("sum")
-    n = grp.transform("count")
-    self_val = df[value_col]
-    self_defined = self_val.notna()
-    other_total = total - self_val.where(self_defined, 0.0)
-    other_n = n - self_defined.astype(int)
-    return (other_total / other_n).where(other_n > 0)
+    `benchmark`: BOVA11's (IBOV-proxy ETF) own price-feature series --
+    trade_date + log_return/return_1m/return_3m/return_12m, computed by the
+    SAME compute_price_features() used for every other ticker, so it's
+    methodologically identical (same split-repair/continuity treatment, same
+    return-window conventions). Used as the market series for beta_1y and
+    momentum_vs_market_* (2026-07-24 audit, Issue 2 -- previously an
+    equal-weighted mean of whatever tickers happened to be in the collected
+    panel on that date, which silently redefines "the market" as "the
+    companies that survived to dataset-end," a second, benchmark-level
+    survivorship bias distinct from the universe-selection-level one
+    documented elsewhere). BOVA11 itself is never a row in the output
+    dataset (quality_filters.filter_tickers_with_no_fundamentals still drops
+    it, having no fundamentals, and rightly so -- it's an ETF, not an
+    operating company) -- it's threaded through purely as an external
+    reference series, so this change doesn't touch row/ticker counts,
+    manifest fingerprinting, or dataset_v{N} shape, only the DEFINITION of
+    beta_1y/momentum_vs_market_* (Issue 12's original "changes dataset shape"
+    objection assumed BOVA11 would need to become a ticker row itself, which
+    this design avoids).
 
-
-def compute_cross_sectional_features(df):
-    """Sector/market-relative features: how does this stock compare to every
-    OTHER stock trading on the same date. Must run on the full dataset in one
-    shot — computing this per ticker-batch (as an earlier version did) silently
-    compares each stock against whichever handful of tickers landed in its
-    batch instead of the true market/sector, corrupting every one of these
-    columns.
-
-    "Market" here means the equal-weighted mean return of every OTHER ticker
-    in the dataset's current universe on that date -- not a true cap-weighted
-    index. BOVA11 (the collected IBOV-proxy benchmark) is excluded from the
-    dataset entirely upstream (quality_filters.filter_tickers_with_no_fundamentals
-    drops it, having no fundamentals) and is not wired in here; routing it
-    through as an actual index benchmark was considered (2026-07-23 audit,
-    Issue 12) and deliberately deferred -- it changes the dataset's row/ticker
-    shape (manifest fingerprinting, dataset_v{N} versioning, any downstream
-    code iterating "all tickers" expecting only operating companies) and
-    redefines beta_1y/momentum_vs_market_* semantically, which is a bigger
-    design decision than a bug fix. What WAS fixed here is the self-inclusion
-    bug below -- a real correctness issue independent of that larger question.
+    Sector-relative features (momentum_vs_sector_*, *_zscore_sector,
+    div_yield_sector_percentile) are unaffected by this and still compare
+    against sector peers within the panel -- there's no equivalent
+    "benchmark" for a sector, and peer comparison is exactly the intended
+    semantics there.
     """
 
     print()
@@ -105,18 +96,22 @@ def compute_cross_sectional_features(df):
 
     # --- MOMENTUM DECOMPOSITION (stock vs sector vs market) ---
 
-    # ponytail: use groupby.transform() for vectorized momentum (1000x faster than loops)
-    # Market momentum: subtract the mean return of every OTHER ticker (per
-    # date) from each return -- self-EXCLUDED, see _exclude_self_mean.
-    df["momentum_vs_market_1m"] = (
-        df["return_1m"] - _exclude_self_mean(df, "trade_date", "return_1m")
-    )
-    df["momentum_vs_market_3m"] = (
-        df["return_3m"] - _exclude_self_mean(df, "trade_date", "return_3m")
-    )
-    df["momentum_vs_market_12m"] = (
-        df["return_12m"] - _exclude_self_mean(df, "trade_date", "return_12m")
-    )
+    # Market momentum: subtract BOVA11's OWN return on the same date -- a
+    # single shared benchmark series, not a per-date panel mean, so no
+    # self-exclusion/NaN-dilution logic is needed here (BOVA11 is never a row
+    # in `df` to begin with). Exact trade_date match (not asof): both series
+    # are same-exchange (B3) daily data sharing the same trading calendar, so
+    # a date BOVA11 didn't trade is correctly NaN here too, not silently
+    # papered over with a stale prior value.
+    bench = benchmark[BENCHMARK_COLS].rename(columns={
+        "log_return": "_mkt_log_return", "return_1m": "_mkt_return_1m",
+        "return_3m": "_mkt_return_3m", "return_12m": "_mkt_return_12m",
+    })
+    df = df.merge(bench, on="trade_date", how="left")
+
+    df["momentum_vs_market_1m"] = df["return_1m"] - df["_mkt_return_1m"]
+    df["momentum_vs_market_3m"] = df["return_3m"] - df["_mkt_return_3m"]
+    df["momentum_vs_market_12m"] = df["return_12m"] - df["_mkt_return_12m"]
 
     # Sector momentum: subtract sector mean (per date, sector) from each return
     df["momentum_vs_sector_1m"] = (
@@ -134,26 +129,18 @@ def compute_cross_sectional_features(df):
 
     # --- ROLLING BETA VS MARKET ---
 
-    # Market return: equal-weighted mean log_return of every OTHER ticker in
-    # the full universe, per date -- self-EXCLUDED (see _exclude_self_mean;
-    # a ticker's own return previously pulled its own benchmark toward
-    # itself, artificially shrinking its measured beta). Reuses the same
-    # full-universe requirement as the momentum/zscore features above, but
-    # beta then needs a per-ticker rolling window over TIME (not a same-date
-    # snapshot), so unlike everything above it can't stay a single
-    # groupby(date).transform() -- needs one groupby("ticker") pass, same
-    # shape as compute_price_features.
-    market_log_return = _exclude_self_mean(df, "trade_date", "log_return")
-
+    # Same BOVA11 series as above, now rolled per-ticker over TIME (not a
+    # same-date snapshot) -- needs one groupby("ticker") pass, same shape as
+    # compute_price_features.
     result = []
     for ticker, g in df.groupby("ticker", sort=False):
         g = g.sort_values("trade_date")
-        mkt = market_log_return.loc[g.index]
-        cov = g["log_return"].rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).cov(mkt)
-        var = mkt.rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).var()
+        cov = g["log_return"].rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).cov(g["_mkt_log_return"])
+        var = g["_mkt_log_return"].rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).var()
         g["beta_1y"] = cov / var
         result.append(g)
     df = pd.concat(result, ignore_index=True)
+    df = df.drop(columns=["_mkt_log_return", "_mkt_return_1m", "_mkt_return_3m", "_mkt_return_12m"])
 
     print(f"Cross-sectional features computed for {len(df)} rows")
     return df

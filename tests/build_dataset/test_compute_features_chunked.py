@@ -83,6 +83,19 @@ def _chunked_pipeline_fixture(n_days: int = 260) -> tuple[pd.DataFrame, pd.DataF
     return dataset, dividends
 
 
+def _synthetic_benchmark(dates):
+    """BOVA11 stand-in: compute_cross_sectional_features now reads the market
+    series from this fixed external benchmark instead of the ticker panel
+    itself (2026-07-24 audit, Issue 2) -- both the chunked and unchunked
+    reference pipelines below must be fed the SAME one for the consistency
+    check to mean anything."""
+    dates = pd.DatetimeIndex(dates).unique()
+    return pd.DataFrame({
+        "trade_date": dates, "log_return": 0.0005,
+        "return_1m": 0.01, "return_3m": 0.03, "return_12m": 0.06,
+    })
+
+
 def test_chunked_matches_unchunked_cross_sectional(tmp_path) -> None:
     """Regression guard for the batching bug: compute_features_chunked splits
     the WITHIN-ticker feature functions into ticker batches, but sector/market
@@ -93,9 +106,10 @@ def test_chunked_matches_unchunked_cross_sectional(tmp_path) -> None:
     catch it: their sector stats would silently diverge from the unchunked
     reference computed directly on the whole dataset in one shot."""
     dataset, dividends = _chunked_pipeline_fixture()
+    benchmark = _synthetic_benchmark(dataset["trade_date"].unique())
 
     out_path = tmp_path / "chunked.parquet"
-    compute_features_chunked(dataset.copy(), dividends, out_path, chunk_size=2)
+    compute_features_chunked(dataset.copy(), dividends, benchmark, out_path, chunk_size=2)
     chunked = pd.read_parquet(out_path)
 
     reference = compute_price_features(dataset.copy())
@@ -104,7 +118,7 @@ def test_chunked_matches_unchunked_cross_sectional(tmp_path) -> None:
     reference = recompute_valuation_daily(reference)
     reference = compute_advanced_features(reference)
     reference = compute_history_relative_features(reference)
-    reference = compute_cross_sectional_features(reference)
+    reference = compute_cross_sectional_features(reference, benchmark)
     reference = clean_dataset(reference)
 
     chunked = chunked.set_index(["ticker", "trade_date"]).sort_index()
@@ -152,11 +166,12 @@ def test_chunked_pipeline_stays_within_coarse_memory_and_time_ceiling(tmp_path) 
     import time
 
     dataset, dividends = _chunked_pipeline_fixture(n_days=500)
+    benchmark = _synthetic_benchmark(dataset["trade_date"].unique())
     out_path = tmp_path / "chunked.parquet"
 
     mem_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss  # KB on Linux
     start = time.monotonic()
-    compute_features_chunked(dataset.copy(), dividends, out_path, chunk_size=2)
+    compute_features_chunked(dataset.copy(), dividends, benchmark, out_path, chunk_size=2)
     elapsed = time.monotonic() - start
     mem_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
