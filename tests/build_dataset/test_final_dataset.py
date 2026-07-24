@@ -315,7 +315,15 @@ def validate(df):
     # asof merge correctness (T5): the merged quarter is the MOST RECENT one
     # available by each trade_date — the per-quarter availability calendar is
     # reconstructed from the dataset's own (reference_date, available_date)
-    # pairs, so this catches stale-pick merge bugs under either date source
+    # pairs, so this catches stale-pick merge bugs under either date source.
+    #
+    # Strict < (not <=): merge_prices_and_fundamentals uses
+    # allow_exact_matches=False (2026-07-23 audit, Issue 6) -- a filing
+    # received ON trade_date T is not visible to T's own close, visibility
+    # starts T+1. This check used <= until 2026-07-25, silently mismatched
+    # against that intentional design (never updated when Issue 6 landed),
+    # and only surfaced once the random_state=0 sample happened to land on an
+    # exact filing-date row.
     mismatches = 0
     avail_col = ("fundamentals_available_date"
                  if "fundamentals_available_date" in df.columns else None)
@@ -329,7 +337,7 @@ def validate(df):
             sample = g.sample(min(100, len(g)), random_state=0)
             for _, row in sample.iterrows():
                 visible = quarters.loc[
-                    quarters[avail_col] <= row["trade_date"], "reference_date"]
+                    quarters[avail_col] < row["trade_date"], "reference_date"]
                 expected = visible.max() if len(visible) else pd.NaT
                 actual = row["reference_date"]
                 if (pd.isna(expected) != pd.isna(actual)) or \
