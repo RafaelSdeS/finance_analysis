@@ -102,6 +102,17 @@ def repair_unadjusted_splits(prices):
     print("REPAIRING UNADJUSTED SPLITS IN adj_* PRICES")
     print("=" * 80)
 
+    # Cast volume columns to float up front: the in-place rescale below
+    # multiplies a SLICE of these (generally non-integer factor) while the
+    # column is still int64, which pandas already warns is deprecated
+    # (silently upcasting only that slice) and will be a hard error in a
+    # future version. Casting the whole column once here avoids the warning;
+    # the final .round().astype("int64") below still converts back after all
+    # rescaling is done (share counts round-trip exactly).
+    for c in VOLUME_COLS:
+        if c in prices.columns:
+            prices[c] = prices[c].astype("float64")
+
     n_fixed = 0
     for ticker, g_ev in ev.groupby("ticker"):
         mask = prices["ticker"] == ticker
