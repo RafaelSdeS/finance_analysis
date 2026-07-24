@@ -522,7 +522,14 @@ def compute_advanced_features(df):
 
     # --- FUNDAMENTAL FRESHNESS (raw days, model learns staleness impact) ---
 
-    df["days_since_fundamental"] = (df["trade_date"] - df["reference_date"]).dt.days
+    # Staleness must be measured from when the market actually SAW these
+    # numbers (fundamentals_available_date, the real CVM filing/statutory
+    # date merge_prices_and_fundamentals attached), not from reference_date
+    # (the fiscal quarter-end the numbers describe) -- the two differ by the
+    # 45-90+ day filing lag itself, so measuring from reference_date silently
+    # overstated every row's true information age by that same lag
+    # (2026-07-24 audit).
+    df["days_since_fundamental"] = (df["trade_date"] - df["fundamentals_available_date"]).dt.days
 
     # --- WITHIN-TICKER HISTORICAL PERCENTILES (context for model) ---
 

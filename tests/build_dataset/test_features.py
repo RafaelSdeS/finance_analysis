@@ -541,6 +541,7 @@ def _advanced_features_fixture(n_rows: int) -> pd.DataFrame:
         "sector": ["Tech"] * n_rows,
         "trade_date": dates,
         "reference_date": dates,
+        "fundamentals_available_date": dates - pd.Timedelta(days=45),
         "div_value_recent": [0.5] * n_rows,
         "lpa": [1.0] * n_rows,
         "ebitda": [100.0] * n_rows,
@@ -614,6 +615,12 @@ def _fill_advanced_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     for col, val in defaults.items():
         if col not in df.columns:
             df[col] = val
+    if "fundamentals_available_date" not in df.columns:
+        # days_since_fundamental is keyed off this (not reference_date) --
+        # default it alongside reference_date where the fixture set one, so
+        # unrelated tests that don't care about staleness still get a valid
+        # (non-crashing) subtraction.
+        df["fundamentals_available_date"] = df["reference_date"] if "reference_date" in df.columns else pd.Timestamp("2020-01-01")
     return df
 
 
@@ -670,6 +677,7 @@ def test_n_quarters_available_counts_real_filings() -> None:
         for d in pd.date_range(qe, periods=60):
             rows.append({
                 "ticker": "A", "trade_date": d, "reference_date": qe,
+                "fundamentals_available_date": qe + pd.Timedelta(days=45),
                 "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0,
                 "shares_outstanding": 1000.0, "volume": 1_000_000.0,
                 "net_revenue": 500.0, "net_income": 50.0,
@@ -704,6 +712,7 @@ def test_n_quarters_available_separate_tickers() -> None:
             for d in pd.date_range(qe, periods=20):
                 rows.append({
                     "ticker": ticker, "trade_date": d, "reference_date": qe,
+                    "fundamentals_available_date": qe + pd.Timedelta(days=45),
                     "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0,
                     "shares_outstanding": 1000.0, "volume": 1_000_000.0,
                     "net_revenue": 500.0, "net_income": 50.0,
@@ -742,6 +751,25 @@ def test_cagr_defined_flags() -> None:
     assert (result["cagr_revenue_defined"] == df["cagr_revenue_5y_final"].notna().astype(float)).all()
     assert result["cagr_earnings_defined"].isin([0, 1]).all()
     assert result["cagr_revenue_defined"].isin([0, 1]).all()
+
+
+def test_days_since_fundamental_keyed_to_availability_not_quarter_end() -> None:
+    """days_since_fundamental must measure staleness from when the market
+    actually SAW the filing (fundamentals_available_date, real CVM receipt
+    or statutory fallback), not from reference_date (the fiscal quarter-end
+    the numbers describe) -- those differ by the 45-90+ day filing lag
+    itself, so keying off reference_date silently understated true
+    information age by that whole lag on every row."""
+    df = _advanced_features_fixture(3)
+    df["fundamentals_available_date"] = df["reference_date"] + pd.Timedelta(days=45)
+
+    result = compute_advanced_features(df)
+
+    expected = (df["trade_date"] - df["fundamentals_available_date"]).dt.days
+    assert (result["days_since_fundamental"] == expected).all()
+    # Regression guard: must NOT equal the old (reference_date-keyed) formula
+    wrong = (df["trade_date"] - df["reference_date"]).dt.days
+    assert not (result["days_since_fundamental"] == wrong).any()
 
 
 def test_dividend_coverage_ratio_nan_when_no_dividend() -> None:
