@@ -27,7 +27,7 @@ from src.build_dataset.paths import (  # noqa: E402
     COMPANY_INFO_PATH, CONTINUITY_PATH, CVM_CROSSWALK_PATH, OUTPUT_PATH, PRICES_DIR,
 )
 from src.build_dataset.loaders import company_siblings  # noqa: E402
-from src.build_dataset.quality_filters import QUARANTINED_TICKERS  # noqa: E402
+from src.build_dataset.quality_filters import MIN_PRICE_ROWS, QUARANTINED_TICKERS  # noqa: E402
 from test_utils import print_header, print_check, print_separator  # noqa: E402
 
 # 3.2: columns the ml_agent branch is known to depend on, and their expected
@@ -213,18 +213,24 @@ def check_no_duplicate_price_series():
     """3.6: no two DISTINCT (different-CNPJ) tickers may share a
     near-identical raw OHLCV price series -- (ticker, trade_date) dedup
     elsewhere in the pipeline can't catch this, since it's duplication
-    ACROSS tickers, not within one. Found 2026-07-24: BAHI3=CGRA3 (Bahema vs
-    Grazziotin -- CGRA3's own dividend history independently corroborates
-    the shared series as CGRA3's, so BAHI3's raw price file is the vendor
-    copy), ATOM3=MBLY3(=LVTC3) (Atom vs Mobly, side not yet identified),
-    GFTT3=GFTT4 (never reaches the final dataset, MIN_PRICE_ROWS-filtered) --
-    each group's raw prices/*.parquet is a vendor copy of another distinct
+    ACROSS tickers, not within one. Found and resolved 2026-07-24:
+    BAHI3=CGRA3 (Bahema vs Grazziotin -- CGRA3's own dividend history
+    independently corroborates the shared series as CGRA3's, so BAHI3's raw
+    price file is the vendor copy) and ATOM3=MBLY3=LVTC3 / ARND3=PORT3
+    (Atom/Mobly/LVTC3, Arandu/Wilson Sons -- neither side identifiable via
+    dividends [none on file] or yfinance [no data for 4 of 5, weak 0.27
+    correlation for the 5th]; BolsAI's own LIVE API independently reproduces
+    the exact same confusion right now -- get_price_history("ATOM3"/"MBLY3"/
+    "LVTC3") all return WDCN3's data, get_price_history("PORT3") returns
+    ARND3's -- confirming a live vendor-side bug, not a stale collection
+    artifact; all 5 quarantined together rather than guessing a "winner").
+    Each group's raw prices/*.parquet is a vendor copy of another distinct
     company's series (fundamentals differ), so every derived price/return/
-    volatility/beta feature for the copied side is fabricated. Same failure
-    class as the already-quarantined WDCN3/CCTY3, just at the cross-ticker
-    level instead of within one file.
+    volatility/beta feature for the copied side would be fabricated. Same
+    failure class as the already-quarantined WDCN3/CCTY3, just at the
+    cross-ticker level instead of within one file.
 
-    Tolerance-based (not exact-hash): ARND3/PORT3 match to within ~5e-9
+    Tolerance-based (not exact-hash): ARND3/PORT3 matched to within ~5e-9
     (float32-rounding noise from some vendor-side conversion), not bit-for-
     bit -- an exact hash comparison missed this real duplicate.
 
@@ -233,7 +239,14 @@ def check_no_duplicate_price_series():
     via the CVM registry, not just the price match itself) -- an expected,
     not-yet-continuity-dated vendor alias, not corruption. Documented
     ticker_continuity.json rename/merger events are excluded too, for
-    companies where the splice is already dated and handled.
+    companies where the splice is already dated and handled. Already-
+    quarantined tickers are excluded too, so a resolved group doesn't keep
+    tripping this guard.
+
+    Row-count floor matches MIN_PRICE_ROWS (quality_filters.py): below that,
+    a ticker never reaches the final dataset regardless of duplication (e.g.
+    GFTT3/GFTT4's 2-row 2001 stub, identical placeholder values on both
+    share classes -- vendor filler, not a real trading history worth chasing).
 
     Bucketed by (row count, first date, last date) before the tolerance
     check so this stays O(n) over ~500 tickers instead of an O(n^2) full
@@ -244,7 +257,7 @@ def check_no_duplicate_price_series():
     frames = {}
     for f in sorted(PRICES_DIR.glob("*.parquet")):
         g = pd.read_parquet(f, columns=ohlcv_cols).sort_values("trade_date").reset_index(drop=True)
-        if len(g) >= 2:
+        if len(g) >= MIN_PRICE_ROWS:
             frames[f.stem] = g
 
     aliased = _cnpj_alias_pairs()

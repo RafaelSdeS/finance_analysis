@@ -33,6 +33,41 @@ QUARANTINED_TICKERS = {
              "data; BAHI3 has no dividends file to check the other way, and BolsAI's own "
              "market_cap for both sides is tautologically derived from this same price (can't "
              "cross-validate). No reliable source found yet for BAHI3's true price history.",
+    # ATOM3/MBLY3/LVTC3 and ARND3/PORT3: confirmed distinct CNPJs (not
+    # rename/alias pairs, per the CVM crosswalk), yet each group shares a
+    # near-identical raw price series (2026-07-24 audit). Unlike BAHI3 above,
+    # NEITHER side of either group could be positively identified: no
+    # dividends file exists for any of the five to cross-check against, and
+    # BolsAI's market_cap is tautologically derived from the same shared
+    # price. Live-queried BolsAI's own API (not just our stored snapshot,
+    # same verification method that resolved CCTY3) independently reproduces
+    # the exact same confusion right now: get_price_history("ATOM3"),
+    # ("MBLY3"), and ("LVTC3") all return WDCN3's data (a third, unrelated,
+    # already-quarantined ticker); get_price_history("PORT3") returns
+    # ARND3's data. get_price_history("PETR4") returns correct data in the
+    # same session, ruling out a general tool malfunction. yfinance has zero
+    # data for ATOM3.SA/MBLY3.SA/LVTC3.SA/PORT3.SA (delisted/no data), and
+    # its ARND3.SA series only weakly correlates with ours (0.27 daily
+    # log-return correlation) -- not strong enough to positively vouch for
+    # ARND3 either. This is a live, reproducible vendor-side ticker-
+    # resolution bug, not a stale artifact of our original collection --
+    # re-running the collector today would fetch the same wrong data. All
+    # five quarantined together rather than guessing a "winner" per group;
+    # revisit if BolsAI fixes this or another data source becomes available.
+    "ATOM3": "raw price file is a near-identical copy of MBLY3/LVTC3's; BolsAI's live API "
+             "itself currently misresolves this ticker to WDCN3's data. See BAHI3 comment above "
+             "for the full investigation -- no reliable source found for any of the 5 tickers "
+             "in this group (ATOM3/MBLY3/LVTC3, ARND3/PORT3) as of 2026-07-24.",
+    "MBLY3": "raw price file is a near-identical copy of ATOM3/LVTC3's; BolsAI's live API "
+             "itself currently misresolves this ticker to WDCN3's data. See BAHI3 comment above.",
+    "LVTC3": "raw price file is a near-identical copy of ATOM3/MBLY3's; BolsAI's live API "
+             "itself currently misresolves this ticker to WDCN3's data. See BAHI3 comment above.",
+    "ARND3": "raw price file is a near-identical copy of PORT3's; BolsAI's live API resolves "
+             "PORT3 to this same series, and yfinance's own ARND3.SA only weakly corroborates "
+             "ours (0.27 daily return correlation) -- not enough to positively confirm this side "
+             "either. See BAHI3 comment above.",
+    "PORT3": "raw price file is a near-identical copy of ARND3's; BolsAI's live API itself "
+             "currently resolves this ticker to ARND3's data. See BAHI3 comment above.",
 }
 
 # Tickers whose raw price file's EARLIEST rows are stale data from an
