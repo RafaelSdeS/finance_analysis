@@ -566,7 +566,7 @@ def main():
     # Exclude raw macro passthrough columns: identical across all tickers on a
     # given date by construction, so they flood this report with repeats of
     # the same macro regime shift rather than per-observation data errors.
-    macro_cols = {"selic", "cdi", "ipca", "selic_trend_20d"}
+    macro_cols = {"selic", "cdi", "ipca", "ipca_daily_equiv", "selic_trend_20d"}
     numeric_cols = [c for c in numeric_columns(df) if c not in macro_cols]
     outliers = check_outliers_zscore(df, numeric_cols, date_col="trade_date")
     print(f"\nOutliers (robust z-score > 8): {len(outliers)}")

@@ -231,6 +231,53 @@ def test_merge_macro_ipca_visible_only_after_publication_lag(tmp_path, monkeypat
     assert approx(result.loc[("A", available_date + pd.Timedelta(days=1)), "ipca"], 0.005)
 
 
+def test_merge_macro_ipca_daily_equiv_same_footing_as_selic_cdi(tmp_path, monkeypatch) -> None:
+    """ipca_daily_equiv converts ipca's native MONTHLY rate to a daily rate on
+    the same percent-per-trading-day footing as selic/cdi -- so a future
+    consumer has an obviously-safe column to read instead of repeating the
+    exact unit-mismatch bug that caused a Critical audit finding (raw ipca
+    silently treated as if it were daily). Geometric decompounding: 21
+    trading days of ipca_daily_equiv must compound back to the original
+    monthly factor, and the log1p of it must exactly match
+    compute_macro_features' real_return formula (log1p(ipca/100)/21) --
+    same math, just factored differently, so the two never drift apart."""
+    monkeypatch.setattr(merge, "MACRO_DIR", tmp_path)
+
+    pd.DataFrame({"reference_date": pd.date_range("2026-01-01", periods=60, freq="B"),
+                  "selic": [0.05] * 60}).to_parquet(tmp_path / "selic.parquet")
+    pd.DataFrame({"reference_date": pd.to_datetime(["2026-01-01"]),
+                  "cdi": [0.04]}).to_parquet(tmp_path / "cdi.parquet")
+    pd.DataFrame({"reference_date": pd.to_datetime(["2026-01-01"]),
+                  "ipca": [0.62]}).to_parquet(tmp_path / "ipca.parquet")
+
+    dataset = pd.DataFrame({
+        "ticker": ["A"] * 60,
+        "trade_date": pd.date_range("2026-01-01", periods=60, freq="B"),
+    })
+    result = merge_macro(dataset)
+
+    row = result.dropna(subset=["ipca_daily_equiv"]).iloc[0]
+    assert approx(row["ipca"], 0.62)
+
+    # 21 compounded days of the daily-equivalent rate reconstructs the
+    # original monthly factor
+    reconstructed_monthly_factor = (1 + row["ipca_daily_equiv"] / 100) ** merge.TRADING_DAYS_PER_MONTH
+    assert approx(reconstructed_monthly_factor, 1 + row["ipca"] / 100, tol=1e-9)
+
+    # exact mathematical equivalence to real_return's existing formula
+    import numpy as np
+    assert approx(
+        np.log1p(row["ipca_daily_equiv"] / 100),
+        np.log1p(row["ipca"] / 100) / 21,
+        tol=1e-12,
+    )
+
+    # NaN wherever raw ipca is NaN (before the publication-lag availability
+    # date) -- never a value computed from a not-yet-visible reading
+    still_unavailable = result[result["ipca"].isna()]
+    assert still_unavailable["ipca_daily_equiv"].isna().all()
+
+
 def test_merge_macro_selic_trend_no_ticker_boundary_leak(tmp_path, monkeypatch) -> None:
     """selic_trend_20d must be computed on the raw daily selic series (one row
     per real trading day, ticker-independent), not per ticker downstream --

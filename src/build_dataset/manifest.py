@@ -38,6 +38,9 @@ COLUMN_UNITS = {
     "selic": "percent per trading day (e.g. 0.0534 = 0.0534%/day)",
     "cdi": "percent per trading day (e.g. 0.0534 = 0.0534%/day)",
     "ipca": "percent per calendar month (e.g. 0.62 = 0.62% for that month)",
+    "ipca_daily_equiv": "percent per trading day (geometric decompounding of ipca, "
+                         "same footing as selic/cdi -- prefer this over raw ipca "
+                         "for any new feature comparing against selic/cdi)",
 }
 
 

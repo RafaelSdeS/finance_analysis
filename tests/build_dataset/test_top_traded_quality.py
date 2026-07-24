@@ -280,7 +280,7 @@ def main():
     if len(stale):
         print(stale.head(10).to_string(index=False))
 
-    macro_cols = {"selic", "cdi", "ipca", "selic_trend_20d"}
+    macro_cols = {"selic", "cdi", "ipca", "ipca_daily_equiv", "selic_trend_20d"}
     numeric_cols = [c for c in numeric_columns(sub) if c not in macro_cols]
     outliers = check_outliers_zscore(sub, numeric_cols, date_col="trade_date")
     print(f"\nOutliers (robust z-score > 8): {len(outliers)}")

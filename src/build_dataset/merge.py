@@ -22,6 +22,11 @@ IPCA_PUBLICATION_LAG_DAYS = 15
 # downstream per-batch, or it leaks across ticker boundaries. See merge_macro.
 SELIC_TREND_LOOKBACK_DAYS = 20
 
+# Trading days per calendar month, used to decompound ipca's native MONTHLY
+# rate into a daily-equivalent rate on the same footing as selic/cdi (both
+# already daily). See merge_macro's ipca_daily_equiv.
+TRADING_DAYS_PER_MONTH = 21
+
 
 # =============================================================================
 # MERGE DAILY PRICES + QUARTERLY FUNDAMENTALS
@@ -242,12 +247,25 @@ def merge_macro(dataset):
             m = m.sort_values("reference_date").copy()
             m["selic_trend_20d"] = m["selic"] - m["selic"].shift(SELIC_TREND_LOOKBACK_DAYS)
         if name == "ipca":
+            m = m.copy()
+            # Daily-equivalent rate, same percent-per-trading-day footing as
+            # selic/cdi -- ipca alone stays a MONTHLY rate (its native SGS
+            # unit; see column_units in manifest.py), which is exactly the
+            # mismatch that caused a Critical audit finding when a downstream
+            # consumer (compute_macro_features) treated it as daily without
+            # converting. This column exists so a FUTURE consumer has an
+            # obviously-safe column to read directly instead of repeating
+            # that mistake with the raw `ipca` column. Geometric decompounding
+            # (not a plain /21) matches the compounding convention
+            # compute_macro_features' real_return already uses.
+            m["ipca_daily_equiv"] = (
+                (1 + m["ipca"] / 100) ** (1 / TRADING_DAYS_PER_MONTH) - 1
+            ) * 100
             # Shift to a conservative availability date (real publication lag,
             # not the SGS reference_date) before this joins the shared date
             # grid below -- otherwise the asof-merge leaks up to ~40 days of
             # future inflation data into every day of the reference month
             # (confirmed 2026-07-23 audit).
-            m = m.copy()
             m["reference_date"] = (
                 m["reference_date"] + pd.DateOffset(months=1) + pd.Timedelta(days=IPCA_PUBLICATION_LAG_DAYS)
             )
