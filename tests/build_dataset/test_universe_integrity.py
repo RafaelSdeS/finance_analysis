@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 
-from src.build_dataset.paths import COMPANY_INFO_PATH, OUTPUT_PATH  # noqa: E402
+from src.build_dataset.paths import COMPANY_INFO_PATH, OUTPUT_PATH, PRICES_DIR  # noqa: E402
 from src.build_dataset.loaders import company_siblings  # noqa: E402
 from test_utils import print_header, print_check, print_separator  # noqa: E402
 
@@ -156,6 +156,28 @@ def check_status_is_static(df):
             f"training feature -- see CLAUDE.md caveat.")
 
 
+def check_no_duplicate_price_series():
+    """3.6: no two DISTINCT tickers may share a byte-identical raw OHLCV price
+    series -- (ticker, trade_date) dedup elsewhere in the pipeline can't catch
+    this, since it's duplication ACROSS tickers, not within one. Found
+    2026-07-24: BAHI3=CGRA3, ATOM3=MBLY3, MEGA3=SRNA3, ARND3=PORT3 -- each
+    pair's raw prices/*.parquet is byte-identical (one is a vendor copy of
+    the other's series) while their fundamentals differ, so every derived
+    price/return/volatility/beta feature for the copied side is fabricated.
+    Regression guard for the same failure class as the already-quarantined
+    WDCN3/CCTY3, just at the cross-ticker level instead of within one file."""
+    ohlcv_cols = ["trade_date", "open", "high", "low", "close", "volume"]
+    sigs = {}
+    for f in sorted(PRICES_DIR.glob("*.parquet")):
+        g = pd.read_parquet(f, columns=ohlcv_cols).sort_values("trade_date").reset_index(drop=True)
+        h = pd.util.hash_pandas_object(g, index=False).values.tobytes()
+        sigs.setdefault(h, []).append(f.stem)
+    dupes = sorted(v for v in sigs.values() if len(v) > 1)
+    return [(f"no duplicate raw price series across distinct tickers "
+             f"[found: {dupes}]" if dupes else "no duplicate raw price series across distinct tickers",
+             not dupes)]
+
+
 def main():
     print_separator()
     print("UNIVERSE INTEGRITY TEST (survivorship, schema, sibling consistency)")
@@ -182,8 +204,12 @@ def main():
     print_header("3.2 SCHEMA/DTYPE CONTRACT")
     schema_checks = check_schema_contract(df)
 
+    print()
+    print_header("3.6 DUPLICATE PRICE SERIES GUARD")
+    dup_checks = check_no_duplicate_price_series()
+
     failed = 0
-    for label, ok in survivorship_checks + schema_checks:
+    for label, ok in survivorship_checks + schema_checks + dup_checks:
         print_check(label, ok)
         failed += not ok
 
