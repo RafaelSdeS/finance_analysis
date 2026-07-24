@@ -215,8 +215,11 @@ def check_no_duplicate_price_series():
     elsewhere in the pipeline can't catch this, since it's duplication
     ACROSS tickers, not within one. Found and resolved 2026-07-24:
     BAHI3=CGRA3 (Bahema vs Grazziotin -- CGRA3's own dividend history
-    independently corroborates the shared series as CGRA3's, so BAHI3's raw
-    price file is the vendor copy) and ATOM3=MBLY3=LVTC3 / ARND3=PORT3
+    independently corroborates the shared series as CGRA3's real identity, so
+    BAHI3's raw price file is the vendor copy; CGRA3 is ALSO separately
+    quarantined for its own unrelated WDCN3-class raw price defect, so both
+    sides of this pair end up excluded -- see quality_filters.py) and
+    ATOM3=MBLY3=LVTC3 / ARND3=PORT3
     (Atom/Mobly/LVTC3, Arandu/Wilson Sons -- neither side identifiable via
     dividends [none on file] or yfinance [no data for 4 of 5, weak 0.27
     correlation for the 5th]; BolsAI's own LIVE API independently reproduces
@@ -295,6 +298,63 @@ def check_no_duplicate_price_series():
     return [(label, not dupes)]
 
 
+# A round-trip oscillation (big jump, then an equally-big reversal the very
+# next row) is not a real market move or a genuine split -- it's the
+# WDCN3/CGRA3 failure signature: the vendor's raw `close` alternates between
+# two price bases. Threshold picked from the real data (2026-07-24 audit):
+# every already-quarantined ticker with this defect sits at 11.7-16.7% of its
+# rows; the highest non-quarantined ticker with a meaningful sample (TOYB4, a
+# thin 3-share-class micro-cap) sits at 3.3%. 8% sits cleanly in the gap
+# between those two clusters -- generous enough not to flag genuine (if
+# unusually spiky) micro-cap volatility, tight enough to catch the next
+# WDCN3/CGRA3 automatically instead of by manual discovery.
+#
+# A fraction alone breaks down on thin tickers: a handful of ~10-80-row
+# stubs each had 2-7 round-trip events by pure small-sample noise, crossing
+# 8% on a denominator too small for a percentage to mean anything (none of
+# them reach the final dataset anyway). OSCILLATION_MIN_COUNT requires the
+# ABSOLUTE count to also clear a floor -- real defects sit at 270+, false
+# positives from thin tickers topped out at 7, so 20 leaves a wide margin
+# on both sides while still requiring genuinely repeated (not one-off)
+# occurrences.
+OSCILLATION_JUMP_THRESHOLD = 0.35  # matches repair.MIN_DETECTABLE_JUMP
+OSCILLATION_FRACTION_LIMIT = 0.08
+OSCILLATION_MIN_COUNT = 20
+
+
+def check_no_price_oscillation():
+    """3.7: no ACTIVE (non-quarantined) ticker's raw price should round-trip-
+    oscillate above OSCILLATION_FRACTION_LIMIT of its rows (and at least
+    OSCILLATION_MIN_COUNT times in absolute terms, to avoid small-sample
+    noise on thin tickers). Would have caught CGRA3 automatically (1,517 big
+    jumps / 4,319 rows, 721 of them round-trip = 16.7%) instead of the
+    accidental discovery while investigating beta_1y outliers (2026-07-24)
+    -- and originally would have caught WDCN3 the same way. Complements
+    check_no_duplicate_price_series: that one catches corruption ACROSS two
+    tickers' files, this one catches it WITHIN a single ticker's own file."""
+    suspicious = []
+    for f in sorted(PRICES_DIR.glob("*.parquet")):
+        t = f.stem
+        if t in QUARANTINED_TICKERS:
+            continue
+        g = pd.read_parquet(f, columns=["close"])
+        if len(g) < MIN_PRICE_ROWS:
+            continue
+        lr = np.log(g["close"] / g["close"].shift(1))
+        big = lr.abs() > OSCILLATION_JUMP_THRESHOLD
+        nxt = lr.shift(-1)
+        roundtrip = big & (np.sign(lr) != np.sign(nxt)) & (nxt.abs() > OSCILLATION_JUMP_THRESHOLD)
+        count = int(roundtrip.sum())
+        frac = count / len(g)
+        if frac >= OSCILLATION_FRACTION_LIMIT and count >= OSCILLATION_MIN_COUNT:
+            suspicious.append(f"{t} ({frac * 100:.1f}%, n={count})")
+
+    label = ("no active ticker shows WDCN3-class raw price oscillation"
+              if not suspicious else
+              f"no active ticker shows WDCN3-class raw price oscillation [found: {sorted(suspicious)}]")
+    return [(label, not suspicious)]
+
+
 def main():
     print_separator()
     print("UNIVERSE INTEGRITY TEST (survivorship, schema, sibling consistency)")
@@ -325,8 +385,12 @@ def main():
     print_header("3.6 DUPLICATE PRICE SERIES GUARD")
     dup_checks = check_no_duplicate_price_series()
 
+    print()
+    print_header("3.7 PRICE OSCILLATION GUARD")
+    oscillation_checks = check_no_price_oscillation()
+
     failed = 0
-    for label, ok in survivorship_checks + schema_checks + dup_checks:
+    for label, ok in survivorship_checks + schema_checks + dup_checks + oscillation_checks:
         print_check(label, ok)
         failed += not ok
 

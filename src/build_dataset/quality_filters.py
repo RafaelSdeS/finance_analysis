@@ -30,9 +30,29 @@ QUARANTINED_TICKERS = {
              "Grazziotin -- confirmed distinct CNPJs, not a rename/alias) (2026-07-24 audit). "
              "CGRA3's own dividend history (32 events, yield 4-18% of the shared price series "
              "at each ex-date) independently corroborates the shared series as CGRA3's real "
-             "data; BAHI3 has no dividends file to check the other way, and BolsAI's own "
-             "market_cap for both sides is tautologically derived from this same price (can't "
-             "cross-validate). No reliable source found yet for BAHI3's true price history.",
+             "data (i.e. the company identity match is BAHI3=copy, CGRA3=genuine); BAHI3 has no "
+             "dividends file to check the other way, and BolsAI's own market_cap for both sides "
+             "is tautologically derived from this same price (can't cross-validate). No reliable "
+             "source found yet for BAHI3's true price history. NOTE: CGRA3 itself is ALSO "
+             "quarantined below, for an unrelated reason discovered while investigating beta_1y "
+             "outliers -- the identity match above still holds, but CGRA3's own raw price series "
+             "has a separate, severe defect independent of this duplication.",
+    "CGRA3": "raw `close` alternates between two price bases (~R$105 vs ~R$24, ~4.4x apart) "
+             "hundreds of times across nearly its entire 2002-2024 history (1,517 single-day "
+             "|log-return|>35% jumps out of 4,319 rows = 35%; 721 of those are round-trip "
+             "oscillations, not a one-way step) -- the same failure signature as the "
+             "already-quarantined WDCN3 (\"alternates between two price bases... not a split, no "
+             "factor to repair with\"), just a different ratio. Discovered 2026-07-24 while "
+             "investigating beta_1y outliers: the extreme dates (e.g. 2019-08-13, beta=-9.72) "
+             "trace to CGRA3's own fabricated +-100%+ \"returns\" on oscillation days, not a "
+             "degenerate market-variance denominator (confirmed normal, 41st percentile, on the "
+             "same date) -- so a beta-variance guard would have been a no-op against the real "
+             "cause. This does NOT reverse the BAHI3 finding above (CGRA3's dividend-yield "
+             "corroboration still correctly identifies it, not BAHI3, as the real Grazziotin "
+             "series -- most ex-dates apparently sampled the oscillation's \"good\" state) -- it's "
+             "a second, independent, unrepairable defect in the same raw file. Consequence: BOTH "
+             "sides of the original BAHI3/CGRA3 pair are now excluded; Grazziotin has no usable "
+             "price history in this dataset until a cleaner source is found.",
     # ATOM3/MBLY3/LVTC3 and ARND3/PORT3: confirmed distinct CNPJs (not
     # rename/alias pairs, per the CVM crosswalk), yet each group shares a
     # near-identical raw price series (2026-07-24 audit). Unlike BAHI3 above,

@@ -45,7 +45,7 @@ but excluded from the corruption guard via CNPJ match instead.
 
 | Group | rows | shared span | In final dataset? | Status |
 |-------|-----:|-------------|:---:|--------|
-| `BAHI3` ≡ `CGRA3` | 4319 | 2000-01-10 … 2026-07-10 | yes | **Quarantined** (`BAHI3`; `CGRA3` kept) |
+| `BAHI3` ≡ `CGRA3` | 4319 | 2000-01-10 … 2026-07-10 | yes | **Quarantined** (both — see below) |
 | `ATOM3` ≡ `MBLY3` ≡ `LVTC3` | 2307 | 2017-03-23 … 2026-07-10 | `ATOM3`/`MBLY3` yes, `LVTC3` no | **Quarantined** (all 3) |
 | `ARND3` ≡ `PORT3` | 1156 | 2021-10-25 … 2026-07-10 | yes | **Quarantined** (both) |
 | `GFTT3` ≡ `GFTT4` | 2 | 2001-01-19 … 2004-06-29 | no (`< MIN_PRICE_ROWS`) | Not corruption — vendor stub
@@ -56,8 +56,13 @@ but excluded from the corruption guard via CNPJ match instead.
   either side (it's tautologically `shares_outstanding × close` off the *same* shared price, so it
   always reads a perfect 1.000 ratio for both). But `CGRA3` has 32 real dividend events on file,
   and every one prices at a plausible 4–18% yield against the shared series — independent
-  corroboration the series is genuinely `CGRA3`'s (Grazziotin). `BAHI3` (Bahema Educação) has no
-  dividends file to check the other way. `BAHI3` added to `QUARANTINED_TICKERS`.
+  corroboration the series is genuinely `CGRA3`'s (Grazziotin), i.e. the *identity* match is
+  `BAHI3`=copy, `CGRA3`=genuine. `BAHI3` (Bahema Educação) has no dividends file to check the other
+  way. `BAHI3` added to `QUARANTINED_TICKERS`. **`CGRA3` itself was subsequently ALSO quarantined**
+  (found while investigating L2 below) for an unrelated, independent defect — see L2's writeup. The
+  identity finding above still stands; it's a second, separate problem in the same raw file. Net
+  effect: both sides of this pair are now excluded, and Grazziotin has no usable price history in
+  the dataset until a cleaner source is found.
 - **`ATOM3`/`MBLY3`/`LVTC3` and `ARND3`/`PORT3` — resolved, quarantine all 5 (no winner
   identifiable).** No internal signal available: neither side of either group has a dividends
   file, and market_cap is tautological (derived from the same shared price on both sides). External
@@ -110,10 +115,21 @@ interior NaN holes and break the prefix-NaN invariant (`test_final_dataset::T_pr
   `adj_close` is pinned at 0.01→0.02→0.03 steps (each step is a >40–70% "return"). Only 6 of these are
   caught by `adj_close_precision_degraded`, because the flag marks the *pinned* row but not the
   *transition* row that carries the fake return. Once C1 is quarantined the tail shrinks ~80%.
-- 🟡 **L2 — `beta_1y` outliers.** Core distribution is fine, but min −9.72 / max 13.07 from
-  thin/low-overlap tickers (near-degenerate market-variance windows). No `inf`, but economically
-  implausible values reach the model. Optional: NaN/flag beta where the window's market-return
-  variance is degenerate, or clip to a sane band.
+- ✅ **L2 — `beta_1y` outliers — root-caused and resolved (not a beta-formula issue).** Original
+  hypothesis (degenerate market-variance window) was wrong: the extreme dates (e.g. `CGRA3`
+  2019-08-13, beta=−9.72) have a completely normal variance denominator (0.000188, 41st percentile
+  of its own distribution) — the outlier comes entirely from `CGRA3`'s own fabricated ±100%+
+  "returns" on specific dates. Tracing those dates back to `data/raw/prices/CGRA3.parquet` found
+  the real cause: raw `close` **alternates between two price bases** (~R$105 vs ~R$24, ~4.4×
+  apart) — 1,517 single-day `|log-return|>35%` jumps out of 4,319 rows (35%), 721 of them
+  round-trip oscillations spanning nearly the entire 2002–2024 history. This is the *exact* failure
+  signature already documented for the already-quarantined `WDCN3` ("alternates between two price
+  bases... not a split, no factor to repair with") — an unrelated, independent defect from the
+  `BAHI3` duplication issue in C1 above, discovered by accident while chasing this. A beta-variance
+  guard would have been a no-op against the real cause, so it wasn't implemented; `CGRA3` was
+  quarantined instead (see C1's `BAHI3`/`CGRA3` entry), and a general regression guard
+  (`check_no_price_oscillation`, §3.7) now scans every active ticker's raw price file for this same
+  signature so the next occurrence is caught automatically instead of by manual investigation.
 - 🟡 **L3 — Split-repair has no persistence guard (by design).** The single-day jump/tolerance matcher
   can't distinguish a permanent split from a coincidental large in-window move; both guard designs were
   reverted (see `repair.py` comment). Data shows the matcher isn't over-firing — 2,703 transient
@@ -173,11 +189,14 @@ def test_nonpositive_adjclose_yields_nan_technicals(df):
         assert z[c].isna().all(), f"{c} computed off a non-positive adj_close"
 ```
 
-### L2 — beta sanity (optional)
-```python
-var = g["_mkt_log_return"].rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).var()
-g["beta_1y"] = (cov / var).where(var > 1e-8)   # degenerate-variance window → NaN, not a wild beta
-```
+### L2 — root cause fixed via quarantine + a general oscillation guard, not a beta formula change
+The originally-proposed `var > 1e-8` guard was diagnosed as a no-op (variance wasn't degenerate)
+and dropped. Landed instead: `CGRA3` quarantined (see C1), plus `check_no_price_oscillation()` /
+§3.7 in `test_universe_integrity.py` — scans every active (non-quarantined) ticker's raw price
+file for the same round-trip-oscillation signature (`|log-return| > 0.35` reversing the very next
+row), flagging any ticker at ≥8% of rows AND ≥20 such events (the fraction alone false-positived on
+a handful of thin ~10–80-row stubs; the count floor fixed that without missing real defects, which
+sit at 270+). Currently green — no other active ticker exhibits this.
 
 ### L3 — persistence regression test (optional, guards future repairs)
 For each event `repair_unadjusted_splits` fixes, assert the post-jump price level holds
@@ -188,15 +207,16 @@ can't be silently "repaired".
 
 ## Action checklist
 - [x] C1: land duplicate-price-series regression guard, CNPJ-aware + tolerance-based (`test_universe_integrity.py` §3.6).
-- [x] C1: resolve + quarantine `BAHI3` (dividend-corroboration evidence; `CGRA3`'s series is genuine).
+- [x] C1: resolve + quarantine `BAHI3` (dividend-corroboration evidence identifies `CGRA3` as the genuine *identity* match — separate from `CGRA3`'s own defect below).
 - [x] C1: resolve `ATOM3`/`MBLY3`/`LVTC3` and `ARND3`/`PORT3` (yfinance + live BolsAI API cross-check, no winner identifiable either group) and quarantine all 5.
 - [x] C1: `GFTT3`/`GFTT4` — confirmed vendor stub data, not corruption; test row-count floor now matches `MIN_PRICE_ROWS` so it's no longer flagged.
-- [x] C1: regression guard passes (`VALIDATION PASSED`).
+- [x] C1: `CGRA3` — found (via L2 investigation) to have its own independent WDCN3-class raw price-oscillation defect; quarantined too.
+- [x] C1: regression guard passes (`VALIDATION PASSED`), now including §3.7's oscillation scan.
 - [ ] C1 (optional): once a verified rename date is known, move `ALOS3`/`ALSO3` and `MEGA3`/`SRNA3` into `ticker_continuity.json` proper instead of relying on the CNPJ-match exclusion.
 - [x] C2: route price technicals + percentiles through the masked `adj`; regression tests added, fast-group green.
 - [x] C2: rebuild landed (manifest `git_commit: 520bd4c`, 510 tickers / 1,308,104 rows) —
-      `BAHI3`/`ATOM3`/`MBLY3`/`LVTC3`/`ARND3`/`PORT3` all confirmed absent (0 rows each), `CGRA3`
-      confirmed kept (4319 rows). `test_universe_integrity.py --group all` passes.
-- [ ] L2: optional beta degenerate-variance guard.
+      `BAHI3`/`ATOM3`/`MBLY3`/`LVTC3`/`ARND3`/`PORT3` all confirmed absent (0 rows each). Postdates
+      the `CGRA3` quarantine — **one more rebuild needed** to drop `CGRA3` too.
+- [x] L2: root-caused (not a beta formula bug) — `CGRA3` quarantined, general `check_no_price_oscillation()` guard (§3.7) added instead of a beta-specific fix.
 - [ ] L3: optional split-repair persistence test.
 - [ ] L4: verify `T_prefix_rule` excludes gap-guarded derived columns.
