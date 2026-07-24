@@ -124,11 +124,14 @@ def repair_unadjusted_splits(prices):
             jump, factor = best
             applied.add(dates[jump])
             prices.loc[g_idx[:jump], ADJ_PRICE_COLS] /= factor
-            # volume scales same direction as prices: 1:4 split divides price by 4,
-            # multiplies volume by 4 (more shares trading same economic activity).
+            # volume scales OPPOSITE to price: 1:4 split divides price by 4,
+            # multiplies volume by 4 (same economic activity, more shares
+            # outstanding trading it) so that volume*price (dollar volume)
+            # stays invariant across the splice -- same invariant
+            # continuity.py's merger-ratio volume scaling preserves.
             vol_cols_present = [c for c in VOLUME_COLS if c in prices.columns]
             if vol_cols_present:
-                prices.loc[g_idx[:jump], vol_cols_present] /= factor
+                prices.loc[g_idx[:jump], vol_cols_present] *= factor
             adj[:jump] /= factor
             n_fixed += 1
             print(f"  {ticker} {pd.Timestamp(dates[jump]).date()}: rescaled "

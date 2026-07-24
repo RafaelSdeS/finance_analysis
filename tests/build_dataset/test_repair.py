@@ -27,13 +27,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from src.build_dataset import repair
 
 
-def _prices(ticker, dates, adj_close):
-    return pd.DataFrame({
+def _prices(ticker, dates, adj_close, volume=None):
+    df = pd.DataFrame({
         "ticker": ticker,
         "trade_date": pd.to_datetime(dates),
         "adj_open": adj_close, "adj_high": adj_close,
         "adj_low": adj_close, "adj_close": adj_close,
     })
+    if volume is not None:
+        df["volume"] = volume
+        df["volume_adjusted"] = volume
+    return df
 
 
 def _events_file(tmp_path, rows):
@@ -61,6 +65,35 @@ def test_repair_rescales_unadjusted_split(tmp_path, monkeypatch) -> None:
     assert np.allclose(result.loc[:4, "adj_close"], 100.0), "pre-event rows must be rescaled 200 -> 100"
     assert np.allclose(result.loc[5:, "adj_close"], 100.0), "post-event rows must be untouched"
     assert np.allclose(result.loc[:4, "adj_open"], 100.0), "every ADJ_PRICE_COLS column must be rescaled together"
+
+
+def test_repair_rescales_volume_opposite_direction_from_price(tmp_path, monkeypatch) -> None:
+    """A 1:4 split (factor=4) must divide pre-event price by 4 AND multiply
+    pre-event volume/volume_adjusted by 4 -- same shares-outstanding logic as
+    a real split (more shares, same dollar activity), and the same
+    dollar-volume-invariant convention continuity.py's merger-ratio scaling
+    uses. Scaling volume the same direction as price (dividing both) would
+    silently double the discontinuity in turnover_ratio/volume_ratio_20d
+    instead of removing it."""
+    monkeypatch.setattr(repair, "CORPORATE_EVENTS_PATH", _events_file(
+        tmp_path, [{"ticker": "TEST3", "date": pd.Timestamp("2026-03-01"), "factor": 4.0}]
+    ))
+
+    dates = pd.date_range("2026-02-20", periods=10, freq="D")
+    adj_close = [400.0] * 5 + [100.0] * 5  # unadjusted 1:4 split
+    volume = [10_000] * 5 + [40_000] * 5   # post-split volume already at new-share scale
+    prices = _prices("TEST3", dates, adj_close, volume=volume)
+
+    result = repair.repair_unadjusted_splits(prices.copy())
+
+    assert np.allclose(result.loc[:4, "adj_close"], 100.0)
+    assert np.allclose(result.loc[:4, "volume"], 40_000), (
+        "pre-event volume must be MULTIPLIED by factor (more new-share-equivalent "
+        "shares traded), matching the price division, so volume*price is invariant "
+        "across the splice"
+    )
+    assert np.allclose(result.loc[:4, "volume_adjusted"], 40_000)
+    assert np.allclose(result.loc[5:, "volume"], 40_000), "post-event volume untouched"
 
 
 def test_repair_matches_inverse_factor_direction(tmp_path, monkeypatch) -> None:
