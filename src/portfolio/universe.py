@@ -9,7 +9,7 @@ recompute any of that, it only exposes it the way the backtest needs.
 
 import pandas as pd
 
-from src.build_dataset.build_top50_universe import build_top50_membership
+from src.build_dataset.build_top50_universe import build_top50_membership, filter_to_top50_universe
 
 
 def liquid_universe(df: pd.DataFrame, top_n: int = 50, rebalance_freq: str = "Q") -> pd.DataFrame:
@@ -18,6 +18,15 @@ def liquid_universe(df: pd.DataFrame, top_n: int = 50, rebalance_freq: str = "Q"
     as of that period's rebalance date. `df` needs ticker/trade_date/traded_amount.
     """
     return build_top50_membership(df, top_n=top_n, rebalance_freq=rebalance_freq)
+
+
+def restrict_to_universe(df: pd.DataFrame, membership: pd.DataFrame) -> pd.DataFrame:
+    """Restrict `df` to rows whose (ticker, trade_date) falls in a period that
+    ticker qualified for (per `membership`) -- the proposal §7 "prove the
+    machinery on a clean, well-behaved universe first" philosophy applied to
+    the alpha model's training data too, not just the backtest. Thin
+    passthrough to the existing filter_to_top50_universe."""
+    return filter_to_top50_universe(df, membership)
 
 
 def rebalance_dates(membership: pd.DataFrame) -> pd.DatetimeIndex:

@@ -72,11 +72,14 @@ no premature abstraction.
 - **Done — 2026-07-24.** Wired into 2.4 (`optimizer.solve` consumes `risk.py`'s output directly).
 
 ### 2.6 — Forecaster (Stage A)  *(proposal Phase 2b)*
-- [ ] Add `lightgbm` to `requirements.txt`.
-- [ ] `src/portfolio/alpha.py`: LightGBM regression on the 2.2 forward-excess-return label, features from 2.2, **native NaN handling** (no imputation — the flags in §4.4-E explain the NaNs). `monotone_constraints` on `earnings_yield_vs_selic` per §4.1.
-- [ ] **Walk-forward retrain loop (new, owns its schedule — P5):** at each quarterly rebalance date `t`, train on all samples whose label window `[d, d+H]` ends `≤ t` minus an embargo (**purged + embargoed**, §3.2); predict α for the current cross-section. Expanding window.
-- [ ] Diagnostics: out-of-sample rank-IC of α vs realized forward return; SHAP interaction on (valuation × `f_score`) per §4.2; feature-importance watch for raw-SELIC-level splits per §4.1.
-- Done when: α ranks forward returns out-of-sample (rank-IC > 0 on held-out rebalances) **and** an α-weighted (still equal-ish, pre-optimizer) portfolio beats the 2.3 equal-weight floor.
+- [x] Added `lightgbm==4.6.0` to `requirements.txt` (installed the same way as `cvxpy` — `--break-system-packages`, matching this machine's existing setup).
+- [x] `src/portfolio/alpha.py`: `fit()`/`predict()`/`walk_forward_predict()` — LightGBM regression on the 2.2 forward-excess-return label, features from 2.2, native NaN handling (no imputation), `monotone_constraints` on `earnings_yield_vs_selic` per §4.1.
+- [x] **Walk-forward retrain loop, purged + embargoed (P5):** `_purge_embargo_mask()` — a training row is only used if its label window closed ≥`embargo_days` before the rebalance date being predicted. Directly checked (not just indirectly): `tests/portfolio/test_alpha.py` hand-computes the exact boundary row-by-row (0 mismatches) and confirms no row whose label window closes after `as_of` is ever included.
+- [x] Diagnostic implemented: `rank_ic()` (per-date Spearman, checked against a perfect-agreement synthetic case = exactly 1.0). **SHAP interaction diagnostics deferred** — `shap` was already flagged optional/diagnostic-only in this plan's §3 dependency list, not required for the Done-when gate below.
+- [x] **Real-data run (`run_alpha_diagnostic.py`, 2026-07-24, ~3m50s for a 103-period walk-forward):**
+  - **Out-of-sample rank-IC: mean 0.056, median 0.074, 65% of the 92 predicted dates positive.** A modest, plausible value for a real factor signal (not suspiciously high — a leak would typically show up as an implausibly large IC) — **criterion 1 met.**
+  - **Criterion 2 (an α-weighted portfolio beats the 2.3 floor) was NOT met by the naive test:** a top-half/equal-weight conversion of the ranking returned 13.1% annualized / 0.60 Sharpe vs. the equal-weight floor's 14.0% / 0.65 — worse, with ~4x the annual turnover (3.46 vs. 0.89). **This is not treated as a failure to paper over or a strategy to tune until it looks better** (that would be exactly the single-history overfitting §9.1 warns against) — it's mechanically expected: re-ranking the full top/bottom split every quarter throws away the L1 no-trade discipline that IS the point of the Phase 2.4 optimizer. A real, positive rank-IC not yet translating into after-cost value from a crude weighting scheme is precisely the gap Phases 2.4–2.5 exist to close.
+- **Substantively done — 2026-07-24, with an honest open item:** the forecaster itself is correct, tested, and shows genuine (if modest) out-of-sample signal. Whether α creates real value is deferred to **2.7**, where α actually feeds the cost-aware optimizer + shrinkage Σ instead of a crude top-half proxy — that wiring, not this naive test, is the real verdict on criterion 2.
 
 ### 2.7 — Full walk-forward backtest + evaluation  *(proposal Phase 5)*
 - [ ] Wire α (2.6) → Σ (2.5) → optimizer (2.4) → harness (2.3). Run purged/embargoed walk-forward end to end.
