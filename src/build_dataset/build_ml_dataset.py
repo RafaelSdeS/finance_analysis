@@ -198,7 +198,7 @@ def main():
     # splice AFTER split repair: each leg is now internally continuous; splicing
     # them together preserves that invariant.
     prices, fundamentals = apply_ticker_continuity(prices, fundamentals)
-    prices       = filter_tickers_with_no_fundamentals(prices, fundamentals)
+    prices, dropped_no_fundamentals = filter_tickers_with_no_fundamentals(prices, fundamentals)
     fundamentals = compute_fundamental_features(fundamentals)
     fundamentals = fill_missing_cagr(fundamentals)
     company_info = load_company_info()
@@ -224,7 +224,7 @@ def main():
     # single read-back for manifest/split_config (unavoidable — both need the
     # full date range / column distributions), now with nothing else resident
     dataset = pd.read_parquet(OUTPUT_PATH)
-    manifest = write_manifest(dataset)
+    manifest = write_manifest(dataset, dropped_no_fundamentals=dropped_no_fundamentals)
     write_split_config(dataset)
     sync_dataset_version(manifest)
 

@@ -95,22 +95,29 @@ def test_merge_applies_filing_lag() -> None:
         "pl": [15.0],
     })
     prices = pd.DataFrame({
-        "ticker": ["A", "A", "A"],
-        "trade_date": [ref_date, available - pd.Timedelta(days=1), available],
-        "close": [100.0, 100.0, 100.0],
+        "ticker": ["A", "A", "A", "A"],
+        "trade_date": [ref_date, available - pd.Timedelta(days=1), available,
+                       available + pd.Timedelta(days=1)],
+        "close": [100.0, 100.0, 100.0, 100.0],
     })
 
     result = merge_prices_and_fundamentals(prices, fundamentals)
 
     assert pd.isna(result.iloc[0]["pl"])          # trade_date == reference_date: not yet filed
     assert pd.isna(result.iloc[1]["pl"])           # one day before the lag elapses: still not filed
-    assert approx(result.iloc[2]["pl"], 15.0)      # lag has elapsed: fundamental now visible
+    # exact filing date itself: not yet visible (allow_exact_matches=False --
+    # a same-day filing can't have been seen before that day's close, 2026-07-23 audit)
+    assert pd.isna(result.iloc[2]["pl"])
+    assert approx(result.iloc[3]["pl"], 15.0)      # the day AFTER filing: now visible
 
 
 def test_merge_honors_actual_filing_date() -> None:
     """When fundamentals carry a real fundamentals_available_date (CVM DT_RECEB),
     merge_asof uses it instead of the statutory fallback — both directions:
-    an early filer is visible before the statutory deadline, a late filer after."""
+    an early filer is visible before the statutory deadline, a late filer after.
+    Visibility starts the day AFTER the filing date, not the filing date itself
+    (allow_exact_matches=False, 2026-07-23 audit: a same-day filing can't have
+    been seen before that day's close)."""
     ref_date = pd.Timestamp("2026-03-31")
     early, late = ref_date + pd.Timedelta(days=20), ref_date + pd.Timedelta(days=200)
 
@@ -121,19 +128,21 @@ def test_merge_honors_actual_filing_date() -> None:
         "pl": [10.0, 20.0],
     })
     prices = pd.DataFrame({
-        "ticker": ["EARLY", "EARLY", "LATE", "LATE"],
-        "trade_date": [early - pd.Timedelta(days=1), early,
-                       ref_date + pd.Timedelta(days=45), late],
-        "close": [100.0, 100.0, 100.0, 100.0],
+        "ticker": ["EARLY", "EARLY", "EARLY", "LATE", "LATE", "LATE"],
+        "trade_date": [early - pd.Timedelta(days=1), early, early + pd.Timedelta(days=1),
+                       ref_date + pd.Timedelta(days=45), late, late + pd.Timedelta(days=1)],
+        "close": [100.0, 100.0, 100.0, 100.0, 100.0, 100.0],
     })
 
     result = merge_prices_and_fundamentals(prices, fundamentals).set_index(
         ["ticker", "trade_date"])
 
     assert pd.isna(result.loc[("EARLY", early - pd.Timedelta(days=1)), "pl"])
-    assert approx(result.loc[("EARLY", early), "pl"], 10.0)   # visible at day 20 < statutory 45
+    assert pd.isna(result.loc[("EARLY", early), "pl"])                          # exact filing date: not yet
+    assert approx(result.loc[("EARLY", early + pd.Timedelta(days=1)), "pl"], 10.0)  # day after: visible, day 21 < statutory 45
     assert pd.isna(result.loc[("LATE", ref_date + pd.Timedelta(days=45)), "pl"])  # statutory day, not yet filed
-    assert approx(result.loc[("LATE", late), "pl"], 20.0)
+    assert pd.isna(result.loc[("LATE", late), "pl"])                            # exact late filing date: not yet
+    assert approx(result.loc[("LATE", late + pd.Timedelta(days=1)), "pl"], 20.0)  # day after: visible
 
 
 def test_merge_macro_aligns_by_date_no_lookahead(tmp_path, monkeypatch) -> None:

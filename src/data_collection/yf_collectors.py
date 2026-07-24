@@ -96,6 +96,72 @@ def _prices_fetch_start(cp: dict, ticker: str, path) -> str:
         if last else config.START_DATE
 
 
+def _bolsai_junction_date(path, fetch_start: str) -> pd.Timestamp | None:
+    """The last BolsAI-sourced row's date immediately preceding a yfinance-era
+    refetch, if `fetch_start` (from _prices_fetch_start) marks the start of
+    the yfinance era -- i.e. there's a BolsAI row on disk right before it.
+    None on a first-ever fetch (no yfinance era exists yet on disk) or when
+    fetch_start isn't actually the yfinance era boundary (a plain
+    incremental fetch with no BolsAI history to reconcile against).
+    """
+    if not path.exists():
+        return None
+    existing = pd.read_parquet(path, columns=["trade_date", "num_trades"])
+    bolsai_rows = existing[existing["num_trades"].notna()]
+    if bolsai_rows.empty:
+        return None
+    junction = bolsai_rows["trade_date"].max()
+    if junction >= pd.Timestamp(fetch_start):
+        return None
+    return junction
+
+
+def _reconcile_yfinance_junction(ticker: str, path, df: pd.DataFrame,
+                                  junction_date: pd.Timestamp | None) -> pd.DataFrame:
+    """Rescale a freshly-fetched yfinance-era batch to match the frozen
+    BolsAI basis at the junction date.
+
+    yfinance's auto_adjust=True recomputes the WHOLE fetched batch's
+    adjustment basis relative to "now" every run (see _prices_fetch_start),
+    but the BolsAI-era rows immediately before the junction stay frozen at
+    whatever basis they were originally collected at. Every dividend paid
+    after that freeze opens a growing, un-reconciled gap right at the
+    junction -- one small discontinuity per --mode update run, forever
+    (2026-07-23 audit finding). Reconciles by an empirical factor from the
+    junction date's own values, same pattern as continuity.py's
+    ADJ_RECONCILE_TOL splice reconciliation -- never rescales the frozen
+    BolsAI side, only the newly-fetched yfinance side.
+
+    `df` must include a row for `junction_date` itself (the caller fetches
+    from that date, not from _prices_fetch_start's date, specifically so
+    this reconciliation has an anchor) -- that row is dropped from the
+    return value regardless, since the junction date's OHLCV belongs to
+    BolsAI on disk and must not be overwritten by _merge_save's dedup.
+    """
+    if junction_date is None or df.empty:
+        return df
+    if junction_date not in set(df["trade_date"]):
+        return df  # fetch didn't return the junction row (holiday/gap) -- nothing to anchor on
+
+    existing = pd.read_parquet(path, columns=["trade_date", "num_trades", "adj_close"])
+    bolsai_junction = existing[(existing["trade_date"] == junction_date) & existing["num_trades"].notna()]
+    yf_junction = df.loc[df["trade_date"] == junction_date, "adj_close"]
+
+    if not bolsai_junction.empty and len(yf_junction):
+        bolsai_adj = bolsai_junction["adj_close"].iloc[0]
+        yf_adj = yf_junction.iloc[0]
+        if pd.notna(bolsai_adj) and pd.notna(yf_adj) and yf_adj != 0:
+            factor = bolsai_adj / yf_adj
+            if abs(factor - 1.0) > 1e-9:
+                for col in ("adj_open", "adj_high", "adj_low", "adj_close"):
+                    df[col] = df[col] * factor
+                log.info("prices %s: reconciled yfinance-era adj_* to frozen BolsAI "
+                          "junction basis at %s (factor=%.6f)",
+                          ticker, junction_date.date(), factor)
+
+    return df[df["trade_date"] != junction_date].reset_index(drop=True)
+
+
 def _repair_nonpositive_ohlc(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
     """Collapse rows with a non-positive Open/High/Low to their Close.
 
@@ -179,10 +245,19 @@ def collect_prices_yf(tickers: list[str], mode: str):
         try:
             path = config.PRICES_DIR / f"{ticker}.parquet"
             fetch_start = _prices_fetch_start(cp, ticker, path)
+            # Fetch from the BolsAI junction date itself (one row earlier than
+            # fetch_start) when one exists, so _reconcile_yfinance_junction
+            # has an anchor row to compute the reconciliation factor from.
+            junction_date = _bolsai_junction_date(path, fetch_start)
+            actual_fetch_start = str(junction_date.date()) if junction_date is not None else fetch_start
 
-            df = _fetch_and_shape_prices(ticker, fetch_start)
+            df = _fetch_and_shape_prices(ticker, actual_fetch_start)
             if df is None:
                 log.info("prices %s: no new rows (delisted/renamed/no yfinance coverage?)", ticker)
+                continue
+            df = _reconcile_yfinance_junction(ticker, path, df, junction_date)
+            if df.empty:
+                log.info("prices %s: no new rows past the reconciled junction", ticker)
                 continue
 
             saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"prices/{ticker}")
@@ -522,6 +597,58 @@ def _demo():
         mixed.to_parquet(path)
         assert _prices_fetch_start({}, "TEST3", path) == "2026-01-03"
     print("_prices_fetch_start: OK")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "JUNC3.parquet"
+
+        # No file on disk: no junction to reconcile against.
+        assert _bolsai_junction_date(path, "2026-01-03") is None
+
+        # BolsAI era only (last row 2026-01-02), fetch_start is the day after --
+        # this IS the yfinance-era boundary: junction = 2026-01-02.
+        bolsai_only = pd.DataFrame({
+            "trade_date": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "num_trades": [100.0, 120.0], "adj_close": [10.0, 10.5],
+        })
+        bolsai_only.to_parquet(path)
+        junction = _bolsai_junction_date(path, "2026-01-03")
+        assert junction == pd.Timestamp("2026-01-02")
+
+        # fetch_start earlier than or equal to the last BolsAI row: NOT a
+        # yfinance-era boundary (e.g. a plain incremental fetch mid-BolsAI-era) --
+        # no reconciliation anchor.
+        assert _bolsai_junction_date(path, "2026-01-02") is None
+        assert _bolsai_junction_date(path, "2026-01-01") is None
+    print("_bolsai_junction_date: OK")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "RECON3.parquet"
+        junction_date = pd.Timestamp("2026-01-02")
+        bolsai_only = pd.DataFrame({
+            "trade_date": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "num_trades": [100.0, 120.0], "adj_close": [10.0, 10.5],
+        })
+        bolsai_only.to_parquet(path)
+
+        # Fetched batch includes the junction row (2026-01-02, adj_close=10.0
+        # per yfinance's OWN fresh basis) plus one new day past it. yfinance's
+        # implied adj_close at the junction (10.0) disagrees with BolsAI's
+        # frozen value (10.5) -- factor = 10.5/10.0 = 1.05, must rescale
+        # EVERY row (including the new day) by it, then drop the junction row.
+        fetched = pd.DataFrame({
+            "trade_date": pd.to_datetime(["2026-01-02", "2026-01-05"]),
+            "adj_open": [9.9, 10.6], "adj_high": [10.1, 10.8],
+            "adj_low": [9.8, 10.5], "adj_close": [10.0, 10.7],
+        })
+        result = _reconcile_yfinance_junction("RECON3", path, fetched.copy(), junction_date)
+
+        assert list(result["trade_date"]) == [pd.Timestamp("2026-01-05")]  # junction row dropped
+        assert abs(result.iloc[0]["adj_close"] - 10.7 * 1.05) < 1e-9
+
+        # No junction_date (first-ever fetch, e.g.) -> no-op, nothing dropped/rescaled.
+        untouched = _reconcile_yfinance_junction("RECON3", path, fetched.copy(), None)
+        pd.testing.assert_frame_equal(untouched, fetched)
+    print("_reconcile_yfinance_junction: OK")
 
     raw = pd.DataFrame({
         "Open": [10.0, 0.0, 5.0], "High": [11.0, 6.0, 5.5],

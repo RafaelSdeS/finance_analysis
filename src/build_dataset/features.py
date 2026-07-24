@@ -240,8 +240,15 @@ def compute_price_features(df):
         # Amihud illiquidity: price impact per unit of currency traded -- a
         # liquidity measure, distinct from volume_ratio_20d (which only asks
         # whether today's volume is unusual for this ticker, not how much
-        # price moves per unit traded).
-        g["amihud_illiquidity"] = g["log_return"].abs() / (g["volume"] * g["adj_close"])
+        # price moves per unit traded). traded_amount (raw currency volume,
+        # already on-disk), not volume*adj_close: adj_close is discounted
+        # backward by every dividend/split since, understating true traded
+        # currency the further back in history a row sits and inflating
+        # Amihud with a secular drift unrelated to actual liquidity
+        # (2026-07-23 audit). traded_amount needs no split/merger rescaling
+        # either -- dollar volume is invariant to both (same currency changes
+        # hands regardless of how many shares or what price it's split into).
+        g["amihud_illiquidity"] = g["log_return"].abs() / g["traded_amount"]
         g["return_1m"]      = g["log_return"].rolling(21).sum()
         g["return_3m"]      = g["log_return"].rolling(63).sum()
         g["return_6m"]      = g["log_return"].rolling(126).sum()
@@ -255,6 +262,28 @@ def compute_price_features(df):
 # =============================================================================
 # FUNDAMENTAL FEATURES
 # =============================================================================
+
+# pct_change(4)/diff(1)/shift(4) below index by ROW POSITION, not calendar
+# time -- correct only when fundamentals rows are perfectly contiguous
+# quarters. A vendor-missing quarter (a real, if uncommon, gap -- see
+# quality_filters.filter_excessive_filing_lag's own rows-dropped note) leaves
+# the row count unchanged but silently stretches "4 quarters back" to 15+
+# months, mislabeling a much longer window as YoY/QoQ (2026-07-23 audit).
+# These bounds bracket normal quarterly spacing (real quarter-ends run
+# 89-92 days apart) with margin, while a single skipped quarter (~180d+ for
+# QoQ, ~456d+ for a 4-quarter YoY window) falls clearly outside them.
+QOQ_GAP_DAYS = (60, 120)     # ~1 real quarter apart
+YOY_GAP_DAYS = (300, 400)    # ~4 real contiguous quarters (1 year) apart
+
+
+def _within_calendar_gap(dates: pd.Series, lookback: int, lo_days: int, hi_days: int) -> pd.Series:
+    """True where the row `lookback` ROWS back is also `lookback` real
+    quarters back in CALENDAR time (between lo_days and hi_days apart) --
+    i.e. genuinely contiguous quarters, not `lookback` rows with one or more
+    quarters missing between them."""
+    gap = (dates - dates.shift(lookback)).dt.days
+    return gap.between(lo_days, hi_days)
+
 
 def compute_fundamental_features(df):
     """Called on the fundamentals DataFrame BEFORE the asof merge."""
@@ -283,28 +312,38 @@ def compute_fundamental_features(df):
         g["working_capital_ratio"] = (g["current_assets"] - g["current_liabilities"]) / g["total_assets"]
 
         # YoY growth (4 quarters back)
-        g["revenue_growth_yoy"]       = g["net_revenue"].pct_change(4, fill_method=None)
-        g["earnings_growth_yoy"]      = g["net_income"].pct_change(4, fill_method=None)
-        g["ebitda_growth_yoy"]        = g["ebitda"].pct_change(4, fill_method=None)
-        g["total_assets_growth_yoy"]  = g["total_assets"].pct_change(4, fill_method=None)
-        g["total_debt_growth_yoy"]    = g["total_debt"].pct_change(4, fill_method=None)
+        yoy_ok = _within_calendar_gap(g["reference_date"], 4, *YOY_GAP_DAYS)
+        g["revenue_growth_yoy"]       = g["net_revenue"].pct_change(4, fill_method=None).where(yoy_ok)
+        g["earnings_growth_yoy"]      = g["net_income"].pct_change(4, fill_method=None).where(yoy_ok)
+        g["ebitda_growth_yoy"]        = g["ebitda"].pct_change(4, fill_method=None).where(yoy_ok)
+        g["total_assets_growth_yoy"]  = g["total_assets"].pct_change(4, fill_method=None).where(yoy_ok)
+        g["total_debt_growth_yoy"]    = g["total_debt"].pct_change(4, fill_method=None).where(yoy_ok)
 
         # QoQ trend (sequential quarter diff)
-        g["gross_margin_qoq"]  = g["gross_margin"].diff(1)
-        g["net_margin_qoq"]    = g["net_margin"].diff(1)
-        g["roe_qoq"]           = g["roe"].diff(1)
-        g["debt_equity_qoq"]   = g["debt_equity"].diff(1)
-        g["current_ratio_qoq"] = g["current_ratio"].diff(1)
+        qoq_ok = _within_calendar_gap(g["reference_date"], 1, *QOQ_GAP_DAYS)
+        g["gross_margin_qoq"]  = g["gross_margin"].diff(1).where(qoq_ok)
+        g["net_margin_qoq"]    = g["net_margin"].diff(1).where(qoq_ok)
+        g["roe_qoq"]           = g["roe"].diff(1).where(qoq_ok)
+        g["debt_equity_qoq"]   = g["debt_equity"].diff(1).where(qoq_ok)
+        g["current_ratio_qoq"] = g["current_ratio"].diff(1).where(qoq_ok)
 
-        # Partial Piotroski F-Score (5-point; omits cash-flow components we lack)
-        g["f_roa_positive"]        = (g["roa"] > 0).astype(int)
-        g["f_roa_improving"]       = (g["roa"] > g["roa"].shift(4)).astype(int)
-        g["f_margin_improving"]    = (g["gross_margin"] > g["gross_margin"].shift(4)).astype(int)
-        g["f_leverage_decreasing"] = (g["debt_equity"] < g["debt_equity"].shift(4)).astype(int)
-        g["f_liquidity_improving"] = (g["current_ratio"] > g["current_ratio"].shift(4)).astype(int)
+        # Partial Piotroski F-Score (5-point; omits cash-flow components we lack).
+        # The 4 *_improving/*_decreasing components compare against shift(4)
+        # (same window as YoY above) -- guarded the same way, but as a
+        # boolean comparison rather than a diff, so the guard NaNs the
+        # comparison result directly (float, not the plain int the unguarded
+        # version used, to hold NaN) rather than masking an intermediate series.
+        g["f_roa_positive"]        = (g["roa"] > 0).astype(float)
+        g["f_roa_improving"]       = (g["roa"] > g["roa"].shift(4)).where(yoy_ok).astype(float)
+        g["f_margin_improving"]    = (g["gross_margin"] > g["gross_margin"].shift(4)).where(yoy_ok).astype(float)
+        g["f_leverage_decreasing"] = (g["debt_equity"] < g["debt_equity"].shift(4)).where(yoy_ok).astype(float)
+        g["f_liquidity_improving"] = (g["current_ratio"] > g["current_ratio"].shift(4)).where(yoy_ok).astype(float)
         f_cols = ["f_roa_positive", "f_roa_improving", "f_margin_improving",
                   "f_leverage_decreasing", "f_liquidity_improving"]
-        g["f_score"] = g[f_cols].sum(axis=1)
+        # skipna=False: a Piotroski-style composite score with an undefined
+        # component (post-gap-guard NaN) is itself undefined, not a partial
+        # score silently missing a fifth of its weight.
+        g["f_score"] = g[f_cols].sum(axis=1, skipna=False)
 
         result.append(g)
 
@@ -416,6 +455,12 @@ def recompute_valuation_daily(df):
 # ADVANCED CONTEXTUAL FEATURES (for conservative long-term allocation)
 # =============================================================================
 
+# Floor for the rolling-percentile features below (~1 trading quarter) --
+# matches cross_sectional.BETA_MIN_PERIODS's convention for "enough history
+# to not be a noisy/degenerate estimate."
+PERCENTILE_MIN_PERIODS = 60
+
+
 def _safe_ratio(numerator, denominator, min_abs=1e-6):
     """numerator / denominator, NaN where |denominator| isn't meaningfully
     away from zero. Replaces the `x / (y + 1e-8)` pattern: that guard avoids
@@ -490,19 +535,28 @@ def compute_advanced_features(df):
         # ponytail: NaNs are excluded from the window count here (old lambda counted them)
         window_252 = 252 * 5  # 5 years
 
+        # min_periods floor (not 1): a percentile ranked against a 1-3 row
+        # window is trivially 100th-percentile and carries no real
+        # information -- every OTHER rolling feature in this pipeline (beta,
+        # volatility, zhist) leaves a NaN warm-up until its window has enough
+        # history to mean something; these percentiles were the one
+        # exception, silently emitting degenerate 1.0s for young listings'
+        # earliest rows (2026-07-23 audit). PERCENTILE_MIN_PERIODS matches
+        # cross_sectional.BETA_MIN_PERIODS's ~1-quarter convention.
+
         # Volatility percentile: where is current vol vs this stock's history?
         # Rolling (not a plain .rank()) so row i only sees rows <= i — a plain
         # rank() here would rank against the ticker's *future* volatility too.
         g["volatility_20d_percentile"] = g["volatility_20d"].rolling(
-            window=window_252, min_periods=1
+            window=window_252, min_periods=PERCENTILE_MIN_PERIODS
         ).rank(method="max", pct=True)
         g["volatility_60d_percentile"] = g["volatility_60d"].rolling(
-            window=window_252, min_periods=1
+            window=window_252, min_periods=PERCENTILE_MIN_PERIODS
         ).rank(method="max", pct=True)
 
         # Price percentile: is price high/low vs own history (last 5 years)?
         g["price_percentile_5y"] = g["adj_close"].rolling(
-            window=window_252, min_periods=1
+            window=window_252, min_periods=PERCENTILE_MIN_PERIODS
         ).rank(method="max", pct=True)
 
         # 1-year version: the standard "52-week high/low" framing, a distinct
@@ -510,17 +564,17 @@ def compute_advanced_features(df):
         # change that 5 years of history would dilute. Same window as
         # drawdown_percentile below, for consistency.
         g["price_percentile_1y"] = g["adj_close"].rolling(
-            window=252, min_periods=1
+            window=252, min_periods=PERCENTILE_MIN_PERIODS
         ).rank(method="max", pct=True)
 
         # P/L (P/E) percentile within stock's history
         g["pl_percentile_5y"] = g["pl"].rolling(
-            window=window_252, min_periods=1
+            window=window_252, min_periods=PERCENTILE_MIN_PERIODS
         ).rank(method="max", pct=True)
 
         # Drawdown percentile: how deep is current drawdown vs historical?
         g["drawdown_percentile"] = g["drawdown"].rolling(
-            window=252, min_periods=1
+            window=252, min_periods=PERCENTILE_MIN_PERIODS
         ).rank(method="max", pct=True)
 
         result.append(g)

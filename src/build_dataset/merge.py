@@ -58,6 +58,11 @@ def merge_prices_and_fundamentals(prices, fundamentals):
 
         # merge_asof: uses the most recent fundamental whose filing date has
         # already passed as of each trade_date (no lookahead bias).
+        # allow_exact_matches=False: a filing received ON trade_date T is not
+        # visible to T's own close -- CVM's DT_RECEB (and the statutory
+        # fallback) is date-granular with no intraday timestamp (confirmed:
+        # zero non-midnight receipts), and companies routinely file after the
+        # session closes. Visibility starts T+1, not T itself (2026-07-23 audit).
         merged = pd.merge_asof(
             p,
             f,
@@ -65,6 +70,7 @@ def merge_prices_and_fundamentals(prices, fundamentals):
             right_on="fundamentals_available_date",
             by="ticker",
             direction="backward",
+            allow_exact_matches=False,
         )
 
         # Replace close_price with actual price at fundamentals_available_date

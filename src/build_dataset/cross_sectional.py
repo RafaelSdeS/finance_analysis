@@ -28,6 +28,18 @@ BETA_WINDOW = 252
 BETA_MIN_PERIODS = 60
 
 
+def _exclude_self_mean(df, group_col, value_col, group_size):
+    """Equal-weighted mean of value_col within each group_col group, EXCLUDING
+    the row's own value -- (group_sum - x) / (n - 1). A plain groupby(...).mean()
+    (the previous convention here) is self-inclusive: a ticker's own return
+    pulls its own "market"/"sector" reference toward itself, artificially
+    shrinking every momentum/beta figure -- materially so on thin dates with
+    few tickers (2026-07-23 audit). NaN when there's no other member to
+    compare against (n <= 1), not a division by zero."""
+    total = df.groupby(group_col)[value_col].transform("sum")
+    return ((total - df[value_col]) / (group_size - 1)).where(group_size > 1)
+
+
 def compute_cross_sectional_features(df):
     """Sector/market-relative features: how does this stock compare to every
     OTHER stock trading on the same date. Must run on the full dataset in one
@@ -35,6 +47,19 @@ def compute_cross_sectional_features(df):
     compares each stock against whichever handful of tickers landed in its
     batch instead of the true market/sector, corrupting every one of these
     columns.
+
+    "Market" here means the equal-weighted mean return of every OTHER ticker
+    in the dataset's current universe on that date -- not a true cap-weighted
+    index. BOVA11 (the collected IBOV-proxy benchmark) is excluded from the
+    dataset entirely upstream (quality_filters.filter_tickers_with_no_fundamentals
+    drops it, having no fundamentals) and is not wired in here; routing it
+    through as an actual index benchmark was considered (2026-07-23 audit,
+    Issue 12) and deliberately deferred -- it changes the dataset's row/ticker
+    shape (manifest fingerprinting, dataset_v{N} versioning, any downstream
+    code iterating "all tickers" expecting only operating companies) and
+    redefines beta_1y/momentum_vs_market_* semantically, which is a bigger
+    design decision than a bug fix. What WAS fixed here is the self-inclusion
+    bug below -- a real correctness issue independent of that larger question.
     """
 
     print()
@@ -65,15 +90,17 @@ def compute_cross_sectional_features(df):
     # --- MOMENTUM DECOMPOSITION (stock vs sector vs market) ---
 
     # ponytail: use groupby.transform() for vectorized momentum (1000x faster than loops)
-    # Market momentum: subtract market mean (per date) from each return
+    # Market momentum: subtract the mean return of every OTHER ticker (per
+    # date) from each return -- self-EXCLUDED, see _exclude_self_mean.
+    market_size = df.groupby("trade_date")["ticker"].transform("size")
     df["momentum_vs_market_1m"] = (
-        df["return_1m"] - df.groupby("trade_date")["return_1m"].transform("mean")
+        df["return_1m"] - _exclude_self_mean(df, "trade_date", "return_1m", market_size)
     )
     df["momentum_vs_market_3m"] = (
-        df["return_3m"] - df.groupby("trade_date")["return_3m"].transform("mean")
+        df["return_3m"] - _exclude_self_mean(df, "trade_date", "return_3m", market_size)
     )
     df["momentum_vs_market_12m"] = (
-        df["return_12m"] - df.groupby("trade_date")["return_12m"].transform("mean")
+        df["return_12m"] - _exclude_self_mean(df, "trade_date", "return_12m", market_size)
     )
 
     # Sector momentum: subtract sector mean (per date, sector) from each return
@@ -92,13 +119,16 @@ def compute_cross_sectional_features(df):
 
     # --- ROLLING BETA VS MARKET ---
 
-    # Market return: equal-weighted mean log_return across the full universe,
-    # per date. This reuses the same full-universe requirement as the
-    # momentum/zscore features above, but beta then needs a per-ticker
-    # rolling window over TIME (not a same-date snapshot), so unlike
-    # everything above it can't stay a single groupby(date).transform() —
-    # needs one groupby("ticker") pass, same shape as compute_price_features.
-    market_log_return = df.groupby("trade_date")["log_return"].transform("mean")
+    # Market return: equal-weighted mean log_return of every OTHER ticker in
+    # the full universe, per date -- self-EXCLUDED (see _exclude_self_mean;
+    # a ticker's own return previously pulled its own benchmark toward
+    # itself, artificially shrinking its measured beta). Reuses the same
+    # full-universe requirement as the momentum/zscore features above, but
+    # beta then needs a per-ticker rolling window over TIME (not a same-date
+    # snapshot), so unlike everything above it can't stay a single
+    # groupby(date).transform() -- needs one groupby("ticker") pass, same
+    # shape as compute_price_features.
+    market_log_return = _exclude_self_mean(df, "trade_date", "log_return", market_size)
 
     result = []
     for ticker, g in df.groupby("ticker", sort=False):

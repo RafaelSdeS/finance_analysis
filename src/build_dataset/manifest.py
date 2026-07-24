@@ -29,17 +29,37 @@ from .paths import OUTPUT_PATH, ROOT, SCALER_DIR, SPLIT_CONFIG_PATH
 # CLAUDE.md) and is deliberately NOT included here.
 LOOKAHEAD_TAINTED_COLS = ["status"]
 
+# Raw macro columns carry heterogeneous units by construction (BCB's own SGS
+# series definitions -- see data_collection/config.py's BCB_SERIES comment).
+# A unit mismatch here previously produced a Critical audit finding (real_return/
+# excess_return silently treated a daily rate as annual); recorded here so a
+# future consumer reading this column directly doesn't repeat it.
+COLUMN_UNITS = {
+    "selic": "percent per trading day (e.g. 0.0534 = 0.0534%/day)",
+    "cdi": "percent per trading day (e.g. 0.0534 = 0.0534%/day)",
+    "ipca": "percent per calendar month (e.g. 0.62 = 0.62% for that month)",
+}
+
 
 # =============================================================================
 # BUILD MANIFEST
 # =============================================================================
 
-def write_manifest(dataset):
+def write_manifest(dataset, dropped_no_fundamentals=None):
     """Reproducibility record + per-column distribution snapshot, one per build.
 
     Written next to the parquet as ml_dataset.manifest.json. Comparing two
     manifests (e.g. before/after a code change) surfaces silent distribution
     drift that passes every schema check.
+
+    dropped_no_fundamentals: quality_filters.filter_tickers_with_no_fundamentals's
+    dropped_report, threaded through from main() -- records every ticker
+    excluded for zero fundamental coverage and why, so this source of
+    universe/survivorship bias is queryable from the manifest instead of only
+    existing as stdout log lines (2026-07-23 audit finding). Optional (None ->
+    recorded as an explicit "not tracked" marker) so callers that build a
+    dataset without running the real Stage 2 filter pipeline (most tests)
+    don't need to fabricate one.
     """
     try:
         commit = subprocess.run(
@@ -64,6 +84,8 @@ def write_manifest(dataset):
         "date_max": str(dataset["trade_date"].max().date()),
         "columns": list(dataset.columns),
         "lookahead_tainted_columns": [c for c in LOOKAHEAD_TAINTED_COLS if c in dataset.columns],
+        "column_units": {c: u for c, u in COLUMN_UNITS.items() if c in dataset.columns},
+        "dropped_no_fundamentals": dropped_no_fundamentals if dropped_no_fundamentals is not None else "not tracked",
         "column_stats": {
             c: {
                 "nan_pct": round(float(numeric[c].isna().mean()) * 100, 2),

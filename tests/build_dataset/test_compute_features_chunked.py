@@ -59,7 +59,7 @@ def _chunked_pipeline_fixture(n_days: int = 260) -> tuple[pd.DataFrame, pd.DataF
                 "ticker": t, "sector": sectors[t],
                 "trade_date": d, "reference_date": dates[0], "fundamentals_available_date": dates[0],
                 "adj_close": price, "adj_high": price * 1.01, "adj_low": price * 0.99,
-                "adj_open": price, "volume": 1_000_000.0,
+                "adj_open": price, "volume": 1_000_000.0, "traded_amount": 100_000_000.0,
                 "close": 100.0, "close_price": 100.0,
                 "market_cap": 1000.0, "net_debt": 100.0,
                 "pl": pl[t], "pvp": pvp[t], "roe": roe[t], "debt_equity": debt_equity[t],

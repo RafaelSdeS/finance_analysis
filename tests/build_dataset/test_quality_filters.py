@@ -50,11 +50,14 @@ def test_filter_tickers_with_no_fundamentals() -> None:
         "reference_date": pd.to_datetime(["2026-03-31", "2026-03-31"]),
     })
 
-    result = qf.filter_tickers_with_no_fundamentals(prices, fundamentals)
+    result, dropped = qf.filter_tickers_with_no_fundamentals(prices, fundamentals)
 
     assert set(result["ticker"].unique()) == {"GOOD"}, (
         "WDCN3 quarantined, NOFUND has no fundamentals, SHORT has <MIN_PRICE_ROWS rows"
     )
+    assert dropped["quarantined"] == {"WDCN3": qf.QUARANTINED_TICKERS["WDCN3"]}
+    assert dropped["gap_unexplained"] == ["NOFUND"]
+    assert dropped["too_short_history"] == ["SHORT"]
 
 
 def test_filter_tickers_with_no_fundamentals_classifies_exclusions(capsys) -> None:
@@ -80,7 +83,7 @@ def test_filter_tickers_with_no_fundamentals_classifies_exclusions(capsys) -> No
         "reference_date": pd.to_datetime(["2026-03-31"]),
     })
 
-    result = qf.filter_tickers_with_no_fundamentals(prices, fundamentals)
+    result, dropped = qf.filter_tickers_with_no_fundamentals(prices, fundamentals)
     out = capsys.readouterr().out
 
     assert set(result["ticker"].unique()) == {"GOOD"}
@@ -88,6 +91,13 @@ def test_filter_tickers_with_no_fundamentals_classifies_exclusions(capsys) -> No
     assert "delisted/renamed" in out and "['DEAD3']" in out
     assert "redundant" in out and "GOOD4 -> GOOD" in out
     assert "⚠ GAP" in out and "['GAP3']" in out
+
+    # same classification, now queryable programmatically (not just stdout)
+    # -- the whole point of the dropped_report return value (2026-07-23 audit)
+    assert dropped["known_non_company"] == {"BOVA11": qf.KNOWN_NO_FUNDAMENTALS["BOVA11"]}
+    assert dropped["delisted_stale"] == ["DEAD3"]
+    assert dropped["redundant_sibling"] == {"GOOD4": "GOOD"}
+    assert dropped["gap_unexplained"] == ["GAP3"]
 
 
 def test_attach_filing_dates_uses_real_cvm_date(tmp_path, monkeypatch) -> None:

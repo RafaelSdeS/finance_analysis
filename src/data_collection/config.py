@@ -41,7 +41,16 @@ PROTOTYPE_TICKERS = ["PETR4", "VALE3", "WEGE3"]
 BENCHMARK_TICKERS = ["BOVA11"]  # iShares Bovespa ETF (IBOV index proxy)
 
 # --- BCB macro series IDs (confirmed against existing data units) ---
-# selic=11 (daily rate ~0.0534), NOT 432 (annual meta target 14.50); cdi=12; ipca=433
+# selic=11, NOT 432 (annual meta target 14.50); cdi=12; ipca=433.
+#
+# Units (heterogeneous -- confirmed once here so it isn't re-derived or
+# mis-assumed downstream; a unit mismatch here previously produced a Critical
+# audit finding, see docs/PIPELINE_FORENSIC_AUDIT_2026-07-23.md Issue 1):
+#   selic, cdi: DAILY rate, in percent (e.g. 0.0534 means 0.0534%/day).
+#   ipca:       MONTHLY rate, in percent (e.g. 0.62 means 0.62% for that month).
+# Consumers converting to decimal/log-return terms: build_dataset/features.py
+# (compute_macro_features, earnings_yield_vs_selic) and
+# build_dataset/merge.py (merge_macro's selic_trend_20d, IPCA_PUBLICATION_LAG_DAYS).
 BCB_SERIES = {"selic": 11, "cdi": 12, "ipca": 433}
 
 # --- Collection limits ---

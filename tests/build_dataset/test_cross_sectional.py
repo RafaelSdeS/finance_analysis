@@ -127,21 +127,31 @@ def test_cross_sectional_values_hand_computed_multi_peer() -> None:
     assert approx(result.loc["T4", "div_yield_sector_percentile"], 0.5)   # sector Y: T4 (0.01) lower
     assert approx(result.loc["T3", "div_yield_sector_percentile"], 1.0)
 
-    # momentum vs market: subtract the mean return_1m across ALL 4 tickers (0.02)
-    market_mean_1m = (0.02 + 0.04 - 0.01 + 0.03) / 4
-    assert approx(result.loc["T1", "momentum_vs_market_1m"], 0.02 - market_mean_1m)
-    assert approx(result.loc["T3", "momentum_vs_market_1m"], -0.01 - market_mean_1m)
+    # momentum vs market: subtract the mean return_1m of the OTHER 3 tickers
+    # (self-excluded, 2026-07-23 fix -- a ticker's own return no longer pulls
+    # its own benchmark toward itself). (total - self) / (n - 1).
+    total_1m = 0.02 + 0.04 - 0.01 + 0.03
+    market_mean_1m_excl_t1 = (total_1m - 0.02) / 3
+    market_mean_1m_excl_t3 = (total_1m - (-0.01)) / 3
+    assert approx(result.loc["T1", "momentum_vs_market_1m"], 0.02 - market_mean_1m_excl_t1)
+    assert approx(result.loc["T3", "momentum_vs_market_1m"], -0.01 - market_mean_1m_excl_t3)
 
-    # momentum vs sector: subtract the mean within the 2-ticker sector only
+    # momentum vs sector: subtract the mean within the 2-ticker sector only.
+    # Unchanged by the self-exclusion fix -- only momentum_vs_MARKET/beta_1y
+    # were flagged as self-inclusive (2026-07-23 audit); sector momentum's
+    # self-inclusive mean matches this codebase's z-score convention
+    # elsewhere (a stock's sector stat includes itself, standard semantics)
+    # and wasn't part of that finding.
     sector_x_mean_1m = (0.02 + 0.04) / 2
     sector_y_mean_1m = (-0.01 + 0.03) / 2
     assert approx(result.loc["T1", "momentum_vs_sector_1m"], 0.02 - sector_x_mean_1m)
     assert approx(result.loc["T4", "momentum_vs_sector_1m"], 0.03 - sector_y_mean_1m)
 
     # return_3m uses independent values -> proves the 1m/3m/12m columns aren't aliased
-    market_mean_3m = (0.05 + 0.09 - 0.02 + 0.06) / 4
+    total_3m = 0.05 + 0.09 - 0.02 + 0.06
+    market_mean_3m_excl_t2 = (total_3m - 0.09) / 3
     sector_x_mean_3m = (0.05 + 0.09) / 2
-    assert approx(result.loc["T2", "momentum_vs_market_3m"], 0.09 - market_mean_3m)
+    assert approx(result.loc["T2", "momentum_vs_market_3m"], 0.09 - market_mean_3m_excl_t2)
     assert approx(result.loc["T2", "momentum_vs_sector_3m"], 0.09 - sector_x_mean_3m)
 
 
@@ -169,19 +179,24 @@ def _beta_fixture(n_days: int = 80, seed: int = 0):
 
 def test_beta_vs_market_matches_direct_computation() -> None:
     """beta_1y = rolling_cov(ticker_return, market_return) / rolling_var(market_return),
-    market_return = mean log_return across the full universe per date (same
-    self-inclusive convention already used by momentum_vs_market_*). Checked
-    against an independently-built reference market series and pandas
-    rolling cov/var call -- not the same code path as the per-ticker
-    groupby/index-alignment loop in the implementation, so this catches
-    misalignment/windowing bugs a purely-internal check couldn't."""
+    market_return = mean log_return of the OTHER tickers in the full universe
+    per date -- self-EXCLUDED (2026-07-23 fix: a ticker's own return
+    previously pulled its own benchmark toward itself, artificially shrinking
+    its measured beta). With 3 tickers, ticker A's market series is the mean
+    of B and C only (a DIFFERENT series per ticker), not one shared market
+    series across all three. Checked against an independently-built reference
+    market series and pandas rolling cov/var call -- not the same code path
+    as the per-ticker groupby/index-alignment loop in the implementation, so
+    this catches misalignment/windowing bugs a purely-internal check couldn't."""
     df, returns, dates = _beta_fixture()
 
     result = compute_cross_sectional_features(df)
 
-    market = (pd.Series(returns["A"]) + pd.Series(returns["B"]) + pd.Series(returns["C"])) / 3
+    others = {"A": ("B", "C"), "B": ("A", "C"), "C": ("A", "B")}
     for t in ("A", "B", "C"):
         s = pd.Series(returns[t])
+        o1, o2 = others[t]
+        market = (pd.Series(returns[o1]) + pd.Series(returns[o2])) / 2
         expected = (
             s.rolling(252, min_periods=60).cov(market)
             / market.rolling(252, min_periods=60).var()

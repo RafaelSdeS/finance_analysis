@@ -90,6 +90,13 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
     Sparse fundamentals (e.g. PETR4 only goes back to 2010) are fine —
     the model handles NaNs in early rows. Zero fundamentals means we have
     no quality signal at all, which is not acceptable for this agent.
+
+    Returns (prices, dropped_report): dropped_report is a structured record
+    of every excluded ticker and why, threaded through to write_manifest()
+    so this source of universe/survivorship bias is queryable from the build
+    manifest instead of only ever existing as stdout log lines (2026-07-23
+    audit finding -- dropped tickers, esp. delisted/failed companies with no
+    fundamentals coverage, are exactly the survivorship-relevant ones).
     """
 
     print()
@@ -97,9 +104,15 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
     print("FUNDAMENTAL COVERAGE CHECK")
     print("=" * 80)
 
+    dropped_report = {
+        "quarantined": {}, "known_non_company": {}, "delisted_stale": [],
+        "redundant_sibling": {}, "gap_unexplained": [], "too_short_history": [],
+    }
+
     quarantined = set(QUARANTINED_TICKERS) & set(prices["ticker"].unique())
     for t in sorted(quarantined):
         print(f"QUARANTINED {t}: {QUARANTINED_TICKERS[t]}")
+        dropped_report["quarantined"][t] = QUARANTINED_TICKERS[t]
     prices = prices[~prices["ticker"].isin(quarantined)]
 
     tickers_with_prices = set(prices["ticker"].unique())
@@ -130,16 +143,20 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
             print(f"  known non-company ({len(known)}):")
             for t in known:
                 print(f"    {t}: {KNOWN_NO_FUNDAMENTALS[t]}")
+                dropped_report["known_non_company"][t] = KNOWN_NO_FUNDAMENTALS[t]
         if dead:
             print(f"  delisted/renamed, last traded >{STALE_TICKER_DAYS}d before dataset end "
                   f"({len(dead)}): {dead}")
+            dropped_report["delisted_stale"] = dead
         if redundant:
             print(f"  redundant, company already covered via sibling ticker ({len(redundant)}):")
             for t, sib in redundant:
                 print(f"    {t} -> {sib}")
+                dropped_report["redundant_sibling"][t] = sib
         if gap:
             print(f"  ⚠ GAP — recent price data but zero fundamentals anywhere, "
                   f"needs investigation ({len(gap)}): {gap}")
+            dropped_report["gap_unexplained"] = gap
         prices = prices[prices["ticker"].isin(covered)]
 
     # Drop tickers with almost no price history — nothing to learn from them
@@ -149,11 +166,12 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
         print(f"EXCLUDED (< {MIN_PRICE_ROWS} price rows): {sorted(too_short)}")
         prices = prices[~prices["ticker"].isin(too_short)]
         covered -= too_short
+        dropped_report["too_short_history"] = sorted(too_short)
 
     print(f"Tickers retained: {sorted(covered)}")
     print(f"Price rows after filter: {len(prices)}")
 
-    return prices
+    return prices, dropped_report
 
 
 # `reference_date` from BolsAI is the fiscal quarter-end, not the real filing/

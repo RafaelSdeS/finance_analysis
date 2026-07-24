@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-write_manifest's lookahead_tainted_columns field.
+write_manifest's lookahead_tainted_columns and column_units fields.
 
 Run from project root: python tests/build_dataset/test_manifest.py
 or: pytest tests/build_dataset/test_manifest.py -v
@@ -51,6 +51,76 @@ def test_manifest_lookahead_tainted_columns_empty_when_absent(tmp_path, monkeypa
     manifest = bmd.write_manifest(dataset)
 
     assert manifest["lookahead_tainted_columns"] == []
+
+
+def test_manifest_records_dropped_no_fundamentals_when_provided(tmp_path, monkeypatch) -> None:
+    """quality_filters.filter_tickers_with_no_fundamentals's dropped_report
+    must be threaded into the manifest so this source of universe/
+    survivorship bias is queryable, not just printed to a build log that
+    gets thrown away (2026-07-23 audit finding)."""
+    monkeypatch.setattr(bmd, "OUTPUT_PATH", tmp_path / "ml_dataset.parquet")
+
+    dataset = pd.DataFrame({
+        "ticker": ["A"], "trade_date": pd.to_datetime(["2020-01-01"]), "pl": [10.0],
+    })
+    dropped = {"gap_unexplained": ["ZZZZ3"], "delisted_stale": ["DEAD3"]}
+
+    manifest = bmd.write_manifest(dataset, dropped_no_fundamentals=dropped)
+
+    assert manifest["dropped_no_fundamentals"] == dropped
+
+
+def test_manifest_dropped_no_fundamentals_defaults_to_not_tracked(tmp_path, monkeypatch) -> None:
+    """Callers that don't run the real Stage 2 filter pipeline (most tests,
+    ad-hoc scripts) shouldn't need to fabricate a dropped_report -- the
+    field must say so explicitly rather than silently claiming zero drops."""
+    monkeypatch.setattr(bmd, "OUTPUT_PATH", tmp_path / "ml_dataset.parquet")
+
+    dataset = pd.DataFrame({
+        "ticker": ["A"], "trade_date": pd.to_datetime(["2020-01-01"]), "pl": [10.0],
+    })
+
+    manifest = bmd.write_manifest(dataset)
+
+    assert manifest["dropped_no_fundamentals"] == "not tracked"
+
+
+def test_manifest_records_macro_column_units_present_in_dataset(tmp_path, monkeypatch) -> None:
+    """selic/cdi are daily-percent rates, ipca is a monthly-percent rate --
+    a unit mismatch here previously caused a Critical audit finding
+    (excess_return/real_return silently treated a daily rate as annual).
+    Recorded mechanically so a future direct consumer of these columns
+    doesn't repeat it."""
+    monkeypatch.setattr(bmd, "OUTPUT_PATH", tmp_path / "ml_dataset.parquet")
+
+    dataset = pd.DataFrame({
+        "ticker": ["A"],
+        "trade_date": pd.to_datetime(["2020-01-01"]),
+        "selic": [0.05], "cdi": [0.04], "ipca": [0.4],
+        "pl": [10.0],
+    })
+
+    manifest = bmd.write_manifest(dataset)
+
+    assert set(manifest["column_units"]) == {"selic", "cdi", "ipca"}
+    assert "month" in manifest["column_units"]["ipca"]
+    assert "trading day" in manifest["column_units"]["selic"]
+
+
+def test_manifest_column_units_empty_when_absent(tmp_path, monkeypatch) -> None:
+    """A dataset that never merged macro series must not list units for
+    columns that don't exist."""
+    monkeypatch.setattr(bmd, "OUTPUT_PATH", tmp_path / "ml_dataset.parquet")
+
+    dataset = pd.DataFrame({
+        "ticker": ["A"],
+        "trade_date": pd.to_datetime(["2020-01-01"]),
+        "pl": [10.0],
+    })
+
+    manifest = bmd.write_manifest(dataset)
+
+    assert manifest["column_units"] == {}
 
 
 if __name__ == "__main__":

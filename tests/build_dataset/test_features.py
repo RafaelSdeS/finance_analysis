@@ -48,6 +48,7 @@ def test_log_return_basic() -> None:
         "adj_low": [100.0, 102.0, 101.0],
         "adj_open": [100.0, 102.0, 101.0],
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -75,6 +76,7 @@ def test_log_return_nan_across_large_calendar_gap() -> None:
         "adj_low": [10.0, 10.5, 11.0, 50.0, 51.0],
         "adj_open": [10.0, 10.5, 11.0, 50.0, 51.0],
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -97,6 +99,7 @@ def test_moving_averages() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -128,6 +131,7 @@ def test_volatility() -> None:
         "adj_low": [100.0] * 30,
         "adj_open": [100.0] * 30,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -147,6 +151,7 @@ def test_rsi_calculation() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -177,6 +182,7 @@ def test_rsi_mixed_trend() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -198,6 +204,7 @@ def test_rsi_downtrend() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -221,6 +228,7 @@ def test_rsi_no_down_days() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -240,6 +248,7 @@ def test_rsi_flat_prices() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -259,6 +268,7 @@ def test_drawdown_calculation() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -285,6 +295,7 @@ def test_hl_ratio() -> None:
         "adj_low": [95.0, 98.0, 99.0],
         "adj_open": [100.0, 102.0, 101.0],
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -308,6 +319,7 @@ def test_return_windows() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -332,6 +344,7 @@ def test_ticker_grouping_isolation() -> None:
         "adj_low": [100.0, 102.0, 50.0, 52.0],
         "adj_open": [100.0, 102.0, 50.0, 52.0],
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -354,6 +367,7 @@ def test_non_positive_prices_masked() -> None:
         "adj_low": [100.0, 0.0, 0.0, 101.0],
         "adj_open": [100.0, 0.0, -50.0, 101.0],
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -406,6 +420,61 @@ def test_fundamental_features_ratios() -> None:
 
     # working_capital_ratio = (current_assets - current_liabilities) / total_assets = (1200 - 400) / 2000 = 0.4
     assert approx(result.iloc[0]["working_capital_ratio"], 0.4)
+
+
+def test_yoy_qoq_fscore_nan_across_a_missing_quarter() -> None:
+    """revenue_growth_yoy/QoQ/f_score index by ROW position (pct_change(4)/
+    diff(1)/shift(4)), not calendar time -- correct only when quarters are
+    truly contiguous. A vendor-missing quarter leaves the row count unchanged
+    but silently stretches the true calendar gap, mislabeling e.g. a 15-month
+    gap as "YoY" (2026-07-23 audit).
+
+    Fixture: 6 real quarterly rows, but 2021-Q1 (2021-03-31) is MISSING from
+    the vendor feed -- row 4 jumps straight from 2020-12-31 to 2021-06-30.
+    Every *_yoy/*_qoq/f_* column touching that stretched gap must read NaN,
+    not a value computed across the wrong span.
+    """
+    dates = pd.to_datetime([
+        "2020-03-31", "2020-06-30", "2020-09-30", "2020-12-31",
+        "2021-06-30",  # 2021-03-31 missing here -- gap is ~182 days, not ~91
+        "2021-09-30",
+    ])
+    n = len(dates)
+    df = pd.DataFrame({
+        "ticker": ["A"] * n,
+        "reference_date": dates,
+        "net_revenue": [100.0, 110.0, 105.0, 120.0, 130.0, 125.0],
+        "net_income": [10.0, 12.0, 9.0, 15.0, 14.0, 13.0],
+        "ebitda": [20.0] * n, "total_assets": [500.0] * n, "total_debt": [200.0] * n,
+        "gross_margin": [0.5] * n, "net_margin": [0.1] * n, "roe": [0.15] * n,
+        "roa": [0.05] * n, "current_ratio": [1.5] * n, "debt_equity": [0.6] * n,
+        "market_cap": [1000.0] * n, "equity": [500.0] * n, "cash": [100.0] * n,
+        "current_assets": [400.0] * n, "current_liabilities": [200.0] * n,
+        "net_debt": [100.0] * n,
+    })
+
+    result = compute_fundamental_features(df)
+
+    # Row 4 (2021-06-30): row-position-back-4 is row 0 (2020-03-31), a ~15-month
+    # gap -- must NOT read as YoY growth, QoQ trend (row-back-1 is row 3,
+    # 2020-12-31, a ~181-day gap), or a valid F-score component.
+    row4 = result.iloc[4]
+    assert pd.isna(row4["revenue_growth_yoy"])
+    assert pd.isna(row4["earnings_growth_yoy"])
+    assert pd.isna(row4["gross_margin_qoq"])
+    assert pd.isna(row4["f_roa_improving"])
+    assert pd.isna(row4["f_score"])
+
+    # Row 3 (2020-12-31): row-back-1 is row 2 (2020-09-30), a real ~92-day
+    # quarter -- QoQ must still compute normally, unaffected by a LATER gap.
+    assert not pd.isna(result.iloc[3]["gross_margin_qoq"])
+
+    # Row 5 (2021-09-30): row-back-4 is row 1 (2020-06-30) -- still spans the
+    # missing quarter, so still NaN.
+    assert pd.isna(result.iloc[5]["revenue_growth_yoy"])
+    # Row 5's row-back-1 is row 4 (2021-06-30), a real ~92-day quarter -- QoQ
+    # recovers on the very next row after the gap.
+    assert not pd.isna(result.iloc[5]["gross_margin_qoq"])
 
 
 def test_recompute_valuation_daily_rescales_by_price_factor() -> None:
@@ -463,7 +532,10 @@ def test_recompute_valuation_daily_no_fundamentals_flag() -> None:
 def _advanced_features_fixture(n_rows: int) -> pd.DataFrame:
     """Minimal single-ticker frame with every column compute_advanced_features touches."""
     dates = pd.date_range("2026-01-01", periods=n_rows, freq="D")
-    volatility = [0.1, 0.2, 0.05, 0.3, 0.15, 0.25][:n_rows]
+    _base_volatility = [0.1, 0.2, 0.05, 0.3, 0.15, 0.25]
+    # Cycles the same 6-value pattern for n_rows > 6 (identical to the plain
+    # slice for n_rows <= 6, so every existing small-n caller is unaffected).
+    volatility = (_base_volatility * ((n_rows // len(_base_volatility)) + 1))[:n_rows]
     return pd.DataFrame({
         "ticker": ["A"] * n_rows,
         "sector": ["Tech"] * n_rows,
@@ -500,13 +572,18 @@ def _advanced_features_fixture(n_rows: int) -> pd.DataFrame:
 
 def test_volatility_percentile_no_lookahead() -> None:
     """volatility_20d_percentile at row i must not depend on rows after i (T1 regression guard:
-    a plain .rank(pct=True) here would rank each row against the ticker's future volatility too)."""
-    df = _advanced_features_fixture(6)
+    a plain .rank(pct=True) here would rank each row against the ticker's future volatility too).
+
+    Fixture must exceed PERCENTILE_MIN_PERIODS (60) or every row is NaN
+    warm-up and the comparison below would pass vacuously (NaN == NaN)
+    without exercising the actual no-lookahead logic."""
+    df = _advanced_features_fixture(100)
 
     full = compute_advanced_features(df.copy())
-    truncated = compute_advanced_features(df.iloc[:3].copy())
+    truncated = compute_advanced_features(df.iloc[:65].copy())
 
-    for i in range(3):
+    check_rows = range(60, 65)  # past warm-up in the truncated (65-row) series too
+    for i in check_rows:
         assert approx(
             full.iloc[i]["volatility_20d_percentile"],
             truncated.iloc[i]["volatility_20d_percentile"],
@@ -515,6 +592,10 @@ def test_volatility_percentile_no_lookahead() -> None:
             full.iloc[i]["volatility_60d_percentile"],
             truncated.iloc[i]["volatility_60d_percentile"],
         )
+    # sanity: the compared rows aren't trivially all-NaN (which would pass
+    # the equality check above without exercising the actual logic)
+    assert full["volatility_20d_percentile"].iloc[list(check_rows)].notna().any()
+    assert full["volatility_60d_percentile"].iloc[list(check_rows)].notna().any()
 
 
 def _fill_advanced_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -734,6 +815,7 @@ def test_adj_close_precision_degraded_flag() -> None:
         "adj_low": [0.0, 0.03, 0.04, 0.000568, 6.20, 100.0],
         "adj_open": [0.0, 0.03, 0.04, 0.000568, 6.20, 100.0],
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -858,6 +940,7 @@ def test_overnight_gap_intraday_return_decompose_log_return() -> None:
         "adj_low": [99.0, 101.0, 100.0],
         "adj_open": [100.0, 99.0, 103.0],
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -898,6 +981,7 @@ def test_overnight_gap_nan_across_large_calendar_gap() -> None:
         "adj_low": [10.0, 10.5, 50.0],
         "adj_open": [10.0, 10.5, 50.0],
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -918,6 +1002,7 @@ def test_price_vs_ma_ratios() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -943,6 +1028,7 @@ def test_true_range_ratio() -> None:
         "adj_low": [99.0, 118.0, 119.0],
         "adj_open": [100.0, 119.0, 119.5],
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -970,6 +1056,7 @@ def test_volatility_ratio_20_60() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": 1_000_000.0,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -992,6 +1079,7 @@ def test_volume_ratio_20d() -> None:
         "adj_low": prices,
         "adj_open": prices,
         "volume": volumes,
+        "traded_amount": 100_000_000.0,
     })
     result = compute_price_features(df)
 
@@ -1004,22 +1092,29 @@ def test_volume_ratio_20d() -> None:
 def test_price_percentile_1y_no_lookahead() -> None:
     """price_percentile_1y must not depend on rows after it -- same
     no-lookahead guard as test_volatility_percentile_no_lookahead, and it
-    must use its own 1-year window, not silently alias price_percentile_5y."""
-    df = _advanced_features_fixture(6)
+    must use its own 1-year window, not silently alias price_percentile_5y.
+
+    Fixture must exceed PERCENTILE_MIN_PERIODS (60) or every row is NaN
+    warm-up and the comparison below would pass vacuously (NaN == NaN)
+    without exercising the actual no-lookahead logic."""
+    df = _advanced_features_fixture(100)
 
     full = compute_advanced_features(df.copy())
-    truncated = compute_advanced_features(df.iloc[:3].copy())
+    truncated = compute_advanced_features(df.iloc[:65].copy())
 
-    for i in range(3):
+    check_rows = range(60, 65)  # past warm-up in the truncated (65-row) series too
+    for i in check_rows:
         assert approx(
             full.iloc[i]["price_percentile_1y"],
             truncated.iloc[i]["price_percentile_1y"],
         )
+    assert full["price_percentile_1y"].iloc[list(check_rows)].notna().any()
     # adj_close is monotonically increasing in the fixture -> percentile
-    # should be monotonically non-decreasing too, and distinct from the 5y
-    # column isn't asserted (both legitimately hit 1.0 on a 6-row monotonic
-    # fixture) -- the no-lookahead property above is the meaningful check.
-    assert full["price_percentile_1y"].is_monotonic_increasing
+    # should be monotonically non-decreasing too, over the non-NaN (past
+    # warm-up) suffix -- distinct from the 5y column isn't asserted (both
+    # legitimately hit 1.0 once the window is dominated by the monotonic
+    # trend) -- the no-lookahead property above is the meaningful check.
+    assert full["price_percentile_1y"].dropna().is_monotonic_increasing
 
 
 def test_turnover_ratio() -> None:
@@ -1037,9 +1132,14 @@ def test_turnover_ratio() -> None:
 
 
 def test_amihud_illiquidity() -> None:
-    """amihud_illiquidity = |log_return| / (volume * adj_close) -- price
-    impact per unit of currency traded, distinct from volume_ratio_20d
-    (which only flags unusual volume, not price sensitivity to volume)."""
+    """amihud_illiquidity = |log_return| / traded_amount -- price impact per
+    unit of REAL currency traded, distinct from volume_ratio_20d (which only
+    flags unusual volume, not price sensitivity to volume). Uses the raw
+    traded_amount column (real historical currency), not volume*adj_close --
+    adj_close is discounted backward by every dividend/split since, which
+    would understate true traded currency in deep history and inflate this
+    feature with a secular drift unrelated to actual liquidity
+    (2026-07-23 audit)."""
     df = pd.DataFrame({
         "ticker": ["A"] * 3,
         "trade_date": pd.date_range("2026-01-01", periods=3),
@@ -1048,20 +1148,21 @@ def test_amihud_illiquidity() -> None:
         "adj_low": [100.0, 110.0, 108.0],
         "adj_open": [100.0, 110.0, 108.0],
         "volume": [1_000.0, 2_000.0, 500.0],
+        "traded_amount": [100_000.0, 219_780.0, 54_200.0],
     })
     result = compute_price_features(df)
 
     # Row 0: no prior close -> log_return NaN -> amihud NaN
     assert pd.isna(result.iloc[0]["amihud_illiquidity"])
 
-    # Row 1: |log(110/100)| / (2000 * 110)
-    expected1 = abs(np.log(110.0 / 100.0)) / (2_000.0 * 110.0)
+    # Row 1: |log(110/100)| / traded_amount[1]
+    expected1 = abs(np.log(110.0 / 100.0)) / 219_780.0
     assert approx(result.iloc[1]["amihud_illiquidity"], expected1, tol=1e-9)
 
     # Row 2: same formula, independent numbers (different sign/magnitude move,
-    # different volume) -- proves the formula isn't accidentally right only
-    # for row 1's specific inputs
-    expected2 = abs(np.log(108.0 / 110.0)) / (500.0 * 108.0)
+    # different traded_amount) -- proves the formula isn't accidentally right
+    # only for row 1's specific inputs
+    expected2 = abs(np.log(108.0 / 110.0)) / 54_200.0
     assert approx(result.iloc[2]["amihud_illiquidity"], expected2, tol=1e-9)
 
 
