@@ -17,6 +17,23 @@ MIN_DETECTABLE_JUMP = 0.3
 JUMP_MATCH_TOL = 0.15
 EVENT_WINDOW_DAYS = (-10, 35)
 
+# ponytail: a persistence guard (reject a matched jump unless the new price
+# level actually holds for ~a month afterward, not just the triggering day)
+# was investigated 2026-07-24 as defense-in-depth against a coincidental
+# market move being mistaken for a split. Two independent designs were tried
+# and both produced false rejections against the REAL 67-event dataset: every
+# one of BGIP4/CASH3/LUXM4/PATI4/RANI3/SBSP3's matches traces to a genuinely
+# recorded corporate_events.parquet entry (confirmed by inspection, incl.
+# PATI4's ~annual small bonus-share splits and SBSP3's clustered restructuring
+# sequence), not a coincidental move -- ordinary volatility on illiquid/
+# small-ratio tickers swamps any window/tolerance loose enough to admit them,
+# so no threshold both keeps these and would reject a hypothetical misfire.
+# Zero actual misfires have been found in the current dataset (see the audit
+# for the full persistence check performed by hand). Not implemented -- would
+# add real complexity to already-delicate matching logic for a risk that
+# remains theoretical. Revisit only if a future ticker's repair is found to
+# have actually misfired.
+
 
 def repair_unadjusted_splits(prices):
     """Rescale adj_* history where the source left a split/inplit unadjusted.
