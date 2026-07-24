@@ -88,6 +88,37 @@ QUARANTINED_TICKERS = {
              "either. See BAHI3 comment above.",
     "PORT3": "raw price file is a near-identical copy of ARND3's; BolsAI's live API itself "
              "currently resolves this ticker to ARND3's data. See BAHI3 comment above.",
+    # ALSO3/ALOS3 (Aliansce Sonae/Allos) and MEGA3/SRNA3 (Omega Energia/Serena
+    # Energia): unlike BAHI3/ATOM3/etc above, these are the SAME legal entity
+    # (identical CNPJ per the CVM crosswalk -- confirmed 2026-07-24, see
+    # test_universe_integrity.py::_cnpj_alias_pairs), so this isn't
+    # corruption. But unlike a normal rename (e.g. ELET5->AXIA5, which has a
+    # clean cutover date and gets spliced via ticker_continuity.json), there
+    # is NO splice boundary here: ALSO3/ALOS3 share the exact same date range
+    # for their ENTIRE history (2019-08-06..2026-07-10, both still "live"
+    # today), and MEGA3/SRNA3 the same (2021-12-27..2025-11-13, both ending
+    # together) -- a persistent vendor alias serving identical data under two
+    # codes throughout, not a company that renamed mid-stream. continuity.py's
+    # splice mechanism assumes a temporal boundary and doesn't fit this
+    # pattern. Both sides currently ship as separate rows in the final
+    # dataset, double-counting the same company in any cross-sectional stat
+    # (sector z-scores, momentum_vs_sector) that groups by date+sector.
+    # Quarantine the legacy/deprecated code (ALSO3, MEGA3 -- neither has a
+    # company_info.parquet row at all, unlike ALOS3/SRNA3, confirming which
+    # side is the vendor's CURRENT primary listing) as redundant with its
+    # sibling, same spirit as filter_tickers_with_no_fundamentals's
+    # "redundant_sibling" bucket (which only catches same-ticker-root share
+    # classes, not an unrelated-looking alias code like this).
+    "ALSO3": "same legal entity as ALOS3 (identical CNPJ, CVM crosswalk) -- a persistent vendor "
+             "alias with no splice boundary (both tickers share the exact same date range for "
+             "their entire history), not a datable rename. Absent from company_info.parquet "
+             "entirely (ALOS3 is the vendor's current primary listing). Quarantined as redundant "
+             "with ALOS3 rather than double-counting Aliansce Sonae/Allos as two tickers.",
+    "MEGA3": "same legal entity as SRNA3 (identical CNPJ, CVM crosswalk) -- a persistent vendor "
+             "alias with no splice boundary (both tickers share the exact same date range for "
+             "their entire history), not a datable rename. Absent from company_info.parquet "
+             "entirely (SRNA3 is the vendor's current primary listing). Quarantined as redundant "
+             "with SRNA3 rather than double-counting Omega Energia/Serena Energia as two tickers.",
 }
 
 # Tickers whose raw price file's EARLIEST rows are stale data from an

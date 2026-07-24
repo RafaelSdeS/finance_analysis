@@ -35,11 +35,20 @@ Structural dedup on `(ticker, trade_date)` cannot catch this; it's cross-*ticker
 The initial exact-hash pass under-*and*-over-counted — refined into a tolerance-based,
 CNPJ-aware check (`test_universe_integrity.py` §3.6). Two categories fell out:
 
-**False positives — same legal entity, not corruption.** `ALOS3`/`ALSO3` and `MEGA3`/`SRNA3`
-share an identical CNPJ in the CVM crosswalk (Aliansce Sonae/Allos; Omega Energia/Serena Energia)
-— same company, two ticker mnemonics, same class as the already-documented `ELET5→AXIA5` rename.
-Not yet in `ticker_continuity.json` (no verified rename date on hand to add one without guessing),
-but excluded from the corruption guard via CNPJ match instead.
+**False positives — same legal entity, not corruption, and resolved.** `ALOS3`/`ALSO3` and
+`MEGA3`/`SRNA3` share an identical CNPJ in the CVM crosswalk (Aliansce Sonae/Allos; Omega
+Energia/Serena Energia) — same company, two ticker mnemonics. Unlike `ELET5→AXIA5`, though, there's
+no splice boundary to date: both tickers in each pair share the *exact same date range* for their
+*entire* history (`ALSO3`/`ALOS3`: 2019-08-06…2026-07-10 both; `MEGA3`/`SRNA3`:
+2021-12-27…2025-11-13 both) — a persistent vendor alias serving identical data under two codes
+throughout, not a company that renamed mid-stream. `ticker_continuity.json`'s splice mechanism
+assumes a temporal boundary and doesn't fit this pattern. Both sides were shipping as separate rows
+in the final dataset, double-counting the same company in any cross-sectional stat (sector
+z-scores, `momentum_vs_sector`) grouped by date+sector. Resolved by quarantining the legacy code
+(`ALSO3`, `MEGA3` — neither has a `company_info.parquet` row at all, confirming `ALOS3`/`SRNA3` are
+the vendor's current primary listings) as redundant with its sibling. The CNPJ-match test exclusion
+(`_cnpj_alias_pairs`) stays in place as a general, self-maintaining guard for any future same-CNPJ
+pair not yet manually reviewed.
 
 **Real corruption — confirmed distinct CNPJs:**
 
@@ -222,11 +231,12 @@ genuine illiquidity/volatility, not repair defects. No code landed.
 - [x] C1: `GFTT3`/`GFTT4` — confirmed vendor stub data, not corruption; test row-count floor now matches `MIN_PRICE_ROWS` so it's no longer flagged.
 - [x] C1: `CGRA3` — found (via L2 investigation) to have its own independent WDCN3-class raw price-oscillation defect; quarantined too.
 - [x] C1: regression guard passes (`VALIDATION PASSED`), now including §3.7's oscillation scan.
-- [ ] C1 (optional): once a verified rename date is known, move `ALOS3`/`ALSO3` and `MEGA3`/`SRNA3` into `ticker_continuity.json` proper instead of relying on the CNPJ-match exclusion.
+- [x] C1: `ALOS3`/`ALSO3` and `MEGA3`/`SRNA3` — no splice boundary exists (identical date range for their entire history), so `ticker_continuity.json` doesn't fit; quarantined the legacy alias code (`ALSO3`, `MEGA3`) instead, resolving the double-counting in the final dataset.
 - [x] C2: route price technicals + percentiles through the masked `adj`; regression tests added, fast-group green.
 - [x] C2: rebuild landed (manifest `git_commit: 520bd4c`, 510 tickers / 1,308,104 rows) —
       `BAHI3`/`ATOM3`/`MBLY3`/`LVTC3`/`ARND3`/`PORT3` all confirmed absent (0 rows each). Postdates
-      the `CGRA3` quarantine — **one more rebuild needed** to drop `CGRA3` too.
+      the `CGRA3`/`ALSO3`/`MEGA3` quarantines added later this session — **one more rebuild
+      needed** to drop these 3 too (508 tickers expected once it lands).
 - [x] L2: root-caused (not a beta formula bug) — `CGRA3` quarantined, general `check_no_price_oscillation()` guard (§3.7) added instead of a beta-specific fix.
 - [x] L3: investigated a third time (post-hoc audit design), reverted — 21% false-positive rate on the real 67-event dataset, root-caused to genuine illiquidity/volatility. Recorded in `CLAUDE.md`'s existing caveat.
 - [x] L4: verified `T_prefix_rule` excludes gap-guarded derived columns — no fix needed.
