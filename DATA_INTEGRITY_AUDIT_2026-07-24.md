@@ -30,31 +30,43 @@ Legend: 🔴 Critical · 🟠 Medium · 🟡 Low · ✅ Passed
 
 ## 2. Critical & medium risks
 
-### 🔴 C1 — Four byte-identical price series across *different* companies
+### 🔴 C1 — Near-identical price series across *different* companies
 Structural dedup on `(ticker, trade_date)` cannot catch this; it's cross-*ticker* duplication.
+The initial exact-hash pass under-*and*-over-counted — refined into a tolerance-based,
+CNPJ-aware check (`test_universe_integrity.py` §3.6). Two categories fell out:
 
-| Pair | rows | shared span | close(last) | Notes |
-|------|-----:|-------------|------------:|-------|
-| `BAHI3` ≡ `CGRA3` | 4319 | 2000-01-10 … 2026-07-10 | 25.00 | Bahema vs Grazziotin — unrelated |
-| `ATOM3` ≡ `MBLY3` | 2307 | 2017-03-23 … 2026-07-10 | 2.37 | Atom vs Mobly |
-| `MEGA3` ≡ `SRNA3` | 973 | 2021-12-27 … 2025-11-13 | 12.62 | — vs Serena |
-| `ARND3` ≡ `PORT3` | 1156 | 2021-10-25 … 2026-07-10 | 0.63 | — vs Portobello (CANCELADA) |
+**False positives — same legal entity, not corruption.** `ALOS3`/`ALSO3` and `MEGA3`/`SRNA3`
+share an identical CNPJ in the CVM crosswalk (Aliansce Sonae/Allos; Omega Energia/Serena Energia)
+— same company, two ticker mnemonics, same class as the already-documented `ELET5→AXIA5` rename.
+Not yet in `ticker_continuity.json` (no verified rename date on hand to add one without guessing),
+but excluded from the corruption guard via CNPJ match instead.
 
-- **Only the price files are identical.** Each pair's *fundamentals* differ (shapes 62/62 but
-  values differ; 61 vs 26; 20 vs 18; 18 vs 20). So the impostor ticker carries its **own real
-  fundamentals bolted onto a copied price series** — i.e. one raw `prices/*.parquet` is a copy
-  of the other company's.
-- **Impact is concentrated in the extreme tail.** `BAHI3`+`CGRA3` alone are **79%** of all 2,583
-  `|log_return|>1.0` rows; these two drive `volatility_20d` up to 1.48 and `return_12m` up to 3.4.
-  Every derived price/return/vol/beta feature for all 8 tickers is fabricated for at least one of
-  each pair.
-- **Impostor is identifiable by listing date vs series start.** e.g. Mobly (`MBLY3`) IPO'd Feb 2021
-  and its own fundamentals start 2019-12-31, yet its price series starts 2017-03-23 = Atom's listing
-  → `MBLY3`'s price file is the copy. Same logic (series-start vs company IPO/first-filing) resolves
-  the others; finalize each with a yfinance cross-check before quarantining.
+**Real corruption — confirmed distinct CNPJs:**
 
-**This is the same failure class as WDCN3/CCTY3 but undetected** — nothing in the pipeline compares
-one ticker's series against another's.
+| Group | rows | shared span | In final dataset? | Status |
+|-------|-----:|-------------|:---:|--------|
+| `BAHI3` ≡ `CGRA3` | 4319 | 2000-01-10 … 2026-07-10 | yes | **Quarantined** (`BAHI3`, see below) |
+| `ATOM3` ≡ `MBLY3` ≡ `LVTC3` | 2307 | 2017-03-23 … 2026-07-10 | `ATOM3`/`MBLY3` yes, `LVTC3` no | Unresolved |
+| `ARND3` ≡ `PORT3` | 1156 | 2021-10-25 … 2026-07-10 | yes | Unresolved |
+| `GFTT3` ≡ `GFTT4` | 2 | 2001-01-19 … 2004-06-29 | no (`< MIN_PRICE_ROWS`) | Low priority |
+
+- **Only the price files match.** Each group's *fundamentals* differ, so the impostor side carries
+  its own real fundamentals bolted onto a copied price series.
+- **`BAHI3`/`CGRA3` resolved and quarantined.** BolsAI's own `market_cap` can't cross-validate
+  either side (it's tautologically `shares_outstanding × close` off the *same* shared price, so it
+  always reads a perfect 1.000 ratio for both). But `CGRA3` has 32 real dividend events on file,
+  and every one prices at a plausible 4–18% yield against the shared series — independent
+  corroboration the series is genuinely `CGRA3`'s (Grazziotin). `BAHI3` (Bahema Educação) has no
+  dividends file to check the other way. `BAHI3` added to `QUARANTINED_TICKERS`.
+- **`ATOM3`/`MBLY3`/`LVTC3` and `ARND3`/`PORT3` remain unresolved.** No independent signal
+  available internally: neither side of either group has a dividends file, and market_cap is
+  tautological. `PORT3`'s `company_info` corporate_name is "WILSON SONS S.A." (a materially larger,
+  since-delisted logistics company) vs `ARND3`'s small holding-company fundamentals — a real
+  difference in scale, but not enough on its own to pick a side. Needs external verification
+  (yfinance / B3) before quarantining either side; guessing wrong would discard genuine data for
+  a real company and keep the fake.
+- **This is the same failure class as WDCN3/CCTY3** — nothing in the pipeline compares one
+  ticker's series against another's — now caught by the regression guard on every future build.
 
 ### 🟠 C2 — Non-positive `adj_close` pollutes raw-adj price technicals
 `compute_price_features` masks `adj_close<=0 → NaN` **only for the log path** (`adj = ...where(>0)`,
@@ -105,29 +117,17 @@ interior NaN holes and break the prefix-NaN invariant (`test_final_dataset::T_pr
 ## 4. Fixes & pytest assertions
 
 ### C1 — detect duplicate price series + quarantine impostors
-Durable guard (fails the build/test if any recur), in `tests/data_collection/` or `test_universe_integrity.py`:
+Landed as `check_no_duplicate_price_series()` / `_cnpj_alias_pairs()` in
+`test_universe_integrity.py` (§3.6, wired into `run_all.py`'s DATA group). Tolerance-based
+(`np.allclose`, not exact hash — `ARND3`/`PORT3` only match to ~5e-9, not bit-for-bit), bucketed
+by `(row count, first date, last date)` to stay O(n), excludes same-CNPJ pairs (real aliases) and
+`QUARANTINED_TICKERS` (already handled).
 
-```python
-def test_no_duplicate_price_series():
-    """No two distinct tickers may share a byte-identical OHLCV price series."""
-    import hashlib, pandas as pd
-    sigs = {}
-    for f in (RAW / "prices").glob("*.parquet"):
-        g = pd.read_parquet(f).sort_values("trade_date")
-        cols = ["trade_date", "open", "high", "low", "close", "volume"]
-        h = hashlib.md5(
-            pd.util.hash_pandas_object(g[cols], index=False).values
-        ).hexdigest()
-        sigs.setdefault(h, []).append(f.stem)
-    dupes = [v for v in sigs.values() if len(v) > 1]
-    assert not dupes, f"identical price series across tickers: {dupes}"
-```
-
-Then, after confirming each impostor via yfinance (series-start vs company IPO/first-filing), add the
-copied-price tickers to `quality_filters.QUARANTINED_TICKERS` with the reason
-(e.g. `"MBLY3": "raw price file is a byte-identical copy of ATOM3; Mobly IPO'd 2021 but series starts 2017-03-23 = Atom's listing"`).
-`MBLY3` is already positively identified; `CGRA3/BAHI3`, `MEGA3/SRNA3`, `ARND3/PORT3` need the
-cross-check to pick which side is the copy.
+`BAHI3` resolved via the dividend-corroboration evidence above and added to
+`quality_filters.QUARANTINED_TICKERS`. `ATOM3`/`MBLY3`/`LVTC3` and `ARND3`/`PORT3` still need an
+external (yfinance/B3) cross-check to identify which side is genuine before they can be quarantined
+— the regression guard will keep failing on these two groups until that happens, which is correct:
+a passing guard achieved by guessing the wrong side would be worse than an honestly-failing one.
 
 ### C2 — route price technicals through the masked series
 In `features.py::compute_price_features`, `adj` is already the masked series — reuse it (do **not**
@@ -170,10 +170,13 @@ can't be silently "repaired".
 ---
 
 ## Action checklist
-- [x] C1: land duplicate-price-series regression guard (`test_universe_integrity.py` §3.6, commit `476585c`).
-- [ ] C1: yfinance-confirm impostor in each pair; add copied-price tickers to `QUARANTINED_TICKERS`; rebuild.
-- [x] C2: route price technicals + percentiles through the masked `adj`; regression tests added (commit `f00c6f1`).
-- [ ] C2: rebuild `ml_dataset.parquet` so the fix reaches the shipped dataset (code fix alone doesn't touch `dataset_v1`).
+- [x] C1: land duplicate-price-series regression guard, CNPJ-aware + tolerance-based (`test_universe_integrity.py` §3.6).
+- [x] C1: resolve + quarantine `BAHI3` (dividend-corroboration evidence; `CGRA3`'s series is genuine).
+- [ ] C1: yfinance/B3-confirm impostor in `ATOM3`/`MBLY3`/`LVTC3` and `ARND3`/`PORT3`; quarantine the copied side; rebuild.
+- [ ] C1 (low priority): confirm `GFTT3`/`GFTT4` — never reaches the final dataset, no urgency.
+- [ ] C1 (optional): once a verified rename date is known, move `ALOS3`/`ALSO3` and `MEGA3`/`SRNA3` into `ticker_continuity.json` proper instead of relying on the CNPJ-match exclusion.
+- [x] C2: route price technicals + percentiles through the masked `adj`; regression tests added, fast-group green.
+- [ ] C2: rebuild `ml_dataset.parquet` so the fix (and the `BAHI3` quarantine) reaches the shipped dataset — code fix alone doesn't touch `dataset_v1`.
 - [ ] L2: optional beta degenerate-variance guard.
 - [ ] L3: optional split-repair persistence test.
 - [ ] L4: verify `T_prefix_rule` excludes gap-guarded derived columns.

@@ -26,6 +26,13 @@ QUARANTINED_TICKERS = {
              "CCRO3/Motiva's (cvm_code 18821) orphaned post-rename stub across BOTH BolsAI's "
              "live API and yfinance independently (2026-07-14 audit); no reliable source found "
              "for this ticker's true price history",
+    "BAHI3": "raw price file is a near-identical copy of CGRA3's (Bahema Educacao vs "
+             "Grazziotin -- confirmed distinct CNPJs, not a rename/alias) (2026-07-24 audit). "
+             "CGRA3's own dividend history (32 events, yield 4-18% of the shared price series "
+             "at each ex-date) independently corroborates the shared series as CGRA3's real "
+             "data; BAHI3 has no dividends file to check the other way, and BolsAI's own "
+             "market_cap for both sides is tautologically derived from this same price (can't "
+             "cross-validate). No reliable source found yet for BAHI3's true price history.",
 }
 
 # Tickers whose raw price file's EARLIEST rows are stale data from an
