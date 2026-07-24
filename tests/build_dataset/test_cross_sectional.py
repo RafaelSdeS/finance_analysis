@@ -15,7 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.build_dataset.cross_sectional import compute_cross_sectional_features
+from src.build_dataset.cross_sectional import compute_cross_sectional_features, _exclude_self_mean
 
 
 def _fill_advanced_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -83,6 +83,56 @@ def test_momentum_vs_sector_nan_for_sector_of_one() -> None:
     assert approx(result.loc["PEER2", "momentum_vs_sector_1m"], 0.03 - peer_mean)
     assert not pd.isna(result.loc["PEER1", "pl_zscore_sector"])
     assert not pd.isna(result.loc["PEER2", "pl_zscore_sector"])
+
+
+def test_exclude_self_mean_denominator_ignores_nan_peers() -> None:
+    """The (total - self) / (n - 1) exclude-self mean must derive BOTH total
+    and n from value_col's own non-NaN count -- not from a blanket group
+    size that counts rows where value_col is undefined (e.g. a ticker still
+    in its warm-up year, return_1m NaN). Mixing a NaN-skipping sum with a
+    NaN-counting size silently dilutes the mean toward zero on any date with
+    at least one undefined peer -- worse the thinner/younger the universe,
+    exactly where momentum/beta matter most (2026-07-24 audit).
+
+    4 tickers same date: T1=0.02, T2=0.04, T3=-0.01, T4=NaN.
+    Mean excluding T1 (correct) = mean of T2,T3 only = (0.04-0.01)/2 = 0.015.
+    A blanket-size-denominator bug would instead compute
+    (0.05-0.02)/(4-1) = 0.01 -- diluted by T4's undefined value."""
+    df = pd.DataFrame({
+        "trade_date": [pd.Timestamp("2026-01-01")] * 4,
+        "val": [0.02, 0.04, -0.01, np.nan],
+    })
+    result = _exclude_self_mean(df, "trade_date", "val")
+
+    assert approx(result.iloc[0], (0.04 + -0.01) / 2), "T1: mean of T2,T3 only"
+    assert approx(result.iloc[1], (0.02 + -0.01) / 2), "T2: mean of T1,T3 only"
+    assert approx(result.iloc[2], (0.02 + 0.04) / 2), "T3: mean of T1,T2 only"
+    # T4's own value is NaN -- excluding "itself" is a no-op (nothing defined
+    # to subtract), so its reference mean is the other 3's straight mean
+    assert approx(result.iloc[3], (0.02 + 0.04 + -0.01) / 3), "T4: mean of T1,T2,T3"
+
+
+def test_momentum_vs_market_excludes_nan_peer_from_denominator() -> None:
+    """Same bug as test_exclude_self_mean_denominator_ignores_nan_peers, but
+    through the public compute_cross_sectional_features entry point: a
+    ticker with NaN return_1m (e.g. still in warm-up) must not dilute the
+    market-mean denominator used for every OTHER ticker's momentum_vs_market_1m."""
+    date = pd.Timestamp("2026-01-01")
+    df = pd.DataFrame({
+        "ticker": ["T1", "T2", "T3", "T4"],
+        "sector": ["X", "X", "Y", "Y"],
+        "trade_date": [date] * 4,
+        "reference_date": [date] * 4,
+        "return_1m": [0.02, 0.04, -0.01, np.nan],
+        "return_3m": [0.02, 0.04, -0.01, np.nan],
+        "return_12m": [0.02, 0.04, -0.01, np.nan],
+        "log_return": [0.001, 0.002, -0.0005, np.nan],
+    })
+    df = _fill_advanced_feature_columns(df)
+    result = compute_cross_sectional_features(df).set_index("ticker")
+
+    market_mean_excl_t1 = (0.04 + -0.01) / 2  # T4 (NaN) must not enter this
+    assert approx(result.loc["T1", "momentum_vs_market_1m"], 0.02 - market_mean_excl_t1)
 
 
 def test_cross_sectional_values_hand_computed_multi_peer() -> None:

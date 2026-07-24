@@ -28,16 +28,32 @@ BETA_WINDOW = 252
 BETA_MIN_PERIODS = 60
 
 
-def _exclude_self_mean(df, group_col, value_col, group_size):
+def _exclude_self_mean(df, group_col, value_col):
     """Equal-weighted mean of value_col within each group_col group, EXCLUDING
     the row's own value -- (group_sum - x) / (n - 1). A plain groupby(...).mean()
     (the previous convention here) is self-inclusive: a ticker's own return
     pulls its own "market"/"sector" reference toward itself, artificially
     shrinking every momentum/beta figure -- materially so on thin dates with
     few tickers (2026-07-23 audit). NaN when there's no other member to
-    compare against (n <= 1), not a division by zero."""
-    total = df.groupby(group_col)[value_col].transform("sum")
-    return ((total - df[value_col]) / (group_size - 1)).where(group_size > 1)
+    compare against (n <= 1), not a division by zero.
+
+    n/total are both derived from value_col's own non-NaN count (groupby
+    "count"/"sum" both skip NaN) -- NOT a blanket ticker-count like
+    groupby(...).transform("size"), which counts every row in the group
+    including ones where value_col is NaN. Using "size" as the denominator
+    while "sum" already dropped the NaN rows silently dilutes the mean
+    toward zero on any date where some tickers have an undefined value
+    (e.g. still in return_12m's warm-up year) -- worse the thinner/younger
+    the universe on that date, exactly where this feature matters most
+    (2026-07-24 audit)."""
+    grp = df.groupby(group_col)[value_col]
+    total = grp.transform("sum")
+    n = grp.transform("count")
+    self_val = df[value_col]
+    self_defined = self_val.notna()
+    other_total = total - self_val.where(self_defined, 0.0)
+    other_n = n - self_defined.astype(int)
+    return (other_total / other_n).where(other_n > 0)
 
 
 def compute_cross_sectional_features(df):
@@ -92,15 +108,14 @@ def compute_cross_sectional_features(df):
     # ponytail: use groupby.transform() for vectorized momentum (1000x faster than loops)
     # Market momentum: subtract the mean return of every OTHER ticker (per
     # date) from each return -- self-EXCLUDED, see _exclude_self_mean.
-    market_size = df.groupby("trade_date")["ticker"].transform("size")
     df["momentum_vs_market_1m"] = (
-        df["return_1m"] - _exclude_self_mean(df, "trade_date", "return_1m", market_size)
+        df["return_1m"] - _exclude_self_mean(df, "trade_date", "return_1m")
     )
     df["momentum_vs_market_3m"] = (
-        df["return_3m"] - _exclude_self_mean(df, "trade_date", "return_3m", market_size)
+        df["return_3m"] - _exclude_self_mean(df, "trade_date", "return_3m")
     )
     df["momentum_vs_market_12m"] = (
-        df["return_12m"] - _exclude_self_mean(df, "trade_date", "return_12m", market_size)
+        df["return_12m"] - _exclude_self_mean(df, "trade_date", "return_12m")
     )
 
     # Sector momentum: subtract sector mean (per date, sector) from each return
@@ -128,7 +143,7 @@ def compute_cross_sectional_features(df):
     # snapshot), so unlike everything above it can't stay a single
     # groupby(date).transform() -- needs one groupby("ticker") pass, same
     # shape as compute_price_features.
-    market_log_return = _exclude_self_mean(df, "trade_date", "log_return", market_size)
+    market_log_return = _exclude_self_mean(df, "trade_date", "log_return")
 
     result = []
     for ticker, g in df.groupby("ticker", sort=False):
