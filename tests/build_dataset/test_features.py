@@ -543,6 +543,7 @@ def _advanced_features_fixture(n_rows: int) -> pd.DataFrame:
         "reference_date": dates,
         "fundamentals_available_date": dates - pd.Timedelta(days=45),
         "div_value_recent": [0.5] * n_rows,
+        "div_value_12m": [0.5] * n_rows,
         "lpa": [1.0] * n_rows,
         "ebitda": [100.0] * n_rows,
         "shares_outstanding": [1000.0] * n_rows,
@@ -604,7 +605,7 @@ def _fill_advanced_feature_columns(df: pd.DataFrame) -> pd.DataFrame:
     test doesn't care about, so callers only need to set up the columns
     relevant to what they're testing."""
     defaults = {
-        "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0, "shares_outstanding": 1000.0,
+        "div_value_recent": 0.5, "div_value_12m": 0.5, "lpa": 1.0, "ebitda": 100.0, "shares_outstanding": 1000.0,
         "volume": 1_000_000.0,
         "net_revenue": 500.0, "net_income": 50.0, "revenue_growth_yoy": 0.05,
         "earnings_growth_yoy": 0.03, "volatility_20d": 0.1, "volatility_60d": 0.1,
@@ -678,7 +679,7 @@ def test_n_quarters_available_counts_real_filings() -> None:
             rows.append({
                 "ticker": "A", "trade_date": d, "reference_date": qe,
                 "fundamentals_available_date": qe + pd.Timedelta(days=45),
-                "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0,
+                "div_value_recent": 0.5, "div_value_12m": 0.5, "lpa": 1.0, "ebitda": 100.0,
                 "shares_outstanding": 1000.0, "volume": 1_000_000.0,
                 "net_revenue": 500.0, "net_income": 50.0,
                 "revenue_growth_yoy": 0.05, "earnings_growth_yoy": 0.03,
@@ -713,7 +714,7 @@ def test_n_quarters_available_separate_tickers() -> None:
                 rows.append({
                     "ticker": ticker, "trade_date": d, "reference_date": qe,
                     "fundamentals_available_date": qe + pd.Timedelta(days=45),
-                    "div_value_recent": 0.5, "lpa": 1.0, "ebitda": 100.0,
+                    "div_value_recent": 0.5, "div_value_12m": 0.5, "lpa": 1.0, "ebitda": 100.0,
                     "shares_outstanding": 1000.0, "volume": 1_000_000.0,
                     "net_revenue": 500.0, "net_income": 50.0,
                     "revenue_growth_yoy": 0.05, "earnings_growth_yoy": 0.03,
@@ -774,7 +775,7 @@ def test_days_since_fundamental_keyed_to_availability_not_quarter_end() -> None:
 
 def test_dividend_coverage_ratio_nan_when_no_dividend() -> None:
     """dividend_coverage_ratio must be NaN, not an astronomically large finite
-    number, when a ticker pays no dividend (div_value_recent == 0 -- the
+    number, when a ticker pays no dividend (div_value_12m == 0 -- the
     ordinary case for ~27% of the real dataset's rows, not rare distress).
 
     Regression test: the old `ebitda / (div_value_recent * shares_outstanding
@@ -784,7 +785,7 @@ def test_dividend_coverage_ratio_nan_when_no_dividend() -> None:
     inf. "Coverage" is undefined without a dividend to cover, not infinite.
     """
     df = _advanced_features_fixture(2)
-    df["div_value_recent"] = [0.0, 0.5]  # row 0: no dividend, row 1: real dividend
+    df["div_value_12m"] = [0.0, 0.5]  # row 0: no dividend in trailing window, row 1: real dividend
 
     result = compute_advanced_features(df)
 
@@ -939,6 +940,53 @@ def test_div_yield_12m_unaffected_by_split_inside_trailing_window() -> None:
     # distorted ~55% that (5.0 + 0.5) / 10.0 (today's post-split price) would give.
     last_row = result.iloc[-1]
     assert approx(last_row["div_yield_12m"], 0.10, tol=1e-3)
+
+
+def test_div_value_12m_is_trailing_nominal_sum_not_single_event() -> None:
+    """div_value_12m must be the TRAILING-12M SUM of nominal per-share
+    dividends -- not div_value_recent's single most-recent payment.
+
+    Regression test (2026-07-24 audit): payout_ratio/dividend_coverage_ratio
+    used div_value_recent (the single latest ex-date's value_per_share) as
+    if it were the whole year's dividend -- correct only for an annual payer,
+    and wrong (understated) for any company paying quarterly or more often.
+    Fixture: 3 quarterly dividends of 0.5 each inside the trailing window;
+    div_value_12m must read their SUM (1.5), while div_value_recent (merged
+    upstream by merge_dividends, not recomputed here) would only ever have
+    read the latest single payment (0.5)."""
+    dates = pd.date_range("2020-01-01", periods=280, freq="D")
+    dataset = pd.DataFrame({"ticker": "A", "trade_date": dates, "adj_close": 10.0, "close": 10.0})
+    dividends = pd.DataFrame({
+        "ticker": ["A", "A", "A"],
+        "ex_date": pd.to_datetime(["2020-01-01", "2020-04-01", "2020-07-01"]),
+        "value_per_share": [0.5, 0.5, 0.5],
+    })
+
+    result = compute_dividend_features(dataset, dividends)
+
+    last_row = result.iloc[-1]
+    assert approx(last_row["div_value_12m"], 1.5), (
+        "must sum all 3 trailing dividends, not read only the most recent one"
+    )
+    assert last_row["div_count_12m"] == 3
+
+
+def test_div_value_12m_zero_when_no_dividends_collected() -> None:
+    """A ticker with no dividends collected at all (dividends df has zero
+    rows for it) must read div_value_12m=0.0, matching div_yield_12m/
+    div_count_12m's existing no-dividend convention -- else
+    compute_advanced_features's payout_ratio/dividend_coverage_ratio would
+    KeyError on this column for any ticker in that branch."""
+    dates = pd.date_range("2020-01-01", periods=5, freq="D")
+    dataset = pd.DataFrame({"ticker": "A", "trade_date": dates, "adj_close": 10.0, "close": 10.0})
+    dividends = pd.DataFrame({
+        "ticker": pd.Series(dtype=str), "ex_date": pd.Series(dtype="datetime64[ns]"),
+        "value_per_share": pd.Series(dtype=float),
+    })
+
+    result = compute_dividend_features(dataset, dividends)
+
+    assert (result["div_value_12m"] == 0.0).all()
 
 
 def test_earnings_yield_recomputed_from_reanchored_pl() -> None:

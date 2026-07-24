@@ -87,6 +87,7 @@ def compute_dividend_features(dataset, dividends):
         if len(div) == 0:
             g["div_yield_12m"] = 0.0
             g["div_count_12m"] = 0
+            g["div_value_12m"] = 0.0
             result.append(g)
             continue
 
@@ -109,6 +110,17 @@ def compute_dividend_features(dataset, dividends):
         # gives the count in O(log n), and cumulative sums give the value in the window.
         ex = div["ex_date"].to_numpy()
         cum_yield = np.concatenate([[0.0], np.cumsum(event_yield)])
+        # Nominal (not yield) trailing sum -- true "annual dividend per share"
+        # for payout_ratio/dividend_coverage_ratio (compute_advanced_features),
+        # which need actual currency, not a price-normalized ratio.
+        # div_value_recent (merge_dividends) is only the single MOST RECENT
+        # event's nominal value; treating that one payment as if it were the
+        # full year's dividend mislabeled a quarterly-or-less-frequent payout
+        # as annual, and stair-stepped discontinuously at every ex-date
+        # (2026-07-24 audit). value_per_share is already nominal at its own
+        # ex-date, so summing it directly (unlike event_yield) needs no price
+        # normalization and is immune to adjustment/split basis by construction.
+        cum_value = np.concatenate([[0.0], np.cumsum(div["value_per_share"].to_numpy())])
         td = g["trade_date"].to_numpy()
 
         hi = np.searchsorted(ex, td, side="right")           # ex_date <= trade_date
@@ -116,6 +128,7 @@ def compute_dividend_features(dataset, dividends):
         count = hi - lo
         g["div_yield_12m"] = cum_yield[hi] - cum_yield[lo]
         g["div_count_12m"] = count
+        g["div_value_12m"] = cum_value[hi] - cum_value[lo]
 
         result.append(g)
 
@@ -485,17 +498,26 @@ def compute_advanced_features(df):
 
     # --- DIVIDEND & PAYOUT ANALYSIS (raw, no thresholds) ---
 
-    # Use LPA (lucro per ação = EPS) directly from API
-    df["payout_ratio"] = _safe_ratio(df["div_value_recent"], df["lpa"])
+    # div_value_12m (compute_dividend_features: trailing-12m nominal sum of
+    # per-event dividends), not div_value_recent -- div_value_recent is only
+    # the single MOST RECENT payment, which mislabels a quarterly-or-less-
+    # frequent payout as if it were the whole year's dividend and stair-steps
+    # discontinuously at every ex-date (2026-07-24 audit). div_value_12m is
+    # already on the same trailing-window convention as div_yield_12m/
+    # div_count_12m, so payout_ratio/dividend_coverage_ratio are now
+    # consistent with the rest of this pipeline's dividend features.
 
-    # Dividend coverage: can EBITDA support annual dividend?
-    # annual_dividend = div_value_recent * shares_outstanding
+    # Use LPA (lucro per ação = EPS) directly from API
+    df["payout_ratio"] = _safe_ratio(df["div_value_12m"], df["lpa"])
+
+    # Dividend coverage: can EBITDA support the trailing-12m dividend?
+    # annual_dividend = div_value_12m * shares_outstanding
     #
-    # div_value_recent==0 (no dividend paid, ever) is the ORDINARY case for
-    # ~27% of rows / 213 tickers (confirmed 2026-07-14), not rare distress,
-    # so this uses a >0 guard (annual_dividend is never legitimately
-    # negative) rather than _safe_ratio's abs()-near-zero guard.
-    annual_dividend = df["div_value_recent"] * df["shares_outstanding"]
+    # div_value_12m==0 (no dividend paid in the trailing window) is the
+    # ORDINARY case for a large share of rows, not rare distress, so this
+    # uses a >0 guard (annual_dividend is never legitimately negative) rather
+    # than _safe_ratio's abs()-near-zero guard.
+    annual_dividend = df["div_value_12m"] * df["shares_outstanding"]
     df["dividend_coverage_ratio"] = df["ebitda"] / annual_dividend.where(annual_dividend > 0)
 
     # --- EARNINGS QUALITY (raw signals, no classification) ---
