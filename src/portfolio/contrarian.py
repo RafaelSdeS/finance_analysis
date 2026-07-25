@@ -27,6 +27,54 @@ import pandas as pd
 
 SIGNAL_COL = "earnings_yield_vs_selic"
 
+SMOOTHED_SIGNAL_COL = "earnings_yield_vs_selic_smoothed"
+SMOOTHED_WINDOW_QUARTERS = 20   # 5y of filings -- same convention as
+SMOOTHED_MIN_QUARTERS = 8       # build_dataset/features.py's FUND_ZHIST_*
+
+
+def add_smoothed_earnings_yield(df: pd.DataFrame, window_quarters: int = SMOOTHED_WINDOW_QUARTERS,
+                                 min_quarters: int = SMOOTHED_MIN_QUARTERS) -> pd.DataFrame:
+    """CAPE-style fix for the trailing-earnings lag (2026-07-25 finding):
+    point-in-time `earnings_yield` (=1/pl) uses only the LAST filed
+    quarter's net income, so during an earnings recession (net income
+    falling as fast as or faster than price) P/E never re-rates 'cheap'
+    even as the market crashes -- confirmed empirically in
+    recession_2015_16 (earn_yield 1.7%, BELOW its 3.1% full-sample mean,
+    despite a 31% BOVA11 drawdown; see PORTFOLIO_IMPROVEMENT_PLAN.md Phase
+    3.1). Fix: average net_income over a trailing multi-year window of
+    FILINGS (not calendar days -- fundamentals are quarterly step
+    functions forward-filled ~63x redundantly across daily rows; same
+    dedup-then-roll-then-map-back pattern as
+    build_dataset/features.py::compute_history_relative_features) before
+    dividing by the already daily-re-anchored market_cap. Needs
+    ticker/trade_date/reference_date/net_income/market_cap/selic in df.
+    Adds `earnings_yield_smoothed` and `earnings_yield_vs_selic_smoothed`.
+
+    Units gotcha (found 2026-07-25, undocumented by the vendor): `net_income`
+    is reported in R$ thousands while `market_cap`/`lpa`/`shares_outstanding`
+    are raw BRL -- a ~1000x mismatch. Verified two ways on a real row
+    (PETR4, 2026-07-10): `earnings_yield / (net_income/market_cap) = 1000.14`
+    and `(lpa * shares_outstanding) / net_income = 1000.35` (the ~0.1-0.35%
+    residual is `market_cap`/`pl` being re-anchored to the CURRENT close
+    while net_income/lpa are the last FILED quarter's values, not a units
+    error). Never surfaced before because the only existing net_income
+    consumer (`earnings_growth_yoy` in build_dataset/features.py) is a
+    same-column YoY self-ratio where the units cancel out.
+    """
+    result = []
+    for _, g in df.groupby("ticker", sort=False):
+        g = g.sort_values("trade_date").copy()
+        q = g.drop_duplicates("reference_date").set_index("reference_date").sort_index()
+        avg_net_income = q["net_income"].rolling(window_quarters, min_periods=min_quarters).mean()
+        g["net_income_smoothed"] = g["reference_date"].map(avg_net_income)
+        result.append(g)
+    df = pd.concat(result, ignore_index=True)
+
+    df["earnings_yield_smoothed"] = (df["net_income_smoothed"] * 1000) / df["market_cap"]
+    selic_annualized = (1 + df["selic"] / 100) ** 252 - 1
+    df[SMOOTHED_SIGNAL_COL] = df["earnings_yield_smoothed"] - selic_annualized
+    return df
+
 
 def equity_exposure(df: pd.DataFrame, reb_dates: pd.DatetimeIndex,
                      col: str = SIGNAL_COL, base: float = 0.75, k: float = 0.15,
@@ -73,3 +121,26 @@ if __name__ == "__main__":
     assert abs(e_trunc[dates[39]] - e[dates[39]]) < 1e-12, "exposure at t used future data"
     print("contrarian self-check OK |", "exposure range:",
           round(e.min(), 3), "..", round(e.max(), 3))
+
+    # add_smoothed_earnings_yield: one ticker, 12 quarterly filings, rising
+    # net_income, constant market_cap/selic -- window collapses to a plain
+    # rolling mean, easy to hand-verify.
+    q_dates = pd.date_range("2015-03-31", periods=12, freq="QE")
+    net_income = pd.Series(range(1, 13), dtype=float) * 100  # 100, 200, .. 1200
+    ticker_df = pd.DataFrame({
+        "ticker": "TEST3", "trade_date": q_dates, "reference_date": q_dates,
+        "net_income": net_income, "market_cap": 10_000.0, "selic": 0.05,
+    })
+    smoothed = add_smoothed_earnings_yield(ticker_df, window_quarters=4, min_quarters=2)
+    # last 4 quarters at the final row: (900+1000+1100+1200)/4 = 1050
+    assert abs(smoothed["net_income_smoothed"].iloc[-1] - 1050.0) < 1e-9, \
+        "trailing 4Q rolling mean of net_income wrong"
+    assert smoothed["net_income_smoothed"].iloc[:1].isna().all(), \
+        "single quarter (< min_quarters=2) should be NaN, not a fabricated average"
+    # causal: recomputing on a truncated history matches the full run at the cut
+    smoothed_trunc = add_smoothed_earnings_yield(ticker_df.iloc[:8], window_quarters=4, min_quarters=2)
+    assert abs(smoothed_trunc["net_income_smoothed"].iloc[-1]
+               - smoothed["net_income_smoothed"].iloc[7]) < 1e-9, \
+        "smoothed earnings at t used future filings"
+    print("add_smoothed_earnings_yield self-check OK | smoothed net_income (last row):",
+          smoothed["net_income_smoothed"].iloc[-1])
