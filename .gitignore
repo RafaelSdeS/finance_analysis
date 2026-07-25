@@ -55,6 +55,7 @@ data/processed/*
 !data/processed/README.md
 
 artifacts/models/
+artifacts/reports/
 
 # Local engineering roadmap (never track)
 TODO.md

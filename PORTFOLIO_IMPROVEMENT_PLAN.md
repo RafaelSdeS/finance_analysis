@@ -78,7 +78,17 @@ Only if Gate A = "signal exists." No new code — all existing `solve` knobs.
   | **0.65 (default)** | **2.56x** | **0.255** | **0.283** |
   | 0.75 | 2.09x | 0.235 | 0.202 |
   | 0.80 | 1.84x ✅ | 0.240 | 0.231 |
-  Counterintuitive direction, confirmed empirically: *narrowing* the gap toward `top_frac` (0.60) makes turnover **worse** (2.78x), not better — less slack means borderline names churn in/out more, not less. Only *widening* the band (0.75/0.80) buys turnover down, and every step costs Sharpe/IR — there's no free lunch. **Decision: keep the 0.65 default.** The ≤2x turnover target was a heuristic guess at "reasonable," not a measured cost-model constraint — the reported returns already net out the actual `one_way_cost` at 2.56x turnover, so there's no evidence this level of churn is actually destructive. Trading real, measured Sharpe/IR edge to satisfy an unvalidated round-number target is the wrong trade. Revisit only if a real transaction-cost or capacity constraint (market impact at size, bid-ask on less liquid names) surfaces that 2.56x specifically breaches.
+  Counterintuitive direction, confirmed empirically: *narrowing* the gap toward `top_frac` (0.60) makes turnover **worse** (2.78x), not better — less slack means borderline names churn in/out more, not less. Only *widening* the band (0.75/0.80) buys turnover down, and every step costs Sharpe/IR — there's no free lunch **at fixed top_frac=0.5**. (Superseded below — the real lever turned out to be `top_frac` itself, not `hold_frac` in isolation.)
+- **`top_frac` swept too (2026-07-25) — 0.60/0.75 STRICTLY DOMINATES the 0.5/0.65 default, new winner:**
+  | top_frac/hold_frac | turnover | excess-CDI Sharpe | info ratio vs EW | max DD | nominal Sharpe |
+  |---|---|---|---|---|---|
+  | 0.30/0.45 | 3.38x | 0.214 | 0.080 | −69.39% | 0.620 |
+  | 0.40/0.55 | 2.97x | 0.225 | 0.096 | −66.71% | 0.651 |
+  | 0.50/0.65 (old default) | 2.56x | 0.255 | 0.283 | −67.02% | 0.673 |
+  | **0.60/0.75 (new default)** | **2.17x** ✅ | **0.260** | **0.341** | **−62.56%** | **0.681** |
+  | 0.70/0.85 | 1.74x | 0.240 | 0.287 | −61.25% | 0.671 |
+  | 1.00 (≡ equal-weight) | 0.89x | 0.198 | 0 (by definition) | −62.52% | 0.645 |
+  Tightening `top_frac` toward more concentration (0.30/0.40) makes *everything* worse — lower Sharpe, higher turnover, deeper drawdown — confirming the rank-IC (0.085) is real but too noisy near the selection boundary to reward concentration; the extra churn from chasing marginal rank differences costs more than the marginal conviction gains. Widening `top_frac` past the old 0.5 default keeps helping up to **0.60/0.75** (a genuine local peak, confirmed by both neighbors being worse) then degrades again at 0.70/0.85 — info ratio and excess-CDI Sharpe both fall past the peak even as turnover/drawdown keep improving, i.e. past 0.60 the strategy is diluting into EW faster than it's saving on cost. **0.60/0.75 beats the old 0.5/0.65 default on every axis simultaneously** (return, both Sharpes, info ratio, turnover, drawdown) — not a tradeoff, a strict improvement. **Decision: ship 0.60/0.75 as the new default** (updated in `run_alpha_diagnostic.py`'s CLI defaults). Turnover also now lands at 2.17x, close enough to the ≤2x heuristic target that the earlier waiver is moot. Not exhaustively fine-tuned around the peak (e.g. 0.55/0.70, 0.65/0.80 untested) — diminishing-returns polish, low priority given each point costs a full walk-forward retrain.
 
 ---
 

@@ -12,12 +12,13 @@ import argparse
 
 import pandas as pd
 
-from src.build_dataset.paths import OUTPUT_PATH
+from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR
 from src.portfolio import alpha, universe
-from src.portfolio.backtest import equal_weight_fn, run_backtest
+from src.portfolio.backtest import buy_and_hold_curve, cdi_curve, equal_weight_fn, run_backtest
 from src.portfolio.features import feature_columns
 from src.portfolio.labels import forward_excess_return
 from src.portfolio.metrics import full_report, print_report
+from src.portfolio.visualize_portfolio import build_dashboard, save_dashboard
 
 
 def make_alpha_weighted_fn(preds_by_date: dict, top_frac: float = 0.5, hold_frac: float | None = None):
@@ -49,7 +50,7 @@ def make_alpha_weighted_fn(preds_by_date: dict, top_frac: float = 0.5, hold_frac
     return weights_fn
 
 
-def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.5, hold_frac: float = 0.65):
+def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_frac: float = 0.75):
     print("Loading dataset (full feature set)...")
     base_cols = ["ticker", "trade_date", "adj_close", "traded_amount"]
     all_cols = sorted(set(base_cols) | set(feature_columns(include_sector=False)))
@@ -94,13 +95,23 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.5, hold_fra
     print_report(f"Alpha-sort (top {top_frac:.0%} buy / hold {hold_frac:.0%})",
                  full_report(alpha_curve, alpha_log, cdi_daily=cdi_series, benchmark_returns=eq_returns))
 
+    print("\nBuilding dashboard...")
+    bova = pd.read_parquet(PRICES_DIR / "BOVA11.parquet", columns=["trade_date", "adj_close"])
+    bova_curve = buy_and_hold_curve(bova.set_index("trade_date")["adj_close"].reindex(alpha_curve.index).ffill())
+    cdi_only_curve = cdi_curve(cdi[cdi["trade_date"].isin(alpha_curve.index)])
+    fig = build_dashboard(alpha_curve, alpha_log, eq_curve, bova_curve, cdi_only_curve, top_frac, hold_frac)
+    path = save_dashboard(fig)
+    print(f"Dashboard saved to {path}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--top-n", type=int, default=50)
     parser.add_argument("--horizon-td", type=int, default=252)
-    parser.add_argument("--top-frac", type=float, default=0.5, help="buy cutoff, e.g. 0.5 = top half")
-    parser.add_argument("--hold-frac", type=float, default=0.65,
+    parser.add_argument("--top-frac", type=float, default=0.6,
+                         help="buy cutoff, e.g. 0.6 = top 60%% (2026-07-25 sweep: strictly beats 0.5 "
+                              "on every metric -- see PORTFOLIO_IMPROVEMENT_PLAN.md)")
+    parser.add_argument("--hold-frac", type=float, default=0.75,
                          help="no-trade band: an already-held name stays until it drops below this "
                               "looser cutoff, not just below --top-frac")
     args = parser.parse_args()
