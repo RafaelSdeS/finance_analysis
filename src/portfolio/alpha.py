@@ -21,6 +21,14 @@ from src.portfolio.features import feature_columns
 
 DEFAULT_EMBARGO_DAYS = 21  # ~1 trading month -- absorbs residual serial correlation at the boundary
 
+DEFAULT_N_ESTIMATORS = 50  # not 100 (LightGBM's own default) or 200: measured
+# empirically (2026-07-24 diagnostic, last 20 rebalance dates) that
+# out-of-sample rank-IC gets monotonically WORSE as n_estimators grows on
+# this weak-signal, few-independent-period problem (0.112 at 50 vs 0.042 at
+# 2000). Set once here so every caller gets the better setting by default
+# instead of re-guessing it per script (run_alpha_diagnostic.py used to
+# still hardcode 200 -- the worse setting -- after this was found).
+
 # monotone_constraints (proposal §4.1): forward return should be non-decreasing
 # in earnings_yield_vs_selic (the equity-vs-cash spread, the actual decision
 # variable) -- a structural regularizer against the tree overfitting a raw
@@ -74,7 +82,8 @@ def fit(df: pd.DataFrame, as_of: pd.Timestamp, horizon_td: int,
 
     cols = feature_columns(include_sector=False)
     monotone = [1 if c == MONOTONE_FEATURE else 0 for c in cols]
-    params = {"objective": "regression", "verbosity": -1, "monotone_constraints": monotone}
+    params = {"objective": "regression", "verbosity": -1, "monotone_constraints": monotone,
+              "n_estimators": DEFAULT_N_ESTIMATORS}
     params.update(lgb_params)
 
     model = lgb.LGBMRegressor(**params)
@@ -107,10 +116,23 @@ def walk_forward_predict(df: pd.DataFrame, rebalance_dates, horizon_td: int,
     for t in rebalance_dates:
         model = fit(df, t, horizon_td, embargo_days, min_train_rows, **lgb_params)
         if model is None:
+            print(f"  [{t.date()}] skipped -- not enough purged training history yet")
             continue
         preds = predict(model, df, t)
+        print(f"  [{t.date()}] trained, predicted {len(preds)} tickers")
         rows.extend({"date": t, "ticker": tkr, "alpha": a} for tkr, a in preds.items())
     return pd.DataFrame(rows, columns=["date", "ticker", "alpha"])
+
+
+def shrink_alpha(alpha_series: pd.Series, factor: float) -> pd.Series:
+    """Shrink predicted alpha toward 0 by `factor` in [0, 1] -- 0 leaves
+    predictions untouched, 1 flattens them to nothing (pure risk-parity,
+    ignore the model). Standard fix for mean-variance "error maximization"
+    (Michaud 1989): an MVO chases whichever noisy alpha estimate happens to
+    be largest this quarter; shrinking the input toward a flat prior caps
+    how much any single noisy estimate can dominate the allocation, without
+    touching Sigma or the optimizer itself (plan Phase 1.3)."""
+    return alpha_series * (1 - factor)
 
 
 def rank_ic(predictions: pd.DataFrame, df: pd.DataFrame) -> pd.Series:

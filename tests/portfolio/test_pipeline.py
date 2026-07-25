@@ -68,6 +68,19 @@ def main():
                 bool(tilts_toward_e_ok), f"w={ {k: round(v, 4) for k, v in w2.items()} }")
     passed, failed = passed + tilts_toward_e_ok, failed + (not tilts_toward_e_ok)
 
+    # --- Phase 1.3: shrink_factor pulls the allocation toward the
+    # equal-weight/risk-parity solution as it goes to 1 (alpha zeroed out ->
+    # nothing left to justify tilting away from diversification).
+    weights_fn_shrunk = make_full_weights_fn(alpha_by_date, price_wide, sigma_window=100,
+                                              c1=0.001, shrink_factor=1.0)
+    w_shrunk = weights_fn_shrunk(reb_dates[2], set(tickers), {"prev_weights": {}})
+    spread_unshrunk = w2.get("E", 0) - w2.get("A", 0)
+    spread_shrunk = w_shrunk.get("E", 0) - w_shrunk.get("A", 0)
+    shrink_ok = spread_shrunk < spread_unshrunk
+    print_check("shrink_factor=1.0 narrows the E-vs-A tilt vs shrink_factor=0.0 (default)",
+                bool(shrink_ok), f"unshrunk spread={spread_unshrunk:.4f}, shrunk spread={spread_shrunk:.4f}")
+    passed, failed = passed + shrink_ok, failed + (not shrink_ok)
+
     # --- regression: Sigma must be scaled to the same horizon as alpha, not
     # left as a raw daily covariance (found empirically 2026-07-24 -- an
     # unscaled Sigma is ~100-300x too small relative to a 252-day alpha,

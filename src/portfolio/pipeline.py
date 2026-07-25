@@ -6,6 +6,7 @@ convex optimizer) into a single weights_fn the backtest harness can drive
 
 import pandas as pd
 
+from src.portfolio.alpha import shrink_alpha
 from src.portfolio.optimizer import solve
 from src.portfolio.risk import add_cash_row_col, shrinkage_cov
 
@@ -28,7 +29,8 @@ def scaled_sigma(price_wide: pd.DataFrame, date: pd.Timestamp, universe: list,
 
 def make_full_weights_fn(alpha_by_date: dict, price_wide: pd.DataFrame,
                           sigma_window: int = 252, horizon_td: int = 252,
-                          c1=0.0003, c2: float = 0.0, lam: float = 1.0, w_max: float = 1.0):
+                          c1=0.0003, c2: float = 0.0, lam: float = 1.0, w_max: float = 1.0,
+                          exposure_by_date: dict | None = None, shrink_factor: float = 0.0):
     """
     alpha_by_date: {date: {ticker: alpha}} -- e.g. alpha.walk_forward_predict()'s
         output grouped by date. `alpha_i` is already an excess-return-over-CDI
@@ -60,6 +62,13 @@ def make_full_weights_fn(alpha_by_date: dict, price_wide: pd.DataFrame,
         Var(H-day return) ~= H * Var(daily return)) puts it back on the same
         basis as alpha.
     c1: one-way per-asset cost passed straight through to optimizer.solve().
+    exposure_by_date: optional {date: equity_cap} from contrarian.equity_exposure()
+        -- the Layer-2 "cannons/violins" overlay. Caps total equity weight per
+        rebalance (residual -> CDI); None = always 100% equity (overlay off).
+    shrink_factor: alpha.shrink_alpha() factor in [0, 1] applied to the raw
+        predictions before optimization (plan Phase 1.3) -- 0 (default)
+        leaves alpha untouched. Caps how much a single noisy quarterly
+        estimate can dominate the allocation (Michaud error-max fix).
     Returns a weights_fn(date, universe, state) -> dict[ticker, weight]
         compatible with backtest.run_backtest(). Falls back to equal-weight
         on any date without an alpha prediction yet (early history) or
@@ -81,13 +90,16 @@ def make_full_weights_fn(alpha_by_date: dict, price_wide: pd.DataFrame,
 
         preds = alpha_by_date[date]
         alpha_series = pd.Series({**{t: preds.get(t, 0.0) for t in investable}, CASH_KEY: 0.0})
+        alpha_series = shrink_alpha(alpha_series, shrink_factor)
         sigma = add_cash_row_col(sigma, cash_key=CASH_KEY)
 
         prev_w = dict(state["prev_weights"])
         prev_w[CASH_KEY] = 1.0 - sum(prev_w.values())
         w_prev = pd.Series(prev_w)
 
-        w = solve(alpha_series, sigma, w_prev, c1=c1, c2=c2, lam=lam, w_max=w_max, cash_key=CASH_KEY)
+        max_equity = 1.0 if exposure_by_date is None else exposure_by_date.get(date, 1.0)
+        w = solve(alpha_series, sigma, w_prev, c1=c1, c2=c2, lam=lam, w_max=w_max,
+                  cash_key=CASH_KEY, max_equity=max_equity)
         return {t: float(w[t]) for t in investable if w.get(t, 0) > 1e-8}
 
     return weights_fn

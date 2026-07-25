@@ -9,14 +9,13 @@ Run: python -m src.portfolio.run_baseline [--top-n 50]
 """
 
 import argparse
-import pprint
 
 import pandas as pd
 
 from src.build_dataset.paths import MACRO_DIR, OUTPUT_PATH, PRICES_DIR
 from src.portfolio import universe
 from src.portfolio.backtest import buy_and_hold_curve, cdi_curve, equal_weight_fn, run_backtest
-from src.portfolio.metrics import full_report
+from src.portfolio.metrics import full_report, print_report
 
 _NO_REBALANCE_LOG = pd.DataFrame({"turnover": [0.0]})
 
@@ -51,8 +50,7 @@ def main(top_n: int = 50):
         ("BOVA11 buy-and-hold", bova_curve, _NO_REBALANCE_LOG),
         ("100% CDI", cdi_only_curve, _NO_REBALANCE_LOG),
     ):
-        print(f"\n=== {name} ===")
-        pprint.pprint(full_report(curve, log, selic_daily=selic_daily))
+        print_report(name, full_report(curve, log, selic_daily=selic_daily))
 
 
 if __name__ == "__main__":

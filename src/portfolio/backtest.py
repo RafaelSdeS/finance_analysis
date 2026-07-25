@@ -114,6 +114,7 @@ def run_backtest(prices: pd.DataFrame, cdi: pd.DataFrame, membership: pd.DataFra
             "date": t, "turnover": turnover, "cost": cost,
             "n_holdings": len(new_shares), "cash_weight": 1 - sum(new_w.values()),
             "port_value_pre_cost": port_value,
+            "weights": dict(new_w),  # ticker -> target weight at this rebalance (cash = 1 - sum)
         })
 
         next_t = reb_dates[k + 1] if k + 1 < len(reb_dates) else all_dates[-1]

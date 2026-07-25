@@ -19,6 +19,9 @@ scipy==1.18.0
 cvxpy==1.7.4
 # Stage 3 portfolio -- the Stage A alpha forecaster (proposal §2b)
 lightgbm==4.6.0
+# Stage 3 portfolio -- renders a single tree from the alpha model (plot_tree.py); needs the
+# system `dot` binary too (already present here, install via your OS package manager otherwise)
+graphviz==0.21
 # Testing
 pytest==8.3.4
 ruff==0.15.20

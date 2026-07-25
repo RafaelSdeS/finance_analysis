@@ -42,6 +42,16 @@ def main():
     print_check("sharpe_ratio matches direct mean/std formula", bool(ok))
     passed, failed = passed + ok, failed + (not ok)
 
+    # sharpe_ratio: a self-vs-self diff has std at float64 noise floor (~1e-16),
+    # not exactly 0 -- must read as NaN (degenerate), not an arbitrary huge/tiny
+    # ratio from dividing noise by noise (found 2026-07-25: 100% CDI's
+    # excess-over-CDI Sharpe printed a spurious 0.133 from exactly this).
+    degenerate = pd.Series([0.0005 + 1e-17 * ((-1) ** i) for i in range(300)])
+    ok = np.isnan(sharpe_ratio(degenerate))
+    print_check("sharpe_ratio treats float-noise-floor std as degenerate (NaN)", bool(ok),
+                f"got {sharpe_ratio(degenerate)}")
+    passed, failed = passed + ok, failed + (not ok)
+
     # max_drawdown: known path
     curve = pd.Series([1.0, 1.1, 1.05, 0.9, 1.2])
     expected_dd = min(0.0, 1.05 / 1.1 - 1, 0.9 / 1.1 - 1, 0.0)

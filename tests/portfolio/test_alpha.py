@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.portfolio.alpha import (  # noqa: E402
     MONOTONE_FEATURE, _label_close_dates, _purge_embargo_mask, fit, predict,
-    rank_ic, walk_forward_predict,
+    rank_ic, shrink_alpha, walk_forward_predict,
 )
 from src.portfolio.features import feature_columns  # noqa: E402
 from tests.test_utils import print_check, print_header, print_section_end  # noqa: E402
@@ -139,6 +139,26 @@ def test_predict_empty_date():
     return passed, failed
 
 
+def test_shrink_alpha():
+    passed = failed = 0
+    a = pd.Series({"A": 0.10, "B": -0.05, "C": 0.0})
+
+    zero_ok = shrink_alpha(a, 0.0).equals(a)
+    print_check("factor=0 leaves alpha untouched", bool(zero_ok))
+    passed, failed = passed + zero_ok, failed + (not zero_ok)
+
+    full_ok = np.allclose(shrink_alpha(a, 1.0).to_numpy(), 0.0)
+    print_check("factor=1 flattens alpha to exactly 0", bool(full_ok))
+    passed, failed = passed + full_ok, failed + (not full_ok)
+
+    half = shrink_alpha(a, 0.5)
+    half_ok = np.allclose(half.to_numpy(), (a * 0.5).to_numpy())
+    print_check("factor=0.5 halves every value, sign preserved", bool(half_ok),
+                f"got {half.to_dict()}")
+    passed, failed = passed + half_ok, failed + (not half_ok)
+    return passed, failed
+
+
 def test_walk_forward_and_rank_ic():
     passed = failed = 0
     df = _synthetic_df(n_rows=300, seed=3, n_tickers=15)
@@ -185,7 +205,8 @@ def main():
     p3, f3 = test_monotone_constraint()
     p4, f4 = test_predict_empty_date()
     p5, f5 = test_walk_forward_and_rank_ic()
-    passed, failed = p1 + p2 + p3 + p4 + p5, f1 + f2 + f3 + f4 + f5
+    p6, f6 = test_shrink_alpha()
+    passed, failed = p1 + p2 + p3 + p4 + p5 + p6, f1 + f2 + f3 + f4 + f5 + f6
     print_section_end(passed, failed)
     return failed == 0
 

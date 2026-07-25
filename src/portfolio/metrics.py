@@ -28,11 +28,38 @@ def annualized_return(returns: pd.Series, periods_per_year: int = TRADING_DAYS_P
     return gross ** (periods_per_year / n) - 1
 
 
+_DEGENERATE_STD = 1e-9  # below genuine daily-return noise (~1e-4); catches float64
+                         # accumulation noise (~1e-16) on a self-vs-self diff (e.g.
+                         # CDI curve minus its own CDI series), not real near-zero vol
+
+
 def sharpe_ratio(returns: pd.Series, periods_per_year: int = TRADING_DAYS_PER_YEAR) -> float:
     std = returns.std(ddof=1)
-    if not std or np.isnan(std):
+    if not std or np.isnan(std) or std < _DEGENERATE_STD:
         return float("nan")
     return (returns.mean() / std) * np.sqrt(periods_per_year)
+
+
+def excess_over_cdi_sharpe(returns: pd.Series, cdi_daily: pd.Series,
+                            periods_per_year: int = TRADING_DAYS_PER_YEAR) -> float:
+    """Sharpe of (returns - CDI) -- plain sharpe_ratio() has no risk-free term
+    (confirmed 2026-07-25: it's why 100% CDI itself prints Sharpe ~42, not
+    ~0), so it answers "is this distinguishable from zero", not "does this
+    beat cash". This is the metric that answers the second question.
+    `cdi_daily`: %/trading-day (manifest.COLUMN_UNITS convention, e.g. 0.0534
+    = 0.0534%/day), same series backtest.run_backtest uses for cash accrual."""
+    cdi_ret = cdi_daily.reindex(returns.index).ffill() / 100
+    return sharpe_ratio((returns - cdi_ret).dropna(), periods_per_year)
+
+
+def information_ratio(returns: pd.Series, benchmark_returns: pd.Series,
+                       periods_per_year: int = TRADING_DAYS_PER_YEAR) -> float:
+    """Sharpe of (returns - benchmark) -- e.g. vs the equal-weight floor.
+    Isolates whatever the extra machinery (alpha model + optimizer) adds on
+    top of shared market beta, which annualized_return/sharpe_ratio alone
+    conflate with it."""
+    active = (returns - benchmark_returns.reindex(returns.index)).dropna()
+    return sharpe_ratio(active, periods_per_year)
 
 
 def max_drawdown(cum_values: pd.Series) -> float:
@@ -115,17 +142,76 @@ def regime_slice(returns: pd.Series, selic_daily: pd.Series) -> dict:
     return result
 
 
+def active_return_report(returns: pd.Series, benchmark_returns: pd.Series,
+                          selic_daily: pd.Series) -> dict:
+    """Regime breakdown of (returns - benchmark), e.g. pipeline minus
+    equal-weight -- same regime_slice() slicing, applied to the ACTIVE return
+    instead of the raw one, so "which regime does the extra machinery help
+    or hurt in" is a direct table read, not a mental subtraction across two
+    separate regime tables (plan Phase 0.3)."""
+    active = (returns - benchmark_returns.reindex(returns.index)).dropna()
+    return regime_slice(active, selic_daily)
+
+
 def full_report(equity_curve: pd.Series, rebalance_log: pd.DataFrame,
-                 selic_daily: pd.Series = None, n_trials: int = 1) -> dict:
-    """The full §8 metric panel for one strategy's equity curve."""
+                 selic_daily: pd.Series = None, cdi_daily: pd.Series = None,
+                 benchmark_returns: pd.Series = None, n_trials: int = 1,
+                 rebalances_per_year: int = 4) -> dict:
+    """The full §8 metric panel for one strategy's equity curve.
+    `rebalances_per_year` MUST match the actual rebalance cadence the log
+    came from (4 for quarterly, 12 for monthly, ...) -- turnover_stats()
+    just multiplies mean per-event turnover by this number, so passing the
+    wrong value silently mis-annualizes turnover/holding-period by that
+    ratio without affecting anything else in the report (found empirically
+    2026-07-25: every caller here used to rely on the 4-quarters-a-year
+    default even when the backtest itself ran on a monthly membership
+    calendar)."""
     returns = equity_curve.pct_change().dropna()
     report = {
         "annualized_return": annualized_return(returns),
         "sharpe": sharpe_ratio(returns),
         "deflated_sharpe": deflated_sharpe_ratio(returns, n_trials=n_trials),
         "max_drawdown": max_drawdown(equity_curve),
-        **turnover_stats(rebalance_log),
+        **turnover_stats(rebalance_log, rebalances_per_year=rebalances_per_year),
     }
+    if cdi_daily is not None:
+        report["excess_cdi_sharpe"] = excess_over_cdi_sharpe(returns, cdi_daily)
+    if benchmark_returns is not None:
+        report["information_ratio"] = information_ratio(returns, benchmark_returns)
     if selic_daily is not None:
         report["regime_slices"] = regime_slice(returns, selic_daily)
     return report
+
+
+def print_regime_slices(slices: dict) -> None:
+    """The per-regime table body shared by print_report and any standalone
+    regime table (e.g. active_return_report's output)."""
+    for slice_name, s in slices.items():
+        print(f"    {slice_name:<20}n={s['n_days']:>5}   "
+              f"ann.ret={s['annualized_return']:>8.2%}   sharpe={s['sharpe']:>8.3f}")
+
+
+def print_report(name: str, report: dict) -> None:
+    """Human-readable replacement for pprint.pprint(full_report(...)) -- the
+    raw dict prints numpy's `np.float64(...)` reprs and alphabetizes an
+    otherwise logically-grouped set of metrics, which is tedious to scan on
+    every backtest run. Same numbers, laid out as a fixed table instead."""
+    holding = report["avg_holding_period_years"]
+    holding_str = "never trades" if np.isinf(holding) else f"{holding:.2f} years"
+    print(f"\n=== {name} ===")
+    print(f"  {'Annualized return':<22}{report['annualized_return']:>10.2%}")
+    print(f"  {'Sharpe ratio':<22}{report['sharpe']:>10.3f}")
+    if "excess_cdi_sharpe" in report:
+        print(f"  {'Excess-CDI Sharpe':<22}{report['excess_cdi_sharpe']:>10.3f}")
+    if "information_ratio" in report:
+        print(f"  {'Info ratio vs EW':<22}{report['information_ratio']:>10.3f}")
+    print(f"  {'Deflated Sharpe':<22}{report['deflated_sharpe']:>10.3f}")
+    print(f"  {'Max drawdown':<22}{report['max_drawdown']:>10.2%}")
+    print(f"  {'Annual turnover':<22}{report['annual_turnover']:>9.2f}x")
+    print(f"  {'Avg holding period':<22}{holding_str:>10}")
+    print(f"  {'No-trade fraction':<22}{report['no_trade_fraction']:>10.1%}")
+
+    slices = report.get("regime_slices")
+    if slices:
+        print("  Regime breakdown:")
+        print_regime_slices(slices)

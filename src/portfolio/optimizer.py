@@ -2,7 +2,8 @@
 optimizer.py -- the cost-aware convex program (proposal §5, Stage B):
 
     maximize_w  a^T w - (lam/2) w^T Sigma w - c1^T |w - w_prev| - (c2/2) ||w - w_prev||^2
-    s.t.        sum(w) == 1, w >= 0, w_i <= w_max (except cash), w_cash >= 0
+    s.t.        sum(w) == 1, w >= 0, w_i <= w_max (except cash), w_cash >= 0,
+                sum(equity w) <= max_equity   (contrarian exposure cap; §Layer 2)
 
 c1 is a ONE-WAY per-asset cost (proposal §5 fix: NOT the round-trip fee --
 `|w - w_prev|` already charges once per leg, so a full entry+exit position
@@ -16,7 +17,7 @@ import pandas as pd
 
 def solve(alpha: pd.Series, sigma: pd.DataFrame, w_prev: pd.Series, c1,
           c2: float = 0.0, lam: float = 1.0, w_max: float = 1.0,
-          cash_key: str = "cash") -> pd.Series:
+          cash_key: str = "cash", max_equity: float = 1.0) -> pd.Series:
     """
     alpha: expected return for the CURRENT investable universe, incl. `cash_key`
         (the CDI carry) -- exactly what an alpha model + cash carry produce
@@ -69,6 +70,11 @@ def solve(alpha: pd.Series, sigma: pd.DataFrame, w_prev: pd.Series, c1,
         if tkr == cash_key:
             continue
         constraints.append(w[i] == 0 if tkr in exited else w[i] <= w_max)
+    # contrarian overlay (contrarian.equity_exposure): cap total equity weight,
+    # residual forced into cash/CDI. max_equity < 1 -> "sell at the violins".
+    if max_equity < 1.0:
+        equity_idx = [i for i in range(n) if i != cash_pos]
+        constraints.append(cp.sum(w[equity_idx]) <= max_equity)
 
     problem = cp.Problem(objective, constraints)
     problem.solve()
