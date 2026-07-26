@@ -250,40 +250,48 @@ model layer.
 
 ### V.0 — Infrastructure that makes honest evaluation possible (~½ day, unblocks everything)
 
-- [ ] **V.0a Persist backtest artifacts.** Save `alpha_curve`/`eq_curve`/rebalance logs + the config
-      to `artifacts/backtests/<config-hash>/`. We just spent **three full walk-forward retrains** to
-      compute three metrics on the same returns series, because nothing persists the curve (the
-      dashboard writes only Plotly HTML). Add a metrics-only re-analysis path over the saved curve.
-- [ ] **V.0b Append-only trial log** (`artifacts/backtests/trials.csv`): timestamp, every config
-      field, key metrics — one row per run. Makes `n_trials` a counted fact instead of an estimate,
-      which the deflation math directly depends on. Retro-fill from this document's tables.
-- [ ] **V.0c Wire `split_config.json` into the portfolio scripts.** Inject the window, never
-      hardcode dates (standing rule; mirror `manifest.iter_fit_windows()`). Add
-      `--window {train,trainval,test,full}` to `run_alpha_diagnostic.py` and
-      `diagnose_contrarian.py`. **This is the load-bearing fix** — without it, every future sweep
-      re-commits the same error.
-- [ ] **V.0d Add `n_trials=1` to the DSR print sweep** (one-token change: `{1, n_trials, 20, 25}`)
-      so search-bias cost is always decomposable — PSR@1 answers "is the edge real at all", DSR@k
-      answers "does it survive the search". Replaces the hand-derived estimates above.
+- [x] **V.0a Persist backtest artifacts.** *(Built 2026-07-26: `src/portfolio/artifacts.py`
+      `save_run()`/`load_run()` — pickled bundle of curves+logs+config in
+      `artifacts/backtests/<timestamp>_<confighash>/`, wired into `run_alpha_diagnostic.py`'s
+      `main()` so every run persists automatically. `src/portfolio/reanalyze.py` is the
+      metrics-only re-analysis path — already paid for itself same-day, see V.1a below.)*
+- [x] **V.0b Append-only trial log.** *(Built 2026-07-26: `artifacts.append_trial_log()` appends
+      config+key-metrics to `artifacts/backtests/trials.csv` on every run. Retro-filling this
+      document's historical sweep tables into it was judged not worth doing — the tables
+      themselves remain the record of those (now-invalidated-as-evidence) trials; the log's job
+      is counting trials from here forward, not reconstructing the past.)*
+- [x] **V.0c Wire `split_config.json` into the portfolio scripts.** *(Built 2026-07-26:
+      `window_bounds()` + `--window {train,trainval,test,full}` in both `run_alpha_diagnostic.py`
+      and `diagnose_contrarian.py`. train/trainval truncate the INPUT data (design-time
+      blindness); test does NOT truncate training — the model keeps learning through full
+      history exactly as production would — but restricts which dates get SCORED.)*
+- [x] **V.0d Add `n_trials=1` to the DSR print sweep.** *(Built 2026-07-26: both DSR blocks in
+      `run_alpha_diagnostic.py` now sweep `{1, n_trials, 20, 25}`.)*
 
 ### V.1 — Re-measure what's real, on the era where the model actually has its features
 
-- [ ] **V.1a Split every metric pre/post-2011-01-31.** Fundamentals are **exactly 0% populated
-      before 2011-01-31** (documented in Phase 3.1 #3 and CLAUDE.md) — so roughly a third of the 92
-      prediction dates come from a *price-features-only* model, silently averaged into every headline
-      number in this document. **Hypothesis: post-2011 rank-IC and info-ratio are both materially
-      higher**, and the current figures understate the real design. If confirmed, the honest
-      evaluation window becomes 2011+ (or 2013+, once the 5y `*_zhist_5y` warm-ups have cleared).
-      Cheap, and the most promising "the numbers are worse than reality" lead available.
-- [ ] **V.1b Restrict metrics to dates where a prediction exists.** `make_alpha_weighted_fn` falls
-      back to equal-weight before `min_train_rows` is met, so the first ~11 of 103 rebalances are
-      literally EW — the active-vs-EW series is *exactly zero* there, diluting the info-ratio by
-      ≈√(n_pred/n_total) (~5%; small, but free to remove and it's currently counted against us).
-- [ ] **V.1c Overlap-corrected t-stat on the rank-IC series.** 92 dates at a 252d horizon on a
-      quarterly calendar means ~4× overlapping label windows → effective n≈23, not 92. Naive
-      t≈5 becomes t≈2.7 under a block bootstrap / Newey-West correction — probably still
-      significant, but **measure it** rather than asserting it. This single number decides whether
-      the signal itself is real, independent of any construction choice.
+- [x] **V.1a Split every metric pre/post-2011-01-31.** *(Built + RUN 2026-07-26. Result is
+      real but two-sided, not the clean "understated" story hypothesized — and it doesn't hold
+      the same way across universe sizes, see V.2a below.)*
+      At the shipped config (top_n=50, `--use-exposure`): active-return-vs-EW pre-2011
+      **−1.37%/yr** → post-2011 **+1.51%/yr** (the hypothesized direction — the model's
+      stock-picking edge over EW genuinely looks better once it has real fundamentals).
+      **But excess-CDI went the OTHER way**: full-sample ann.mean 6.40% → post-2011-only just
+      **1.84%**, and DSR@16 **0.393 → 0.075** (`reanalyze.py`, re-run on the saved artifact, no
+      retrain) — most of the "beats cash" edge is a pre-2011 Brazilian-equity-supercycle beta
+      effect (2000s commodity boom), not something specific to this construction. Neither series
+      clears the DSR bar even in its best era (active-vs-EW: 0.172; excess-CDI: 0.075) — both
+      still clear fails, just a sharper, more honest picture of *why*: weak-but-real
+      stock-picking skill, riding on top of a "beats cash" claim that was mostly riding 2000s
+      beta and looks much weaker in the market Brazil has actually had since 2011.
+- [x] **V.1b Restrict metrics to dates where a prediction exists.** *(Built + RUN 2026-07-26.)*
+      Effect was exactly as small as predicted: DSR@16 on active-vs-EW moved 0.067→0.068,
+      noise-level. Correct to keep, not a lever that matters.
+- [x] **V.1c Overlap-corrected t-stat on the rank-IC series.** *(Built 2026-07-26:
+      `metrics.newey_west_tstat`, wired into `run_alpha_diagnostic.py`'s rank-IC print with
+      `max_lag` auto-derived from the rebalance calendar's actual spacing. Not yet read off a
+      real run in this conversation — the printed naive-vs-NW t-stat is in every `--window full`
+      run's output from here forward; check it next time one runs.)*
 
 ### V.2 — Increase EFFECT SIZE, not knob count
 
@@ -292,10 +300,24 @@ at top_frac=0.6 the book holds 60% of a 50-name universe = 30 names, equal-weigh
 nearly EW by construction**, yet different enough to carry tracking error. Paying to differ from a
 benchmark while diluting into it is precisely a 0.067 DSR. The fix is structural, not a knob:
 
-- [ ] **V.2a Widen the universe** (`--top-n` 50 → 100/150). At 100 names a top-25% cut is 25 names:
-      a genuinely concentrated *and* diversified book with a **sharp** alpha cut, instead of owning
-      most of the universe. Never tried. Also the textbook lever for converting a small IC into
-      realized return (IR ≈ IC·√breadth). **Highest expected value on this list.**
+- [x] **V.2a Widen the universe** (`--top-n` 50 → 100/150). *(RUN 2026-07-26. REJECTED — the
+      naive version of this idea makes things monotonically WORSE, not better, the opposite of
+      the IR≈IC·√breadth prediction.)*
+      | top_n | info-ratio vs EW | alpha-sort excess-CDI Sharpe | EW excess-CDI Sharpe | EW max-DD |
+      |---|---|---|---|---|
+      | 50 | 0.063 | 0.308 | 0.234 | −62.5% |
+      | 100 | 0.023 | 0.252 | **0.277** (beats alpha-sort) | −85.4% |
+      | 150 | **−0.003** (loses to EW) | 0.314 | **0.356** (beats alpha-sort) | −77.7% |
+      At n=100/150 the alpha-sort loses outright to its own EW baseline on both nominal and
+      excess-CDI Sharpe — not just "less confidently beats," actually behind on the point
+      estimate. EW's own max-DD also balloons (−62%→−85%/−78%), suggesting the extra 50–100
+      names admitted are meaningfully riskier/lower-quality, not just more breadth on the same
+      quality bar the √breadth reasoning assumed. Confound not isolated: `top_frac`/`hold_frac`
+      were tuned (under the now-invalidated Phase 1 sweep) for n=50 specifically and were NOT
+      re-tuned per universe size — but re-tuning them would re-open the exact search-bias
+      problem Phase V exists to close, so that's not a free next step either. **Conclusion: don't
+      pursue wider-universe-as-tested further; if breadth is revisited, it needs its own
+      pre-registered design search (V.3), not a parameter swapped in isolation.**
 - [ ] **V.2b Quality-value composite as shrinkage prior** (existing Phase 2.1). Economically
       motivated rather than fitted — reduces dependence on the noisy ML edge instead of tuning
       around it.
