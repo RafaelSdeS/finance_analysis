@@ -27,6 +27,14 @@ from src.portfolio.visualize_portfolio import build_dashboard, save_dashboard
 
 WINDOW_CHOICES = ("train", "trainval", "test", "full")
 
+# Plan V.1a: `pl` (and everything derived from it -- earnings_yield, and every P/L-based
+# fundamental ratio anywhere in the dataset) is exactly 0% populated before this date
+# (CLAUDE.md, confirmed dataset-wide, not a gradual ramp: 2010=0.0%, 2011=62.3%). Predictions
+# before it come from a price-features-only model (LightGBM's native NaN handling lets it
+# train regardless, per alpha.py's docstring), silently averaged into every headline number
+# unless explicitly split out here.
+FUNDAMENTALS_COVERAGE_START = pd.Timestamp("2011-01-31")
+
 
 def window_bounds(window: str) -> tuple:
     """(truncate_end, eval_start) per plan Phase V.0c/V.3a-b -- deliberately
@@ -153,6 +161,17 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
     print(f"mean={ic.mean():.4f}  median={ic.median():.4f}  "
           f"fraction of dates with IC>0={float((ic > 0).mean()):.2f}  n_dates={ic.notna().sum()}")
 
+    # Plan V.1a: is the headline number understating a design that actually works once
+    # fundamentals exist? Split, don't just flag -- the earlier full-sample numbers blend a
+    # price-only era in with the era the model was actually designed for.
+    ic_pre = ic[ic.index < FUNDAMENTALS_COVERAGE_START]
+    ic_post = ic[ic.index >= FUNDAMENTALS_COVERAGE_START]
+    if len(ic_pre) and len(ic_post):
+        print(f"  pre-{FUNDAMENTALS_COVERAGE_START.date()} (price-only features): "
+              f"mean={ic_pre.mean():.4f}  n_dates={ic_pre.notna().sum()}")
+        print(f"  post-{FUNDAMENTALS_COVERAGE_START.date()} (fundamentals available): "
+              f"mean={ic_post.mean():.4f}  n_dates={ic_post.notna().sum()}")
+
     # Overlap-corrected t-stat (plan V.1c): consecutive rebalance dates' 252-trading-day
     # label windows overlap heavily on a quarterly calendar (~4 quarters per horizon), so
     # the naive t-stat below overstates significance by treating each date as independent.
@@ -215,6 +234,18 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
     print_report(f"Alpha-sort (top {top_frac:.0%} buy / hold {hold_frac:.0%}{exposure_label})",
                  full_report(alpha_curve, alpha_log, cdi_daily=cdi_series, benchmark_returns=eq_returns,
                              n_trials=n_trials))
+
+    # Plan V.1a, active-return side: same pre/post-2011 split, now on the actual
+    # construction (not just the raw signal) -- does the "beats EW" edge concentrate in
+    # the era the model has real features for?
+    active_all = (alpha_curve.pct_change() - eq_returns).dropna()
+    active_pre = active_all[active_all.index < FUNDAMENTALS_COVERAGE_START]
+    active_post = active_all[active_all.index >= FUNDAMENTALS_COVERAGE_START]
+    if len(active_pre) and len(active_post):
+        print(f"\n  active-return-vs-EW, pre-{FUNDAMENTALS_COVERAGE_START.date()}: "
+              f"ann.mean={active_pre.mean() * 252:.2%}  n_days={len(active_pre)}")
+        print(f"  active-return-vs-EW, post-{FUNDAMENTALS_COVERAGE_START.date()}: "
+              f"ann.mean={active_post.mean() * 252:.2%}  n_days={len(active_post)}")
     # n_trials sensitivity (2026-07-26): the honest count above is an estimate of how many
     # distinct configs were compared across all Phase 1/3 sweeps before picking this one --
     # show how the deflated Sharpe moves if that count is off, rather than reporting one
