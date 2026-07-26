@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.portfolio.metrics import (  # noqa: E402
     CRISIS_WINDOWS, annualized_return, deflated_sharpe_ratio, max_drawdown,
-    regime_slice, sharpe_ratio, turnover_stats,
+    newey_west_tstat, regime_slice, sharpe_ratio, turnover_stats,
 )
 from tests.test_utils import print_check, print_header, print_section_end  # noqa: E402
 
@@ -96,6 +96,31 @@ def main():
     print_check("more trials (multiple-testing penalty) never raises the deflated Sharpe",
                 bool(monotonic_ok), f"1 trial={dsr_1trial:.3f}, 100 trials={dsr_100trial:.3f}")
     passed, failed = passed + monotonic_ok, failed + (not monotonic_ok)
+
+    # newey_west_tstat (plan V.1c): max_lag=0 collapses to the plain
+    # population-std (ddof=0) t-stat -- gamma_0/n IS that variance, with no
+    # cross-lag terms added yet.
+    rng_nw = np.random.default_rng(0)
+    plain = pd.Series(rng_nw.normal(0.5, 1.0, 100))
+    naive_pop_t = plain.mean() / (plain.std(ddof=0) / np.sqrt(len(plain)))
+    ok = np.isclose(newey_west_tstat(plain, max_lag=0), naive_pop_t)
+    print_check("newey_west_tstat(max_lag=0) matches the plain population-std t-stat", bool(ok))
+    passed, failed = passed + ok, failed + (not ok)
+
+    # The actual point of the correction: an OVERLAPPING series (each point =
+    # sum of 4 consecutive iid shocks, mimicking quarterly rank-IC at a 252d
+    # horizon sharing 3 of 4 underlying periods with its neighbor) inflates
+    # the naive t-stat by treating n dependent points as independent. The
+    # NW-corrected t-stat (max_lag=3, the known overlap) must come in
+    # meaningfully smaller in magnitude.
+    shocks = rng_nw.normal(0, 1, 103)
+    overlapping = pd.Series([shocks[i:i + 4].sum() for i in range(100)])
+    naive_t = overlapping.mean() / (overlapping.std(ddof=1) / np.sqrt(len(overlapping)))
+    nw_t = newey_west_tstat(overlapping, max_lag=3)
+    shrinks_ok = abs(nw_t) < abs(naive_t) * 0.8
+    print_check("newey_west_tstat meaningfully shrinks the inflated t-stat from overlapping windows",
+                bool(shrinks_ok), f"naive={naive_t:.3f}, NW={nw_t:.3f}")
+    passed, failed = passed + shrinks_ok, failed + (not shrinks_ok)
 
     # turnover_stats: known rebalance log
     log = pd.DataFrame({"turnover": [1.0, 0.0, 0.5, 0.0]})

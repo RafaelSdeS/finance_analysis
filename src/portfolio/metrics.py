@@ -62,6 +62,36 @@ def information_ratio(returns: pd.Series, benchmark_returns: pd.Series,
     return sharpe_ratio(active, periods_per_year)
 
 
+def newey_west_tstat(series: pd.Series, max_lag: int) -> float:
+    """HAC (Newey-West, 1987) t-stat for "is this series' mean different
+    from 0" -- corrects the naive mean/std*sqrt(n) t-stat for serial
+    correlation from OVERLAPPING observations (plan Phase V.1c: quarterly
+    rank-IC at a 252-trading-day label horizon has ~4 quarters of window
+    overlap between consecutive observations, so naive n=92 treats each
+    date as independent when the effective count is closer to n/4). Bartlett
+    kernel:
+        Var(mean) = (1/n) * [gamma_0 + 2 * sum_{k=1}^{L} (1 - k/(L+1)) * gamma_k]
+    `max_lag` (L) is the known overlap length, not a searched/estimated
+    bandwidth -- for rank-IC it's the label horizon divided by the
+    rebalance spacing, a structural fact of the label construction.
+    """
+    x = series.dropna().to_numpy()
+    n = len(x)
+    if n < 2:
+        return float("nan")
+    x_dm = x - x.mean()
+    gamma0 = (x_dm @ x_dm) / n
+    var = gamma0
+    for k in range(1, min(max_lag, n - 1) + 1):
+        gamma_k = (x_dm[k:] @ x_dm[:-k]) / n
+        weight = 1 - k / (max_lag + 1)
+        var += 2 * weight * gamma_k
+    se = np.sqrt(var / n)
+    if not se or np.isnan(se) or se < _DEGENERATE_STD:
+        return float("nan")
+    return x.mean() / se
+
+
 def max_drawdown(cum_values: pd.Series) -> float:
     """cum_values: a cumulative equity curve (levels, not returns)."""
     running_max = cum_values.cummax()

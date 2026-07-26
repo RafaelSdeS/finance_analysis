@@ -11,6 +11,7 @@ Run: python -m src.portfolio.run_alpha_diagnostic [--top-n 50] [--horizon-td 252
 import argparse
 import json
 
+import numpy as np
 import pandas as pd
 
 from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR, SPLIT_CONFIG_PATH
@@ -19,7 +20,8 @@ from src.portfolio.backtest import buy_and_hold_curve, cdi_curve, equal_weight_f
 from src.portfolio.features import feature_columns
 from src.portfolio.labels import forward_excess_return
 from src.portfolio.metrics import (
-    deflated_sharpe_ratio, excess_over_cdi_sharpe, full_report, information_ratio, print_report,
+    deflated_sharpe_ratio, excess_over_cdi_sharpe, full_report, information_ratio,
+    newey_west_tstat, print_report,
 )
 from src.portfolio.visualize_portfolio import build_dashboard, save_dashboard
 
@@ -131,13 +133,43 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
     print(f"  {preds['date'].nunique()} dates produced a prediction "
           f"(first {len(reb_dates) - preds['date'].nunique()} skipped -- not enough training history yet)")
 
+    # Plan V.1b: before the first real prediction, make_alpha_weighted_fn falls back to
+    # plain equal-weight, so the alpha-sort is LITERALLY the EW baseline on those dates --
+    # active-vs-EW is exactly zero there, diluting info-ratio/DSR by counting "no strategy
+    # exists yet" as "strategy added nothing." Fold this into the same eval floor as the
+    # --window restriction (whichever is later wins) rather than a second, separate cutoff.
+    first_pred_date = preds["date"].min() if not preds.empty else None
+    floors = [d for d in (eval_start, first_pred_date) if d is not None]
+    restrict_start = max(floors) if floors else None
+    if first_pred_date is not None and (eval_start is None or first_pred_date > eval_start):
+        print(f"  first real prediction at {first_pred_date.date()} -- metrics restricted from "
+              f"there (pre-prediction dates are an EW clone by construction, not strategy skill)")
+
     ic = alpha.rank_ic(preds, df)
-    if eval_start is not None:
-        ic = ic[ic.index >= eval_start]
-        print(f"  --window={window}: rank-IC restricted to dates >= {eval_start.date()}")
+    if restrict_start is not None:
+        ic = ic[ic.index >= restrict_start]
+        print(f"  rank-IC restricted to dates >= {restrict_start.date()}")
     print("\n=== Out-of-sample rank-IC ===")
     print(f"mean={ic.mean():.4f}  median={ic.median():.4f}  "
           f"fraction of dates with IC>0={float((ic > 0).mean()):.2f}  n_dates={ic.notna().sum()}")
+
+    # Overlap-corrected t-stat (plan V.1c): consecutive rebalance dates' 252-trading-day
+    # label windows overlap heavily on a quarterly calendar (~4 quarters per horizon), so
+    # the naive t-stat below overstates significance by treating each date as independent.
+    # max_lag derived from the rebalance calendar's own spacing, not hardcoded to "quarterly"
+    # -- calendar-day gap converted to trading days (252/365), a deliberately simple
+    # approximation (same convention as alpha.py's own purge-boundary date math).
+    ic_dates = pd.Series(ic.dropna().index).sort_values()
+    if len(ic_dates) < 2:
+        print("(too few rank-IC dates in this window to compute a t-stat)")
+    else:
+        median_gap_days = ic_dates.diff().dt.days.median()
+        gap_trading_days = median_gap_days * 252 / 365
+        max_lag = max(0, round(horizon_td / gap_trading_days) - 1)
+        naive_t = ic.mean() / (ic.std(ddof=1) / np.sqrt(ic.notna().sum()))
+        nw_t = newey_west_tstat(ic, max_lag=max_lag)
+        print(f"naive t-stat={naive_t:.2f}  Newey-West t-stat (max_lag={max_lag}, ~{max_lag + 1} "
+              f"overlapping periods/horizon)={nw_t:.2f}")
 
     preds_by_date = {
         d: g.set_index("ticker")["alpha"].to_dict() for d, g in preds.groupby("date")
@@ -166,13 +198,13 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
           f"hold to {hold_frac:.0%}, equal-weight{exposure_label})...")
     alpha_curve, alpha_log = run_backtest(prices, cdi, membership, alpha_fn)
 
-    if eval_start is not None:
+    if restrict_start is not None:
         n_before = len(alpha_curve)
-        eq_curve = eq_curve[eq_curve.index >= eval_start]
-        eq_log = eq_log[eq_log["date"] >= eval_start]
-        alpha_curve = alpha_curve[alpha_curve.index >= eval_start]
-        alpha_log = alpha_log[alpha_log["date"] >= eval_start]
-        print(f"  --window={window}: evaluation restricted to dates >= {eval_start.date()} "
+        eq_curve = eq_curve[eq_curve.index >= restrict_start]
+        eq_log = eq_log[eq_log["date"] >= restrict_start]
+        alpha_curve = alpha_curve[alpha_curve.index >= restrict_start]
+        alpha_log = alpha_log[alpha_log["date"] >= restrict_start]
+        print(f"  evaluation restricted to dates >= {restrict_start.date()} "
               f"({len(alpha_curve)} of {n_before} days) -- training was NOT restricted, only "
               f"which dates get scored (the model trained continuously through the full history, "
               f"exactly as it would in production)")
