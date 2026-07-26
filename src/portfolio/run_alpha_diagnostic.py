@@ -9,16 +9,56 @@ Run: python -m src.portfolio.run_alpha_diagnostic [--top-n 50] [--horizon-td 252
 """
 
 import argparse
+import json
 
 import pandas as pd
 
-from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR
-from src.portfolio import alpha, contrarian, universe
+from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR, SPLIT_CONFIG_PATH
+from src.portfolio import alpha, artifacts, contrarian, universe
 from src.portfolio.backtest import buy_and_hold_curve, cdi_curve, equal_weight_fn, run_backtest
 from src.portfolio.features import feature_columns
 from src.portfolio.labels import forward_excess_return
-from src.portfolio.metrics import full_report, print_report
+from src.portfolio.metrics import (
+    deflated_sharpe_ratio, excess_over_cdi_sharpe, full_report, information_ratio, print_report,
+)
 from src.portfolio.visualize_portfolio import build_dashboard, save_dashboard
+
+WINDOW_CHOICES = ("train", "trainval", "test", "full")
+
+
+def window_bounds(window: str) -> tuple:
+    """(truncate_end, eval_start) per plan Phase V.0c/V.3a-b -- deliberately
+    two DIFFERENT levers, not one cutoff applied twice:
+
+    `truncate_end`: restricts what the model is ALLOWED TO SEE. Used by
+    train/trainval to simulate "as of" a past date -- nothing after this
+    date exists anywhere in the run, so universe construction, walk-forward
+    training, AND backtest trading all happen blind to the future. This is
+    what a real train/val-only design search needs.
+
+    `eval_start`: restricts which dates get SCORED, without touching what
+    the model trained on. Used by test -- the walk-forward model keeps
+    training continuously through the full history exactly like production
+    (`alpha.walk_forward_predict` already retrains at every rebalance date),
+    and only the reported metrics are sliced to the held-out tail. An
+    artificially-blinded model would understate what a real frozen-test
+    deployment looks like.
+
+    `full` (default): both None -- today's original behavior, unrestricted,
+    for exploratory diagnostics that intentionally want the whole sample
+    (e.g. the Phase V deflated-Sharpe checks already run).
+    """
+    if window == "full":
+        return None, None
+    split = json.loads(SPLIT_CONFIG_PATH.read_text())
+    train_end, val_end = pd.Timestamp(split["train_end"]), pd.Timestamp(split["val_end"])
+    if window == "train":
+        return train_end, None
+    if window == "trainval":
+        return val_end, None
+    if window == "test":
+        return None, val_end
+    raise ValueError(f"unknown window {window!r}, choose from {WINDOW_CHOICES}")
 
 
 def make_alpha_weighted_fn(preds_by_date: dict, top_frac: float = 0.5, hold_frac: float | None = None,
@@ -61,7 +101,9 @@ def make_alpha_weighted_fn(preds_by_date: dict, top_frac: float = 0.5, hold_frac
 
 
 def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_frac: float = 0.75,
-         use_exposure: bool = False):
+         use_exposure: bool = False, n_trials: int = 16, window: str = "full"):
+    truncate_end, eval_start = window_bounds(window)
+
     print("Loading dataset (full feature set)...")
     base_cols = ["ticker", "trade_date", "adj_close", "traded_amount"]
     # net_income/market_cap/reference_date aren't in the ML feature keep-list
@@ -69,6 +111,11 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
     exposure_cols = ["net_income", "market_cap", "reference_date"]
     all_cols = sorted(set(base_cols) | set(feature_columns(include_sector=False)) | set(exposure_cols))
     df = pd.read_parquet(OUTPUT_PATH, columns=all_cols)
+
+    if truncate_end is not None:
+        df = df[df["trade_date"] <= truncate_end]
+        print(f"  --window={window}: truncated input to <= {truncate_end.date()} "
+              f"({len(df)} rows) -- simulates design-time, nothing after this date exists yet")
 
     print(f"Building point-in-time liquid universe (top_n={top_n})...")
     membership = universe.liquid_universe(df[["ticker", "trade_date", "traded_amount"]], top_n=top_n)
@@ -85,6 +132,9 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
           f"(first {len(reb_dates) - preds['date'].nunique()} skipped -- not enough training history yet)")
 
     ic = alpha.rank_ic(preds, df)
+    if eval_start is not None:
+        ic = ic[ic.index >= eval_start]
+        print(f"  --window={window}: rank-IC restricted to dates >= {eval_start.date()}")
     print("\n=== Out-of-sample rank-IC ===")
     print(f"mean={ic.mean():.4f}  median={ic.median():.4f}  "
           f"fraction of dates with IC>0={float((ic > 0).mean()):.2f}  n_dates={ic.notna().sum()}")
@@ -116,11 +166,66 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
           f"hold to {hold_frac:.0%}, equal-weight{exposure_label})...")
     alpha_curve, alpha_log = run_backtest(prices, cdi, membership, alpha_fn)
 
+    if eval_start is not None:
+        n_before = len(alpha_curve)
+        eq_curve = eq_curve[eq_curve.index >= eval_start]
+        eq_log = eq_log[eq_log["date"] >= eval_start]
+        alpha_curve = alpha_curve[alpha_curve.index >= eval_start]
+        alpha_log = alpha_log[alpha_log["date"] >= eval_start]
+        print(f"  --window={window}: evaluation restricted to dates >= {eval_start.date()} "
+              f"({len(alpha_curve)} of {n_before} days) -- training was NOT restricted, only "
+              f"which dates get scored (the model trained continuously through the full history, "
+              f"exactly as it would in production)")
+
     cdi_series = cdi.set_index("trade_date")["cdi"]
     eq_returns = eq_curve.pct_change().dropna()
     print_report("Equal-weight baseline", full_report(eq_curve, eq_log, cdi_daily=cdi_series))
     print_report(f"Alpha-sort (top {top_frac:.0%} buy / hold {hold_frac:.0%}{exposure_label})",
-                 full_report(alpha_curve, alpha_log, cdi_daily=cdi_series, benchmark_returns=eq_returns))
+                 full_report(alpha_curve, alpha_log, cdi_daily=cdi_series, benchmark_returns=eq_returns,
+                             n_trials=n_trials))
+    # n_trials sensitivity (2026-07-26): the honest count above is an estimate of how many
+    # distinct configs were compared across all Phase 1/3 sweeps before picking this one --
+    # show how the deflated Sharpe moves if that count is off, rather than reporting one
+    # falsely-precise number. Deflated on EXCESS-CDI returns, not raw returns: raw equity
+    # returns clear "beats zero" almost by construction over a 26y positive-drift sample
+    # (CDI/BOVA11 would too) -- the mandate-relevant question is whether the excess-CDI edge
+    # (the actual Gate B/D metric) survives the same cherry-picking correction.
+    # n_trials=1 alongside the honest count (2026-07-26, plan V.0d): PSR@1 answers "is the
+    # edge real at all" (no search-bias correction); DSR@n_trials answers "does it survive
+    # having tried n_trials configs" -- printing both decomposes the two separate questions
+    # instead of only showing the harsher, already-corrected number.
+    alpha_excess_cdi = (alpha_curve.pct_change() - cdi_series.reindex(alpha_curve.index).ffill() / 100).dropna()
+    print(f"\n  Deflated Sharpe (on excess-CDI returns) sensitivity to n_trials estimate "
+          f"({n_trials} counted from PLAN sweeps):")
+    for nt in sorted({1, n_trials, 20, 25}):
+        print(f"    n_trials={nt:<4}{deflated_sharpe_ratio(alpha_excess_cdi, n_trials=nt):>10.3f}")
+
+    # Same check on the active-vs-EW series (2026-07-26): the most literal test of "is the
+    # construction adding real skill on top of just being a boring EW investor" -- isolates
+    # our top_frac/hold_frac/overlay choices from generic Brazilian-equity beta, which both
+    # the raw-return and excess-CDI checks above still partly carry.
+    alpha_active_vs_ew = (alpha_curve.pct_change() - eq_returns).dropna()
+    print(f"\n  Deflated Sharpe (on active-return-vs-EW) sensitivity to n_trials estimate "
+          f"({n_trials} counted from PLAN sweeps):")
+    for nt in sorted({1, n_trials, 20, 25}):
+        print(f"    n_trials={nt:<4}{deflated_sharpe_ratio(alpha_active_vs_ew, n_trials=nt):>10.3f}")
+
+    # Persist the run (plan V.0a/b): every DSR check to date has cost a full walk-forward
+    # retrain because nothing survived past the in-memory run. Save once, re-analyze many
+    # times; the trial log also makes n_trials a counted fact for the NEXT deflation instead
+    # of a hand re-count of this document's sweep tables.
+    run_config = {
+        "top_n": top_n, "horizon_td": horizon_td, "top_frac": top_frac, "hold_frac": hold_frac,
+        "use_exposure": use_exposure, "window": window,
+    }
+    run_path = artifacts.save_run(run_config, alpha_curve=alpha_curve, alpha_log=alpha_log,
+                                   eq_curve=eq_curve, eq_log=eq_log, cdi_series=cdi_series)
+    print(f"\nRun artifacts saved to {run_path}")
+    artifacts.append_trial_log(run_config, {
+        "excess_cdi_sharpe": excess_over_cdi_sharpe(alpha_curve.pct_change().dropna(), cdi_series),
+        "info_ratio_vs_ew": information_ratio(alpha_curve.pct_change().dropna(), eq_returns),
+        "rank_ic_mean": float(ic.mean()),
+    })
 
     print("\nBuilding dashboard...")
     bova = pd.read_parquet(PRICES_DIR / "BOVA11.parquet", columns=["trade_date", "adj_close"])
@@ -145,6 +250,16 @@ if __name__ == "__main__":
                          help="scale weights by contrarian.equity_exposure() (smoothed earnings yield "
                               "vs SELIC), leaving the residual in cash -- off by default, this strategy "
                               "is a pure stock-picker unless opted in (plan Phase 3.1c)")
+    parser.add_argument("--n-trials", type=int, default=16,
+                         help="count of distinct configs compared across all Phase 1/3 sweeps before "
+                              "picking top_frac/hold_frac/the overlay -- corrects deflated Sharpe for "
+                              "that selection bias (2026-07-26 methodology check, see PLAN)")
+    parser.add_argument("--window", choices=WINDOW_CHOICES, default="full",
+                         help="train/trainval TRUNCATE the input data (design-time blindness, for a "
+                              "leak-free parameter search); test does NOT truncate training (the model "
+                              "keeps learning through the full history, like production) but restricts "
+                              "which dates get SCORED to the held-out tail; full (default) is today's "
+                              "original unrestricted behavior (plan Phase V.0c)")
     args = parser.parse_args()
     main(top_n=args.top_n, horizon_td=args.horizon_td, top_frac=args.top_frac, hold_frac=args.hold_frac,
-         use_exposure=args.use_exposure)
+         use_exposure=args.use_exposure, n_trials=args.n_trials, window=args.window)

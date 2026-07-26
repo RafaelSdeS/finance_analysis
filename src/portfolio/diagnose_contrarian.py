@@ -18,13 +18,27 @@ import pandas as pd
 from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR
 from src.portfolio import contrarian, universe
 from src.portfolio.metrics import CRISIS_WINDOWS
+from src.portfolio.run_alpha_diagnostic import WINDOW_CHOICES, window_bounds
 
 
-def main(top_n: int = 50):
+def main(top_n: int = 50, window: str = "full"):
+    # No ML training here (the overlay is a pure macro/valuation rule, no
+    # walk-forward model to protect from seeing the future) -- so unlike
+    # run_alpha_diagnostic.py, train/trainval/test all collapse to the same
+    # mechanism, a plain date filter on `df` (plan Phase V.0c).
+    truncate_end, eval_start = window_bounds(window)
+
     print("Loading dataset (valuation + net_income/market_cap -- no features, no alpha)...")
     cols = ["ticker", "trade_date", "traded_amount", "reference_date", "pl", "selic",
             "earnings_yield", "earnings_yield_vs_selic", "net_income", "market_cap"]
     df = pd.read_parquet(OUTPUT_PATH, columns=cols)
+
+    if truncate_end is not None:
+        df = df[df["trade_date"] <= truncate_end]
+        print(f"  --window={window}: restricted to <= {truncate_end.date()} ({len(df)} rows)")
+    elif eval_start is not None:
+        df = df[df["trade_date"] >= eval_start]
+        print(f"  --window={window}: restricted to >= {eval_start.date()} ({len(df)} rows)")
 
     print(f"Building point-in-time liquid universe (top_n={top_n})...")
     membership = universe.liquid_universe(df[["ticker", "trade_date", "traded_amount"]], top_n=top_n)
@@ -78,5 +92,8 @@ def main(top_n: int = 50):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--top-n", type=int, default=50)
+    parser.add_argument("--window", choices=WINDOW_CHOICES, default="full",
+                         help="restrict to a split_config.json era (plan Phase V.0c); full (default) "
+                              "is today's original unrestricted behavior")
     args = parser.parse_args()
-    main(top_n=args.top_n)
+    main(top_n=args.top_n, window=args.window)

@@ -6,6 +6,21 @@ that beats **CDI on an excess-over-CDI, risk-adjusted basis**, out-of-sample, ne
 0.03% B3 fee — and at minimum beats naive equal-weight. The contrarian cash↔equity timing
 ("buy the cannons, sell the violins") is an **overlay proven last**, not the engine.
 
+**Mandate clarified 2026-07-26 (user):** the real objective is *good absolute risk-adjusted
+return with drawdown control* — "a responsible, boring investor" — not beating CDI at its own
+game specifically. Excess-CDI Sharpe stays as a **diagnostic** (it's the honest way to strip
+out ~12%/yr of free carry), but it is no longer the sole optimization target. See Phase V for
+how the objective is now stated and validated.
+
+> ## 🛑 STOP — read Phase V before acting on ANY number in this document.
+> A deflated-Sharpe check on 2026-07-26 found that the Phase 1/3 conclusions
+> ("0.60/0.75 strictly dominates", "Gate D passes") **do not survive correction for the ~16
+> configurations that were compared to produce them.** Every parameter in this pipeline was
+> selected by reading full-sample backtest performance, including the nominally-held-out
+> 2022→2026 period, because **no script in `src/portfolio/` reads `split_config.json`**.
+> The sweeps' *rankings* are still useful as hypotheses; their *levels* are not evidence.
+> Phase 1/3 are marked ON HOLD, not wrong — pending Phase V.
+
 ---
 
 ## What the latest runs actually say (2026-07-25 — Phase 0 now RUN; read before touching anything)
@@ -58,6 +73,9 @@ Only if Gate A = "signal exists." No new code — all existing `solve` knobs.
 → **Turnover ≤2x waived 2026-07-25** for the sort candidate (2.56x, see below) — heuristic target, not a validated cost constraint; swept and confirmed not worth the Sharpe/IR tradeoff to enforce.
 
 **✅ RUN 2026-07-25 — Gate B FAILS for the MVO; the honest sort (1.1) wins outright.**
+> **🛑 ON HOLD 2026-07-26 (Phase V):** every number below was scored on the full sample including
+> the 2022→2026 test period, and the winning config was picked by comparing ~16 of them. The
+> *rankings* stand as hypotheses; the *levels* are not evidence. Re-derive under V.3.
 
 - **Gate A got materially stronger post `n_estimators` fix:** rank-IC now **mean 0.085 / median 0.082, positive on 66% of 92 dates** (was 0.056/0.074/65% at the stale n_estimators=200) — confirms the 0.054 side-fix mattered, not just a rounding change.
 - **The no-trade-band sort (1.1) now BEATS equal-weight outright** — first time anything has: **15.67% / Sharpe 0.684** vs EW's **14.02% / 0.645**, at **2.56x turnover** (down from the pre-band 3.46x, still above the 2x target but the band alone closed most of the gap). This is the new honest baseline bar and, per the meta-decision, the leading candidate as-is.
@@ -147,6 +165,12 @@ Only if Gate A = "signal exists." No new code — all existing `solve` knobs.
 **GATE D:** Layer 2 improves excess-CDI Sharpe, OR cuts max-DD ≥5pp without hurting excess-CDI Sharpe — **AND** the benefit survives leave-one-crisis-out (not just fitting GFC/2015/covid). **Amended 2026-07-25:** "leave-one-crisis-out" now explicitly means covid_2020 and the near-ATH case — recession_2015_16 is excluded from the pass/fail bar per the documented data-ceiling limitation above, not silently dropped.
 **✅ PASSES 2026-07-25** — max-DD cut +11.4pp (≫5pp bar) with excess-CDI Sharpe unchanged (0.259 vs 0.260, not hurt). Benefit is driven by covid_2020 (100% exposure, already known to work) and the moderate de-risking near-ATH/other calm periods — recession_2015_16 contributes little given its documented partial fix, so this isn't fitting a single episode. **`--use-exposure` still opt-in, not yet the default** — pending an explicit call on whether the info-ratio-vs-EW cost (0.341→0.061) is acceptable for this repo's mandate.
 → If it only helps by fitting one episode, **drop it.** Timing on 3 events does not generalize.
+> **🛑 ON HOLD 2026-07-26 (Phase V):** Gate D's pass is full-sample and post-hoc — the overlay's
+> `window`/`k`/`base`/`floor` were themselves swept against these same crisis windows. The max-DD
+> improvement (+11.4pp) is the most likely part to survive (it's a large, mechanical effect of
+> holding cash, not a fitted edge); the excess-CDI-neutrality claim is the part to re-test under
+> V.3. Keep `--use-exposure` **opt-in** until then — the earlier "should it be default?" question
+> is deferred, not answered.
 
 ---
 
@@ -160,6 +184,168 @@ Only if Gate A = "signal exists." No new code — all existing `solve` knobs.
 **Gate:** Option B's turnover clears ≤2x target while excess-CDI Sharpe doesn't regress vs the current sort. Option A likely fails this immediately (turnover too high, no constraint knob).
 
 **When to tackle:** After validating that Phase 1–3 actually ship to production and the next return/Sharpe gains are worth the added complexity. If the 0.6/0.75 sort already solves the mandate, this is a refinement, not blocking work.
+
+---
+
+## Phase V — Validity (2026-07-26). **Blocks Phases 2 and 4. Do this before any further tuning.**
+
+### The finding
+
+Deflated Sharpe (Bailey & López de Prado; `metrics.deflated_sharpe_ratio`, already in the repo but
+never called with `n_trials>1`) on the shipped config — `--use-exposure`, top_frac=0.6/hold_frac=0.75,
+same universe/dates/costs, `n_trials≈16` counted from the Phase 1/3 sweeps below:
+
+| series deflated | ann. Sharpe | DSR @16 | @20 | @25 | read |
+|---|---|---|---|---|---|
+| raw returns (vs 0) | 0.798 | 0.989 | 0.986 | 0.982 | passes — but the bar is trivial |
+| excess-over-CDI | 0.259 | **0.313** | 0.279 | 0.247 | **FAILS** |
+| active-return-vs-EW | 0.061 | **0.067** | 0.055 | 0.045 | **FAILS badly** |
+
+With `n_trials>1` the DSR is not testing "Sharpe > 0" — it computes the Sharpe you would expect from
+the *best of N zero-skill trials* (expected-max-of-N-Gaussians) and asks whether the observed Sharpe
+still clears that inflated bar. Read the numbers as probabilities the edge is real given the search:
+**~31% for "beats cash", ~7% for "beats equal-weight."** The passing bar is ~0.90–0.95.
+
+**Why raw returns pass and the other two fail:** CDI runs ~12%/yr over this sample, so *any*
+long-only-or-cash Brazilian book clears "beats zero" almost by construction (CDI and BOVA11 would
+too). Subtracting CDI removes that free carry; subtracting EW removes generic equity beta as well.
+What's left in the third row is only what *our* construction choices contributed — and that is
+indistinguishable from noise.
+
+**`n_trials≈16`, counted (not guessed) from this document:** top_frac×hold_frac grid (5) +
+hold_frac-only sweep at top_frac=0.5 (4) + contrarian window sweep (4) + MVO lam/c2/shrink (2) +
+cash-overlay on/off (1). EW is the fixed benchmark, not a trial.
+
+### Root cause
+
+**No script in `src/portfolio/` reads `split_config.json`** (`grep` confirms: zero matches; the
+split exists and is honored only by `scale_features.py`). So every sweep that produced "0.60/0.75
+strictly dominates on every metric" or "window=20 is best" was scored on the **full 2000→2026
+sample, including the nominally-held-out 2022→2026 test period.** That is hyperparameter selection
+on the test set. The sweeps' *relative rankings* remain useful hypotheses; their *levels* are not
+evidence of anything.
+
+**What is NOT affected:** `alpha.fit`/`walk_forward_predict` are genuinely walk-forward
+(purge+embargo verified in 0.5). Rank-IC 0.085 is a real out-of-sample number *for the signal*.
+The leak is entirely at the strategy-construction layer — which knobs a human chose — not the
+model layer.
+
+### Caveats, in both directions
+
+- **Cuts in the strategy's favor:** the DSR's `n_trials` correction assumes *independent* trials.
+  Ours are heavily correlated (top_frac 0.5 vs 0.6 produce largely overlapping portfolios), so the
+  effective number of independent trials is below 16 and the real bar is *lower* than what we
+  applied. The reported DSRs are therefore somewhat conservative.
+- **Cuts against it:** `n_trials=16` counts only the *documented sweeps*. Untracked choices —
+  `top_n=50`, `horizon_td=252`, `n_estimators` (50 vs 200 vs 2000 were all explored), the label
+  definition, the feature keep-list — were also selected against observed performance. The true
+  count is plausibly well above 16.
+- These roughly offset. Treat ~0.07 and ~0.31 as "clearly short of the bar," not as precise
+  probabilities.
+- **PSR at `n_trials=1`** (hand-derived from the reported DSRs at n≈6,480 daily obs — **confirm by
+  running V.0d, do not cite as measured**): excess-CDI ≈**0.90**, active-vs-EW ≈**0.62**. This
+  decomposition matters: the *beats-cash* claim was borderline-respectable on its own terms and the
+  search penalty is what breaks it, whereas the *beats-EW* claim was never statistically meaningful
+  even before any correction — the 0.061 info-ratio was noise as reported.
+
+### V.0 — Infrastructure that makes honest evaluation possible (~½ day, unblocks everything)
+
+- [ ] **V.0a Persist backtest artifacts.** Save `alpha_curve`/`eq_curve`/rebalance logs + the config
+      to `artifacts/backtests/<config-hash>/`. We just spent **three full walk-forward retrains** to
+      compute three metrics on the same returns series, because nothing persists the curve (the
+      dashboard writes only Plotly HTML). Add a metrics-only re-analysis path over the saved curve.
+- [ ] **V.0b Append-only trial log** (`artifacts/backtests/trials.csv`): timestamp, every config
+      field, key metrics — one row per run. Makes `n_trials` a counted fact instead of an estimate,
+      which the deflation math directly depends on. Retro-fill from this document's tables.
+- [ ] **V.0c Wire `split_config.json` into the portfolio scripts.** Inject the window, never
+      hardcode dates (standing rule; mirror `manifest.iter_fit_windows()`). Add
+      `--window {train,trainval,test,full}` to `run_alpha_diagnostic.py` and
+      `diagnose_contrarian.py`. **This is the load-bearing fix** — without it, every future sweep
+      re-commits the same error.
+- [ ] **V.0d Add `n_trials=1` to the DSR print sweep** (one-token change: `{1, n_trials, 20, 25}`)
+      so search-bias cost is always decomposable — PSR@1 answers "is the edge real at all", DSR@k
+      answers "does it survive the search". Replaces the hand-derived estimates above.
+
+### V.1 — Re-measure what's real, on the era where the model actually has its features
+
+- [ ] **V.1a Split every metric pre/post-2011-01-31.** Fundamentals are **exactly 0% populated
+      before 2011-01-31** (documented in Phase 3.1 #3 and CLAUDE.md) — so roughly a third of the 92
+      prediction dates come from a *price-features-only* model, silently averaged into every headline
+      number in this document. **Hypothesis: post-2011 rank-IC and info-ratio are both materially
+      higher**, and the current figures understate the real design. If confirmed, the honest
+      evaluation window becomes 2011+ (or 2013+, once the 5y `*_zhist_5y` warm-ups have cleared).
+      Cheap, and the most promising "the numbers are worse than reality" lead available.
+- [ ] **V.1b Restrict metrics to dates where a prediction exists.** `make_alpha_weighted_fn` falls
+      back to equal-weight before `min_train_rows` is met, so the first ~11 of 103 rebalances are
+      literally EW — the active-vs-EW series is *exactly zero* there, diluting the info-ratio by
+      ≈√(n_pred/n_total) (~5%; small, but free to remove and it's currently counted against us).
+- [ ] **V.1c Overlap-corrected t-stat on the rank-IC series.** 92 dates at a 252d horizon on a
+      quarterly calendar means ~4× overlapping label windows → effective n≈23, not 92. Naive
+      t≈5 becomes t≈2.7 under a block bootstrap / Newey-West correction — probably still
+      significant, but **measure it** rather than asserting it. This single number decides whether
+      the signal itself is real, independent of any construction choice.
+
+### V.2 — Increase EFFECT SIZE, not knob count
+
+The failing metric is info-ratio-vs-EW, and the mechanism is already visible in Phase 1's own sweep:
+at top_frac=0.6 the book holds 60% of a 50-name universe = 30 names, equal-weighted — **that is
+nearly EW by construction**, yet different enough to carry tracking error. Paying to differ from a
+benchmark while diluting into it is precisely a 0.067 DSR. The fix is structural, not a knob:
+
+- [ ] **V.2a Widen the universe** (`--top-n` 50 → 100/150). At 100 names a top-25% cut is 25 names:
+      a genuinely concentrated *and* diversified book with a **sharp** alpha cut, instead of owning
+      most of the universe. Never tried. Also the textbook lever for converting a small IC into
+      realized return (IR ≈ IC·√breadth). **Highest expected value on this list.**
+- [ ] **V.2b Quality-value composite as shrinkage prior** (existing Phase 2.1). Economically
+      motivated rather than fitted — reduces dependence on the noisy ML edge instead of tuning
+      around it.
+- [ ] **V.2c Ensemble predictions across refits** (existing Phase 2.2). Variance reduction at the
+      source, which cuts turnover *and* construction noise. Adds no new tunable surface, so it
+      cannot worsen the search-bias problem.
+- [ ] **V.2d Cross-sectional rank label** instead of raw forward excess return — robust to the fat
+      tails a 252d Brazilian equity return distribution is full of; likely improves IC stability
+      more than any weighting change.
+- **Deliberately NOT on this list:** re-sweeping top_frac/hold_frac/window/k. More search over the
+  same design space is what created this section.
+
+### V.3 — The frozen protocol (run ONCE, after V.1/V.2 land)
+
+- [ ] **V.3a Pre-register.** Commit the exact config + objective to this file **before** touching
+      test. Objective per the clarified mandate: **maximize plain Sharpe subject to max-DD ≤ EW's,
+      with turnover ≤2x as a constraint** — searched on **train+val only** (2011→2022-07-26 per
+      `split_config.json`; the existing dates work as-is, no recompute needed).
+- [ ] **V.3b Freeze and evaluate once** on test (2022-07-26→2026-06-30). Report whatever it says.
+      No iterating afterward: a disappointing result sends the *next* design change back through
+      V.2 with a **new** pre-registration and an incremented trial counter.
+- [ ] **V.3c Report test DSR at `n_trials=1`** — legitimate here precisely *because* only one frozen
+      config ever touched test. This is the entire statistical payoff of freezing.
+
+**Known constraint — state this before reading V.3b's result.** Test is ~4 years ≈ 16 quarterly
+rebalances ≈ 1,000 trading days. For PSR>0.95 on active-vs-EW at n=1,000 you need daily Sharpe
+>1.645/√999 ≈ 0.052, i.e. an **annualized info-ratio >0.83**; full-sample is currently 0.061. So the
+frozen test can **falsify** (a collapse is genuinely informative) but almost certainly **cannot
+prove** the strategy works. Designing on 2011→2022 and keeping a 4y test is the best this dataset
+allows. The only real proof is V.4.
+
+### V.4 — Forward tracking (the only evidence no sweep can contaminate)
+
+- [ ] Freeze the shipped design. Every quarterly `--mode update` brings genuinely unseen data.
+      Log realized return vs EW each quarter into the V.0b trial log. Revisit the *design* at most
+      annually — and count each revisit as a trial, because it is one.
+
+### GATE V
+
+- **Signal leg:** overlap-corrected rank-IC t-stat > 2 on the post-2011 era (V.1c) → the alpha is
+  real and worth building on.
+- **Construction leg:** the pre-registered candidate beats EW on Sharpe with max-DD ≤ EW's on
+  **train+val**, AND does not collapse on test (test Sharpe ≥ 0, within ~1 SE of the train+val
+  level, max-DD not worse than EW's by >5pp).
+- **If the signal leg passes but the construction leg fails → ship EW on the point-in-time liquid
+  universe** and keep the ML machinery as a research project until V.2 produces a materially larger
+  effect or V.4 accumulates forward evidence. On today's numbers this is the honest default, and it
+  is not a failure of the exercise: EW *is* a responsible, boring, low-turnover investor (14.02%,
+  0.89x turnover, zero tuned parameters), and finding that out before deploying capital is exactly
+  what Phase V is for.
 
 ---
 
