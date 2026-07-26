@@ -78,6 +78,25 @@ def main():
     print_check("chosen names are equal-weighted", bool(equal_w_ok))
     passed, failed = passed + equal_w_ok, failed + (not equal_w_ok)
 
+    # exposure_by_date (plan Phase 3.1c): scales the chosen set down, residual
+    # falls through to cash (weights sum to exposure, not 1.0).
+    fn_exposed = make_alpha_weighted_fn({"d1": preds}, top_frac=0.5, exposure_by_date={"d1": 0.7})
+    w_exposed = fn_exposed("d1", uni, {"prev_weights": {}})
+    exposure_scaled_ok = abs(sum(w_exposed.values()) - 0.7) < 1e-9
+    print_check("exposure_by_date scales the chosen set's weights to sum to the cap, not 1.0",
+                bool(exposure_scaled_ok), f"sum={sum(w_exposed.values()):.4f}")
+    passed, failed = passed + exposure_scaled_ok, failed + (not exposure_scaled_ok)
+
+    # A date missing from exposure_by_date defaults to full exposure (1.0) --
+    # same "no data yet" convention as the rest of the pipeline, not a silent
+    # forced-to-cash surprise.
+    fn_exposed_missing = make_alpha_weighted_fn({"d1": preds}, top_frac=0.5, exposure_by_date={"d2": 0.7})
+    w_missing = fn_exposed_missing("d1", uni, {"prev_weights": {}})
+    default_full_ok = abs(sum(w_missing.values()) - 1.0) < 1e-9
+    print_check("a date missing from exposure_by_date defaults to full (1.0) exposure",
+                bool(default_full_ok), f"sum={sum(w_missing.values()):.4f}")
+    passed, failed = passed + default_full_ok, failed + (not default_full_ok)
+
     print_section_end(passed, failed)
     return failed == 0
 

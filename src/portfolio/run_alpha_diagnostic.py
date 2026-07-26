@@ -13,7 +13,7 @@ import argparse
 import pandas as pd
 
 from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR
-from src.portfolio import alpha, universe
+from src.portfolio import alpha, contrarian, universe
 from src.portfolio.backtest import buy_and_hold_curve, cdi_curve, equal_weight_fn, run_backtest
 from src.portfolio.features import feature_columns
 from src.portfolio.labels import forward_excess_return
@@ -21,7 +21,8 @@ from src.portfolio.metrics import full_report, print_report
 from src.portfolio.visualize_portfolio import build_dashboard, save_dashboard
 
 
-def make_alpha_weighted_fn(preds_by_date: dict, top_frac: float = 0.5, hold_frac: float | None = None):
+def make_alpha_weighted_fn(preds_by_date: dict, top_frac: float = 0.5, hold_frac: float | None = None,
+                            exposure_by_date: dict | None = None):
     """The honest baseline bar (plan Phase 1.1): quintile/top-half sort,
     equal-weight, PLUS a no-trade band -- a name already held stays as long
     as it's still within the looser `hold_frac` cut, not just the tighter
@@ -31,7 +32,15 @@ def make_alpha_weighted_fn(preds_by_date: dict, top_frac: float = 0.5, hold_frac
     best, hold" bar should not have. `hold_frac=None` (default) reproduces
     the pre-band behavior (hold_frac == top_frac, no slack).
     Falls back to equal-weight on any date without a prediction yet (early
-    history, before the model has min_train_rows)."""
+    history, before the model has min_train_rows).
+
+    `exposure_by_date` (plan Phase 3.1c): optional {date: equity_cap} from
+    contrarian.equity_exposure(). Without it (default), weights sum to 1.0 --
+    this strategy is a pure stock-picker, never holds cash by construction.
+    With it, the chosen set is scaled by the cap and the residual falls
+    through to cash via run_backtest's "weights need not sum to 1" convention
+    (backtest.py) -- no optimizer/cvxpy needed, just a scalar on top of the
+    existing equal-weight sort."""
     hold_frac = top_frac if hold_frac is None else hold_frac
     def weights_fn(date, uni, state):
         preds = preds_by_date.get(date, {})
@@ -45,15 +54,20 @@ def make_alpha_weighted_fn(preds_by_date: dict, top_frac: float = 0.5, hold_frac
         hold_set = set(ranked[:n_hold])
         currently_held = set(state.get("prev_weights", {}))
         chosen = buy_set | (currently_held & hold_set)
-        w = 1.0 / len(chosen)
+        exposure = exposure_by_date.get(date, 1.0) if exposure_by_date else 1.0
+        w = exposure / len(chosen)
         return {t: w for t in chosen}
     return weights_fn
 
 
-def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_frac: float = 0.75):
+def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_frac: float = 0.75,
+         use_exposure: bool = False):
     print("Loading dataset (full feature set)...")
     base_cols = ["ticker", "trade_date", "adj_close", "traded_amount"]
-    all_cols = sorted(set(base_cols) | set(feature_columns(include_sector=False)))
+    # net_income/market_cap/reference_date aren't in the ML feature keep-list
+    # (feature_columns()) but are needed for the contrarian exposure signal.
+    exposure_cols = ["net_income", "market_cap", "reference_date"]
+    all_cols = sorted(set(base_cols) | set(feature_columns(include_sector=False)) | set(exposure_cols))
     df = pd.read_parquet(OUTPUT_PATH, columns=all_cols)
 
     print(f"Building point-in-time liquid universe (top_n={top_n})...")
@@ -78,7 +92,20 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
     preds_by_date = {
         d: g.set_index("ticker")["alpha"].to_dict() for d, g in preds.groupby("date")
     }
-    alpha_fn = make_alpha_weighted_fn(preds_by_date, top_frac=top_frac, hold_frac=hold_frac)
+
+    exposure_by_date = None
+    exposure_label = ""
+    if use_exposure:
+        print("Computing contrarian equity exposure (smoothed earnings yield vs SELIC)...")
+        df = contrarian.add_smoothed_earnings_yield(df)
+        exposure_by_date = contrarian.equity_exposure(df, reb_dates, col=contrarian.SMOOTHED_SIGNAL_COL)
+        exp = pd.Series(exposure_by_date)
+        print(f"  exposure: {exp.min():.0%}..{exp.max():.0%} (median {exp.median():.0%}) "
+              f"across {len(exp)} rebalances")
+        exposure_label = ", contrarian cash overlay"
+
+    alpha_fn = make_alpha_weighted_fn(preds_by_date, top_frac=top_frac, hold_frac=hold_frac,
+                                       exposure_by_date=exposure_by_date)
 
     cdi = pd.read_parquet(OUTPUT_PATH, columns=["trade_date", "cdi"]).drop_duplicates().sort_values("trade_date")
     prices = df[["ticker", "trade_date", "adj_close"]]
@@ -86,13 +113,13 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
     print("\nRunning equal-weight baseline (same universe/dates/costs)...")
     eq_curve, eq_log = run_backtest(prices, cdi, membership, equal_weight_fn)
     print(f"Running alpha-sort (honest baseline bar: top {top_frac:.0%} buy / "
-          f"hold to {hold_frac:.0%}, equal-weight)...")
+          f"hold to {hold_frac:.0%}, equal-weight{exposure_label})...")
     alpha_curve, alpha_log = run_backtest(prices, cdi, membership, alpha_fn)
 
     cdi_series = cdi.set_index("trade_date")["cdi"]
     eq_returns = eq_curve.pct_change().dropna()
     print_report("Equal-weight baseline", full_report(eq_curve, eq_log, cdi_daily=cdi_series))
-    print_report(f"Alpha-sort (top {top_frac:.0%} buy / hold {hold_frac:.0%})",
+    print_report(f"Alpha-sort (top {top_frac:.0%} buy / hold {hold_frac:.0%}{exposure_label})",
                  full_report(alpha_curve, alpha_log, cdi_daily=cdi_series, benchmark_returns=eq_returns))
 
     print("\nBuilding dashboard...")
@@ -114,5 +141,10 @@ if __name__ == "__main__":
     parser.add_argument("--hold-frac", type=float, default=0.75,
                          help="no-trade band: an already-held name stays until it drops below this "
                               "looser cutoff, not just below --top-frac")
+    parser.add_argument("--use-exposure", action="store_true",
+                         help="scale weights by contrarian.equity_exposure() (smoothed earnings yield "
+                              "vs SELIC), leaving the residual in cash -- off by default, this strategy "
+                              "is a pure stock-picker unless opted in (plan Phase 3.1c)")
     args = parser.parse_args()
-    main(top_n=args.top_n, horizon_td=args.horizon_td, top_frac=args.top_frac, hold_frac=args.hold_frac)
+    main(top_n=args.top_n, horizon_td=args.horizon_td, top_frac=args.top_frac, hold_frac=args.hold_frac,
+         use_exposure=args.use_exposure)

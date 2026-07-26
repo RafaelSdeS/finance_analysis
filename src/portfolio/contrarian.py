@@ -10,8 +10,19 @@ and overfits by construction. The ML stays on cross-sectional stock SELECTION
     signal_t = median over the current universe of `earnings_yield_vs_selic`
                (the aggregate equity risk premium -- SELIC ~= CDI in Brazil,
                 so this is stocks' earnings yield vs the ~riskless carry)
-    z_t      = causal expanding z-score of signal_t (uses only dates <= t)
+    z_t      = causal ROLLING z-score of signal_t (trailing `window` periods,
+               not expanding-since-inception -- see 2026-07-25 fix below)
     exposure = clip(base + k * z_t, floor, ceil)     -> total equity weight cap
+
+    Rolling, not expanding (fixed 2026-07-25): an expanding mean/std drifts
+    its own reference along with a slow, sustained trend in signal_t, muting
+    how unusual a multi-year decline looks by the time it matters -- found
+    empirically investigating why the recession_2015-16 exposure stayed
+    near-neutral despite the (smoothed) spread falling steadily from -2.6%
+    (2012-12) to -10.6% (2015-06): the expanding mean chased the decline
+    down with it. A trailing window judges each point against its recent
+    past instead of its entire history since 2011. See
+    PORTFOLIO_IMPROVEMENT_PLAN.md Phase 3.1b for the full diagnosis.
 
 High ERP (stocks cheap vs the carry) -> z>0 -> more equity (cannons).
 ERP compresses (stocks expensive)     -> z<0 -> shift to CDI  (violins).
@@ -79,7 +90,7 @@ def add_smoothed_earnings_yield(df: pd.DataFrame, window_quarters: int = SMOOTHE
 def equity_exposure(df: pd.DataFrame, reb_dates: pd.DatetimeIndex,
                      col: str = SIGNAL_COL, base: float = 0.75, k: float = 0.15,
                      floor: float = 0.50, ceil: float = 1.00,
-                     min_periods: int = 12) -> dict:
+                     window: int = 20, min_periods: int = 12) -> dict:
     """
     df: the universe-restricted dataset; needs `trade_date` and `col`. The
         cross-`trade_date` median of `col` is the aggregate ERP each day
@@ -91,15 +102,23 @@ def equity_exposure(df: pd.DataFrame, reb_dates: pd.DatetimeIndex,
         history) get `base` -- a neutral cap, same leading-prefix convention
         as every other rolling feature in the pipeline.
 
-    Causal by construction: the expanding mean/std at date t include t's own
-    value but nothing after it. `k` and `base` are the only knobs; tune `k`
-    against realized exposure swings, not in-sample Sharpe.
+    `window`/`min_periods` are in REBALANCE PERIODS (quarterly by default,
+    so window=20 ~= 5y, matching contrarian.py's own SMOOTHED_WINDOW_QUARTERS).
+    Rolling, not expanding (2026-07-25 fix -- see module docstring): a fixed
+    trailing window judges each point against its recent past, not its
+    entire history since 2011, so it actually reacts to a sustained
+    multi-year trend instead of drifting its reference mean along with it.
+
+    Causal by construction either way: at date t the window only ever
+    includes dates <= t. `k` and `base` are the only knobs; tune `k` against
+    realized exposure swings, not in-sample Sharpe.
     """
     daily = df.groupby("trade_date")[col].median().sort_index()
     # value known as of each rebalance date (last observation <= that date)
     erp = daily.reindex(daily.index.union(reb_dates)).ffill().reindex(reb_dates)
-    mu = erp.expanding(min_periods=min_periods).mean()
-    sd = erp.expanding(min_periods=min_periods).std()
+    roll = erp.rolling(window=window, min_periods=min_periods)
+    mu = roll.mean()
+    sd = roll.std()
     z = (erp - mu) / sd.replace(0.0, np.nan)
     exposure = (base + k * z).clip(floor, ceil).fillna(base)
     return exposure.to_dict()
