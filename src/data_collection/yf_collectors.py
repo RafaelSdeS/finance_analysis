@@ -83,8 +83,22 @@ def _seed_last_date(cp: dict, ticker: str, path, col: str) -> str | None:
     """Own checkpoint wins; else fall back to the max date already on disk
     (BolsAI backfill or a prior update run), so the first update doesn't
     redownload full history. --mode update keeps its own checkpoint dir,
-    decoupled from prototype/full_scale."""
-    if ticker in cp:
+    decoupled from prototype/full_scale.
+
+    A checkpoint entry is only trusted if the file it describes still
+    exists. Real bug, found scaling to the full ~10,432-ticker US universe
+    (2026-07-28): re-running under the SAME mode string after wiping
+    data/raw/us/prices/*.parquet (to redo a smaller verification pass
+    first) left 1,972 stale checkpoint entries claiming "already up to
+    date" for tickers whose actual parquet files no longer existed --
+    silently skipping real collection for every one of them, with no
+    error and no log line distinguishing it from genuinely-nothing-new.
+    By construction the checkpoint is only ever written right after a
+    successful file write (`collect_prices_yf`'s loop), so this can only
+    diverge when the file is deleted independently afterward -- exactly
+    the scenario that bit us.
+    """
+    if ticker in cp and path.exists():
         return cp[ticker].get("last_date") or cp[ticker].get("last_quarter")
     if path.exists():
         return str(pd.read_parquet(path, columns=[col])[col].max().date())
@@ -637,17 +651,35 @@ def _demo():
     assert np.isnan(compute_ratios({k: v for k, v in r.items() if k != "ebitda"})["ev_ebitda"])
     print("compute_ratios: OK")
 
-    cp = {"PETR4": {"last_date": "2026-01-01"}}
-    assert _seed_last_date(cp, "PETR4", None, "trade_date") == "2026-01-01"
-    print("_seed_last_date: OK")
-
     import tempfile
     from pathlib import Path
     with tempfile.TemporaryDirectory() as tmp:
+        seed_path = Path(tmp) / "PETR4.parquet"
+        cp = {"PETR4": {"last_date": "2026-01-01"}}
+        # File exists: checkpoint is trusted (the normal case).
+        pd.DataFrame({"trade_date": pd.to_datetime(["2026-01-01"])}).to_parquet(seed_path)
+        assert _seed_last_date(cp, "PETR4", seed_path, "trade_date") == "2026-01-01"
+        # File does NOT exist even though the checkpoint has an entry -- must NOT
+        # be trusted. Real bug, found scaling to the full US universe
+        # (2026-07-28): a data wipe/redo under the SAME mode string left stale
+        # checkpoint entries pointing at deleted files, silently skipping real
+        # collection for ~1,972 tickers with no error at all.
+        ghost_path = Path(tmp) / "GHOST.parquet"
+        assert _seed_last_date(cp, "PETR4", ghost_path, "trade_date") is None
+    print("_seed_last_date: OK")
+
+    with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "TEST3.parquet"
 
-        # No file on disk yet: falls back to checkpoint's last_date + 1 day.
+        # Checkpoint has an entry but the file doesn't exist yet: the checkpoint
+        # must NOT be trusted (see _seed_last_date) -- falls back to a full
+        # refetch from the floor, not the stale checkpoint date.
         cp2 = {"TEST3": {"last_date": "2026-01-01"}}
+        assert _prices_fetch_start(cp2, "TEST3", path, floor="2020-01-01") == "2020-01-01"
+
+        # Once the file genuinely exists, the checkpoint IS trusted again.
+        pd.DataFrame({"trade_date": pd.to_datetime(["2026-01-01"]),
+                      "num_trades": [100.0]}).to_parquet(path)
         assert _prices_fetch_start(cp2, "TEST3", path) == "2026-01-02"
 
         # BolsAI-only rows on disk (num_trades populated): same fallback, day after
