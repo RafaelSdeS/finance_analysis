@@ -1,8 +1,9 @@
 # US Equities Expansion — Full Plan
 
 **Status:** Phases 1-2 done (real data collected). Phase 3 code done + spot-verified on real
-data; full 130-quarter historical crawl pending in your terminal (see Phase 3). Phase 0/4-8
-not started.
+data; full 130-quarter historical crawl pending in your terminal (see Phase 3). Phase 4 core
+logic done + verified against real AAPL data (per-CIK path only; bulk-zip scale-up pending).
+Phase 0/5-8 not started.
 **Date:** 2026-07-28.
 **Goal:** extend Stage 1 (data collection) + Stage 2 (dataset build) to US equities —
 prices, fundamentals, macro — as far back as free sources reliably allow, minimizing
@@ -529,20 +530,51 @@ Once that's done, the **Gate** (roster contains Enron/Lehman/Twitter/WorldCom wi
 active spans; coverage table produced honestly) is already effectively met by the spot-check
 above — the full crawl just extends it to every quarter and every CIK instead of 8 samples.
 
-### Phase 4 — fundamentals, XBRL tier 2009+ (3–5 days)
+### Phase 4 — fundamentals, XBRL tier 2009+ — CORE LOGIC DONE 2026-07-28 (per-CIK path only)
 
-- [ ] `sec/http.py` with a hard 10 req/s throttle; prefer the **bulk zips** over per-CIK calls
-      (1.4 GB once vs 10k+ requests).
-- [ ] `sec/companyfacts.py`: facts → tidy `(cik, concept, start, end, val, filed, form, accn)`.
-- [ ] As-first-reported selection: `min(filed)` per `(concept, start, end)`; optional
-      `*_restated` companion column.
-- [ ] `sec/ratios.py`: map XBRL concepts → the BR fundamentals schema. **Budget real time for
-      tag heterogeneity** — revenue alone appears as `Revenues`,
-      `RevenueFromContractWithCustomerExcludingAssessedTax`, `SalesRevenueNet`, and others.
-      Needs a per-concept ordered fallback list, not a single tag.
+- [x] `sec/companyfacts.py`: `fetch_companyfacts(cik)` → tidy `(end, val, filed, form, accn)`
+      per concept (`_facts_to_frame`).
+- [x] As-first-reported selection: `min(filed)` per `(start, end)` (`as_first_reported`).
+      `*_restated` companion column **not yet added** (straightforward extension, deferred).
+- [x] Ratio computation **reused, not reimplemented**: `yf_collectors._compute_ratios` was
+      promoted to a public `compute_ratios(r, unit_scale=K)` (default `K=1000` preserves BR
+      behavior exactly) — SEC's XBRL figures are already full-dollar (not thousands), so
+      `sec/companyfacts.compute_us_ratios()` calls it with `unit_scale=1`. Same formulas
+      already verified at 5% tolerance against live BolsAI data, now reused for US ratios too.
+- [ ] `sec/http.py`'s bulk-zip path (`companyfacts.zip`, 1.4GB once vs 10k+ per-CIK calls) —
+      **not built**; current implementation is per-CIK only (`fetch_companyfacts(cik)`), fine
+      for prototyping a handful of companies, but scaling to the full universe (Phase 6) needs
+      the bulk-zip path instead of one HTTP request per CIK.
 
-**Gate:** AAPL FY2008 net income comes out as **$4.834B** (as-first-reported), not $6.119B.
-That single assertion proves the whole point-in-time chain works.
+**Gate met:** AAPL FY2008 net income comes out as **$4.834B** (as-first-reported), verified
+directly against live data — `as_first_reported(facts, "NetIncomeLoss")` on real AAPL
+companyfacts returns exactly `4834000000`, filed `2009-10-27`, not the `6119000000` restatement
+filed a year later. Self-checked without network in `test_sec_companyfacts.py`.
+
+**Two real bugs found and fixed while verifying against live AAPL data (not caught by design
+alone — both needed actual data to surface):**
+
+1. **Duration collision:** XBRL tags the same fiscal `end` with quarterly, half-year,
+   9-month, AND annual durations simultaneously (a 10-Q's current-quarter + YTD comparatives;
+   a 10-K's full year) — confirmed 96 of AAPL's `NetIncomeLoss` periods share an `end` with a
+   different-duration sibling. Merging line items on `end` alone collided multiple duration
+   variants into one row. Fixed: `_quarterly_only()` restricts duration concepts to ~60-100
+   day periods before dedup; instant (balance-sheet) concepts are unaffected (no `start`, no
+   ambiguity).
+2. **Global-not-per-period concept resolution:** the original fallback logic picked the first
+   non-empty concept **for the whole company** and used it for all periods. AAPL's own revenue
+   tag moved `SalesRevenueNet` (2008-2018, 40 periods) → `"Revenues"` (2016-2018 transition
+   label, only 8 periods) → `RevenueFromContractWithCustomerExcludingAssessedTax` (2017-2026,
+   29 periods). Because `"Revenues"` happened to be non-empty, the original code used *only*
+   its 8 periods, silently discarding 2008-2016 and most of 2019-2026. Fixed: `_resolve_item()`
+   unions every concept's coverage **per period**, with fallback-list order breaking ties only
+   where two concepts genuinely report the same `end` (transition-year overlap). Revenue
+   coverage went from 8 periods to 66 (2008-01 → 2026-03) after the fix.
+
+Both bugs would have been invisible from synthetic test data alone — they only showed up
+against AAPL's real, messy, multi-era tagging history. Worth remembering for Phase 5/7: the
+EX-27 and Item-6 tiers deserve the same real-data verification before trusting them, not just
+unit tests against hand-built fixtures.
 
 ### Phase 5 — fundamentals, EX-27 tier 1994–2001 (3–5 days, gated on Phase 0)
 

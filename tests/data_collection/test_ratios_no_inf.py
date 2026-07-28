@@ -1,7 +1,7 @@
 """
 test_ratios_no_inf.py
 ======================
-Verifies _compute_ratios() never returns a literal inf (e.g. net_revenue=0
+Verifies compute_ratios() never returns a literal inf (e.g. net_revenue=0
 for a pre-revenue/holding-company ticker must yield NaN, not inf, so raw
 fundamentals parquet stays clean).
 
@@ -15,11 +15,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data_collection.yf_collectors import _compute_ratios
+from src.data_collection.yf_collectors import compute_ratios
 
 
 def test_zero_denominator_yields_nan():
-    out = _compute_ratios({
+    out = compute_ratios({
         "net_income": 100.0, "equity": 50.0, "net_revenue": 0.0,
         "total_assets": 200.0, "total_debt": 30.0, "ebitda": 10.0, "ebit": 5.0,
         "cash": 5.0, "current_assets": 20.0, "current_liabilities": 10.0,

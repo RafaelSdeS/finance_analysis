@@ -376,16 +376,25 @@ def backfill_price_gap(ticker: str, gap_start: str, gap_end: str) -> pd.DataFram
 # fundamentals
 # ---------------------------------------------------------------------------
 
-def _compute_ratios(r: dict) -> dict:
-    """Recompute BolsAI-equivalent ratios from yfinance raw figures.
+def compute_ratios(r: dict, unit_scale: float = K) -> dict:
+    """Recompute BolsAI-equivalent ratios from raw fundamentals figures.
     Formulas for market_cap/lpa/vpa/pl/pvp/roe/roa/net_margin/ebitda_margin/
     net_debt/debt_equity/ev_ebitda are the exact ones already verified at 5%
     tolerance against live BolsAI data in tests/data_collection/validate_vs_yfinance.py's
     check_internal_consistency(). The rest extend the same algebraic pattern.
     All divisions propagate NaN naturally on missing/zero inputs — no extra guards needed.
+
+    `unit_scale` converts the "thousands"-denominated fields (net_income, equity,
+    etc. — BolsAI's storage convention, see module-level `K`) up to market_cap's
+    full-currency-unit scale before combining them. Defaults to `K` for the BR/
+    yfinance callers below; SEC EDGAR's XBRL figures are already full-dollar
+    (verified 2026-07-28: AAPL NetIncomeLoss reported as 4,834,000,000, not
+    4,834,000), so sec/ratios.py passes unit_scale=1 — same formulas, no
+    thousands conversion needed. Public (not `_compute_ratios`) because it's
+    now shared across sources, not yfinance-internal.
     """
     # np.float64 (not plain float) so x/0 -> inf/nan instead of ZeroDivisionError.
-    g = lambda k: np.float64(r.get(k, np.nan))
+    g = lambda key: np.float64(r.get(key, np.nan))
     net_income, equity, net_revenue = g("net_income"), g("equity"), g("net_revenue")
     total_assets, total_debt, ebitda, ebit = g("total_assets"), g("total_debt"), g("ebitda"), g("ebit")
     cash, current_assets, current_liabilities = g("cash"), g("current_assets"), g("current_liabilities")
@@ -394,32 +403,32 @@ def _compute_ratios(r: dict) -> dict:
 
     market_cap = close_price * shares
     net_debt = total_debt - cash
-    ev = market_cap + net_debt * K
+    ev = market_cap + net_debt * unit_scale
 
     # Zero denominators (pre-revenue/holding-company quarters) are expected and
     # handled below by the inf->NaN cleanup, not a bug — silence numpy's warning.
     with np.errstate(divide="ignore", invalid="ignore"):
         out = {
             "market_cap": market_cap,
-            "lpa": net_income * K / shares,
-            "vpa": equity * K / shares,
-            "pl": market_cap / (net_income * K),
-            "pvp": market_cap / (equity * K),
+            "lpa": net_income * unit_scale / shares,
+            "vpa": equity * unit_scale / shares,
+            "pl": market_cap / (net_income * unit_scale),
+            "pvp": market_cap / (equity * unit_scale),
             "roe": net_income / equity * 100,
             "roa": net_income / total_assets * 100,
             "net_margin": net_income / net_revenue * 100,
             "ebitda_margin": ebitda / net_revenue * 100,
             "net_debt": net_debt,
             "debt_equity": total_debt / equity,
-            "ev_ebitda": ev / (ebitda * K),
-            "ev_ebit": ev / (ebit * K),
-            "p_ebitda": market_cap / (ebitda * K),
-            "p_ebit": market_cap / (ebit * K),
-            "p_sr": market_cap / (net_revenue * K),
+            "ev_ebitda": ev / (ebitda * unit_scale),
+            "ev_ebit": ev / (ebit * unit_scale),
+            "p_ebitda": market_cap / (ebitda * unit_scale),
+            "p_ebit": market_cap / (ebit * unit_scale),
+            "p_sr": market_cap / (net_revenue * unit_scale),
             "ebit_margin": ebit / net_revenue * 100,
             "ebit_over_assets": ebit / total_assets * 100,
             "asset_turnover": net_revenue / total_assets,
-            "p_assets": market_cap / (total_assets * K),
+            "p_assets": market_cap / (total_assets * unit_scale),
             "current_ratio": current_assets / current_liabilities,
             "net_debt_equity": net_debt / equity,
             "net_debt_ebitda": net_debt / ebitda,
@@ -514,7 +523,7 @@ def collect_fundamentals_yf(tickers: list[str], mode: str):
                     "cost_of_revenue": cost_of_revenue.get(d, np.nan),
                 }
                 base["net_debt"] = base["total_debt"] - base["cash"]
-                row = {**base, **_compute_ratios(base)}
+                row = {**base, **compute_ratios(base)}
                 row.pop("cost_of_revenue", None)  # not part of the on-disk schema
                 rows.append(row)
 
@@ -585,7 +594,7 @@ def _demo():
         "cash": 50.0, "current_assets": 400.0, "current_liabilities": 200.0,
         "shares_outstanding": 10.0, "close_price": 100.0, "cost_of_revenue": 600.0,
     }
-    out = _compute_ratios(r)
+    out = compute_ratios(r)
     assert out["market_cap"] == 1000.0
     assert abs(out["roe"] - 20.0) < 1e-9
     assert abs(out["roa"] - 5.0) < 1e-9
@@ -593,9 +602,9 @@ def _demo():
     assert out["net_debt"] == 250.0
     assert abs(out["debt_equity"] - 0.6) < 1e-9
     assert abs(out["current_ratio"] - 2.0) < 1e-9
-    assert np.isnan(_compute_ratios({**r, "equity": 0.0})["roe"])  # 100/0 -> inf -> cleaned to NaN
-    assert np.isnan(_compute_ratios({k: v for k, v in r.items() if k != "ebitda"})["ev_ebitda"])
-    print("_compute_ratios: OK")
+    assert np.isnan(compute_ratios({**r, "equity": 0.0})["roe"])  # 100/0 -> inf -> cleaned to NaN
+    assert np.isnan(compute_ratios({k: v for k, v in r.items() if k != "ebitda"})["ev_ebitda"])
+    print("compute_ratios: OK")
 
     cp = {"PETR4": {"last_date": "2026-01-01"}}
     assert _seed_last_date(cp, "PETR4", None, "trade_date") == "2026-01-01"
