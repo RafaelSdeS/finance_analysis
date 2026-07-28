@@ -83,7 +83,8 @@ def test_resolve_item_unions_across_concepts_per_period():
             [_fact("2020-01-01", "2020-03-31", 900.0, "2020-05-01")],                  # new tag, later history
     })
     resolved = companyfacts._resolve_item(facts, companyfacts.CONCEPT_MAP["net_revenue"])
-    assert set(resolved["end"]) == {"2008-03-31", "2016-03-31", "2020-03-31"}, (
+    ends = {d.strftime("%Y-%m-%d") for d in resolved["end"]}
+    assert ends == {"2008-03-31", "2016-03-31", "2020-03-31"}, (
         "must cover ALL three eras, not truncate to whichever concept is non-empty first")
     print("OK: _resolve_item unions coverage across a filer's whole tag-history, not just one concept")
 
@@ -114,9 +115,50 @@ def test_extract_line_items_conservative_available_date():
     print("OK: extract_line_items bundles to the conservative (max) availability date")
 
 
+def test_extract_line_items_clusters_nearby_period_ends():
+    # Real bug, found scaling to a full company history (2026-07-28): different XBRL
+    # concepts for the SAME fiscal quarter carry slightly different `end` dates.
+    # Coca-Cola tags NetIncomeLoss's Q2 2008 as ending 2008-06-27 (a business-day
+    # quarter end) while StockholdersEquity for "the same" quarter is 2008-06-28 --
+    # one day apart. An exact-date merge fragments one real quarter into two
+    # near-empty rows; this must instead collapse to ONE row.
+    facts = _facts({
+        "NetIncomeLoss": [_fact("2008-03-29", "2008-06-27", 1_422_000_000, "2008-07-25")],
+        "StockholdersEquity": [_fact(None, "2008-06-28", 20_900_000_000, "2008-07-25")],
+    })
+    li = companyfacts.extract_line_items(facts)
+    assert len(li) == 1, f"one real quarter must become ONE row, got {len(li)}"
+    row = li.iloc[0]
+    assert row["net_income"] == 1_422_000_000.0
+    assert row["equity"] == 20_900_000_000.0
+    print("OK: extract_line_items clusters near-identical period ends into one row")
+
+
+def test_shares_outstanding_does_not_fragment_periods():
+    # Real bug: shares_outstanding's dei concept (EntityCommonStockSharesOutstanding)
+    # is "as of the filing's cover page date", NOT a fiscal period end -- confirmed
+    # on Coca-Cola, where it floats ~3 weeks from the real quarter end. Treating it
+    # as a period-anchor (the original bug) created a spurious extra row every
+    # quarter; it must instead attach to the nearest real quarter via nearest-match.
+    facts = _facts({
+        "NetIncomeLoss": [_fact("2009-04-04", "2009-07-03", 2_037_000_000, "2009-07-30")],
+        "EntityCommonStockSharesOutstanding": [_fact(None, "2009-07-24", 2_313_000_000, "2009-07-30")],
+    })
+    li = companyfacts.extract_line_items(facts)
+    assert len(li) == 1, (
+        f"shares_outstanding's cover-page date (21 days from the real quarter end) "
+        f"must NOT create a second row, got {len(li)}")
+    row = li.iloc[0]
+    assert row["net_income"] == 2_037_000_000.0
+    assert row["shares_outstanding"] == 2_313_000_000.0
+    print("OK: shares_outstanding attaches via nearest-match instead of fragmenting periods")
+
+
 if __name__ == "__main__":
     test_as_first_reported_takes_earliest_filing()
     test_quarterly_only_drops_annual_duplicate()
     test_resolve_item_unions_across_concepts_per_period()
     test_resolve_item_priority_on_overlap()
     test_extract_line_items_conservative_available_date()
+    test_extract_line_items_clusters_nearby_period_ends()
+    test_shares_outstanding_does_not_fragment_periods()

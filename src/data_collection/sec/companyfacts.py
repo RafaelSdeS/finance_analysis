@@ -53,6 +53,15 @@ CONCEPT_MAP = {
     "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"],
 }
 
+# Items whose `end` is NOT a fiscal period-end and must not define/join a period
+# cluster on equal footing with the rest. `shares_outstanding`'s dei concept
+# (EntityCommonStockSharesOutstanding) is explicitly "as of the cover page date"
+# -- confirmed on Coca-Cola: its `end` floats ~3 weeks from the real quarter end
+# (e.g. 2009-07-24 vs. the quarter's actual 2009-07-03), which used to create a
+# spurious extra cluster/row every quarter. Attached via nearest-match instead
+# of being allowed to anchor a cluster.
+_ATTACHED_ITEMS = {"shares_outstanding"}
+
 
 def fetch_companyfacts(cik: int) -> dict | None:
     resp = http.get(COMPANYFACTS_URL.format(cik=cik))
@@ -104,6 +113,7 @@ def as_first_reported(facts: dict, concept: str) -> pd.DataFrame:
     if df.empty:
         return df
     df["filed"] = pd.to_datetime(df["filed"])
+    df["end"] = pd.to_datetime(df["end"])
     key = ["start", "end"] if "start" in df.columns else ["end"]
     return (df.sort_values("filed")
               .drop_duplicates(subset=key, keep="first")
@@ -137,17 +147,50 @@ def _resolve_item(facts: dict, concepts: list[str]) -> pd.DataFrame:
                      .reset_index(drop=True))
 
 
+_CLUSTER_TOL_DAYS = 10  # real quarters are ~90 days apart -- 9x margin below that
+
+
+def _cluster_period_ends(dates) -> dict:
+    """Group period-end dates within `_CLUSTER_TOL_DAYS` of each other into one
+    cluster, mapped to a single representative date.
+
+    Real bug, found scaling past a single company's summary view (2026-07-28):
+    different XBRL concepts for the SAME fiscal quarter can carry slightly
+    different `end` dates. Confirmed on Coca-Cola: NetIncomeLoss tags Q2 2008 as
+    ending 2008-06-27 (the last business day of its actual fiscal period), while
+    StockholdersEquity tags "the same" quarter 2008-06-28. An exact-date merge
+    (the original approach) fragments one real quarter into several near-empty
+    rows -- confirmed directly: KO's XBRL era produced 148 rows this way,
+    versus ~70 real quarters once fixed. Greedy chaining is safe here only
+    because real distinct quarters are ~90 days apart, 9x this tolerance --
+    it will NOT falsely merge two genuinely different quarters.
+    """
+    uniq = sorted(set(dates))
+    if not uniq:
+        return {}
+    clusters, current = [], [uniq[0]]
+    for d in uniq[1:]:
+        if (d - current[-1]).days <= _CLUSTER_TOL_DAYS:
+            current.append(d)
+        else:
+            clusters.append(current)
+            current = [d]
+    clusters.append(current)
+    return {d: c[len(c) // 2] for c in clusters for d in c}
+
+
 def extract_line_items(facts: dict) -> pd.DataFrame:
-    """One row per fiscal `end`, every CONCEPT_MAP line item resolved via its fallback
-    list (each as-first-reported, per-period per _resolve_item). Each item keeps its own
-    `{item}_filed` date plus an overall `fundamentals_available_date` = MAX across
-    populated items' filed dates -- the conservative (never-early) bundling date
-    merge_asof downstream must key on (plan §5.2): using the max, not the min,
-    guarantees no single item in the row is ever exposed before it was genuinely
-    public, even though different concepts for the same quarter can individually
-    become known at different times (e.g. a balance-sheet item appearing as a
-    prior-period comparative before the income-statement figure for the same
-    quarter is filed)."""
+    """One row per fiscal quarter (period-end dates clustered via
+    _cluster_period_ends, not merged on exact equality), every CONCEPT_MAP line
+    item resolved via its fallback list (each as-first-reported, per-period per
+    _resolve_item). Each item keeps its own `{item}_filed` date plus an overall
+    `fundamentals_available_date` = MAX across populated items' filed dates --
+    the conservative (never-early) bundling date merge_asof downstream must key
+    on (plan §5.2): using the max, not the min, guarantees no single item in the
+    row is ever exposed before it was genuinely public, even though different
+    concepts for the same quarter can individually become known at different
+    times (e.g. a balance-sheet item appearing as a prior-period comparative
+    before the income-statement figure for the same quarter is filed)."""
     resolved = {}
     for item, concepts in CONCEPT_MAP.items():
         df = _resolve_item(facts, concepts)
@@ -157,9 +200,34 @@ def extract_line_items(facts: dict) -> pd.DataFrame:
     if not resolved:
         return pd.DataFrame()
 
+    period_items = {k: v for k, v in resolved.items() if k not in _ATTACHED_ITEMS}
+    attached_items = {k: v for k, v in resolved.items() if k in _ATTACHED_ITEMS}
+    if not period_items:
+        return pd.DataFrame()
+
+    all_ends = pd.concat([df["end"] for df in period_items.values()])
+    cluster_map = _cluster_period_ends(all_ends)
+
     out = None
-    for item, df in resolved.items():
+    for item, df in period_items.items():
+        df = df.copy()
+        df["end"] = df["end"].map(cluster_map)
+        # A cluster could hold >1 row for one item only if two of ITS OWN
+        # distinct periods fell within the tolerance window -- shouldn't
+        # happen (an item's own periods are naturally ~90 days apart), but
+        # keep="first" (already sorted by end) degrades safely if it did.
+        df = df.drop_duplicates(subset="end", keep="first")
         out = df if out is None else out.merge(df, on="end", how="outer")
+    out = out.sort_values("end").reset_index(drop=True)
+
+    # Attached items (shares_outstanding): nearest-match onto the real period
+    # grid rather than joined on exact/clustered end -- their own `end` is a
+    # different kind of date entirely (see _ATTACHED_ITEMS), not a competing
+    # fiscal quarter.
+    for item, df in attached_items.items():
+        df = df.sort_values("end")
+        out = pd.merge_asof(out.sort_values("end"), df, on="end",
+                             direction="nearest", tolerance=pd.Timedelta(days=45))
 
     filed_cols = [c for c in out.columns if c.endswith("_filed")]
     out["fundamentals_available_date"] = out[filed_cols].max(axis=1)
