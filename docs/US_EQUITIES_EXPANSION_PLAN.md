@@ -1,14 +1,19 @@
 # US Equities Expansion — Full Plan
 
 **Status (2026-07-28, updated):** Phases 1, 2, 3, 4, 5, 7 all have working, real-data-verified
-code (`sec/{universe,crosswalk,companyfacts,fds,item6,fundamentals}.py`, `fred_collectors.py`,
-US price collection via `yf_collectors.py`). Full-universe scale-up is running now: price
-collection across all ~10,432 tier-1-crosswalk tickers, and fundamentals collection (all 3
-tiers combined) across every priced ticker, both launched in the background. 9 real bugs found
-and fixed so far by actually running at scale (see `CLAUDE.md` and each phase's notes below) —
-none were caught by design review or small-sample testing alone. Phase 0's remaining items
-(Alpha Vantage/yfinance-throughput checks) and Phase 6's formal Stage-2-style dataset assembly
-+ full coverage measurement are what's left; Phase 8 (full-statement parsing) stays deferred.
+code (`sec/{http,universe,crosswalk,companyfacts,fds,item6,fundamentals}.py`, `fred_collectors.py`,
+US price collection via `yf_collectors.py`). A first full-universe attempt (all ~10,432
+tier-1-crosswalk tickers) was **deliberately paused and scoped down to the top 500 tickers by
+market cap** to verify the pipeline end-to-end on a smaller, cheaper-to-audit dataset before
+committing hours of runtime to the full universe — a good call: auditing that top-500 run
+surfaced **9 more real bugs** on top of the ~9 found earlier (see Phase 6 below for the full
+list), several of them severe (a single bad filing or transient HTTP error could silently
+discard a whole company's data). All are fixed and verified against live data; the top-500
+run is now clean (500/500 prices, 476/500 fundamentals, zero lookahead violations, zero
+tier-boundary duplicates, zero known shell-CIK mapping bugs). **Full-universe scale-up is the
+current step** — same code, now trusted at 500-ticker scale. Phase 0's remaining items (Alpha
+Vantage/yfinance-throughput checks) and Phase 6's formal Stage-2-style dataset assembly + full
+coverage measurement are what's left after that; Phase 8 (full-statement parsing) stays deferred.
 **Date:** 2026-07-28.
 **Goal:** extend Stage 1 (data collection) + Stage 2 (dataset build) to US equities —
 prices, fundamentals, macro — as far back as free sources reliably allow, minimizing
@@ -583,7 +588,9 @@ long/heavy scripts):
    companies today than 25 years ago, sometimes called "the listing gap") — a good sanity
    check that the roster reflects real economic history, not a parsing artifact.
 
-**Coverage table** (current state — 6 priced tickers vs. thousands-per-year roster):
+**Coverage table** (snapshot from Phase 2's 6-ticker prototype — kept here only to illustrate
+the mechanism; superseded by whatever the current priced universe is. Re-run
+`universe.compute_coverage()` for a live number rather than trusting this table):
 
 ```
 year  roster_ciks  priced_ciks  coverage
@@ -591,6 +598,11 @@ year  roster_ciks  priced_ciks  coverage
 2008        11713            5   0.04%
 2026         6749            5   0.07%
 ```
+
+This climbs as the priced universe grows — by the top-500 run (Phase 6) it had already reached
+~9.6% for 2026 with only 1,014 tickers priced (a partial, in-progress full-universe attempt at
+the time) — but the real, final number only means something once Phase 6's full-universe
+collection actually completes; treat every number in this section as a lower bound until then.
 
 This ~0.05% figure is **expected and not a defect** — it reflects that only Phase 2's 6
 prototype tickers are priced so far, not a flaw in the roster or crosswalk. It becomes the
@@ -610,9 +622,16 @@ future regression in coverage is visible immediately rather than discovered late
       `sec/companyfacts.compute_us_ratios()` calls it with `unit_scale=1`. Same formulas
       already verified at 5% tolerance against live BolsAI data, now reused for US ratios too.
 - [ ] `sec/http.py`'s bulk-zip path (`companyfacts.zip`, 1.4GB once vs 10k+ per-CIK calls) —
-      **not built**; current implementation is per-CIK only (`fetch_companyfacts(cik)`), fine
-      for prototyping a handful of companies, but scaling to the full universe (Phase 6) needs
-      the bulk-zip path instead of one HTTP request per CIK.
+      **not built**; current implementation is per-CIK only (`fetch_companyfacts(cik)`). Fine
+      through the top-500 run; still unaddressed going into the full ~10,432-ticker scale-up,
+      where it means ~10k individual HTTP requests instead of one bulk download — correct, just
+      slow. Worth building if the full-universe runtime proves painful, not before.
+- [x] **ifrs-full taxonomy support added 2026-07-28** (found auditing the top-500 run, Phase 6):
+      `_facts_to_frame` only ever checked `us-gaap`/`dei`, silently missing every 20-F/IFRS
+      foreign filer's data. Now also checks `ifrs-full`, with verified concept fallbacks
+      (`Revenue`, `ProfitLoss`, `Assets`, `Equity`, etc.) and an exemption from the quarterly-
+      duration filter (20-F filers have no quarterly reporting requirement, so all their
+      duration facts are annual). See Phase 6 bugs #4-5 for full detail.
 
 **Gate met:** AAPL FY2008 net income comes out as **$4.834B** (as-first-reported), verified
 directly against live data — `as_first_reported(facts, "NetIncomeLoss")` on real AAPL
@@ -673,12 +692,118 @@ published 1994 10-K. Derived ratios are sane: net margin 15.8%, ROA 18.4%, curre
 red flag). Self-checked without network in `test_sec_fds.py` (the synthetic fixture mirrors
 the real filing's EX-27 block byte-for-byte).
 
-### Phase 6 — full-universe scale-up + Stage 2 build (1 week)
+### Phase 6 — full-universe scale-up + Stage 2 build
 
-- [ ] Scale prices to the full ticker list; expect long runtimes and partial failures —
-      reuse the existing checkpoint/resume machinery, don't invent new.
+- [x] **Top-500-by-market-cap dry run — DONE 2026-07-28.** A first attempt at the full
+      ~10,432-ticker universe was killed deliberately partway through: at that scale, a single
+      bug produces thousands of silently-wrong rows before anyone notices, and re-running the
+      full universe after every fix would cost hours per iteration. Scoped down to the top 500
+      tickers by market cap instead (`cik_ticker_crosswalk.parquet.head(500)` — SEC's
+      `company_tickers.json` is empirically market-cap-ordered, not officially documented as
+      such but confirmed by spot-checking: NVDA/AAPL/GOOGL/MSFT/AMZN lead, FirstEnergy/
+      CenterPoint round out #500). Old full-universe data wiped, fresh 500-ticker prices +
+      fundamentals collected, audited for correctness (not just "did the job finish"), fixed,
+      re-collected, re-audited — several iterations, documented below.
+- [ ] Scale prices + fundamentals to the full ticker list, same code now verified at 500-ticker
+      scale; expect long runtimes and partial failures — reuse the existing checkpoint/resume
+      machinery, don't invent new. **Current step.**
 - [ ] `us_ml_dataset.parquet` via the Stage 2 pipeline, schema-aligned to BR (§5.5).
 - [ ] Port the existing test suite's invariants (no-lookahead, prefix-NaN, split repair).
+
+**9 more real bugs found and fixed auditing the top-500 run (2026-07-28), all via actually
+running the code and sweeping the output for correctness — none caught by design review:**
+
+1. **Item6 fiscal-year-end fix only corrected the flagged row, not its siblings.** The earlier
+   ADP fix (Phase 7) derived a company's real fiscal quarter-end from whichever row proved the
+   naive Dec-31 guess impossible, but only overwrote *that* row. A single Item6 table reports
+   *several* fiscal years from *one* filing (e.g. 2001-2006 at once) — comparative years whose
+   naive Dec-31 comfortably precedes the (much later) filing date never tripped the check and
+   stayed silently wrong. Confirmed on ADP itself: its Aug-2006 10-K bundles both FY2006
+   (caught) and FY2005 (comparative, missed — labeled 2005-12-31 instead of the real 2005-06-30,
+   six months off). Fixed by deriving the correction once and applying it to every row for that
+   CIK.
+2. **That same derivation rounded forward past the filing date for short filing lags.** The
+   fix computed `filing_date − 2 months` then rounded UP to the *containing* calendar quarter —
+   safe when the gap to the quarter boundary happens to exceed the lag, wrong otherwise.
+   Confirmed on CRM (filed 2005-03-25 → "−2mo" gives 2005-01-25 → rounds up to Q1's end,
+   2005-03-31, six days *after* the filing), and on NTAP/LRCX/ADSK/ADM and 53 others (57
+   tickers total). Fixed by deriving the latest quarter-end *strictly before* the filing date
+   (safe by construction) plus a year offset — companies like CRM/NTAP, whose real fiscal
+   year-end falls in Jan/Apr, have their nearest safe quarter-end in the calendar year *before*
+   the fiscal_year label.
+3. **Cross-tier combination deduped on exact `end` equality.** Item6's Dec-31-rounded guess and
+   xbrl/ex27's real fiscal-calendar dates (e.g. "2007-09-29") can describe the same real period
+   a few days apart; exact-equality dedup let both survive as separate rows. Confirmed on AAPL,
+   INTC, JNJ, MAR, CSX and 35 others (40 pairs across 465 companies). Fixed by reusing
+   companyfacts.py's intra-tier tolerance-clustering (promoted `_cluster_period_ends` to public
+   `cluster_period_ends`) across tiers too, before applying tier priority.
+4. **companyfacts.py never checked the `ifrs-full` XBRL taxonomy.** Foreign private issuers
+   filing 20-F report under IFRS, tagged under a separate taxonomy key the code simply never
+   looked at — confirmed HSBC/RIO/TECK/SAN each have 350-450 populated `ifrs-full` concepts,
+   one root cause behind the top-500 run's initial 108/500 "no data from either tier" tickers.
+   Added `ifrs-full` to the taxonomy lookup plus verified IFRS concept fallbacks (`Revenue`,
+   `ProfitLoss`, `Assets`, `Equity`, etc.) to `CONCEPT_MAP`.
+5. **The quarterly-duration filter dropped 100% of 20-F filers' data.** Foreign private issuers
+   are exempt from quarterly reporting entirely (no 10-Q equivalent), so *every* one of their
+   duration facts is ~365 days — the 60-100 day window that resolves us-gaap's quarterly-vs-
+   annual duplication silently filtered out all of them. Fixed by exempting `ifrs-full`-sourced
+   rows from that filter.
+6. **`item6.py`'s `pd.read_html` call only caught `ValueError`.** Pandas' internal HTML parser
+   can raise other exception types on malformed real-world HTML — confirmed on YUM/BDX/HSY/ROP,
+   each with one filing whose table structure crashed with an `IndexError`. Uncaught, this
+   propagated up through `build_company_fundamentals` and discarded the *entire* company's
+   fundamentals build, including hundreds of perfectly good XBRL-tier rows, since nothing
+   downstream catches it per-CIK. Fixed by catching any parse exception, not just `ValueError`
+   — the loop's whole point is "skip a filing that doesn't parse, try the next one."
+7. **`sec/http.py` never retried transient SEC 5xx errors.** `raise_for_status()` ran *after*
+   the retry loop had already exited on a successful (but bad-status) response, so a transient
+   error got zero retries unlike a connection failure. Confirmed on FLEX/SNPS: real "503
+   Service Unavailable" responses crashed their entire fundamentals build (same failure mode as
+   #6, at the HTTP layer). Fixed by moving `raise_for_status()` inside the retry loop's try
+   block.
+8. **A genuine upstream XBRL tagging error, not fixable by deriving anything.** WMT has a real
+   `CashAndCashEquivalentsAtCarryingValue` fact tagged `end=2012-12-31` — not even one of WMT's
+   real Jan/Apr/Jul/Oct fiscal quarter-ends — filed 2012-03-27, nine months before the period it
+   claims to describe. Rather than chase every possible upstream anomaly shape individually,
+   `build_company_fundamentals` now enforces the `end <= fundamentals_available_date` invariant
+   as a final defensive filter at the one point all three tiers converge, dropping (and logging)
+   whatever still violates it regardless of root cause.
+9. **Shell-CIK ticker hijacking: SEC's `company_tickers.json` occasionally points a ticker at a
+   newly-created holding-company shell CIK with zero (or near-zero) filing history, while the
+   real, decades-long history stays under the OLD CIK indefinitely** (the old entity gets
+   renamed/demoted but never refiles under the new one). Confirmed on two cases, both verified
+   via `submissions.json`'s `formerNames`: **XOM** (ticker → CIK 2115436 "ExxonMobil Holdings
+   Corp", 0 filings; real filer is CIK 34088, 133 filings, 438 XBRL concepts) and **BLK**
+   (ticker → CIK 2012383, created 2024-02 as "BlackRock Funding, Inc.", 1 real filing; real
+   filer is CIK 1364742 "BlackRock Finance, Inc.", 73 filings back to 2006, 557 XBRL concepts).
+   Systematically scanned all 500 top-cap tickers for the same pattern (< 20 filings, earliest
+   filing after 2020) — 21 candidates, 19 verified as genuinely new entities (real spinoffs/
+   IPOs/mergers, or a 20-F-to-10-K transition after a redomicile — distinguished by whether the
+   "former name" was a merger-shell placeholder always destined to become the new entity, e.g.
+   Apollo's "Tango Holdings, Inc.", vs. an old company's identity being quietly taken over).
+   XOM and BLK were the only two real instances — **not widespread**. Fixed via a
+   `CIK_OVERRIDES` dict in `crosswalk.py`, applied at build time so it survives a future
+   refetch from SEC.
+
+**Final verified state of the top-500 run** (after all 9 fixes, re-collected and re-swept):
+
+```
+prices:       500/500 tickers
+fundamentals: 476/500 tickers (25,925+ rows across xbrl/ex27/item6)
+lookahead violations (end > fundamentals_available_date): 0
+tier-boundary near-duplicates: 0
+known shell-CIK mapping bugs: 0 (2 found, both fixed)
+```
+
+The 24 remaining fundamentals gaps are OTC-exempt foreign ADRs (BAE Systems, BMW, CSL, CATL,
+Deutsche Telekom, ICICI Bank, Infineon, LSEG, Rio Tinto Ltd's separate dual-listing, Swisscom,
+Siemens Energy, Sumitomo Electric, Tokio Marine, Universal Music Group, and others) — verified
+via `submissions.json` to have **zero SEC filings of any kind** (0 10-K/10-Q, 0 XBRL concepts
+under either taxonomy). They trade in the US as unsponsored OTC ADRs (which is why we already
+have *price* data for them), but foreign private issuers trading this way are typically exempt
+from SEC registration/reporting under Rule 12g3-2(b). Not a gap in this pipeline — there is
+nothing in EDGAR to collect. Explicitly accepted as out of scope (2026-07-28 decision): ~5% of
+the top-500 universe, not worth chasing further.
 
 ### Phase 7 — fundamentals, gap tier 2001–2006 via Item 6 chaining — ✅ DONE 2026-07-28
 
