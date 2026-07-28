@@ -66,12 +66,18 @@ def fetch_filing_text(filename: str) -> str | None:
     return resp.text if resp is not None else None
 
 
-def parse_fds(text: str) -> dict | None:
-    """One filing's raw EX-27 tag-value dict, or None if no EX-27 present."""
-    m = _EX27_BLOCK.search(text)
-    if m is None:
-        return None
-    return {tag: val.strip() for tag, val in _TAG_VALUE.findall(m.group(1))}
+def parse_fds(text: str) -> list[dict]:
+    """ALL EX-27 exhibits' raw tag-value dicts in this filing -- a single filing can
+    bundle MULTIPLE (current year + restated prior-year comparatives). Confirmed on
+    Coca-Cola's real 1998-03-09 10-K (2026-07-28): it carries three EX-27 exhibits at
+    once -- EX-27.1 (FY1995, restated), EX-27.2 (FY1996, restated), EX-27.3 (FY1997,
+    the actual current year this filing exists to report). An earlier version of this
+    used .search() (first match only), which silently kept EX-27.1's restated FY1995
+    figures and discarded FY1996 and FY1997 entirely -- losing the current year's data
+    on every filing that bundles comparatives this way. Empty list if none present.
+    """
+    return [{tag: val.strip() for tag, val in _TAG_VALUE.findall(m.group(1))}
+            for m in _EX27_BLOCK.finditer(text)]
 
 
 def _to_number(s: str) -> float:
@@ -105,17 +111,60 @@ def extract_line_items(tags: dict) -> dict:
     return out
 
 
-def extract_and_compute(text: str) -> dict | None:
-    """One filing's text -> line items + compute_ratios(unit_scale=1) (EX-27 values
-    are already scaled to full dollars by extract_line_items' multiplier). None if
-    no EX-27 present."""
-    tags = parse_fds(text)
-    if tags is None:
-        return None
-    items = extract_line_items(tags)
-    if items.get("fds_article") != "5":
-        return items
-    return {**items, **compute_ratios(items, unit_scale=1)}
+def _parse_fds_date(s: str | None) -> pd.Timestamp:
+    """EX-27's <FISCAL-YEAR-END> is "DEC-31-1994"-style, not ISO -- pandas parses it
+    fine with dayfirst=False, but NaT on anything malformed rather than raising."""
+    return pd.to_datetime(s, format="%b-%d-%Y", errors="coerce") if s else pd.NaT
+
+
+def extract_and_compute(text: str) -> list[dict]:
+    """One filing's text -> a list of results, ONE PER EX-27 exhibit (a filing can
+    bundle several -- see parse_fds's docstring). Each result is line items +
+    compute_ratios(unit_scale=1) (already full-dollar via <MULTIPLIER>) + its own
+    `fds_period_end` (from that exhibit's <FISCAL-YEAR-END>). Empty list if no
+    EX-27 exhibit exists in this filing."""
+    results = []
+    for tags in parse_fds(text):
+        items = extract_line_items(tags)
+        period_end = _parse_fds_date(tags.get("FISCAL-YEAR-END"))
+        if items.get("fds_article") != "5":
+            results.append({**items, "fds_period_end": period_end})
+            continue
+        results.append({**items, **compute_ratios(items, unit_scale=1), "fds_period_end": period_end})
+    return results
+
+
+def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
+    """Every qualifying (Article-5) EX-27 exhibit for one CIK across the Phase 3
+    filings table -- including every comparative exhibit a single filing bundles,
+    not just its first -- each stamped with `fundamentals_available_date` = the
+    filing's real EDGAR date_filed -- NOT the fiscal period end, per the plan's
+    §5.2 point-in-time rule (identical reasoning to companyfacts.py's `filed`).
+    Where a period is reported by more than one filing (a later 10-K restating an
+    earlier year as a comparative, or a 10-K/A amendment), the EARLIEST filing
+    wins -- same as-first-reported rule as the XBRL tier (§3.3).
+    """
+    cik_filings = filings[(filings["cik"] == cik) & (filings["form_type"].str.startswith("10-K"))]
+    rows = []
+    for row in cik_filings.itertuples():
+        text = fetch_filing_text(row.filename)
+        if text is None:
+            continue
+        for result in extract_and_compute(text):
+            if result.get("fds_article") != "5":
+                continue
+            rows.append({**result, "cik": cik, "fundamentals_available_date": row.date_filed,
+                         "fds_form": row.form_type, "fds_filename": row.filename})
+    if not rows:
+        return pd.DataFrame()
+    df = pd.DataFrame(rows)
+    # as-first-reported: whichever filing disclosed a given fiscal period EARLIEST
+    # wins, whether that's the period's own original filing or a later filing's
+    # bundled comparative exhibit reporting it first for some other reason.
+    return (df.sort_values("fundamentals_available_date")
+              .drop_duplicates(subset="fds_period_end", keep="first")
+              .sort_values("fds_period_end")
+              .reset_index(drop=True))
 
 
 def measure_prevalence(filings: pd.DataFrame, years=range(1994, 2002), sample_per_year=28,

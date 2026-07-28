@@ -80,20 +80,68 @@ THIS SCHEDULE CONTAINS SUMMARY FINANCIAL INFORMATION
 
 
 def test_parse_fds_extracts_tags():
-    tags = fds.parse_fds(FAKE_FILING_TEXT)
-    assert tags is not None
+    exhibits = fds.parse_fds(FAKE_FILING_TEXT)
+    assert len(exhibits) == 1
+    tags = exhibits[0]
     assert tags["ARTICLE"] == "5"
     assert tags["TOTAL-ASSETS"] == "13,873"
     print("OK: parse_fds extracts the EX-27 tag-value block, not the main filing text")
 
 
-def test_parse_fds_none_when_absent():
-    assert fds.parse_fds("<DOCUMENT><TYPE>10-K\n<TEXT>no exhibit here</TEXT></DOCUMENT>") is None
-    print("OK: parse_fds returns None when no EX-27 exhibit exists")
+def test_parse_fds_empty_when_absent():
+    assert fds.parse_fds("<DOCUMENT><TYPE>10-K\n<TEXT>no exhibit here</TEXT></DOCUMENT>") == []
+    print("OK: parse_fds returns [] when no EX-27 exhibit exists")
+
+
+def test_parse_fds_finds_every_bundled_exhibit():
+    # Real bug, found immediately on scaling past a single company (2026-07-28):
+    # Coca-Cola's real 1998-03-09 10-K bundles THREE EX-27 exhibits at once --
+    # EX-27.1 (FY1995, restated comparative), EX-27.2 (FY1996, restated comparative),
+    # EX-27.3 (FY1997, the actual current year this filing exists to report). The
+    # original parse_fds used re.search() (first match only), which kept ONLY
+    # EX-27.1's restated FY1995 figures and silently discarded FY1996 and FY1997 --
+    # losing the current year's data on every filing that bundles comparatives.
+    multi_exhibit_text = """<DOCUMENT>
+<TYPE>EX-27.1
+<TEXT>
+<ARTICLE> 5
+<MULTIPLIER> 1,000,000
+<FISCAL-YEAR-END>                          DEC-31-1995
+<TOTAL-ASSETS>                                  15,041
+<NET-INCOME>                                     2,986
+</TEXT>
+</DOCUMENT>
+<DOCUMENT>
+<TYPE>EX-27.2
+<TEXT>
+<ARTICLE> 5
+<MULTIPLIER> 1,000,000
+<FISCAL-YEAR-END>                          DEC-31-1996
+<TOTAL-ASSETS>                                  16,161
+<NET-INCOME>                                     3,492
+</TEXT>
+</DOCUMENT>
+<DOCUMENT>
+<TYPE>EX-27.3
+<TEXT>
+<ARTICLE> 5
+<MULTIPLIER> 1,000,000
+<FISCAL-YEAR-END>                          DEC-31-1997
+<TOTAL-ASSETS>                                  16,940
+<NET-INCOME>                                     4,129
+</TEXT>
+</DOCUMENT>
+"""
+    exhibits = fds.parse_fds(multi_exhibit_text)
+    assert len(exhibits) == 3, f"must find all 3 bundled exhibits, found {len(exhibits)}"
+    fyes = [e["FISCAL-YEAR-END"] for e in exhibits]
+    assert fyes == ["DEC-31-1995", "DEC-31-1996", "DEC-31-1997"], (
+        "must preserve every exhibit, in document order, not just the first")
+    print("OK: parse_fds finds every EX-27 exhibit a filing bundles, not just the first")
 
 
 def test_extract_line_items_reconciles_to_published_figures():
-    tags = fds.parse_fds(FAKE_FILING_TEXT)
+    tags = fds.parse_fds(FAKE_FILING_TEXT)[0]
     items = fds.extract_line_items(tags)
     # Real, independently-verified reconciliation: Coca-Cola FY1994 published 10-K.
     assert items["total_assets"] == 13_873_000_000.0
@@ -103,6 +151,15 @@ def test_extract_line_items_reconciles_to_published_figures():
     assert items["fds_article"] == "5"
     assert items["fds_multiplier"] == 1_000_000.0
     print("OK: extract_line_items reconciles exactly to Coca-Cola's published FY1994 figures")
+
+
+def test_extract_and_compute_returns_one_result_per_exhibit():
+    results = fds.extract_and_compute(FAKE_FILING_TEXT)
+    assert len(results) == 1  # FAKE_FILING_TEXT has a single EX-27 exhibit
+    r = results[0]
+    assert r["total_assets"] == 13_873_000_000.0
+    assert str(r["fds_period_end"].date()) == "1994-12-31"
+    print("OK: extract_and_compute returns one dict per exhibit, each with its own fds_period_end")
 
 
 def test_non_article_5_not_silently_mapped():
@@ -124,7 +181,9 @@ def test_zero_multiplier_defaults_to_one():
 
 if __name__ == "__main__":
     test_parse_fds_extracts_tags()
-    test_parse_fds_none_when_absent()
+    test_parse_fds_empty_when_absent()
+    test_parse_fds_finds_every_bundled_exhibit()
     test_extract_line_items_reconciles_to_published_figures()
+    test_extract_and_compute_returns_one_result_per_exhibit()
     test_non_article_5_not_silently_mapped()
     test_zero_multiplier_defaults_to_one()

@@ -43,14 +43,34 @@ def _yf_symbol(ticker: str, suffix: str | None = None) -> str:
     return config.TICKER_ALIASES.get(ticker, ticker) + (config.YF_SUFFIX if suffix is None else suffix)
 
 
-def _retry(fn, label: str):
+def _retry(fn, label: str, retry_on_empty: bool = False):
     """yfinance is a scraper with no typed exceptions worth special-casing —
     a couple of doubling-backoff retries is enough, no need for client.py's
-    full httpx retry machinery (different transport entirely)."""
+    full httpx retry machinery (different transport entirely).
+
+    `retry_on_empty` also retries when fn() returns an empty-but-non-raising
+    result -- confirmed 2026-07-28 at US-scale collection: QCOM (a decades-listed,
+    fully active ticker with 8,714 rows of real history) returned an empty
+    DataFrame on first attempt during a large batch run with no exception raised
+    at all, then succeeded immediately on manual retry. Without this, a single
+    transient hiccup gets silently recorded as permanent "no yfinance coverage"
+    for an otherwise-fine ticker. Only used for price history, where an empty
+    result this early is surprising; left False for callers where empty is
+    often a legitimate answer (e.g. a ticker with no dividends/splits).
+    Still returns the (possibly empty) result after exhausting retries rather
+    than raising -- a genuinely-empty ticker must degrade gracefully, not error.
+    """
     last_err = None
     for attempt in range(config.YF_RETRIES):
         try:
-            return fn()
+            result = fn()
+            is_last = attempt == config.YF_RETRIES - 1
+            if retry_on_empty and not is_last and hasattr(result, "empty") and result.empty:
+                wait = config.YF_RETRY_SLEEP * 2 ** attempt
+                log.warning("%s: empty result (possible transient issue), retry in %ds", label, wait)
+                sleep(wait)
+                continue
+            return result
         except Exception as e:
             last_err = e
             wait = config.YF_RETRY_SLEEP * 2 ** attempt
@@ -167,17 +187,27 @@ def _reconcile_yfinance_junction(ticker: str, path, df: pd.DataFrame,
     return df[df["trade_date"] != junction_date].reset_index(drop=True)
 
 
-def _repair_nonpositive_ohlc(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
-    """Collapse rows with a non-positive Open/High/Low to their Close.
+def _repair_bad_ohlc(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    """Collapse rows with internally-inconsistent Open/High/Low/Close to their Close.
 
-    Known yfinance glitch: occasional non-positive Open on an otherwise-valid
-    trading day (e.g. BOVA11 has 13 such rows from 2009). Left alone, these
-    permanently fail validate_prices on tickers whose whole span gets
-    re-fetched every run (see _prices_fetch_start), blocking new data forever.
+    Known yfinance glitch class, two confirmed forms:
+    - Non-positive Open/High/Low on an otherwise-valid trading day (e.g. BOVA11
+      has 13 such rows from 2009).
+    - Open or Close falling OUTSIDE that day's own [Low, High] bracket (or
+      High < Low) -- confirmed 2026-07-28 at US-scale collection: SHEL had 4
+      such rows across its history, e.g. 2023-01-24 Open=51.26 vs that same
+      day's Low=56.26, a >5-point gap. An earlier version of this only checked
+      non-positive values, so bracket violations like this one slipped through.
+    Left alone, EITHER form permanently fails validate_prices for the WHOLE
+    ticker, since the whole span gets re-fetched every run (see
+    _prices_fetch_start) -- one bad historical day blocks all new data forever.
     """
-    bad = (raw[["Open", "High", "Low", "Close"]] <= 0).any(axis=1) & (raw["Close"] > 0)
+    o, h, lo, c = raw["Open"], raw["High"], raw["Low"], raw["Close"]
+    non_positive = (raw[["Open", "High", "Low", "Close"]] <= 0).any(axis=1)
+    bracket_violation = (o < lo) | (o > h) | (c < lo) | (c > h) | (h < lo)
+    bad = (non_positive | bracket_violation) & (c > 0)
     if bad.any():
-        log.warning("prices %s: %d rows with non-positive Open/High/Low from yfinance — "
+        log.warning("prices %s: %d rows with internally-inconsistent OHLC from yfinance — "
                     "collapsing to Close (known vendor glitch)", ticker, bad.sum())
         close_fill = raw.loc[bad, "Close"]
         for col in ("Open", "High", "Low", "Close"):
@@ -200,14 +230,15 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = 
     exchange suffix) without touching the BR default for existing callers.
     """
     t = yf.Ticker(_yf_symbol(ticker, suffix))
-    raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False), f"prices/{ticker}")
+    raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False), f"prices/{ticker}",
+                 retry_on_empty=True)
     if raw.empty:
         return None
 
-    raw = _repair_nonpositive_ohlc(raw, ticker)
+    raw = _repair_bad_ohlc(raw, ticker)
 
     adj_close = _retry(lambda: t.history(start=fetch_start, auto_adjust=True)["Close"],
-                       f"prices/{ticker} adj_close")
+                       f"prices/{ticker} adj_close", retry_on_empty=True)
 
     # Split-boundary fix: reverse-adjust any pre-split rows within THIS fetch
     # (which may re-span multiple quarters now, see _prices_fetch_start) back to
@@ -695,11 +726,11 @@ def _demo():
         "Open": [10.0, 0.0, 5.0], "High": [11.0, 6.0, 5.5],
         "Low": [9.5, 5.0, 4.5], "Close": [10.5, 5.5, 5.0],
     })
-    fixed = _repair_nonpositive_ohlc(raw.copy(), "TEST3")
+    fixed = _repair_bad_ohlc(raw.copy(), "TEST3")
     assert (fixed.loc[1, ["Open", "High", "Low", "Close"]] == 5.5).all()  # glitch row collapsed to Close
     assert list(fixed.loc[0]) == list(raw.loc[0])  # untouched otherwise
     assert list(fixed.loc[2]) == list(raw.loc[2])
-    print("_repair_nonpositive_ohlc: OK")
+    print("_repair_bad_ohlc: OK")
 
     # _flat_run_fraction must flag yfinance's coverage-padding signature
     # (mostly one repeated value) and pass real, varying data through clean.
@@ -773,6 +804,30 @@ def _demo():
     result = _drop_incomplete_today(df)
     assert list(result["trade_date"]) == [today - pd.Timedelta(days=1)]
     print("_drop_incomplete_today: OK")
+
+    # retry_on_empty: a transient empty result (no exception) must be retried when
+    # requested, but still degrade gracefully (return empty, not raise) once retries
+    # are exhausted -- confirmed 2026-07-28: QCOM returned empty on first attempt
+    # during a large batch run despite having 8,714 rows of real history.
+    from unittest import mock
+    calls = {"n": 0}
+    def flaky_then_ok():
+        calls["n"] += 1
+        return pd.DataFrame() if calls["n"] == 1 else pd.DataFrame({"x": [1]})
+    with mock.patch.object(config, "YF_RETRY_SLEEP", 0):
+        out = _retry(flaky_then_ok, "test", retry_on_empty=True)
+    assert not out.empty and calls["n"] == 2, "must retry past the first empty result"
+
+    calls["n"] = 0
+    with mock.patch.object(config, "YF_RETRY_SLEEP", 0):
+        out = _retry(flaky_then_ok, "test", retry_on_empty=False)
+    assert out.empty and calls["n"] == 1, "default (False) must NOT retry on empty -- some callers treat empty as legitimate"
+
+    always_empty = lambda: pd.DataFrame()
+    with mock.patch.object(config, "YF_RETRY_SLEEP", 0):
+        out = _retry(always_empty, "test", retry_on_empty=True)
+    assert out.empty, "must degrade gracefully (return empty) once retries are exhausted, not raise"
+    print("_retry retry_on_empty: OK")
 
 
 if __name__ == "__main__":
