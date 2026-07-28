@@ -62,3 +62,37 @@ def get_json(client: httpx.Client, path: str, params: dict | None = None) -> dic
         r.raise_for_status()
 
     raise RuntimeError(f"max retries exceeded for {path}: {last_err}")
+
+
+def get_text(client: httpx.Client, path: str, params: dict | None = None) -> str:
+    """GET with backoff retry, returning raw text (CSV/HTML) instead of JSON.
+
+    Separate from get_json rather than a shared refactor: get_json's retry-on-
+    empty-body branch is BCB-specific behavior that must not change, and a
+    body-agnostic merge would risk it. Small, deliberate duplication of the
+    retry loop instead.
+    """
+    last_err = None
+    for attempt in range(config.MAX_RETRIES):
+        try:
+            r = client.get(path, params=params or {})
+        except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
+            last_err = e
+            wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
+            log.warning("%s: network error (%s), retry in %ds", path, e, wait)
+            time.sleep(wait)
+            continue
+
+        if r.status_code == 200:
+            return r.text
+
+        if r.status_code in RETRYABLE_STATUS:
+            last_err = f"HTTP {r.status_code}"
+            wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
+            log.warning("%s: HTTP %d, retry in %ds", path, r.status_code, wait)
+            time.sleep(wait)
+            continue
+
+        r.raise_for_status()
+
+    raise RuntimeError(f"max retries exceeded for {path}: {last_err}")

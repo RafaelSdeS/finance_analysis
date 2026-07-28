@@ -28,6 +28,9 @@ load_env()
 # --- Secrets ---
 BOLSAI_API_KEY = os.environ.get("BOLSAI_API_KEY")
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+# SEC asks (not enforced, but good practice re throttling) for a descriptive UA
+# identifying the requester -- set a real contact in .env to be a good citizen.
+SEC_USER_AGENT = os.environ.get("SEC_USER_AGENT", "finance-analysis-research contact@example.com")
 
 # --- Endpoints ---
 BOLSAI_BASE = "https://api.usebolsai.com/api/v1"
@@ -53,6 +56,30 @@ BENCHMARK_TICKERS = ["BOVA11"]  # iShares Bovespa ETF (IBOV index proxy)
 # build_dataset/merge.py (merge_macro's selic_trend_20d, IPCA_PUBLICATION_LAG_DAYS).
 BCB_SERIES = {"selic": 11, "cdi": 12, "ipca": 433}
 
+# --- FRED (US macro) series IDs ---
+# Keyless (fredgraph.csv), verified 2026-07-28: CPIAUCNS returns 1913-01-01 -> present.
+# Frequency/unit documented once here, same reasoning as BCB_SERIES above (a mismatch
+# there was already a Critical audit finding) — never assume before combining series:
+#   FEDFUNDS    monthly,   percent (effective fed funds rate)
+#   DGS2/10/30  daily,     percent (constant-maturity Treasury yield)
+#   CPIAUCSL/NS monthly,   index (1982-84=100) -- a LEVEL, not a rate; pct_change downstream
+#   PPIACO      monthly,   index
+#   UNRATE      monthly,   percent
+#   GDPC1       quarterly, billions of chained 2017 dollars
+#   INDPRO      monthly,   index (2017=100)
+#   T10Y2Y      daily,     percentage points (10y-2y spread, already differenced)
+#   VIXCLS      daily,     index points
+#   DTWEXBGS    daily,     index (broad trade-weighted USD)
+#   M2SL        monthly,   billions of dollars
+FRED_BASE = "https://fred.stlouisfed.org/graph"
+FRED_SERIES = {
+    "fed_funds": "FEDFUNDS", "treasury_2y": "DGS2", "treasury_10y": "DGS10",
+    "treasury_30y": "DGS30", "cpi_sa": "CPIAUCSL", "cpi_nsa": "CPIAUCNS",
+    "ppi": "PPIACO", "unemployment": "UNRATE", "real_gdp": "GDPC1",
+    "industrial_production": "INDPRO", "term_spread_10y2y": "T10Y2Y",
+    "vix": "VIXCLS", "dollar_index": "DTWEXBGS", "m2": "M2SL",
+}
+
 # --- Collection limits ---
 PRICE_LIMIT = 5000          # API hard cap per request (6000 -> 422)
 # ponytail: API rejects limit >= 90; 80 grabs all ~62 quarters available today.
@@ -77,6 +104,14 @@ COMPANY_DIR = RAW_DIR / "company_info"
 DIVIDENDS_DIR = RAW_DIR / "dividends"
 CORP_EVENTS_DIR = RAW_DIR / "corporate_events"
 CVM_DIR = RAW_DIR / "cvm"           # CVM open-data caches (crosswalk, statements, shares)
+US_RAW_DIR = RAW_DIR / "us"         # US-market raw data root (prices/fundamentals/macro)
+US_MACRO_DIR = US_RAW_DIR / "macro"
+US_PRICES_DIR = US_RAW_DIR / "prices"
+US_SEC_DIR = US_RAW_DIR / "sec"      # EDGAR full-index cache, universe roster, CIK<->ticker crosswalk
+
+# US prices: pure yfinance (no BolsAI counterpart), no exchange suffix needed.
+# Verified 2026-07-28: GE/KO/IBM/XOM/PG all return 16,249 rows from 1962-01-02.
+US_PROTOTYPE_TICKERS = ["AAPL", "GE", "KO", "IBM", "XOM", "PG"]
 CHECKPOINT_ROOT = PROJECT / "artifacts/checkpoints"
 LOG_DIR = PROJECT / "artifacts/logs/collection"
 

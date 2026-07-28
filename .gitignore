@@ -54,6 +54,11 @@ artifacts/logs/
 data/processed/*
 !data/processed/README.md
 
+# US-market raw data (docs/US_EQUITIES_EXPANSION_PLAN.md) -- unlike BR's data/raw,
+# this is too large to git-track (full universe + deep history); fully regenerable
+# via src/data_collection/{fred_collectors.py,yf_collectors.py,sec/}.
+data/raw/us/
+
 artifacts/models/
 artifacts/reports/
 artifacts/backtests/

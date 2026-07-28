@@ -55,6 +55,8 @@ FAST = [
     "tests/data_collection/test_ratios_no_inf.py",
     "tests/data_collection/test_skip_existing.py",
     "tests/data_collection/test_yf_collectors_demo.py",
+    "tests/data_collection/test_fred_collectors.py",
+    "tests/data_collection/test_sec_universe.py",
     "tests/data_collection/test_pipeline_dispatch.py",
     "tests/data_collection/test_cvm_filing_dates.py",
 ]

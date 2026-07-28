@@ -39,8 +39,8 @@ FUND_FULL_COLS = [
 # helpers
 # ---------------------------------------------------------------------------
 
-def _yf_symbol(ticker: str) -> str:
-    return config.TICKER_ALIASES.get(ticker, ticker) + config.YF_SUFFIX
+def _yf_symbol(ticker: str, suffix: str | None = None) -> str:
+    return config.TICKER_ALIASES.get(ticker, ticker) + (config.YF_SUFFIX if suffix is None else suffix)
 
 
 def _retry(fn, label: str):
@@ -71,8 +71,13 @@ def _seed_last_date(cp: dict, ticker: str, path, col: str) -> str | None:
     return None
 
 
-def _prices_fetch_start(cp: dict, ticker: str, path) -> str:
+def _prices_fetch_start(cp: dict, ticker: str, path, floor: str | None = None) -> str:
     """Where to start the prices fetch from.
+
+    `floor` overrides config.START_DATE (BR's 2000-01-01 backfill floor) for the
+    "no prior data at all" case — US collection passes an intentionally early
+    floor so yfinance returns as far back as it actually has (verified: old
+    NYSE names go back to 1962-01-02, Yahoo's own hard floor).
 
     yfinance's auto_adjust=True back-adjusts adj_close relative to whatever "now"
     is at fetch time. If each --mode update run only fetched rows after the last
@@ -93,7 +98,7 @@ def _prices_fetch_start(cp: dict, ticker: str, path) -> str:
             return str(yf_start["trade_date"].min().date())
     last = _seed_last_date(cp, ticker, path, "trade_date")
     return (pd.to_datetime(last) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") \
-        if last else config.START_DATE
+        if last else (floor or config.START_DATE)
 
 
 def _bolsai_junction_date(path, fetch_start: str) -> pd.Timestamp | None:
@@ -184,14 +189,17 @@ def _repair_nonpositive_ohlc(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
 # prices
 # ---------------------------------------------------------------------------
 
-def _fetch_and_shape_prices(ticker: str, fetch_start: str) -> pd.DataFrame | None:
+def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = None) -> pd.DataFrame | None:
     """Fetch one ticker's yfinance OHLCV from fetch_start through now and shape
     it into the on-disk raw-prices schema. Shared by collect_prices_yf (auto-
     computed incremental range) and backfill_price_gap (explicit historical
     range) so the split-boundary fix and non-positive-OHLC repair below live
     in exactly one place. Returns None if yfinance has no rows for this span.
+
+    `suffix` overrides config.YF_SUFFIX (e.g. "" for US tickers, which need no
+    exchange suffix) without touching the BR default for existing callers.
     """
-    t = yf.Ticker(_yf_symbol(ticker))
+    t = yf.Ticker(_yf_symbol(ticker, suffix))
     raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False), f"prices/{ticker}")
     if raw.empty:
         return None
@@ -218,7 +226,7 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str) -> pd.DataFrame | Non
     close = raw["Close"]
     ratio = adj_close / close
 
-    return pd.DataFrame({
+    out = pd.DataFrame({
         "ticker": ticker,
         "trade_date": raw.index.tz_localize(None),
         "open": raw["Open"].values,
@@ -238,20 +246,44 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str) -> pd.DataFrame | Non
                                 # triggers pd.concat's all-NA FutureWarning)
     })
 
+    return _drop_incomplete_today(out)
 
-def collect_prices_yf(tickers: list[str], mode: str):
+
+def _drop_incomplete_today(df: pd.DataFrame) -> pd.DataFrame:
+    """Drop today's row if the fetch landed mid-session: a still-forming intraday
+    bar can have low > open (open/close print immediately; high/low keep moving
+    from a differently-lagged feed — confirmed 2026-07-28, XOM: low 15c above
+    open). One bad row here fails validate_prices for the WHOLE batch via
+    _merge_save, silently dropping thousands of otherwise-good historical rows.
+    Safe to drop unconditionally: the next run re-fetches this ticker's full
+    yfinance-sourced span (see _prices_fetch_start) and picks up the finalized
+    close once the session ends.
+    """
+    today = pd.Timestamp.now().normalize()
+    return df[df["trade_date"] < today].reset_index(drop=True)
+
+
+def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str | None = None,
+                       floor: str | None = None):
+    """`price_dir`/`suffix`/`floor` default to the BR globals (config.PRICES_DIR /
+    config.YF_SUFFIX / config.START_DATE). Pass price_dir=config.US_PRICES_DIR, suffix="",
+    floor="1900-01-01" for the pure-yfinance US path — there is no BolsAI history to
+    reconcile against, so _bolsai_junction_date/_reconcile_yfinance_junction below are
+    no-ops for that case (confirmed: both short-circuit when no on-disk row has a non-NaN
+    num_trades, which is true for every row in a US-only file)."""
+    price_dir = price_dir or config.PRICES_DIR
     cp = checkpoint.load("yf_prices", mode)
     for ticker in tickers:
         try:
-            path = config.PRICES_DIR / f"{ticker}.parquet"
-            fetch_start = _prices_fetch_start(cp, ticker, path)
+            path = price_dir / f"{ticker}.parquet"
+            fetch_start = _prices_fetch_start(cp, ticker, path, floor)
             # Fetch from the BolsAI junction date itself (one row earlier than
             # fetch_start) when one exists, so _reconcile_yfinance_junction
             # has an anchor row to compute the reconciliation factor from.
             junction_date = _bolsai_junction_date(path, fetch_start)
             actual_fetch_start = str(junction_date.date()) if junction_date is not None else fetch_start
 
-            df = _fetch_and_shape_prices(ticker, actual_fetch_start)
+            df = _fetch_and_shape_prices(ticker, actual_fetch_start, suffix)
             if df is None:
                 log.info("prices %s: no new rows (delisted/renamed/no yfinance coverage?)", ticker)
                 continue
@@ -714,6 +746,24 @@ def _demo():
         assert saved.loc[saved["trade_date"] == "2002-01-01", "close"].iloc[0] == 1.0  # NOT overwritten by the 999.0 fetch row
         assert set(saved["trade_date"].dt.strftime("%Y-%m-%d")) == {"2002-01-01", "2002-01-05", "2002-01-08", "2002-01-10"}
     print("backfill_price_gap: OK")
+
+    # US-market support: suffix/floor overrides default to the BR globals
+    # (empty-string args must NOT fall back — only None means "use the default").
+    assert _yf_symbol("PETR4") == "PETR4.SA"
+    assert _yf_symbol("AAPL", suffix="") == "AAPL"
+    assert _yf_symbol("AAPL", suffix=None) == "AAPL.SA"  # explicit None -> BR default, not ""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "USNEW.parquet"
+        assert _prices_fetch_start({}, "USNEW", path) == config.START_DATE  # BR default floor
+        assert _prices_fetch_start({}, "USNEW", path, floor="1900-01-01") == "1900-01-01"
+    print("_yf_symbol/_prices_fetch_start overrides: OK")
+
+    # Same-day guard: a still-forming intraday bar must never reach validation.
+    today = pd.Timestamp.now().normalize()
+    df = pd.DataFrame({"trade_date": [today - pd.Timedelta(days=1), today]})
+    result = _drop_incomplete_today(df)
+    assert list(result["trade_date"]) == [today - pd.Timedelta(days=1)]
+    print("_drop_incomplete_today: OK")
 
 
 if __name__ == "__main__":
