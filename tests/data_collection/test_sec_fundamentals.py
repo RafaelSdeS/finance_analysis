@@ -39,6 +39,17 @@ calendar year BEFORE the fiscal_year label -- reusing bare month/day against
 each row's own fiscal_year, as fix #1 did, produced a different impossible
 date for these).
 
+A FOURTH issue, found auditing the SAME run's XBRL-tier rows (2026-07-28):
+WMT has a real CashAndCashEquivalentsAtCarryingValue fact tagged
+end=2012-12-31 (not even one of WMT's real Jan/Apr/Jul/Oct fiscal quarter-
+ends) filed 2012-03-27 -- nine months before the period it claims to
+describe. This is a genuine upstream XBRL tagging error in the source data,
+not a derivation bug our code could "fix" correctly (there's no right answer
+to derive). build_company_fundamentals now enforces the invariant itself as
+a final defensive filter, dropping any row that still violates it regardless
+of which tier or root cause produced it -- the one choke point all three
+tiers converge through.
+
 Usage: python tests/data_collection/test_sec_fundamentals.py
 """
 
@@ -157,8 +168,33 @@ def test_tier_boundary_near_duplicate_end_dates_are_deduped():
     print("OK: near-duplicate 'end' dates across tiers are clustered and deduped by tier priority")
 
 
+def test_source_data_anomaly_is_dropped_not_left_in():
+    # Mirrors WMT's real XBRL fact: CashAndCashEquivalentsAtCarryingValue tagged
+    # end=2012-12-31, filed 2012-03-27 -- nine months before the period it
+    # claims to describe. A genuine upstream tagging error (not even one of
+    # WMT's real fiscal quarter-ends), not something any derivation logic could
+    # correctly "fix". Also includes one good row to confirm the filter only
+    # drops the actual violator, not the whole company's data.
+    xbrl_rows = pd.DataFrame({
+        "end": pd.to_datetime(["2012-12-31", "2012-10-31"]),
+        "fundamentals_available_date": pd.to_datetime(["2012-03-27", "2012-12-04"]),
+        "cash": [6_600_000_000.0, 8_643_000_000.0],
+    })
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value={"placeholder": True}), \
+         mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_rows), \
+         mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.item6, "build_cik_history", return_value=pd.DataFrame()):
+        df = fundamentals.build_company_fundamentals(104169, pd.DataFrame())
+
+    assert len(df) == 1, f"the anomalous row must be dropped, the good one kept, got {len(df)} rows"
+    assert str(df.iloc[0]["end"].date()) == "2012-10-31", "must keep the good row, not the anomalous one"
+    print("OK: a source-data tagging anomaly (end > filed) is dropped, not left in the output")
+
+
 if __name__ == "__main__":
     test_non_calendar_fiscal_year_end_does_not_precede_filing()
     test_non_calendar_fiscal_year_end_fixes_every_row_not_just_the_flagged_one()
     test_short_filing_lag_does_not_round_derived_end_past_filing_date()
     test_tier_boundary_near_duplicate_end_dates_are_deduped()
+    test_source_data_anomaly_is_dropped_not_left_in()

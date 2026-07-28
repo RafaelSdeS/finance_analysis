@@ -111,11 +111,29 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     # winning row keeps its OWN 'end' (not the cluster midpoint) -- the
     # cluster only decides which duplicate to drop.
     combined["_end_cluster"] = combined["end"].map(companyfacts.cluster_period_ends(combined["end"]))
-    return (combined.sort_values(["_end_cluster", "_priority"])
-                     .drop_duplicates(subset="_end_cluster", keep="first")
-                     .drop(columns=["_priority", "_end_cluster"])
-                     .sort_values("fundamentals_available_date")
-                     .reset_index(drop=True))
+    result = (combined.sort_values(["_end_cluster", "_priority"])
+                       .drop_duplicates(subset="_end_cluster", keep="first")
+                       .drop(columns=["_priority", "_end_cluster"])
+                       .sort_values("fundamentals_available_date")
+                       .reset_index(drop=True))
+
+    # Last line of defense, not a derivation: every fix above targets a KNOWN
+    # shape of bug, but the source data itself occasionally has one too --
+    # confirmed on WMT's real XBRL: a CashAndCashEquivalentsAtCarryingValue
+    # fact tagged end=2012-12-31 (not even one of WMT's real Jan/Apr/Jul/Oct
+    # fiscal quarter-ends) filed 2012-03-27, nine months before the period it
+    # claims to describe -- a genuine upstream tagging error, not anything
+    # our derivation logic could "fix" correctly, since there's no right
+    # answer to derive. Rather than chase every possible upstream anomaly
+    # shape, enforce the invariant itself at the one point all three tiers
+    # converge: drop (and log) whatever still violates it.
+    bad = result["end"] > result["fundamentals_available_date"]
+    if bad.any():
+        log.warning("fundamentals CIK %s: dropping %d row(s) with end > fundamentals_available_date "
+                    "(source data anomaly) -- %s", cik, bad.sum(),
+                    result.loc[bad, "end"].dt.date.tolist())
+        result = result[~bad].reset_index(drop=True)
+    return result
 
 
 def collect_fundamentals_us(tickers: list[str], fund_dir=None) -> None:

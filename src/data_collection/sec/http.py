@@ -34,19 +34,29 @@ def _throttle():
 
 def get(url: str) -> requests.Response | None:
     """One throttled GET with retry. Returns None on 404 (a missing quarter/CIK
-    is an expected, non-error outcome across ~130 quarters / thousands of CIKs)."""
-    resp = None
+    is an expected, non-error outcome across ~130 quarters / thousands of CIKs).
+
+    Real bug, found retrying fundamentals collection at scale (2026-07-28):
+    raise_for_status() used to run AFTER the retry loop, so a transient 5xx
+    (confirmed on FLEX/SNPS: real "503 Service Unavailable" from SEC) raised
+    uncaught on the FIRST attempt, with no retry at all -- unlike a connection
+    error, which does get retried. Since nothing downstream catches this per-
+    filing either, it crashed the CIK's entire fundamentals build. Moved
+    inside the try block so a bad status code gets the same retry-with-
+    backoff treatment as a connection failure (HTTPError is itself a
+    RequestException subclass).
+    """
     for attempt in range(RETRIES + 1):
         _throttle()
         try:
             resp = requests.get(url, headers={"User-Agent": config.SEC_USER_AGENT}, timeout=TIMEOUT)
-            break
+            if resp.status_code == 404:
+                return None
+            resp.raise_for_status()
+            return resp
         except requests.RequestException as e:
             if attempt == RETRIES:
                 log.warning("%s: network error after %d attempts: %s", url, RETRIES + 1, e)
                 return None
             log.warning("%s: %s — retrying (%d/%d)", url, type(e).__name__, attempt + 1, RETRIES)
-    if resp.status_code == 404:
-        return None
-    resp.raise_for_status()
-    return resp
+    return None
