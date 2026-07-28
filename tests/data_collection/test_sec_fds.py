@@ -13,8 +13,11 @@ Usage: python tests/data_collection/test_sec_fds.py
 
 import sys
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+import pandas as pd
 
 from src.data_collection.sec import fds
 
@@ -179,6 +182,29 @@ def test_zero_multiplier_defaults_to_one():
     print("OK: missing/zero <MULTIPLIER> defaults to 1, doesn't zero out every figure")
 
 
+def test_build_cik_history_skips_post_ex27_era_filings():
+    # Real efficiency bug, found scaling past a handful of companies (2026-07-28):
+    # the original code fetched EVERY 10-K a CIK ever filed just to check for an
+    # EX-27, including decades of post-2001 filings that structurally cannot have
+    # one (this tier's own prevalence measurement found 2001 ~0%, nothing later).
+    # For a company with 30 years of post-2001 history, that's ~30x wasted fetches.
+    filings = pd.DataFrame({
+        "cik": [1, 1, 1],
+        "form_type": ["10-K", "10-K", "10-K"],
+        "date_filed": pd.to_datetime(["1996-03-01", "2010-03-01", "2023-03-01"]),
+        "filename": ["old.txt", "mid.txt", "recent.txt"],
+    })
+    requested = []
+    def fake_fetch(filename):
+        requested.append(filename)
+        return None  # content doesn't matter for this test
+    with mock.patch.object(fds, "fetch_filing_text", fake_fetch):
+        fds.build_cik_history(1, filings)
+    assert requested == ["old.txt"], (
+        f"must only fetch filings up to EX27_ERA_END, fetched {requested}")
+    print("OK: build_cik_history skips filings past the EX-27 era, not every 10-K ever filed")
+
+
 if __name__ == "__main__":
     test_parse_fds_extracts_tags()
     test_parse_fds_empty_when_absent()
@@ -187,3 +213,4 @@ if __name__ == "__main__":
     test_extract_and_compute_returns_one_result_per_exhibit()
     test_non_article_5_not_silently_mapped()
     test_zero_multiplier_defaults_to_one()
+    test_build_cik_history_skips_post_ex27_era_filings()

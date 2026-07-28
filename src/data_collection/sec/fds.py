@@ -134,6 +134,9 @@ def extract_and_compute(text: str) -> list[dict]:
     return results
 
 
+EX27_ERA_END = "2002-12-31"  # one-year buffer past EX-27's 2001 elimination (plan §2.0)
+
+
 def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     """Every qualifying (Article-5) EX-27 exhibit for one CIK across the Phase 3
     filings table -- including every comparative exhibit a single filing bundles,
@@ -143,8 +146,15 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     Where a period is reported by more than one filing (a later 10-K restating an
     earlier year as a comparative, or a 10-K/A amendment), the EARLIEST filing
     wins -- same as-first-reported rule as the XBRL tier (§3.3).
+
+    Filtered to filings up to EX27_ERA_END: an earlier version fetched EVERY
+    10-K a CIK ever filed (including decades of post-2001 filings that
+    structurally cannot contain an EX-27, per this tier's own prevalence
+    measurement), making batch collection needlessly slow -- confirmed while
+    scaling past a handful of companies, 2026-07-28.
     """
-    cik_filings = filings[(filings["cik"] == cik) & (filings["form_type"].str.startswith("10-K"))]
+    cik_filings = filings[(filings["cik"] == cik) & (filings["form_type"].str.startswith("10-K"))
+                           & (filings["date_filed"] <= EX27_ERA_END)]
     rows = []
     for row in cik_filings.itertuples():
         text = fetch_filing_text(row.filename)
