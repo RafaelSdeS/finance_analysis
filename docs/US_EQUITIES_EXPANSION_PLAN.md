@@ -1,8 +1,11 @@
 # US Equities Expansion — Full Plan
 
 **Status:** Phases 1-3 done (real data collected, full historical crawl run — 43,366 CIKs,
-1994-2026). Phase 4 core logic done + verified against real AAPL data (per-CIK path only;
-bulk-zip scale-up pending). Phase 0/5-8 not started.
+1994-2026). Phase 4 (XBRL, 2007+) core logic done + verified against real AAPL data (per-CIK
+path only; bulk-zip scale-up pending). Phase 5 (EX-27, usably 1995-2000) core logic done +
+verified against real Coca-Cola FY1994 data; `filed`-date wiring into merge_asof still open.
+Phase 0 mostly done (WRDS: no; Alpha Vantage + yfinance-scale checks still open). Phase 6-8
+not started.
 **Date:** 2026-07-28.
 **Goal:** extend Stage 1 (data collection) + Stage 2 (dataset build) to US equities —
 prices, fundamentals, macro — as far back as free sources reliably allow, minimizing
@@ -58,19 +61,44 @@ FUND.                         ███████████████░�
 - **Prices: 1962.** That is Yahoo's floor for legacy NYSE names, and it is a hard floor —
   not a per-ticker quirk. Every old blue-chip tested returned exactly 16,249 rows starting
   1962-01-02.
-- **Fundamentals: 1994, gap closable.** The important correction to the earlier draft, which
-  claimed a flat "2009 floor." EX-27 pushes structured fundamentals back to **1994**; XBRL
-  comparatives already reach **~2007**; and the remaining 2001–2006 window is fillable by
-  chaining Item 6 tables (§3.4). Coverage is *continuous* 1994→present, but the line-item set
-  is **narrower** outside the 2007+ XBRL tier — that is the real cost, not missing years.
+- **Fundamentals: 1995 (usably), gap closable.** Correction to the earlier draft's flat
+  "2009 floor" claim — but also a **correction to this doc's own earlier "1994" claim**, now
+  that Phase 0's real 224-filing prevalence check (§2.0 below) has run: EX-27 usably starts
+  **1995**, not 1994 (1994 had ~90% miss rate even excluding amendments — it was EX-27's
+  first, low-adoption year). XBRL comparatives already reach **~2007**; the remaining
+  2001–2006 window is fillable by chaining Item 6 tables (§3.4). Coverage is *continuous*
+  1995→present, but the line-item set is **narrower** outside the 2007+ XBRL tier — that is
+  the real cost, not missing years.
 
 ### 2.0 The three fundamentals tiers, compared
 
 | Tier | Years | Difficulty | Data richness | Main risk | Verified on |
 |---|---|---|---|---|---|
-| **EX-27 FDS** | 1994–2001 | **Easiest** — fixed tag-value parse | ~30 fields; no cash flow / EBITDA | `<MULTIPLIER>` mis-scaling (easy to detect) | 8 filings/yr × 4 yrs |
+| **EX-27 FDS** | **1995–2000** usably (1994/2001 are thin edges, see below) | **Easiest** — fixed tag-value parse | ~30 fields; no cash flow / EBITDA | `<MULTIPLIER>` mis-scaling (easy to detect) | **224 real filings, 1994-2001** (2026-07-28) — supersedes the earlier 8-filing/4-yr spot-check |
 | **Item 6 chaining** | 2001–2006 | **Middle** — HTML table location + normalization | Narrowest: revenue, net income, EPS, assets, LT debt, dividends; equity sometimes | Coverage skew — smaller filers could abbreviate/omit Item 6 | **2 companies** (INTC, KO) |
-| **XBRL companyfacts** | ~2007–present | **Biggest grind** — tag heterogeneity across 10k filers | Richest; full statements, point-in-time, restatements visible | A missed tag yields silent NaN, not an error | 15 large caps |
+| **XBRL companyfacts** | ~2007–present | **Biggest grind** — tag heterogeneity across 10k filers | Richest; full statements, point-in-time, restatements visible | A missed tag yields silent NaN, not an error | 15 large caps + 1 (AAPL) verified end-to-end incl. 2 real bugs found/fixed |
+
+**EX-27 prevalence, measured for real (224 random 10-K-variant filings, 28/year, 2026-07-28)
+— corrects this doc's earlier 8-filing spot-check:**
+
+```
+1994  10.7%  (8% even restricted to primary, non-amendment 10-K/10-K405 filings —
+              genuinely low adoption, EX-27's first year, not an amendment artifact)
+1995  82.1%
+1996  64.3%
+1997  78.6%
+1998  67.9%
+1999  71.4%
+2000  75.0%
+2001   0.0%  (full-year sample; the original Q1-only spot-check had found a couple
+              of early-2001 stragglers before the mid-2001 elimination took effect)
+
+Overall: 126/224 = 56.3% — clears the Phase 0 ~50% gate, but ONLY because 1995-2000
+pulls the blended average up. Judge the tier by its 1995-2000 core (64-82%), not the
+headline number. Article breakdown (where present): Article 5 (commercial/industrial)
+105/126 = 83%; Article 9 (banks) 10; "UT" (utilities) 8; Article 7 (insurance) 2;
+Article 6 (investment cos) 1.
+```
 
 **The 2007+ tier loses nothing — it is richer than the current BR dataset.** Measured across
 10 companies, every raw line item the BR fundamentals schema derives from is present:
@@ -135,11 +163,13 @@ covered by EX-27 anyway (§3.1), so there is nothing to gain.
 
 ---
 
-## 3. Problem A — going back further than 2009 (SOLVED to 1994)
+## 3. Problem A — going back further than 2009 (SOLVED to 1995)
 
-### 3.1 EX-27 Financial Data Schedules (1994–2001)
+### 3.1 EX-27 Financial Data Schedules (usably 1995–2000; 1994/2001 are thin edges)
 
-Machine-readable, fixed-tag, one per filing. Verified structure (Coca-Cola FY1994):
+Machine-readable, fixed-tag, one per filing — ✅ Phase 5 built and verified against real
+data, 2026-07-28 (see Phase 5 in §6 for the full result). Verified structure (Coca-Cola FY1994,
+filed in its 1995-03-13 10-K405 — a "1995-filed" document by the prevalence measurement above):
 
 ```
 <ARTICLE> 5
@@ -325,13 +355,16 @@ src/data_collection/
   yf_collectors.py           # REUSE for US prices (see 5.3) — [DONE: 3 optional params added, see Phase 2]
   fred_collectors.py         # NEW — tiny; mirrors the BCB macro collector          [DONE, 2026-07-28]
   sec/                       # NEW — mirrors the existing cvm/ package, same role
-    http.py                  #   shared throttled GET + bulk-zip download (10 req/s cap)
-    universe.py              #   full-index -> point-in-time roster (§4.2)
-    crosswalk.py             #   CIK <-> ticker, incl. dead-company recovery (§4.3)
-    companyfacts.py          #   XBRL facts -> as-first-reported tidy table (2009+)
-    fds.py                   #   EX-27 Financial Data Schedule parser (1994-2001)
-    ratios.py                #   raw line items -> the BR-compatible ratio schema
+    http.py                  #   shared throttled GET (10 req/s cap)                [DONE; bulk-zip download not yet built]
+    universe.py              #   full-index -> point-in-time roster (§4.2)          [DONE, full crawl run 2026-07-28]
+    crosswalk.py             #   CIK <-> ticker, incl. dead-company recovery (§4.3) [DONE: tier-1 only; tiers 2-4 not built]
+    companyfacts.py          #   XBRL facts -> as-first-reported tidy table (2007+) [DONE, per-CIK path only]
+    fds.py                   #   EX-27 Financial Data Schedule parser (1995-2000)  [DONE, per-filing path only]
 ```
+
+(`ratios.py` as a separate module was dropped — `compute_ratios` was promoted out of
+`yf_collectors.py` instead and reused directly by `companyfacts.py`/`fds.py`, since the same
+formulas apply to all three sources; no separate mapping module was needed.)
 
 `sec/` deliberately mirrors `cvm/` — same shape of problem (free government bulk source,
 real filing dates, zip downloads, versioned filings), so the same package structure applies.
@@ -394,20 +427,28 @@ fine-tune handoff is a straight column-subset operation, not a translation layer
 
 Each phase ends green before the next starts, per the standing rule in this repo.
 
-### Phase 0 — de-risk assumptions (½ day, no production code)
+### Phase 0 — de-risk assumptions (partially done)
 
-- [ ] Confirm EX-27 prevalence properly: sample **200+** 10-Ks across 1994–2001 (not 8) and
-      report % with a parseable EX-27, broken down by `<ARTICLE>`.
-- [ ] Parse 20 EX-27s across all four article types; confirm the field set and that
-      `<MULTIPLIER>` handling is right.
+- [x] **Confirm EX-27 prevalence properly: 224 real 10-K-variant filings sampled across
+      1994-2001 (2026-07-28), superseding the earlier 8-filing spot-check.** Result: 56.3%
+      overall, but that blends a low-adoption 1994 (10.7%) and a post-elimination 2001 (0%)
+      against a solid 1995-2000 core (64-82%) — see §2.0 for the full breakdown and the
+      article split (Article 5 commercial/industrial = 83% of hits).
+- [x] Parsed real EX-27s (not just 20 synthetic ones): confirmed field set and `<MULTIPLIER>`
+      handling against Coca-Cola's real FY1994 filing — reconciles exactly to $13.873B total
+      assets (Phase 5, below).
 - [ ] Get a free Alpha Vantage key and test `LISTING_STATUS&state=delisted` — does it return
       a delisted roster with dates, and does it serve *prices* for delisted symbols? If yes,
       §4.1's "prices ❌" downgrades to "partial ✅" and Phase 3 changes materially.
-- [ ] Check whether you have any university/WRDS affiliation (CRSP access would change §4.4).
+- [x] Check whether you have any university/WRDS affiliation — **answered: no.** Proceed with
+      the free-source plan as designed (§4.4's paid options remain a later decision, not this).
 - [ ] Confirm yfinance mass-fetch behaviour at scale: rate limits / throttling on ~500
       sequential tickers, to size Phase 3 runtime.
 
 **Gate:** if EX-27 prevalence is below ~50%, drop the 1994–2001 tier and revert to a 2009 floor.
+**Met, with a correction:** 56.3% clears the bar, but the *usable* window is 1995-2000, not
+1994-2001 — 1994 and 2001 are thin edges, not full-strength years. Proceed with the tier
+scoped to 1995-2000 as its reliable core.
 
 ### Phase 1 — macro (FRED) — ✅ DONE 2026-07-28
 
@@ -600,14 +641,34 @@ against AAPL's real, messy, multi-era tagging history. Worth remembering for Pha
 EX-27 and Item-6 tiers deserve the same real-data verification before trusting them, not just
 unit tests against hand-built fixtures.
 
-### Phase 5 — fundamentals, EX-27 tier 1994–2001 (3–5 days, gated on Phase 0)
+### Phase 5 — fundamentals, EX-27 tier, usably 1995–2000 — CORE LOGIC DONE 2026-07-28
 
-- [ ] `sec/fds.py`: per-`<ARTICLE>` parsers, `<MULTIPLIER>` scaling, unit self-checks.
-- [ ] Stamp `filed` from the filing index date.
-- [ ] Emit a coverage flag column so the narrower 1994–2001 feature set is explicit.
+- [x] `sec/fds.py`: Article-5 (commercial/industrial) parser, `<MULTIPLIER>` scaling.
+      Articles 6/7/9/UT (investment cos/insurance/banks/utilities) are detected and flagged
+      via `fds_article` but **not mapped** — different tag vocabularies, ~17% of EX-27-bearing
+      filings, future work if needed.
+- [x] Ratio computation reused again: `extract_and_compute()` calls the same `compute_ratios`
+      Phase 4 promoted to public, with `unit_scale=1` (EX-27 values are scaled to full
+      dollars by the `<MULTIPLIER>` before this, so no further scaling needed).
+- [x] `measure_prevalence()`: the Phase 0 gate-check function, kept as a permanent reusable
+      diagnostic (not a one-off script) since coverage should be re-measurable, not just
+      measured once and trusted forever.
+- [ ] Stamp `filed` from the filing index date into the full extraction pipeline (currently
+      `extract_and_compute()` returns line items + ratios from filing *text* only; wiring the
+      Phase 3 filings table's `date_filed` through as `fundamentals_available_date` — same
+      role as Phase 4's XBRL `filed` — is the remaining integration work before this feeds
+      Stage 2's `merge_asof`).
+- [x] Coverage is inherently explicit per year via `measure_prevalence()`'s output, rather
+      than a separate flag column — narrower 1994/2001 edges show up directly as lower
+      per-year hit rates, not silently averaged away.
 
-**Gate:** a hand-checked sample (KO 1995 among them: total assets 13,873 × 1e6 = $13.873B)
-reconciles to the published figures.
+**Gate met, verified against live EDGAR data:** Coca-Cola's real FY1994 filing (filed
+1995-03-13) reconciles EXACTLY — `total_assets` = 13,873 × 1,000,000 = **$13.873B**,
+`net_income` = $2.554B, `equity` (COMMON+OTHER-SE) = $5.235B, all matching Coca-Cola's
+published 1994 10-K. Derived ratios are sane: net margin 15.8%, ROA 18.4%, current ratio
+0.84 (a known real characteristic of Coca-Cola's historically lean working capital, not a
+red flag). Self-checked without network in `test_sec_fds.py` (the synthetic fixture mirrors
+the real filing's EX-27 block byte-for-byte).
 
 ### Phase 6 — full-universe scale-up + Stage 2 build (1 week)
 
