@@ -59,6 +59,7 @@ FAST = [
     "tests/data_collection/test_sec_universe.py",
     "tests/data_collection/test_sec_companyfacts.py",
     "tests/data_collection/test_sec_fds.py",
+    "tests/data_collection/test_sec_item6.py",
     "tests/data_collection/test_pipeline_dispatch.py",
     "tests/data_collection/test_cvm_filing_dates.py",
 ]

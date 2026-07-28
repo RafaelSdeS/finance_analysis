@@ -108,6 +108,7 @@ US_RAW_DIR = RAW_DIR / "us"         # US-market raw data root (prices/fundamenta
 US_MACRO_DIR = US_RAW_DIR / "macro"
 US_PRICES_DIR = US_RAW_DIR / "prices"
 US_SEC_DIR = US_RAW_DIR / "sec"      # EDGAR full-index cache, universe roster, CIK<->ticker crosswalk
+US_FUNDAMENTALS_DIR = US_RAW_DIR / "fundamentals"
 
 # US prices: pure yfinance (no BolsAI counterpart), no exchange suffix needed.
 # Verified 2026-07-28: GE/KO/IBM/XOM/PG all return 16,249 rows from 1962-01-02.
