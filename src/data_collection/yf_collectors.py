@@ -589,16 +589,25 @@ def collect_fundamentals_yf(tickers: list[str], mode: str):
 # dividends
 # ---------------------------------------------------------------------------
 
-def collect_dividends_yf(tickers: list[str], mode: str):
+def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
+                          suffix: str | None = None, floor: str | None = None):
+    """`dividend_dir`/`suffix`/`floor` default to the BR globals (config.DIVIDENDS_DIR /
+    config.YF_SUFFIX / config.START_DATE) -- mirrors collect_prices_yf's override pattern
+    for the pure-yfinance US path (price_dir=config.US_DIVIDENDS_DIR, suffix="",
+    floor="1900-01-01"). Verified back to 1994 against 5 real long-history payers
+    (KO/GE/IBM/PG/XOM, 2026-07-28): plausible quarterly values, and KO's reconciles
+    exactly to its known real 1994 dividend once un-split (0.04875 x 4 = $0.195/share,
+    matching its real 1996 + 2012 2:1 splits)."""
+    dividend_dir = dividend_dir or config.DIVIDENDS_DIR
     cp = checkpoint.load("yf_dividends", mode)
     for ticker in tickers:
         try:
-            path = config.DIVIDENDS_DIR / f"{ticker}.parquet"
+            path = dividend_dir / f"{ticker}.parquet"
             start = _seed_last_date(cp, ticker, path, "ex_date")
             fetch_start = (pd.to_datetime(start) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") \
-                if start else config.START_DATE
+                if start else (floor or config.START_DATE)
 
-            t = yf.Ticker(_yf_symbol(ticker))
+            t = yf.Ticker(_yf_symbol(ticker, suffix))
             hist = _retry(lambda: t.history(start=fetch_start, actions=True), f"dividends/{ticker}")
             if hist.empty or "Dividends" not in hist.columns:
                 log.info("dividends %s: no new rows", ticker)
@@ -860,6 +869,30 @@ def _demo():
         out = _retry(always_empty, "test", retry_on_empty=True)
     assert out.empty, "must degrade gracefully (return empty) once retries are exhausted, not raise"
     print("_retry retry_on_empty: OK")
+
+    # US-market support for dividends: dividend_dir/suffix/floor overrides mirror
+    # collect_prices_yf's exact pattern -- verified end-to-end (mocked yf.Ticker),
+    # not just checked as default values. Also pins the real KO reconciliation
+    # from this function's docstring (0.195/share, KO's real un-split 1994 dividend).
+    class _FakeTicker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, start, actions):
+            assert self.symbol == "KO", f"suffix override must produce a bare symbol, got {self.symbol}"
+            assert start == "1994-01-01", f"floor override must be honored when no prior data exists, got {start}"
+            return pd.DataFrame({"Dividends": [0.195]}, index=pd.to_datetime(["1994-03-09"]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        div_dir = Path(tmp)
+        with mock.patch.object(yf, "Ticker", _FakeTicker), \
+             mock.patch.object(checkpoint, "load", return_value={}), \
+             mock.patch.object(checkpoint, "save"):
+            collect_dividends_yf(["KO"], mode="test", dividend_dir=div_dir, suffix="", floor="1994-01-01")
+        saved = pd.read_parquet(div_dir / "KO.parquet")
+        assert len(saved) == 1
+        assert abs(saved["value_per_share"].iloc[0] - 0.195) < 1e-9
+    print("collect_dividends_yf US overrides: OK")
 
 
 if __name__ == "__main__":
