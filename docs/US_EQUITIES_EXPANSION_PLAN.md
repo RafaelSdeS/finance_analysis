@@ -715,9 +715,25 @@ to be complete. This also means the located table is sometimes a generic MD&A 3-
 rather than the SEC's literal "Item 6" caption — accepted, since accurate history matters more
 here than which item officially captioned it.
 
+**Two more real bugs found scaling to ~250 companies (2026-07-28), both lookahead-shaped:**
+- `fds.py`: EX-27's `<FISCAL-YEAR-END>` is only a reliable period end when `<PERIOD-TYPE>` is
+  `YEAR`. ADP's real 1998-09-23 10-K bundles an Article-5 exhibit tagged `PERIOD-TYPE=6-MOS` but
+  `FISCAL-YEAR-END=DEC-31-1998` (a fiscal-year-transition stub) — using it as-is produced a filing
+  dated *before* its own claimed period end. Fixed by requiring `PERIOD-TYPE == YEAR`; non-annual
+  exhibits are skipped rather than guessed at.
+- `fundamentals.py`: Item 6's `fiscal_year → Dec-31` mapping assumes a calendar fiscal year.
+  Confirmed broken on ADP (real fiscal year end is June 30): its Aug-2006-filed 10-K got labeled
+  `end=2006-12-31`, a date that hadn't happened yet at filing time. Fixed with a fallback that
+  derives an approximate fiscal year-end from the filing date whenever the naive mapping would
+  produce `end > fundamentals_available_date`.
+
+A full sweep of collected fundamentals output after these fixes found zero remaining
+`end > fundamentals_available_date` violations.
+
 **Not yet done:** formal per-year coverage measurement across a wide company sample (only
-verified on Intel so far) and systematic boundary-year reconciliation against EX-27/XBRL across
-many companies (confirmed correct on Intel's specific boundary years, not yet measured broadly).
+verified on Intel/KO/AAPL/JPM/MSFT/ADP/KMB individually so far) and systematic boundary-year
+reconciliation against EX-27/XBRL across many companies (confirmed correct on the companies
+checked so far, not yet measured broadly).
 
 ### Phase 8 — *deferred* — full-statement parsing
 

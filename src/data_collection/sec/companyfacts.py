@@ -150,7 +150,7 @@ def _resolve_item(facts: dict, concepts: list[str]) -> pd.DataFrame:
 _CLUSTER_TOL_DAYS = 10  # real quarters are ~90 days apart -- 9x margin below that
 
 
-def _cluster_period_ends(dates) -> dict:
+def cluster_period_ends(dates) -> dict:
     """Group period-end dates within `_CLUSTER_TOL_DAYS` of each other into one
     cluster, mapped to a single representative date.
 
@@ -181,7 +181,7 @@ def _cluster_period_ends(dates) -> dict:
 
 def extract_line_items(facts: dict) -> pd.DataFrame:
     """One row per fiscal quarter (period-end dates clustered via
-    _cluster_period_ends, not merged on exact equality), every CONCEPT_MAP line
+    cluster_period_ends, not merged on exact equality), every CONCEPT_MAP line
     item resolved via its fallback list (each as-first-reported, per-period per
     _resolve_item). Each item keeps its own `{item}_filed` date plus an overall
     `fundamentals_available_date` = MAX across populated items' filed dates --
@@ -206,7 +206,7 @@ def extract_line_items(facts: dict) -> pd.DataFrame:
         return pd.DataFrame()
 
     all_ends = pd.concat([df["end"] for df in period_items.values()])
-    cluster_map = _cluster_period_ends(all_ends)
+    cluster_map = cluster_period_ends(all_ends)
 
     out = None
     for item, df in period_items.items():

@@ -4,16 +4,27 @@ test_sec_fundamentals.py
 Self-check for sec/fundamentals.py's combiner logic (no network; mocks the
 three per-tier fetchers).
 
-Real bug, found scaling to ~250 companies (2026-07-28): Item 6's chained
-rows are keyed by `fiscal_year` only (an int, e.g. 2006), so
-build_company_fundamentals maps it to `end` = that year's Dec-31 -- a
-simplification that assumes a calendar fiscal year. Confirmed on ADP (real
-fiscal year end is June 30, not December 31): its real Aug-2006-filed 10-K
-got labeled with `end`=2006-12-31, a date that HADN'T HAPPENED YET at filing
-time -- `end > fundamentals_available_date`, the exact class of lookahead-
-shaped artifact this whole pipeline exists to prevent. The fallback derives
-an approximate fiscal year-end from the filing date instead of leaving that
-impossible ordering in the data.
+Two real bugs, found scaling past ~250-465 companies (2026-07-28):
+
+1. Item 6's chained rows are keyed by `fiscal_year` only (an int, e.g. 2006),
+   so build_company_fundamentals maps it to `end` = that year's Dec-31 -- a
+   simplification that assumes a calendar fiscal year. Confirmed on ADP (real
+   fiscal year end is June 30): its Aug-2006-filed 10-K bundles BOTH FY2006
+   (current) and FY2005 (comparative) in one Item 6 table. The first fix
+   caught FY2006 (Dec-31-2006 postdates the Aug-2006 filing -- an impossible,
+   lookahead-shaped ordering) but silently left FY2005 wrong: Dec-31-2005
+   comfortably PRECEDES the filing date, so nothing flagged it, even though
+   ADP's real FY2005 end is 2005-06-30, six months off. Fixed by deriving the
+   company's true fiscal quarter-end ONCE (from whichever row proves Dec-31
+   impossible) and applying it to every row for that CIK -- a company's
+   fiscal year-end doesn't change year to year.
+2. Combining tiers deduped on EXACT `end` equality. Item6's Dec-31-rounded
+   guess and xbrl/ex27's real fiscal-calendar dates (e.g. "2007-09-29") can
+   describe the SAME real period a few days apart, so exact-equality dedup
+   let both survive as separate rows -- confirmed on AAPL, INTC, JNJ, MAR,
+   CSX and 35 others (40 pairs across 465 companies already collected).
+   Fixed by clustering `end` across tiers with the same tolerance already
+   used intra-tier in companyfacts.py, before applying tier priority.
 
 Usage: python tests/data_collection/test_sec_fundamentals.py
 """
@@ -53,5 +64,59 @@ def test_non_calendar_fiscal_year_end_does_not_precede_filing():
     print("OK: non-calendar-fiscal-year Item 6 rows fall back instead of producing an impossible end date")
 
 
+def test_non_calendar_fiscal_year_end_fixes_every_row_not_just_the_flagged_one():
+    # Mirrors ADP's ACTUAL bundled filing: one 2006-08-30 10-K reports BOTH
+    # FY2006 (current, trips the impossible check) and FY2005 (comparative,
+    # does NOT trip it -- Dec-31-2005 already precedes the filing date).
+    fake_item6 = pd.DataFrame({
+        "fiscal_year": [2005, 2006],
+        "fundamentals_available_date": pd.to_datetime(["2006-08-30", "2006-08-30"]),
+        "net_income": [400_000_000.0, 500_000_000.0],
+        "cik": [8670, 8670],
+    })
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=None), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.item6, "build_cik_history", return_value=fake_item6):
+        df = fundamentals.build_company_fundamentals(8670, pd.DataFrame())
+
+    ends = sorted(str(e.date()) for e in df["end"])
+    assert ends == ["2005-06-30", "2006-06-30"], (
+        f"BOTH rows must use the company's real June fiscal year-end, got {ends} "
+        f"-- a per-row-only fix leaves the untrigged comparative year wrong")
+    print("OK: the derived fiscal year-end is applied to every row for the CIK, not just the flagged one")
+
+
+def test_tier_boundary_near_duplicate_end_dates_are_deduped():
+    # Mirrors the real AAPL case: xbrl's FY2007 Q4 ends 2007-09-29 (AAPL's actual
+    # fiscal-calendar convention), item6's naive guess for the same real period
+    # is 2007-09-30 -- one day apart, describing the SAME period twice.
+    fake_facts = {"placeholder": True}
+    xbrl_row = pd.DataFrame({
+        "end": pd.to_datetime(["2007-09-29"]),
+        "fundamentals_available_date": pd.to_datetime(["2007-11-15"]),
+        "net_income": [1_000_000_000.0],
+    })
+    item6_row = pd.DataFrame({
+        "fiscal_year": [2007],
+        "fundamentals_available_date": pd.to_datetime(["2007-11-16"]),  # ~2mo after AAPL's real Sept FYE
+        "net_income": [999_000_000.0],
+        "cik": [320193],
+    })
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=fake_facts), \
+         mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_row), \
+         mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.item6, "build_cik_history", return_value=item6_row):
+        df = fundamentals.build_company_fundamentals(320193, pd.DataFrame())
+
+    assert len(df) == 1, (
+        f"one real period reported by two tiers a day apart must collapse to ONE row, got {len(df)}")
+    assert df.iloc[0]["fundamentals_tier"] == "xbrl", "higher-priority tier (xbrl) must win"
+    assert df.iloc[0]["net_income"] == 1_000_000_000.0
+    print("OK: near-duplicate 'end' dates across tiers are clustered and deduped by tier priority")
+
+
 if __name__ == "__main__":
     test_non_calendar_fiscal_year_end_does_not_precede_filing()
+    test_non_calendar_fiscal_year_end_fixes_every_row_not_just_the_flagged_one()
+    test_tier_boundary_near_duplicate_end_dates_are_deduped()

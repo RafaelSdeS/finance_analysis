@@ -54,16 +54,23 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         # Non-calendar-fiscal-year companies break the Dec-31 assumption above,
         # producing an impossible end > fundamentals_available_date -- confirmed
         # on ADP (real FYE is June 30; its Aug-filed 10-K got labeled with a
-        # Dec-31 "end" that hadn't happened yet at filing time). Where that
-        # happens, fall back to the quarter-end nearest ~2 months before the
-        # filing date (a typical 10-K filing lag) instead of leaving a
-        # nonsensical ordering in the data -- an estimate, not a real fix for
-        # not knowing each company's actual fiscal calendar, but it removes
-        # the impossible-order artifact.
+        # Dec-31 "end" that hadn't happened yet at filing time).
         impossible = gap["end"] > gap["fundamentals_available_date"]
         if impossible.any():
-            approx = (gap.loc[impossible, "fundamentals_available_date"] - pd.DateOffset(months=2))
-            gap.loc[impossible, "end"] = approx.dt.to_period("Q").dt.end_time.dt.normalize()
+            # Derive this company's real fiscal quarter-end (month/day) from
+            # whichever row proves the naive Dec-31 guess impossible, then
+            # apply it to EVERY row for this CIK -- a company's fiscal
+            # year-end doesn't change year to year. Real bug, found auditing
+            # ADP's already-collected data (2026-07-28): only the CURRENT
+            # year of a filing ever trips this check (its Dec-31 postdates
+            # the filing); OLDER comparative years bundled in the SAME Item 6
+            # table kept the wrong naive Dec-31 uncorrected, because it still
+            # safely precedes the (much later) filing date -- silently
+            # mis-dated by up to 6 months, not caught by a per-row-only fix.
+            approx = gap.loc[impossible, "fundamentals_available_date"].iloc[0] - pd.DateOffset(months=2)
+            q_end = approx.to_period("Q").end_time.normalize()
+            gap["end"] = pd.to_datetime(gap["fiscal_year"].astype(str)
+                                         + f"-{q_end.month:02d}-{q_end.day:02d}")
         gap["fundamentals_tier"] = "item6"
         frames.append(gap)
 
@@ -73,9 +80,20 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     combined = pd.concat(frames, ignore_index=True, sort=False)
     combined["cik"] = cik
     combined["_priority"] = combined["fundamentals_tier"].map(_TIER_PRIORITY)
-    return (combined.sort_values(["end", "_priority"])
-                     .drop_duplicates(subset="end", keep="first")
-                     .drop(columns="_priority")
+    # Cluster 'end' across tiers before dedup, don't rely on exact equality.
+    # Item6's Dec-31-style rounding and xbrl/ex27's exact fiscal-calendar
+    # dates (e.g. "2007-09-29") can describe the SAME real period a few days
+    # apart -- an exact-date dedup misses this and keeps both as separate
+    # rows. Real bug, found scaling to ~465 companies (2026-07-28): 40 such
+    # tier-boundary duplicates (AAPL, INTC, JNJ, MAR, CSX...). Reuses the
+    # same tolerance-clustering already applied intra-tier in
+    # companyfacts.py (same shape of bug, different tier boundary). The
+    # winning row keeps its OWN 'end' (not the cluster midpoint) -- the
+    # cluster only decides which duplicate to drop.
+    combined["_end_cluster"] = combined["end"].map(companyfacts.cluster_period_ends(combined["end"]))
+    return (combined.sort_values(["_end_cluster", "_priority"])
+                     .drop_duplicates(subset="_end_cluster", keep="first")
+                     .drop(columns=["_priority", "_end_cluster"])
                      .sort_values("fundamentals_available_date")
                      .reset_index(drop=True))
 
