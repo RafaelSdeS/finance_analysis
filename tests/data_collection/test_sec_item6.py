@@ -21,6 +21,7 @@ Usage: python tests/data_collection/test_sec_item6.py
 
 import sys
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -84,7 +85,37 @@ def test_parenthesized_negative():
     print("OK: _parse_value handles parenthesized negatives, $ signs, commas, and blanks")
 
 
+def test_build_cik_history_skips_filing_that_crashes_read_html():
+    # Real bug, found retrying fundamentals collection at scale (2026-07-28):
+    # pd.read_html raises more than ValueError on malformed real-world HTML.
+    # Confirmed on YUM's real filing history: one filing crashed pandas'
+    # internal TextParser with an IndexError (not a ValueError), which
+    # propagated all the way up and discarded YUM's ENTIRE fundamentals build
+    # -- including 611 perfectly good xbrl-tier concepts -- since nothing
+    # downstream catches it per-CIK. A single bad filing must not take down
+    # the whole company's history; the next (good) filing must still recover.
+    filings = pd.DataFrame({
+        "cik": [1, 1],
+        "form_type": ["10-K", "10-K"],
+        "date_filed": pd.to_datetime(["2003-03-01", "2004-03-01"]),
+        "filename": ["bad.txt", "good.txt"],
+    })
+    fake_resp = mock.Mock(text="<html>irrelevant, read_html is mocked directly</html>")
+    good_table = pd.DataFrame({0: ["Net revenue"], 1: ["2003"], 2: ["100"]})
+
+    with mock.patch.object(item6.http, "get", return_value=fake_resp), \
+         mock.patch.object(item6.pd, "read_html", side_effect=[IndexError("list index out of range"), [good_table]]), \
+         mock.patch.object(item6, "find_item6_table", return_value=good_table), \
+         mock.patch.object(item6, "extract_years", return_value={"2003": {"net_revenue": 100.0}}):
+        df = item6.build_cik_history(1, filings)
+
+    assert len(df) == 1, "must skip the crashing filing and still recover the next one, not lose the whole CIK"
+    assert df.iloc[0]["fiscal_year"] == 2003
+    print("OK: build_cik_history skips a filing whose HTML crashes pd.read_html, doesn't lose the whole CIK")
+
+
 if __name__ == "__main__":
     test_find_item6_table_picks_best_scoring_candidate()
     test_extract_years_reconciles_real_intel_figures()
     test_parenthesized_negative()
+    test_build_cik_history_skips_filing_that_crashes_read_html()

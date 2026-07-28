@@ -189,7 +189,16 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
             continue
         try:
             tabs = pd.read_html(io.StringIO(resp.text))
-        except ValueError:
+        except Exception:
+            # pd.read_html raises more than ValueError on malformed real-world
+            # HTML -- confirmed on YUM's real filing history (2026-07-28): one
+            # filing's table structure crashed pandas' internal TextParser
+            # with an IndexError, not a ValueError. Uncaught, this took down
+            # the CIK's ENTIRE fundamentals build (item6 has no per-CIK try/
+            # except of its own in fundamentals.py), discarding YUM's
+            # perfectly good xbrl-tier data (611 us-gaap concepts) along with
+            # it. The whole point of this loop is "skip a filing that doesn't
+            # parse cleanly, try the next one" -- any parse failure qualifies.
             continue
         table = find_item6_table(tabs)
         if table is None:
