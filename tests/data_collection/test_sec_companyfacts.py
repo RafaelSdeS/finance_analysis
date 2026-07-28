@@ -154,6 +154,30 @@ def test_shares_outstanding_does_not_fragment_periods():
     print("OK: shares_outstanding attaches via nearest-match instead of fragmenting periods")
 
 
+def test_extract_line_items_picks_up_ifrs_full_taxonomy():
+    # Real gap, found auditing the top-500 collection run (2026-07-28): foreign
+    # private issuers filing 20-F report under IFRS, tagged under a separate
+    # "ifrs-full" taxonomy key that _facts_to_frame never checked at all --
+    # confirmed on HSBC/RIO/TECK/SAN, each with 350-450 populated ifrs-full
+    # concepts silently ignored. "Revenue"/"ProfitLoss"/"Assets" mirror the real
+    # concept names these companies actually use (RIO/TECK/SAN all have "Revenue";
+    # "ProfitLoss" and "Assets" are common to every one of the four, including
+    # HSBC which lacks a plain "Revenue" tag, matching the same kind of
+    # financial-sector gap already known for us-gaap banks/insurers).
+    facts = _facts({
+        "Revenue": [_fact("2023-01-01", "2023-12-31", 50_000_000_000.0, "2024-02-15")],
+        "ProfitLoss": [_fact("2023-01-01", "2023-12-31", 5_000_000_000.0, "2024-02-15")],
+        "Assets": [_fact(None, "2023-12-31", 300_000_000_000.0, "2024-02-15")],
+    }, taxonomy="ifrs-full")
+    li = companyfacts.extract_line_items(facts)
+    assert len(li) == 1, f"expected 1 row from ifrs-full facts, got {len(li)}"
+    row = li.iloc[0]
+    assert row["net_revenue"] == 50_000_000_000.0
+    assert row["net_income"] == 5_000_000_000.0
+    assert row["total_assets"] == 300_000_000_000.0
+    print("OK: extract_line_items picks up ifrs-full concepts for 20-F/foreign filers")
+
+
 if __name__ == "__main__":
     test_as_first_reported_takes_earliest_filing()
     test_quarterly_only_drops_annual_duplicate()
@@ -162,3 +186,4 @@ if __name__ == "__main__":
     test_extract_line_items_conservative_available_date()
     test_extract_line_items_clusters_nearby_period_ends()
     test_shares_outstanding_does_not_fragment_periods()
+    test_extract_line_items_picks_up_ifrs_full_taxonomy()

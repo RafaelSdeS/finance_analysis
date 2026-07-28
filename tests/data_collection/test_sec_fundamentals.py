@@ -26,6 +26,19 @@ Two real bugs, found scaling past ~250-465 companies (2026-07-28):
    Fixed by clustering `end` across tiers with the same tolerance already
    used intra-tier in companyfacts.py, before applying tier priority.
 
+A THIRD bug was found auditing a full top-500 collection run against fix #1
+above (2026-07-28): the derivation itself ("filing_date - 2 months, then
+round UP to the CONTAINING calendar quarter") rounds forward past the filing
+date whenever the filing lands less than ~2 months into its own quarter --
+confirmed on CRM (filed 2005-03-25 -> "-2mo" gives 2005-01-25 -> rounds UP to
+Q1's end, 2005-03-31 -- 6 days AFTER the filing), and on NTAP/LRCX/ADSK.
+Fixed by deriving the latest quarter-end STRICTLY BEFORE the filing date
+(safe by construction) plus a year offset (companies like CRM/NTAP, whose
+fiscal year-end falls in Jan/Apr, have their nearest safe quarter-end in the
+calendar year BEFORE the fiscal_year label -- reusing bare month/day against
+each row's own fiscal_year, as fix #1 did, produced a different impossible
+date for these).
+
 Usage: python tests/data_collection/test_sec_fundamentals.py
 """
 
@@ -86,6 +99,34 @@ def test_non_calendar_fiscal_year_end_fixes_every_row_not_just_the_flagged_one()
     print("OK: the derived fiscal year-end is applied to every row for the CIK, not just the flagged one")
 
 
+def test_short_filing_lag_does_not_round_derived_end_past_filing_date():
+    # Mirrors CRM's real case: fiscal year labeled by its ENDING calendar year
+    # (real FYE ~Jan 31), filed only ~2 months later. The "-2mo, round UP to
+    # containing quarter" derivation (fix #1) computed 2005-01-25 -> Q1 2005's
+    # end (2005-03-31) -- 6 days AFTER the real 2005-03-25 filing that
+    # reported it. Also exercises the year-offset: the safe quarter-end
+    # (2004-12-31) falls in the CALENDAR YEAR BEFORE the fiscal_year label.
+    fake_item6 = pd.DataFrame({
+        "fiscal_year": [2005, 2006],
+        "fundamentals_available_date": pd.to_datetime(["2005-03-25", "2006-03-15"]),
+        "net_income": [100_000_000.0, 120_000_000.0],
+        "cik": [1108524, 1108524],
+    })
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=None), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.item6, "build_cik_history", return_value=fake_item6):
+        df = fundamentals.build_company_fundamentals(1108524, pd.DataFrame())
+
+    for _, row in df.iterrows():
+        assert row["end"] <= row["fundamentals_available_date"], (
+            f"end ({row['end']}) must never be after its own filing "
+            f"({row['fundamentals_available_date']})")
+    ends = sorted(str(e.date()) for e in df["end"])
+    assert ends == ["2004-12-31", "2005-12-31"], (
+        f"expected the year-before quarter-end for a Jan-FYE company, got {ends}")
+    print("OK: a short filing lag doesn't round the derived end past its own filing date")
+
+
 def test_tier_boundary_near_duplicate_end_dates_are_deduped():
     # Mirrors the real AAPL case: xbrl's FY2007 Q4 ends 2007-09-29 (AAPL's actual
     # fiscal-calendar convention), item6's naive guess for the same real period
@@ -119,4 +160,5 @@ def test_tier_boundary_near_duplicate_end_dates_are_deduped():
 if __name__ == "__main__":
     test_non_calendar_fiscal_year_end_does_not_precede_filing()
     test_non_calendar_fiscal_year_end_fixes_every_row_not_just_the_flagged_one()
+    test_short_filing_lag_does_not_round_derived_end_past_filing_date()
     test_tier_boundary_near_duplicate_end_dates_are_deduped()

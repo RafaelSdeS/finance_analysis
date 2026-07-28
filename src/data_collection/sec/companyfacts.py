@@ -35,21 +35,35 @@ COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.jso
 # raw line item (compute_ratios' expected key) -> ordered XBRL concept fallback list.
 # First concept present in a filer's facts wins; verified present across a 10-company
 # sample (AAPL/MSFT/KO/INTC/XOM/JNJ/WMT/CAT/HD/NKE, 2026-07-28) at the rates noted.
+#
+# Also includes ifrs-full concept names (marked below), for foreign private issuers
+# that file 20-F under IFRS instead of 10-K under US-GAAP -- verified against real
+# HSBC/RIO/TECK/SAN companyfacts (2026-07-28). A domestic filer never has any
+# ifrs-full facts at all, so these extra entries are harmless no-ops for it (the
+# lookup just comes up empty); a 20-F filer typically has ONLY ifrs-full data, so
+# these are additive, not competing, in the overwhelming majority of real cases.
+# Known remaining gap: some foreign issuers (e.g. CYATY) have ZERO tagged data
+# under ANY taxonomy in companyfacts -- not recoverable via this API at all.
 CONCEPT_MAP = {
     "net_revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
-                    "SalesRevenueNet", "RevenueFromContractWithCustomerIncludingAssessedTax"],
-    "net_income": ["NetIncomeLoss", "ProfitLoss"],
-    "equity": ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest"],
-    "total_assets": ["Assets"],
-    "current_assets": ["AssetsCurrent"],
-    "current_liabilities": ["LiabilitiesCurrent"],
+                    "SalesRevenueNet", "RevenueFromContractWithCustomerIncludingAssessedTax",
+                    "Revenue", "RevenueFromContractsWithCustomers"],  # ifrs-full
+    "net_income": ["NetIncomeLoss", "ProfitLoss"],  # ProfitLoss doubles as the ifrs-full tag
+    "equity": ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
+               "Equity", "EquityAttributableToOwnersOfParent"],  # ifrs-full
+    "total_assets": ["Assets"],  # identical literal tag name in both taxonomies
+    "current_assets": ["AssetsCurrent", "CurrentAssets"],  # ifrs-full
+    "current_liabilities": ["LiabilitiesCurrent", "CurrentLiabilities"],  # ifrs-full
     "cash": ["CashAndCashEquivalentsAtCarryingValue",
-             "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"],
-    "ebit": ["OperatingIncomeLoss"],                 # ~80% coverage (financials often lack this subtotal)
+             "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+             "CashAndCashEquivalents"],  # ifrs-full
+    "ebit": ["OperatingIncomeLoss", "ProfitLossFromOperatingActivities"],  # ifrs-full; ~80% coverage (financials often lack this subtotal)
     "gross_profit_reported": ["GrossProfit"],         # ~80% coverage; gross_margin derived if absent
-    "total_debt": ["LongTermDebt", "LongTermDebtNoncurrent", "DebtLongtermAndShorttermCombinedAmount"],
+    "total_debt": ["LongTermDebt", "LongTermDebtNoncurrent", "DebtLongtermAndShorttermCombinedAmount",
+                   "Borrowings"],  # ifrs-full; banks (HSBC/SAN) lack a clean equivalent, same known gap as us-gaap financials
     "shares_outstanding": ["CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding"],
-    "cashflow_ops": ["NetCashProvidedByUsedInOperatingActivities"],
+    "cashflow_ops": ["NetCashProvidedByUsedInOperatingActivities",
+                     "CashFlowsFromUsedInOperatingActivities"],  # ifrs-full
     "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"],
 }
 
@@ -71,16 +85,23 @@ def fetch_companyfacts(cik: int) -> dict | None:
 
 
 def _facts_to_frame(facts: dict, concept: str) -> pd.DataFrame:
-    """One concept's raw fact list (any taxonomy) -> tidy (start, end, val, filed, form, accn)."""
+    """One concept's raw fact list (any taxonomy) -> tidy (start, end, val, filed, form, accn).
+
+    Checks ifrs-full alongside us-gaap/dei -- foreign private issuers filing 20-F
+    report under IFRS, tagged under a separate top-level taxonomy key that earlier
+    versions of this function never looked at at all (confirmed 2026-07-28: HSBC/
+    RIO/TECK/SAN each have 350-450 populated ifrs-full concepts, silently ignored).
+    """
     rows = []
-    for taxonomy in ("us-gaap", "dei"):
+    for taxonomy in ("us-gaap", "ifrs-full", "dei"):
         units = facts.get("facts", {}).get(taxonomy, {}).get(concept, {}).get("units", {})
         for unit_facts in units.values():
-            rows.extend(unit_facts)
+            for fact in unit_facts:
+                rows.append({**fact, "_taxonomy": taxonomy})
     if not rows:
-        return pd.DataFrame(columns=["start", "end", "val", "filed", "form", "accn"])
+        return pd.DataFrame(columns=["start", "end", "val", "filed", "form", "accn", "_taxonomy"])
     df = pd.DataFrame(rows)
-    keep = [c for c in ("start", "end", "val", "filed", "form", "accn") if c in df.columns]
+    keep = [c for c in ("start", "end", "val", "filed", "form", "accn", "_taxonomy") if c in df.columns]
     return df[keep]
 
 
@@ -94,11 +115,20 @@ def _quarterly_only(df: pd.DataFrame) -> pd.DataFrame:
     a 363-day full-year figure). Without this filter, merging line items on `end`
     collides multiple duration variants into one period. Instant (balance-sheet)
     concepts have no `start` and no such ambiguity.
+
+    ifrs-full rows are exempt from this filter -- real gap, found extending this
+    tier to 20-F filers (2026-07-28): foreign private issuers are exempt from
+    quarterly reporting entirely (no 10-Q equivalent), so EVERY one of their
+    duration facts is ~365 days. Applying the 60-100 day window to them dropped
+    100% of their revenue/income/cashflow data, not just the annual duplicates
+    the filter exists to remove for us-gaap filers -- there's no quarterly
+    sibling to prefer over, so nothing needs filtering out.
     """
     if "start" not in df.columns or df.empty:
         return df
     dur = (pd.to_datetime(df["end"]) - pd.to_datetime(df["start"])).dt.days
-    return df[dur.between(60, 100)]
+    is_ifrs = df["_taxonomy"] == "ifrs-full" if "_taxonomy" in df.columns else False
+    return df[is_ifrs | dur.between(60, 100)]
 
 
 def as_first_reported(facts: dict, concept: str) -> pd.DataFrame:

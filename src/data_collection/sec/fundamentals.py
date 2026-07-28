@@ -57,20 +57,40 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         # Dec-31 "end" that hadn't happened yet at filing time).
         impossible = gap["end"] > gap["fundamentals_available_date"]
         if impossible.any():
-            # Derive this company's real fiscal quarter-end (month/day) from
-            # whichever row proves the naive Dec-31 guess impossible, then
-            # apply it to EVERY row for this CIK -- a company's fiscal
-            # year-end doesn't change year to year. Real bug, found auditing
-            # ADP's already-collected data (2026-07-28): only the CURRENT
-            # year of a filing ever trips this check (its Dec-31 postdates
-            # the filing); OLDER comparative years bundled in the SAME Item 6
-            # table kept the wrong naive Dec-31 uncorrected, because it still
-            # safely precedes the (much later) filing date -- silently
-            # mis-dated by up to 6 months, not caught by a per-row-only fix.
-            approx = gap.loc[impossible, "fundamentals_available_date"].iloc[0] - pd.DateOffset(months=2)
-            q_end = approx.to_period("Q").end_time.normalize()
-            gap["end"] = pd.to_datetime(gap["fiscal_year"].astype(str)
+            # Derive this company's real fiscal quarter-end from whichever row
+            # proves the naive Dec-31 guess impossible: the latest standard
+            # calendar quarter-end STRICTLY BEFORE that row's own filing date
+            # (QuarterEnd subtraction guarantees this by construction). Apply
+            # the same (month, day, year-offset-from-fiscal_year) template to
+            # EVERY row for this CIK -- a company's fiscal year-end doesn't
+            # change year to year. The year OFFSET matters, not just
+            # month/day: confirmed on CRM/NTAP (real FYE Jan/Apr) -- their
+            # true fiscal-year-end quarter falls in the CALENDAR YEAR BEFORE
+            # the fiscal_year label (e.g. "fiscal 2005" ends Jan-2005, whose
+            # nearest safe quarter-end is Dec-2004), so reusing bare
+            # month/day against each row's own fiscal_year (the prior fix)
+            # produced a DIFFERENT still-impossible date (e.g. "2005-12-31"
+            # for a company whose year rolls into the prior calendar year).
+            # An earlier version of this derivation subtracted ~2 months then
+            # rounded UP to the CONTAINING quarter -- for filings less than
+            # ~2 months past their own quarter boundary that rounds FORWARD
+            # past the filing date itself. Confirmed on CRM, NTAP, LRCX,
+            # ADSK (2026-07-28): e.g. CRM filed 2005-03-25, "-2mo" gives
+            # 2005-01-25, rounding up to Q1's end (2005-03-31) -- 6 days
+            # AFTER the filing that supposedly reported it.
+            flagged = gap.loc[impossible].iloc[0]
+            q_end = flagged["fundamentals_available_date"] - pd.offsets.QuarterEnd(n=1, startingMonth=3)
+            year_offset = q_end.year - flagged["fiscal_year"]
+            gap["end"] = pd.to_datetime((gap["fiscal_year"] + year_offset).astype(str)
                                          + f"-{q_end.month:02d}-{q_end.day:02d}")
+            # Belt-and-suspenders: the shared template can still overshoot a
+            # SPECIFIC row's own (shorter-lag) filing -- clamp any remaining
+            # violator to ITS OWN safe quarter-end rather than leave an
+            # impossible ordering in the data.
+            still_bad = gap["end"] > gap["fundamentals_available_date"]
+            if still_bad.any():
+                gap.loc[still_bad, "end"] = (gap.loc[still_bad, "fundamentals_available_date"]
+                                              - pd.offsets.QuarterEnd(n=1, startingMonth=3))
         gap["fundamentals_tier"] = "item6"
         frames.append(gap)
 
