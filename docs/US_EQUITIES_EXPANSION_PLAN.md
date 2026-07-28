@@ -1,9 +1,8 @@
 # US Equities Expansion — Full Plan
 
-**Status:** Phases 1-2 done (real data collected). Phase 3 code done + spot-verified on real
-data; full 130-quarter historical crawl pending in your terminal (see Phase 3). Phase 4 core
-logic done + verified against real AAPL data (per-CIK path only; bulk-zip scale-up pending).
-Phase 0/5-8 not started.
+**Status:** Phases 1-3 done (real data collected, full historical crawl run — 43,366 CIKs,
+1994-2026). Phase 4 core logic done + verified against real AAPL data (per-CIK path only;
+bulk-zip scale-up pending). Phase 0/5-8 not started.
 **Date:** 2026-07-28.
 **Goal:** extend Stage 1 (data collection) + Stage 2 (dataset build) to US equities —
 prices, fundamentals, macro — as far back as free sources reliably allow, minimizing
@@ -511,24 +510,49 @@ the session ends.
   the exact quarter its real-world collapse says it should, with no manual curation.
 - [x] Tier-1 crosswalk fetched for real: 10,432 current CIK↔ticker pairs (AAPL→320193 confirmed).
 
-**Not yet done — the full historical crawl:** `build_filings()`/`build_roster()` over all
-~130 quarters (1994Q1→now, ~1-2GB of full-index text) is long-running (network-bound,
-likely 10-20+ minutes) and was intentionally **not** run in this session — per your
-instruction, anything long/heavy gets handed to your own terminal so you can watch progress.
+**Full historical crawl — ✅ RUN 2026-07-28** (in your terminal, per your instruction for
+long/heavy scripts):
 
-**To run it yourself:**
-```bash
-python -m src.data_collection.sec.universe
 ```
-This fetches/caches every quarter (progress logged per-quarter to stdout), builds
-`data/raw/us/sec/edgar_10k10q_filings.parquet` and `us_universe_roster.parquet`. Safe to
-interrupt and rerun — completed quarters are cached under `data/raw/us/sec/full_index/` and
-won't be re-fetched (only the current in-progress quarter always refetches). The 8 quarters
-already spot-checked above are already cached, so a rerun starts most of the way there.
+131/131 quarters (1994Q1 -> 2026Q3) -- 1,072,744 qualifying 10-K/10-Q filings
+284,404 (cik, year) roster rows -- 43,366 distinct CIKs ever actively reporting
+```
 
-Once that's done, the **Gate** (roster contains Enron/Lehman/Twitter/WorldCom with correct
-active spans; coverage table produced honestly) is already effectively met by the spot-check
-above — the full crawl just extends it to every quarter and every CIK instead of 8 samples.
+**Gate met on the complete dataset**, not just the 8-quarter spot-check:
+
+| Company (CIK) | Active years (full roster) | Real history |
+|---|---|---|
+| Lehman Brothers Holdings (806085) | 1994 → 2008 | Collapsed Sept 2008. Correct. |
+| Enron Corp (1024401) | 1996 → 2001 | Ch. 11 Dec 2001. Correct. |
+| WorldCom/MCI (723527) | 1995 → 2006 | **Not a simple story** — Ch. 11 Jul 2002, but the SAME CIK resumed normal 10-K/10-Q filing after reorganizing as "MCI Inc," continuing until Verizon's Jan 2006 acquisition. The roster correctly captures the full bankruptcy-reorganization-then-acquisition lifecycle, not just "died in 2002." |
+| Twitter, Inc. (1418091) | 2014 → 2022 | IPO Nov 2013 (first 10-K, fiscal 2013, filed 2014); taken private by Musk Oct 2022. Correct. |
+
+**Two findings worth flagging, now that real numbers exist:**
+
+1. **The tier-1 crosswalk resolves a ticker for only 5,414 of the 43,366 distinct roster
+   CIKs (12.5%).** The other 87.5% are exactly the dead-company-ticker-recovery problem
+   §4.3 describes — this is that gap, measured for the first time rather than estimated.
+   Tiers 2-4 (not yet built) are what would close it.
+2. **Active filer count nearly halved since its 1998-99 peak:** ~11,300 CIKs/year in
+   1997-1999 (and again ~11,700 in 2008) down to 6,749 in 2026. This independently
+   reproduces a well-documented phenomenon in the finance literature (fewer US public
+   companies today than 25 years ago, sometimes called "the listing gap") — a good sanity
+   check that the roster reflects real economic history, not a parsing artifact.
+
+**Coverage table** (current state — 6 priced tickers vs. thousands-per-year roster):
+
+```
+year  roster_ciks  priced_ciks  coverage
+1994         2351            5   0.21%
+2008        11713            5   0.04%
+2026         6749            5   0.07%
+```
+
+This ~0.05% figure is **expected and not a defect** — it reflects that only Phase 2's 6
+prototype tickers are priced so far, not a flaw in the roster or crosswalk. It becomes the
+real, meaningful survivorship-bias number once Phase 6 collects the full priced universe;
+tracking it from here forward (rather than only computing it once at the end) means any
+future regression in coverage is visible immediately rather than discovered late.
 
 ### Phase 4 — fundamentals, XBRL tier 2009+ — CORE LOGIC DONE 2026-07-28 (per-CIK path only)
 
