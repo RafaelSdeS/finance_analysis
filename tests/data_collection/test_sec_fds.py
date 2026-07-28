@@ -175,11 +175,27 @@ def test_non_article_5_not_silently_mapped():
 
 def test_zero_multiplier_defaults_to_one():
     # A malformed/missing <MULTIPLIER> must not silently zero out every figure.
-    tags = {"ARTICLE": "5", "TOTAL-ASSETS": "100"}
+    tags = {"ARTICLE": "5", "PERIOD-TYPE": "YEAR", "TOTAL-ASSETS": "100"}
     items = fds.extract_line_items(tags)
     assert items["total_assets"] == 100.0
     assert items["fds_multiplier"] == 1.0
     print("OK: missing/zero <MULTIPLIER> defaults to 1, doesn't zero out every figure")
+
+
+def test_non_annual_period_not_silently_mapped():
+    # Real bug, found scaling to ~250 companies (2026-07-28): <FISCAL-YEAR-END> is
+    # only reliable as an exhibit's OWN period end when PERIOD-TYPE is YEAR.
+    # Confirmed on ADP's real 1998-09-23 10-K: it bundles an Article-5 exhibit with
+    # PERIOD-TYPE=6-MOS but FISCAL-YEAR-END=DEC-31-1998 (the eventual full-year
+    # cutoff, not the ~1998-06-30 the 6-month figures actually describe) --
+    # produced a fundamentals_available_date earlier than its own fds_period_end,
+    # a lookahead-shaped artifact. Non-YEAR exhibits must be skipped, not mapped.
+    tags = {"ARTICLE": "5", "PERIOD-TYPE": "6-MOS", "FISCAL-YEAR-END": "DEC-31-1998",
+            "TOTAL-ASSETS": "999", "MULTIPLIER": "1000000"}
+    items = fds.extract_line_items(tags)
+    assert "total_assets" not in items, "non-annual exhibits must not get Article-5 tags mapped"
+    assert items == {"fds_article": "5", "fds_multiplier": 1000000.0}
+    print("OK: non-annual (PERIOD-TYPE != YEAR) exhibits are skipped, not mapped with a misleading period end")
 
 
 def test_build_cik_history_skips_post_ex27_era_filings():
@@ -213,4 +229,5 @@ if __name__ == "__main__":
     test_extract_and_compute_returns_one_result_per_exhibit()
     test_non_article_5_not_silently_mapped()
     test_zero_multiplier_defaults_to_one()
+    test_non_annual_period_not_silently_mapped()
     test_build_cik_history_skips_post_ex27_era_filings()

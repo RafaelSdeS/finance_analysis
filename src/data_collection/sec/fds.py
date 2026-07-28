@@ -94,12 +94,24 @@ def extract_line_items(tags: dict) -> dict:
     """Article-5 raw line items, scaled by <MULTIPLIER>. Non-Article-5 filings
     return just {fds_article, fds_multiplier} -- caller can see why nothing else
     is populated rather than getting silently wrong numbers under Article 5's tags.
+
+    Also requires <PERIOD-TYPE> YEAR. Real bug, found scaling to ~250 companies
+    (2026-07-28): <FISCAL-YEAR-END> is only reliable as the exhibit's OWN period
+    end when the exhibit covers the full year. Confirmed on ADP's real 1998-09-23
+    10-K: it bundles an Article-5 exhibit with PERIOD-TYPE=6-MOS but
+    FISCAL-YEAR-END=DEC-31-1998 -- the company's eventual full-year cutoff (likely
+    a fiscal-year-transition stub filing), not the ~1998-06-30 the 6-month figures
+    actually describe. Using it as-is produced a filing DATED BEFORE its own
+    claimed period end (a fundamentals_available_date earlier than fds_period_end
+    -- the exact class of bug this whole pipeline exists to prevent). Non-annual
+    exhibits are skipped entirely rather than guessing at the true interim date;
+    this tier's job is annual data anyway (matching EX-27's primary 10-K use).
     """
     article = (tags.get("ARTICLE") or "").strip()
     multiplier = _to_number(tags.get("MULTIPLIER", "1"))
     multiplier = 1.0 if np.isnan(multiplier) or multiplier == 0 else multiplier
     out = {"fds_article": article, "fds_multiplier": multiplier}
-    if article != "5":
+    if article != "5" or (tags.get("PERIOD-TYPE") or "").strip().upper() != "YEAR":
         return out
 
     for item, tag in ARTICLE_5_MAP.items():
@@ -161,7 +173,11 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         if text is None:
             continue
         for result in extract_and_compute(text):
-            if result.get("fds_article") != "5":
+            # "total_assets" is only present when extract_line_items actually populated
+            # the exhibit (article==5 AND period-type==YEAR) -- covers both the wrong-
+            # article case and the wrong-period-type case (see extract_line_items) with
+            # one check, rather than needing a second explicit condition per reason.
+            if "total_assets" not in result:
                 continue
             rows.append({**result, "cik": cik, "fundamentals_available_date": row.date_filed,
                          "fds_form": row.form_type, "fds_filename": row.filename})

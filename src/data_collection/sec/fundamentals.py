@@ -51,6 +51,19 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     gap = item6.build_cik_history(cik, filings)
     if not gap.empty:
         gap["end"] = pd.to_datetime(gap["fiscal_year"].astype(str) + "-12-31")
+        # Non-calendar-fiscal-year companies break the Dec-31 assumption above,
+        # producing an impossible end > fundamentals_available_date -- confirmed
+        # on ADP (real FYE is June 30; its Aug-filed 10-K got labeled with a
+        # Dec-31 "end" that hadn't happened yet at filing time). Where that
+        # happens, fall back to the quarter-end nearest ~2 months before the
+        # filing date (a typical 10-K filing lag) instead of leaving a
+        # nonsensical ordering in the data -- an estimate, not a real fix for
+        # not knowing each company's actual fiscal calendar, but it removes
+        # the impossible-order artifact.
+        impossible = gap["end"] > gap["fundamentals_available_date"]
+        if impossible.any():
+            approx = (gap.loc[impossible, "fundamentals_available_date"] - pd.DateOffset(months=2))
+            gap.loc[impossible, "end"] = approx.dt.to_period("Q").dt.end_time.dt.normalize()
         gap["fundamentals_tier"] = "item6"
         frames.append(gap)
 
