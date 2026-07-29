@@ -48,6 +48,18 @@ CONCEPT_MAP = {
     "net_revenue": ["Revenues", "RevenueFromContractWithCustomerExcludingAssessedTax",
                     "SalesRevenueNet", "RevenueFromContractWithCustomerIncludingAssessedTax",
                     "Revenue", "RevenueFromContractsWithCustomers"],  # ifrs-full
+    # Known, deliberately unfilled gap (measured 2026-07-29 across all 1,848 collected
+    # tickers): 170 (9.2%) have no net_revenue -- 163 with no column at all (none of the
+    # above tags ever appear in their XBRL history) plus 7 more (AB, CFNB, COLB, CVBF, DX,
+    # GS, NLY) where the column exists from an ex27/item6-tier row but is 100%-NaN in the
+    # xbrl tier. All 170 cluster in banks/thrifts/mortgage REITs/BDCs/GSEs (confirmed via
+    # ABCB/AGNC/ARCC/AGM/GS/NLY/COLB's raw companyfacts): they report
+    # InterestIncomeExpenseNet (interest income NET of interest expense) + NoninterestIncome
+    # instead of a single gross top-line figure. Deliberately NOT added as a fallback here --
+    # net interest income is already a spread, not comparable to industrial companies'
+    # gross Revenues, and conflating them would silently corrupt every revenue-based ratio
+    # (P/S, revenue CAGR, margins) for this whole sector cluster. Same shape of gap as
+    # total_debt's acknowledged banks gap below; leave NaN, don't fabricate a number.
     "net_income": ["NetIncomeLoss", "ProfitLoss"],  # ProfitLoss doubles as the ifrs-full tag
     "equity": ["StockholdersEquity", "StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest",
                "Equity", "EquityAttributableToOwnersOfParent"],  # ifrs-full

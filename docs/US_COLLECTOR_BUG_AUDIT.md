@@ -76,10 +76,16 @@ first fetch).
   other collector here goes through `checkpoint.py` + `_merge_save`; this one refetches all
   ~1,250 tickers (companyfacts + every pre-2002 10-K + every 2001–2008 10-K) from scratch on
   rerun and overwrites each parquet outright.
-- [ ] **9. 8 of 120 sampled tickers have 100% NaN `net_revenue` in the xbrl tier** —
-  `CONCEPT_MAP` misses their tag vocabulary (financials/REITs the likely cluster). The
-  docstring acknowledges the `total_debt` gap for banks; a fully-empty revenue column is a
-  bigger one. Worth measuring per-sector before treating xbrl coverage as solved.
+- [x] **9. 8 of 120 sampled tickers have 100% NaN `net_revenue` in the xbrl tier** — measured
+  for real 2026-07-29 across all 1,848 collected tickers (not just the 120 sample): 170
+  (9.2%) affected, confirmed clustered in banks/thrifts/mortgage REITs/BDCs/GSEs (ABCB,
+  AGNC, ARCC, AGM, GS, NLY, COLB and 163 more), verified via their raw companyfacts —
+  they report `InterestIncomeExpenseNet` + `NoninterestIncome` instead of a single gross
+  revenue tag. **Not fixed by adding a concept** — net interest income is already a spread,
+  not comparable to industrial `Revenues`; mapping it in would silently corrupt every
+  revenue-based ratio for this whole sector cluster. Documented as an intentional gap next
+  to `CONCEPT_MAP`'s `net_revenue` entry, same treatment as the existing `total_debt`/banks
+  acknowledgment.
 - [ ] **10. Nothing US is wired into `pipeline.py`** — no `--market us`; `collect_macro_us`,
   `collect_prices_yf(price_dir=US_PRICES_DIR, suffix="", floor=...)` and
   `collect_fundamentals_us` are reachable only as module `__main__`s or manual calls.

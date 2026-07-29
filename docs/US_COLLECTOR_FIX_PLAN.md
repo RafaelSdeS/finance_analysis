@@ -58,26 +58,22 @@ that must be fully recomputed when a derivation changes.
 
 ---
 
-## 3. 100%-NaN `net_revenue` in the XBRL tier — pothole #9
+## 3. 100%-NaN `net_revenue` in the XBRL tier — pothole #9 — ✅ DONE 2026-07-29
 
-8 of 120 sampled tickers have a fully-empty revenue column; `CONCEPT_MAP` is missing their
-tag vocabulary, suspected financials/REITs. Never measured beyond that sample.
+Measured for real across all 1,848 collected tickers (not the 8/120 sample): 170 (9.2%)
+affected — 163 with no `net_revenue` column at all, 7 more (AB, CFNB, COLB, CVBF, DX, GS,
+NLY) where the column exists (from an ex27/item6-tier row) but is 100%-NaN in the xbrl
+tier. Inspected raw companyfacts for a sample (ABCB/AGNC/ARCC/AGM/GS/NLY/COLB) — confirmed
+cluster is banks/thrifts/mortgage REITs/BDCs/GSEs, all reporting
+`InterestIncomeExpenseNet` + `NoninterestIncome` instead of a single gross-revenue tag.
 
-Caveat that changes the fix: for a bank, "revenue" genuinely has no single XBRL analog
-(net interest income + noninterest income, tagged separately). Part of this cluster is
-**correctly empty**, and forcing a tag would fabricate a number. Measure before mapping.
-
-- [ ] Sweep all collected `data/raw/us/fundamentals/*.parquet` for 100%-NaN `net_revenue`
-      in xbrl-tier rows — get the real rate and the sector/filer-type cluster, not 8/120.
-- [ ] For a sample of those CIKs, list which `us-gaap`/`ifrs-full` concepts matching
-      `Revenue`/`Income` *are* populated in their companyfacts. Data-driven, not guessed.
-- [ ] Add only the concepts that are genuine revenue analogs to `CONCEPT_MAP`'s ordered
-      fallback list (same pattern as the existing IFRS additions).
-- [ ] For filer types with no true analog, leave NaN and document it — same treatment as
-      the acknowledged `total_debt` gap for banks. A flagged NaN beats an invented figure.
-
-Steps 1-2 can run against the existing 1,848 files immediately; no need to wait for the
-collection to finish.
+**Decision: not fixed by adding a concept.** Net interest income is already a spread (income
+minus interest expense), not the same economic quantity as an industrial company's gross
+`Revenues` — mapping it into `net_revenue` would silently corrupt every revenue-based ratio
+(P/S, revenue CAGR, margins) for this whole sector cluster, worse than the NaN it would
+replace. Documented next to `CONCEPT_MAP`'s `net_revenue` entry (`companyfacts.py`), same
+treatment as the existing `total_debt`/banks gap. `US_COLLECTOR_BUG_AUDIT.md` item 9 closed
+with this finding.
 
 ---
 
