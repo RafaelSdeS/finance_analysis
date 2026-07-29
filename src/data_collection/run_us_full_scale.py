@@ -24,8 +24,8 @@ separate `prices` run (they hit different services -- yfinance vs SEC EDGAR --
 so there's no rate-limit conflict) without redoing tickers a prior pass already
 covered.
 
-Usage: python -m src.data_collection.run_us_full_scale [prices|dividends|fundamentals|universe]
-       (no argument runs all four, in order)
+Usage: python -m src.data_collection.run_us_full_scale [prices|dividends|fundamentals|universe|company_info]
+       (no argument runs all five, in order)
        RESUME=1 python -m src.data_collection.run_us_full_scale fundamentals
 """
 
@@ -36,7 +36,7 @@ import sys
 import pandas as pd
 
 from . import config
-from .sec import crosswalk, fundamentals, universe
+from .sec import company_info, crosswalk, fundamentals, universe
 from .yf_collectors import collect_dividends_yf, collect_prices_yf
 
 log = logging.getLogger(__name__)
@@ -69,8 +69,13 @@ def run_fundamentals():
     fundamentals.collect_fundamentals_us(all_priced, skip_existing=os.environ.get("RESUME") == "1")
 
 
+def run_company_info():
+    company_info.collect_company_info(_all_tickers())
+
+
 STEPS = {"universe": run_universe, "prices": run_prices,
-         "dividends": run_dividends, "fundamentals": run_fundamentals}
+         "dividends": run_dividends, "fundamentals": run_fundamentals,
+         "company_info": run_company_info}
 
 if __name__ == "__main__":
     logging.basicConfig(level=config.LOG_LEVEL, format="%(asctime)s %(message)s")
