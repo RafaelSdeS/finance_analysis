@@ -207,7 +207,12 @@ def measure_prevalence(filings: pd.DataFrame, years=range(1994, 2002), sample_pe
         sample = grp.sample(min(sample_per_year, len(grp)), random_state=random_state)
         for row in sample.itertuples():
             text = fetch_filing_text(row.filename)
-            tags = parse_fds(text) if text else None
-            rows.append({"year": year, "has_ex27": tags is not None,
-                         "article": (tags or {}).get("ARTICLE")})
+            # parse_fds returns a LIST (a filing can bundle multiple EX-27
+            # exhibits, see its own docstring) -- an earlier version of this
+            # treated it as a dict/None, so `tags is not None` was True even
+            # for an empty list (has_ex27 always True), and `.get("ARTICLE")`
+            # raised AttributeError on the first filing that genuinely had one.
+            exhibits = parse_fds(text) if text else []
+            rows.append({"year": year, "has_ex27": bool(exhibits),
+                         "article": exhibits[0].get("ARTICLE") if exhibits else None})
     return pd.DataFrame(rows)

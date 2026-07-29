@@ -131,15 +131,32 @@ def _quarterly_only(df: pd.DataFrame) -> pd.DataFrame:
     return df[is_ifrs | dur.between(60, 100)]
 
 
-def as_first_reported(facts: dict, concept: str) -> pd.DataFrame:
+def _annual_only(df: pd.DataFrame) -> pd.DataFrame:
+    """The full fiscal-year (300-380 day) durations _quarterly_only drops -- kept
+    separately so a missing standalone Q4 duration tag can be derived as FY total
+    minus Q1+Q2+Q3 (see _derive_q4). ifrs-full rows are excluded here: they're
+    already fully present in _quarterly_only's output (exempted from its filter
+    since foreign private issuers only ever report annually), so re-including them
+    as "annual" would double up rather than fill a real gap.
+    """
+    if "start" not in df.columns or df.empty:
+        return df
+    dur = (pd.to_datetime(df["end"]) - pd.to_datetime(df["start"])).dt.days
+    is_ifrs = df["_taxonomy"] == "ifrs-full" if "_taxonomy" in df.columns else False
+    return df[~is_ifrs & dur.between(300, 380)]
+
+
+def as_first_reported(facts: dict, concept: str, annual: bool = False) -> pd.DataFrame:
     """A concept's facts, restricted to quarterly duration (if applicable) and deduped
     to the EARLIEST filing per (start, end) period -- the as-first-reported value
-    (plan §3.3), not whatever the latest restatement holds.
+    (plan §3.3), not whatever the latest restatement holds. `annual=True` restricts
+    to full fiscal-year durations instead (see _annual_only) -- used only to derive
+    a missing Q4 duration, not as a general-purpose alternate view.
     """
     df = _facts_to_frame(facts, concept)
     if df.empty:
         return df
-    df = _quarterly_only(df)
+    df = _annual_only(df) if annual else _quarterly_only(df)
     if df.empty:
         return df
     df["filed"] = pd.to_datetime(df["filed"])
@@ -150,7 +167,53 @@ def as_first_reported(facts: dict, concept: str) -> pd.DataFrame:
               .reset_index(drop=True))
 
 
-def _resolve_item(facts: dict, concepts: list[str]) -> pd.DataFrame:
+def _derive_q4(quarterly: pd.DataFrame, annual: pd.DataFrame) -> pd.DataFrame:
+    """Fill in a missing standalone Q4 duration as FY total minus Q1+Q2+Q3.
+
+    Most 10-K filers never tag a discrete ~90-day Q4 duration at all -- they tag
+    the full fiscal year instead (10-Qs cover Q1-Q3; the 10-K's own duration fact
+    is the full year) -- so _quarterly_only leaves every fiscal year-end NaN for
+    flow items even though the balance sheet (instant concepts) has a real data
+    point there. Confirmed on a 120-ticker sample of the real collected dataset
+    (2026-07-28): net_revenue NaN 22.9% overall, but 58.7% of those NaN rows land
+    in December vs 26.4% of all rows -- one missing quarter per fiscal year,
+    almost exactly (median NaN count per ticker = 0.93 x rows/4).
+
+    Only derives where EXACTLY 3 quarterly periods nest inside the FY's own
+    [start, end] window -- if a company's quarterly history has its own gaps,
+    the subtraction isn't safe, so it's left NaN as before rather than guessing.
+    The derived row keeps the FY total's own `filed` date (conservative: the Q4
+    figure isn't computable, by definition, before the FY total itself was
+    filed). A filer that DOES tag a real standalone Q4 (rare) is left alone --
+    derivation only fills an `end` with no existing quarterly value.
+    """
+    if annual.empty or quarterly.empty:
+        return quarterly
+    have_ends = set(quarterly["end"])
+    rows = []
+    for _, fy in annual.iterrows():
+        if fy["end"] in have_ends:
+            continue  # a real standalone Q4 fact already covers this FY end
+        nested = quarterly[(quarterly["start"] >= fy["start"]) & (quarterly["end"] < fy["end"])]
+        if len(nested) != 3:
+            continue
+        rows.append({"start": nested["end"].max(), "end": fy["end"],
+                     "val": fy["val"] - nested["val"].sum(), "filed": fy["filed"]})
+    if not rows:
+        return quarterly
+    derived = pd.DataFrame(rows)
+    return pd.concat([quarterly, derived], ignore_index=True).sort_values("end").reset_index(drop=True)
+
+
+# Flow/duration concepts where a fiscal year is the sum of its 4 quarters, so a
+# missing Q4 can be derived via _derive_q4. Instant (balance-sheet) concepts --
+# total_assets, current_assets/liabilities, cash, total_debt, equity,
+# shares_outstanding -- are as-of-a-date snapshots, not additive across
+# quarters, so deriving a "Q4" for them the same way would be meaningless.
+_FLOW_ITEMS = {"net_revenue", "net_income", "ebit", "gross_profit_reported", "cashflow_ops", "capex"}
+
+
+def _resolve_item(facts: dict, concepts: list[str], annual: bool = False) -> pd.DataFrame:
     """Union as_first_reported() across a line item's WHOLE fallback list, keyed by
     `end` -- NOT "first non-empty concept wins for the whole company", which silently
     truncates coverage. Confirmed on AAPL's revenue: SalesRevenueNet covers 2008-2018
@@ -163,7 +226,7 @@ def _resolve_item(facts: dict, concepts: list[str]) -> pd.DataFrame:
     """
     frames = []
     for priority, concept in enumerate(concepts):
-        df = as_first_reported(facts, concept)
+        df = as_first_reported(facts, concept, annual=annual)
         if not df.empty:
             df = df.copy()
             df["_priority"] = priority
@@ -224,6 +287,8 @@ def extract_line_items(facts: dict) -> pd.DataFrame:
     resolved = {}
     for item, concepts in CONCEPT_MAP.items():
         df = _resolve_item(facts, concepts)
+        if item in _FLOW_ITEMS and not df.empty:
+            df = _derive_q4(df, _resolve_item(facts, concepts, annual=True))
         if not df.empty:
             resolved[item] = df.rename(columns={"val": item, "filed": f"{item}_filed"})[
                 ["end", item, f"{item}_filed"]]

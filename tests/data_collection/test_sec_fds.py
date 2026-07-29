@@ -221,6 +221,28 @@ def test_build_cik_history_skips_post_ex27_era_filings():
     print("OK: build_cik_history skips filings past the EX-27 era, not every 10-K ever filed")
 
 
+def test_measure_prevalence_handles_list_return_from_parse_fds():
+    # Real bug: parse_fds returns a LIST (a filing can bundle multiple EX-27
+    # exhibits), but measure_prevalence used to treat it like a dict/None --
+    # `tags is not None` was True even for an empty list (has_ex27 always
+    # True regardless of content), and `(tags or {}).get("ARTICLE")` raised
+    # AttributeError on the first filing that genuinely had an exhibit (a
+    # non-empty list has no .get method). Covers both: a filing with an
+    # exhibit and one without.
+    filings = pd.DataFrame({
+        "cik": [1, 1], "form_type": ["10-K", "10-K"],
+        "date_filed": pd.to_datetime(["1996-03-01", "1997-03-01"]),
+        "filename": ["has_ex27.txt", "no_ex27.txt"],
+    })
+    with mock.patch.object(fds, "fetch_filing_text",
+                           side_effect=["<TYPE>EX-27\n<ARTICLE>5", "no exhibit here"]):
+        result = fds.measure_prevalence(filings, years=[1996, 1997], sample_per_year=1)
+    by_year = result.set_index("year")
+    assert by_year.loc[1996, "has_ex27"] and by_year.loc[1996, "article"] == "5"
+    assert not by_year.loc[1997, "has_ex27"] and by_year.loc[1997, "article"] is None
+    print("OK: measure_prevalence handles parse_fds's list return without crashing or misreporting")
+
+
 if __name__ == "__main__":
     test_parse_fds_extracts_tags()
     test_parse_fds_empty_when_absent()
@@ -231,3 +253,4 @@ if __name__ == "__main__":
     test_zero_multiplier_defaults_to_one()
     test_non_annual_period_not_silently_mapped()
     test_build_cik_history_skips_post_ex27_era_filings()
+    test_measure_prevalence_handles_list_return_from_parse_fds()

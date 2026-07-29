@@ -54,5 +54,21 @@ def test_cik_overrides_apply_at_build_time():
     print(f"OK: all {len(crosswalk.CIK_OVERRIDES)} CIK_OVERRIDES entries apply at build time, survive a refetch")
 
 
+def test_build_crosswalk_tier1_raises_clear_error_on_fetch_failure():
+    # Real bug: http.get() returns None after exhausting retries (see
+    # sec/http.py); build_crosswalk_tier1 used to do resp.text unchecked,
+    # raising an obscure AttributeError deep inside json.loads instead of a
+    # clear error identifying what failed -- this is a hard prerequisite for
+    # every ticker in a batch run, so it should fail loudly, not obscurely.
+    with mock.patch.object(crosswalk.http, "get", return_value=None):
+        try:
+            crosswalk.build_crosswalk_tier1()
+            assert False, "must raise when the crosswalk fetch fails, not silently produce nothing"
+        except RuntimeError as e:
+            assert "crosswalk" in str(e).lower()
+    print("OK: build_crosswalk_tier1 raises a clear RuntimeError when the SEC fetch fails")
+
+
 if __name__ == "__main__":
     test_cik_overrides_apply_at_build_time()
+    test_build_crosswalk_tier1_raises_clear_error_on_fetch_failure()

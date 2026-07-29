@@ -22,12 +22,41 @@ import re
 import pandas as pd
 
 from . import http
+from ..yf_collectors import compute_ratios
 
 log = logging.getLogger("sec")
 
-_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+_YEAR_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 # Curly right-single-quote (U+2019) shows up in "Stockholders' equity" etc.
 _APOSTROPHE = re.compile("’")
+
+# Item 6 tables print dollar figures under a "(in millions)"/"(in thousands)"
+# caption that lives in the filing's surrounding text, not inside the parsed
+# table itself -- extract_years/find_item6_table never saw it, so every
+# gap-tier dollar figure was stored at face value (e.g. Intel's real
+# $35,127,000,000 1994-2009 net revenue stored as bare "35127"). Confirmed
+# against adjacent tiers for the SAME company (2026-07-28): INTC item6
+# net_revenue median 3.42e4 vs INTC xbrl 1.36e10; IBM 9.14e4 vs IBM ex27
+# 7.39e10 -- a 10^5-10^6 magnitude cliff sandwiched between two correct
+# tiers. Per-share figures (EPS, dividends/share) are NEVER expressed in the
+# table's caption units even when every other row is -- confirmed on Intel's
+# real table above: "0.79"/"0.77" EPS sit next to "35127"/"4369" net
+# revenue/income under the same "(In Millions...)" caption.
+_UNITS_RE = re.compile(r"in\s+(thousands|millions|billions)\b", re.I)
+_UNIT_MULTIPLIER = {"thousands": 1e3, "millions": 1e6, "billions": 1e9}
+_PER_SHARE_ITEMS = {"eps_basic", "eps_diluted", "dividends_per_share"}
+
+
+def detect_unit_multiplier(text: str) -> float:
+    """Scale factor implied by the filing's units caption ("(in millions)" etc.),
+    1.0 if none found. A filing can mention units more than once (other tables,
+    MD&A prose) -- takes the most frequent mention, not just the first, since
+    Item 6's own caption is virtually always the dominant one in a 10-K."""
+    hits = [m.group(1).lower() for m in _UNITS_RE.finditer(text)]
+    if not hits:
+        return 1.0
+    mode = max(set(hits), key=hits.count)
+    return _UNIT_MULTIPLIER[mode]
 
 # Filings in this date-filed window can plausibly carry the target 2001-2006
 # gap years within their 5-year (or fragmented 3-year, see find_item6_table)
@@ -36,6 +65,20 @@ _APOSTROPHE = re.compile("’")
 # already a confirmed real bug there; same principle applies here.
 GAP_ERA_START = "2001-01-01"
 GAP_ERA_END = "2008-12-31"
+
+# Last-line-of-defense bound on any single extracted fiscal_year, generous
+# margin either side of a filing's plausible 5-year lookback within
+# GAP_ERA. Found necessary the hard way (2026-07-29): a mis-selected table
+# producing even ONE implausible fiscal_year (e.g. AMG's 2054, from an
+# embedded-digit false match) doesn't just corrupt that one row --
+# fundamentals.py's non-calendar-FYE correction derives a company-wide
+# year_offset from whichever row looks "impossible" and applies it to EVERY
+# row for that CIK, so one bad year silently shifted AMG's otherwise-correct
+# 2002-2006 rows by -49 years too. The _year_header_row row-selection fix
+# above addresses the specific mechanism found; this bound is a cheap,
+# independent backstop against any other yet-unseen mis-parse doing the same.
+_FISCAL_YEAR_MIN = 1990
+_FISCAL_YEAR_MAX = 2010
 
 ROW_ALIASES = {
     "net_revenue": ["net revenue", "net sales", "total revenue", "total revenues"],
@@ -55,6 +98,39 @@ def _row_text(series: pd.Series) -> str:
 
 def _normalize_label(s: str) -> str:
     return _APOSTROPHE.sub("'", str(s)).strip().lower()
+
+
+def _year_header_row(df: pd.DataFrame) -> list[str]:
+    """Years found in whichever of the first 3 rows has the most distinct
+    year-like tokens, left to right (dedup preserving first occurrence -- a
+    year can span 2 merged header cells). Rows containing "$" are skipped --
+    real Item 6 tables always list years bare in one dedicated row, with "$"
+    appearing only on data rows below.
+
+    Scanning row-by-row (not flattening df.head(3) together) matters:
+    confirmed on two real false-positive filings (2026-07-29) where combining
+    rows let unrelated data-row figures get counted alongside a genuine year
+    header, tipping a wrong table over the >=3-years threshold in
+    find_item6_table -- AAPL's 2004 10-K misread its Selected Quarterly
+    Financial Data table as Item 6 because three quarters' net sales
+    ($2,014M / $1,909M / $2,006M) are themselves 4-digit year-shaped numbers;
+    AMG's misread a stock-comp footnote table where large figures like
+    "119069" and "22054.0" contain embedded year-shaped substrings ("1906",
+    "2054") that the old unanchored _YEAR_RE also matched.
+    """
+    best: list[str] = []
+    for _, row in df.head(3).iterrows():
+        cells = [str(c) for c in row.tolist()]
+        if any("$" in c for c in cells):
+            continue
+        years: list[str] = []
+        for c in cells:
+            m = _YEAR_RE.search(c)
+            if m and m.group() not in years:
+                years.append(m.group())
+        if len(years) > len(best):
+            best = years
+    return best
 
 
 def find_item6_table(tables: list[pd.DataFrame]) -> pd.DataFrame | None:
@@ -78,8 +154,7 @@ def find_item6_table(tables: list[pd.DataFrame]) -> pd.DataFrame | None:
     for df in tables:
         if df.shape[1] < 3:
             continue
-        header_text = _row_text(df.head(3).values.flatten())
-        years = set(_YEAR_RE.findall(header_text))
+        years = _year_header_row(df)
         if len(years) < 3:
             continue
         firstcol = _row_text(df.iloc[:, 0]).upper()
@@ -94,15 +169,9 @@ def find_item6_table(tables: list[pd.DataFrame]) -> pd.DataFrame | None:
 
 
 def _find_year_columns(df: pd.DataFrame) -> list[str]:
-    """Years found in the header rows, in left-to-right column order (dedup
-    preserving first occurrence -- a year can span 2 merged header cells)."""
-    years = []
-    for _, row in df.head(3).iterrows():
-        for cell in row:
-            m = _YEAR_RE.search(str(cell))
-            if m and m.group() not in years:
-                years.append(m.group())
-    return years
+    """Years found in the header row, in left-to-right column order -- see
+    _year_header_row for why this must be a single row, not flattened."""
+    return _year_header_row(df)
 
 
 def _parse_value(s) -> float | None:
@@ -135,7 +204,7 @@ def _row_values(row: pd.Series, n_years: int) -> list[float | None]:
     return vals + [None] * (n_years - len(vals))
 
 
-def extract_years(table: pd.DataFrame) -> dict[str, dict[str, float]]:
+def extract_years(table: pd.DataFrame, unit_multiplier: float = 1.0) -> dict[str, dict[str, float]]:
     """The located Item 6 table -> {year: {line_item: value}}.
 
     Two-pass alias matching, EXACT first then substring, and never overwrites
@@ -146,6 +215,10 @@ def extract_years(table: pd.DataFrame) -> dict[str, dict[str, float]]:
     overwrote the correct EPS values with share-count figures. Exact-match
     rows are resolved first so the short, precise label wins before any
     longer label's substring collision is even considered.
+
+    `unit_multiplier` (see detect_unit_multiplier) rescales every dollar-figure
+    row to full currency units -- every ROW_ALIASES item except _PER_SHARE_ITEMS,
+    which the caption never applies to (see that set's docstring).
     """
     years = _find_year_columns(table)
     if not years:
@@ -157,12 +230,13 @@ def extract_years(table: pd.DataFrame) -> dict[str, dict[str, float]]:
         for item, aliases in ROW_ALIASES.items():
             if any(item in out[y] for y in years):
                 continue  # already assigned by a higher-priority pass
+            scale = 1.0 if item in _PER_SHARE_ITEMS else unit_multiplier
             for label, row in rows:
                 if label and label_test(label, aliases):
                     vals = _row_values(row.iloc[1:], len(years))
                     for y, v in zip(years, vals):
                         if v is not None:
-                            out[y][item] = v
+                            out[y][item] = v * scale
                     break
 
     assign(lambda label, aliases: label in aliases)                       # exact match
@@ -203,8 +277,13 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         table = find_item6_table(tabs)
         if table is None:
             continue
-        for year_str, items in extract_years(table).items():
-            rows.append({**items, "fiscal_year": int(year_str),
+        unit_multiplier = detect_unit_multiplier(resp.text)
+        for year_str, items in extract_years(table, unit_multiplier).items():
+            year = int(year_str)
+            if not (_FISCAL_YEAR_MIN <= year <= _FISCAL_YEAR_MAX):
+                continue
+            ratios = compute_ratios(items, unit_scale=1)
+            rows.append({**items, **ratios, "fiscal_year": year,
                          "fundamentals_available_date": row.date_filed,
                          "item6_form": row.form_type, "item6_filename": row.filename})
     if not rows:

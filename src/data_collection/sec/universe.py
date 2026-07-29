@@ -72,11 +72,26 @@ def parse_master_idx(text: str) -> pd.DataFrame:
     return df.dropna(subset=["cik", "date_filed"]).reset_index(drop=True)
 
 
+QUARTER_GRACE_DAYS = 10  # SEC's index can lag a few business days past quarter-close
+
 def fetch_quarter(year: int, q: int) -> pd.DataFrame | None:
-    """Cached per quarter; only the current in-progress quarter is re-fetched."""
+    """Cached per quarter; the current in-progress quarter is always re-fetched, and
+    so is any quarter that closed within the last QUARTER_GRACE_DAYS.
+
+    Real bug, found auditing a live collection run (2026-07-28): a quarter is only
+    re-fetched while it's the LATEST one -- the moment the calendar rolls into the
+    next quarter, whatever was cached (possibly a partial in-progress snapshot, e.g.
+    2026Q3's cache held 414 rows the day this was found, versus ~6,500 for a closed
+    quarter) becomes "closed" and is trusted forever. Confirmed live: the running
+    job's own 2026Q3 cache was still being written to at audit time. The grace
+    window re-verifies a quarter shortly after it closes without re-fetching every
+    quarter on every run (full-index snapshots ARE stable well past this window).
+    """
     cache = CACHE_DIR / f"{year}q{q}.parquet"
     is_current = (year, q) == max(_quarters_through_now())
-    if cache.exists() and not is_current:
+    quarter_end = pd.Period(f"{year}Q{q}", freq="Q").end_time.date()
+    recently_closed = not is_current and (date.today() - quarter_end).days <= QUARTER_GRACE_DAYS
+    if cache.exists() and not is_current and not recently_closed:
         return pd.read_parquet(cache)
     resp = http.get(FULL_INDEX_URL.format(year=year, q=q))
     if resp is None:

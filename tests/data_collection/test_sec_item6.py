@@ -15,6 +15,12 @@ mirror real structural quirks confirmed against Intel's actual 10-K filings
   - Positional value extraction survives "$" placeholder cells and NaN
     spacer columns interleaved inconsistently between the label and the
     numbers, and parenthesized negatives.
+  - detect_unit_multiplier/extract_years(unit_multiplier=...): Item 6's dollar
+    figures are printed under a "(in millions)"-style caption that lives
+    OUTSIDE the parsed table -- confirmed against adjacent tiers for the SAME
+    company (2026-07-28): unscaled INTC item6 net_revenue read ~1e6 too small
+    vs INTC's own xbrl tier. Per-share rows (EPS, dividends/share) must NOT be
+    rescaled even when every other row in the same table is.
 
 Usage: python tests/data_collection/test_sec_item6.py
 """
@@ -114,8 +120,157 @@ def test_build_cik_history_skips_filing_that_crashes_read_html():
     print("OK: build_cik_history skips a filing whose HTML crashes pd.read_html, doesn't lose the whole CIK")
 
 
+def test_extract_years_scales_dollar_rows_but_not_per_share():
+    # Same real Intel table shape as above, exercising unit_multiplier: dollar
+    # rows (net_revenue/net_income/total_assets) must scale by the caption's
+    # implied multiplier; EPS rows must NOT (per-share figures are never
+    # expressed in the caption's units -- confirmed on the same real table,
+    # "0.79"/"0.77" sit next to "35127"/"4369" under one "(In Millions)" caption).
+    table = pd.DataFrame({
+        0: [None, "(In Millions, Except Per Share Amounts)", "Net revenue", "Net income",
+            "Earnings per common share", "Basic", "Diluted", "Total assets"],
+        1: [None, None, None, None, None, None, None, None],
+        2: [None, "2009", "$", "$", None, "$", "$", "$"],
+        3: [None, "2009", "35127", "4369", None, "0.79", "0.77", "53095"],
+    })
+    years = item6.extract_years(table, unit_multiplier=1_000_000.0)
+    assert years["2009"]["net_revenue"] == 35_127_000_000.0
+    assert years["2009"]["net_income"] == 4_369_000_000.0
+    assert years["2009"]["total_assets"] == 53_095_000_000.0
+    assert years["2009"]["eps_basic"] == 0.79, "EPS must stay a per-share dollar figure, not get scaled by 1e6"
+    assert years["2009"]["eps_diluted"] == 0.77
+    print("OK: extract_years scales dollar rows by unit_multiplier but leaves per-share rows alone")
+
+
+def test_find_item6_table_rejects_quarterly_and_embedded_digit_false_positives():
+    # Real bug, found auditing the collected dataset (2026-07-29): AAPL got a
+    # fiscal_year=1909 row because find_item6_table picked its Selected
+    # Quarterly Financial Data table -- quarterly net sales figures ($2,014M /
+    # $1,909M / $2,006M) are themselves 4-digit, year-shaped numbers, and the
+    # old code flattened df.head(3) together instead of checking one row at a
+    # time. AMG hit a second variant: a stock-comp footnote table where large
+    # bare numbers ("119069", "22054.0") contain embedded year-shaped
+    # substrings ("1906", "2054") an unanchored regex still matched. Shapes
+    # below mirror the real filings (values reconciled against live EDGAR).
+    quarterly = pd.DataFrame({
+        0: ["2004", "Net sales", "Net income"],
+        1: [None, "$", "$"],
+        2: [None, 2350.0, 106.0],
+        3: [None, "$", "$"],
+        4: [None, 2014.0, 61.0],
+        5: [None, "$", "$"],
+        6: [None, 1909.0, 46.0],
+        7: [None, "$", "$"],
+        8: [None, "2006", "63"],
+    })
+    footnote = pd.DataFrame({
+        0: ["Net Income—as reported",
+            "Less: comp expense, net of tax",
+            "Less: comp expense related to 2003 Amendment, net of tax"],
+        1: [None, None, None],
+        2: ["$", None, None],
+        3: [60528.0, 10614.0, 22054.0],
+        4: ["$", None, None],
+        5: ["77147", "14326", "—"],
+        6: ["$", None, None],
+        7: ["119069", "709", "—"],
+    })
+    real = pd.DataFrame({
+        0: ["(In Millions)", "Net revenue", "Net income", "Total assets"],
+        1: [None, "$", "$", "$"],
+        2: ["2008", "35127", "4369", "53095"],
+        3: [None, None, None, None],
+        4: ["2007", "38334", "6976", "55664"],
+        5: ["2006", "35382", "5044", "48372"],
+        6: ["2005", "38826", "8664", "48309"],
+    })
+    assert item6._year_header_row(quarterly) == ["2004"], (
+        "quarterly-earnings table's data rows (all carrying '$') must not "
+        "contribute their dollar figures as extra 'years'")
+    assert item6._year_header_row(footnote) == ["2003"], (
+        "footnote table must not yield '1906'/'2054' embedded-digit false years")
+    best = item6.find_item6_table([quarterly, footnote, real])
+    assert best is real, "must pick the real Item 6 table over both false-positive shapes"
+    print("OK: find_item6_table rejects quarterly-data and embedded-digit false-positive tables")
+
+
+def test_detect_unit_multiplier():
+    assert item6.detect_unit_multiplier("Some prose (In Millions, Except Per Share)") == 1_000_000.0
+    assert item6.detect_unit_multiplier("figures in thousands of dollars") == 1_000.0
+    assert item6.detect_unit_multiplier("no caption anywhere") == 1.0
+    print("OK: detect_unit_multiplier reads the filing's units caption, defaults to 1.0 if absent")
+
+
+def test_build_cik_history_scales_and_computes_ratios():
+    # End-to-end: a filing whose Item 6 table is captioned "(In Millions)" must
+    # produce full-dollar figures AND derived ratios (roa/net_margin/etc.), not
+    # the bare table values with zero ratio columns -- the two-part gap-tier
+    # bug found auditing a 120-ticker sample of the real collected dataset
+    # (2026-07-28): item6 net_revenue read ~1e6 too small and roe/roa/net_margin
+    # were 100% NaN across every item6 row sampled.
+    filings = pd.DataFrame({
+        "cik": [8],
+        "form_type": ["10-K"],
+        "date_filed": pd.to_datetime(["2003-03-01"]),
+        "filename": ["intel.txt"],
+    })
+    fake_resp = mock.Mock(text="irrelevant, read_html is mocked (In Millions, Except Per Share Amounts)")
+    table = pd.DataFrame({
+        0: [None, "(In Millions)", "Net revenue", "Net income", "Total assets"],
+        1: [None, None, None, None, None],
+        2: [None, "2002", "$", "$", "$"],
+        3: [None, "2002", "25000", "3000", "50000"],
+    })
+    with mock.patch.object(item6.http, "get", return_value=fake_resp), \
+         mock.patch.object(item6.pd, "read_html", return_value=[table]), \
+         mock.patch.object(item6, "find_item6_table", return_value=table):
+        df = item6.build_cik_history(8, filings)
+
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["net_revenue"] == 25_000_000_000.0, "must be scaled to full dollars, not the bare table value"
+    assert pd.notna(row["net_margin"]), "ratios must be computed for the gap tier, not left all-NaN"
+    print("OK: build_cik_history scales item6 figures and populates ratio columns")
+
+
+def test_build_cik_history_drops_implausible_fiscal_year():
+    # Real bug, found auditing the collected dataset (2026-07-29): AMG's
+    # chained history had fiscal_year=1906/1961/2054 rows (from a mis-selected
+    # footnote table, since fixed in find_item6_table). Those bogus years
+    # didn't just add junk rows -- fundamentals.py's non-calendar-FYE
+    # correction picked the 2054 row as "impossible" (end > filing date) and
+    # derived a company-wide -49-year offset from it, corrupting AMG's
+    # otherwise-correct 2002-2006 rows too. This last-line-of-defense bound
+    # drops any single implausible year before it can reach that cascade,
+    # independent of whatever mis-parse produced it.
+    filings = pd.DataFrame({
+        "cik": [9],
+        "form_type": ["10-K"],
+        "date_filed": pd.to_datetime(["2006-03-16"]),
+        "filename": ["amg.txt"],
+    })
+    fake_resp = mock.Mock(text="irrelevant, read_html is mocked")
+    table = pd.DataFrame({0: ["Net revenue"], 1: ["2005"], 2: ["100"]})
+
+    with mock.patch.object(item6.http, "get", return_value=fake_resp), \
+         mock.patch.object(item6.pd, "read_html", return_value=[table]), \
+         mock.patch.object(item6, "find_item6_table", return_value=table), \
+         mock.patch.object(item6, "extract_years",
+                            return_value={"2054": {"net_revenue": 100.0}, "2005": {"net_revenue": 200.0}}):
+        df = item6.build_cik_history(9, filings)
+
+    assert len(df) == 1, "the implausible fiscal_year=2054 row must be dropped, not just the good one kept"
+    assert df.iloc[0]["fiscal_year"] == 2005
+    print("OK: build_cik_history drops implausible fiscal_year rows before they can reach fundamentals.py's cascade")
+
+
 if __name__ == "__main__":
     test_find_item6_table_picks_best_scoring_candidate()
     test_extract_years_reconciles_real_intel_figures()
     test_parenthesized_negative()
     test_build_cik_history_skips_filing_that_crashes_read_html()
+    test_extract_years_scales_dollar_rows_but_not_per_share()
+    test_find_item6_table_rejects_quarterly_and_embedded_digit_false_positives()
+    test_detect_unit_multiplier()
+    test_build_cik_history_scales_and_computes_ratios()
+    test_build_cik_history_drops_implausible_fiscal_year()

@@ -105,6 +105,9 @@ def _seed_last_date(cp: dict, ticker: str, path, col: str) -> str | None:
     return None
 
 
+TRUSTED_MIN_YF_ROWS = 10  # below this, a recorded yfinance span looks truncated, not genuine
+
+
 def _prices_fetch_start(cp: dict, ticker: str, path, floor: str | None = None) -> str:
     """Where to start the prices fetch from.
 
@@ -124,12 +127,29 @@ def _prices_fetch_start(cp: dict, ticker: str, path, floor: str | None = None) -
     such row (not the latest) so the whole yfinance era gets recomputed together
     and stays internally consistent. Before that (no yfinance rows yet), behave
     like every other collector: start the day after the last row on disk.
+
+    Below TRUSTED_MIN_YF_ROWS, the recorded span itself is NOT trusted as "this
+    is where history starts" — refetch from the floor instead. Real bug, found
+    at US-scale during a rate-limited batch run (2026-07-29): GRTX (a real,
+    actively-traded Nasdaq biotech listed since 2020) got truncated to 2 rows
+    on its first-ever fetch, no exception raised. Anchoring on that thin span
+    forever, as the un-guarded logic below does, would permanently prevent it
+    from ever fetching its real multi-year history — every subsequent run
+    would just re-confirm the same 2 rows are "where it starts." Harmless for
+    a genuinely brand-new listing: re-fetching from the floor just returns the
+    same few real rows again, and it stops being "thin" once enough real
+    trading days accumulate.
     """
     if path.exists():
         yf_start = pd.read_parquet(path, columns=["trade_date", "num_trades"])
         yf_start = yf_start[yf_start["num_trades"].isna()]
-        if len(yf_start):
+        if len(yf_start) >= TRUSTED_MIN_YF_ROWS:
             return str(yf_start["trade_date"].min().date())
+        if len(yf_start):
+            log.warning("prices %s: only %d yfinance row(s) on disk (below the %d-row trust "
+                        "floor) -- treating as a possibly-truncated fetch, retrying from the "
+                        "deep floor instead of anchoring on it", ticker, len(yf_start), TRUSTED_MIN_YF_ROWS)
+            return floor or config.START_DATE
     last = _seed_last_date(cp, ticker, path, "trade_date")
     return (pd.to_datetime(last) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") \
         if last else (floor or config.START_DATE)
@@ -700,15 +720,29 @@ def _demo():
         bolsai_only.to_parquet(path)
         assert _prices_fetch_start({}, "TEST3", path) == "2026-01-03"
 
-        # A yfinance era already exists (NaN num_trades): re-anchor to its EARLIEST
-        # date, not the latest — this is the fix, re-fetching the whole yfinance
-        # span every run instead of only appending past the last checkpoint.
-        mixed = pd.DataFrame({
-            "trade_date": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03", "2026-01-06"]),
-            "num_trades": [100.0, 120.0, np.nan, np.nan],
-        })
+        # A yfinance era already exists (NaN num_trades) with enough rows to be
+        # TRUSTED: re-anchor to its EARLIEST date, not the latest — this is the
+        # fix, re-fetching the whole yfinance span every run instead of only
+        # appending past the last checkpoint.
+        yf_dates = pd.date_range("2026-01-03", periods=TRUSTED_MIN_YF_ROWS, freq="D")
+        mixed = pd.concat([
+            pd.DataFrame({"trade_date": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+                          "num_trades": [100.0, 120.0]}),
+            pd.DataFrame({"trade_date": yf_dates, "num_trades": np.nan}),
+        ], ignore_index=True)
         mixed.to_parquet(path)
         assert _prices_fetch_start({}, "TEST3", path) == "2026-01-03"
+
+        # A yfinance era exists but is THIN (below TRUSTED_MIN_YF_ROWS): must NOT
+        # be anchored on -- treated as a possibly-truncated first fetch (see
+        # GRTX in the docstring) and retried from the floor instead. Without
+        # this, a truncated first fetch anchors on itself forever.
+        thin = pd.DataFrame({
+            "trade_date": pd.to_datetime(["2026-07-17", "2026-07-20"]),
+            "num_trades": [np.nan, np.nan],
+        })
+        thin.to_parquet(path)
+        assert _prices_fetch_start({}, "GRTX", path, floor="1962-01-02") == "1962-01-02"
     print("_prices_fetch_start: OK")
 
     with tempfile.TemporaryDirectory() as tmp:

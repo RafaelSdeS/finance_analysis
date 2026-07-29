@@ -23,6 +23,13 @@ companyfacts-shaped dicts):
   - extract_line_items: fundamentals_available_date = MAX of populated items'
     filed dates (conservative bundling -- never exposes a row before every
     item in it was genuinely public).
+  - _derive_q4: most 10-K filers never tag a standalone ~90-day Q4 duration --
+    only the full fiscal year -- so _quarterly_only alone leaves every flow
+    item (revenue, net income, ...) NaN at fiscal year-end. Confirmed on a
+    120-ticker sample of the real collected dataset (2026-07-28): net_revenue
+    NaN 22.9% overall, 58.7% of those NaN rows in December vs 26.4% of all
+    rows. Fixed by deriving Q4 = FY total - (Q1+Q2+Q3), only when exactly 3
+    quarters nest inside the FY window.
 
 Usage: python tests/data_collection/test_sec_companyfacts.py
 """
@@ -31,6 +38,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+import pandas as pd
 
 from src.data_collection.sec import companyfacts
 
@@ -178,6 +187,68 @@ def test_extract_line_items_picks_up_ifrs_full_taxonomy():
     print("OK: extract_line_items picks up ifrs-full concepts for 20-F/foreign filers")
 
 
+def test_derive_q4_fills_missing_fiscal_year_end():
+    # Q1-Q3 tagged normally (~90-day durations); the FY is tagged only as one
+    # full-year duration, never as a standalone Q4 -- the overwhelmingly common
+    # real-world shape (10-Qs cover Q1-Q3, the 10-K's own duration IS the FY).
+    facts = _facts({"NetIncomeLoss": [
+        _fact("2020-01-01", "2020-03-31", 100.0, "2020-05-01"),
+        _fact("2020-04-01", "2020-06-30", 110.0, "2020-08-01"),
+        _fact("2020-07-01", "2020-09-30", 120.0, "2020-11-01"),
+        _fact("2020-01-01", "2020-12-31", 460.0, "2021-02-01"),
+    ]})
+    quarterly = companyfacts._resolve_item(facts, ["NetIncomeLoss"])
+    annual = companyfacts._resolve_item(facts, ["NetIncomeLoss"], annual=True)
+    derived = companyfacts._derive_q4(quarterly, annual)
+    assert len(derived) == 4, f"expected Q1-Q4, got {len(derived)} rows"
+    q4 = derived[derived["end"] == pd.Timestamp("2020-12-31")].iloc[0]
+    assert q4["val"] == 130.0, f"Q4 must be FY(460) - (100+110+120) = 130, got {q4['val']}"
+    assert str(q4["filed"].date()) == "2021-02-01", "derived Q4 must inherit the FY total's own filed date"
+    print("OK: _derive_q4 fills a missing standalone Q4 duration as FY total minus Q1+Q2+Q3")
+
+
+def test_derive_q4_skips_when_quarters_incomplete():
+    # Only 2 of the 3 needed quarters are present (a gap in the filer's own
+    # history) -- must NOT guess at a Q4 value from an incomplete sum.
+    facts = _facts({"NetIncomeLoss": [
+        _fact("2020-01-01", "2020-03-31", 100.0, "2020-05-01"),
+        _fact("2020-04-01", "2020-06-30", 110.0, "2020-08-01"),
+        _fact("2020-01-01", "2020-12-31", 460.0, "2021-02-01"),
+    ]})
+    quarterly = companyfacts._resolve_item(facts, ["NetIncomeLoss"])
+    annual = companyfacts._resolve_item(facts, ["NetIncomeLoss"], annual=True)
+    derived = companyfacts._derive_q4(quarterly, annual)
+    assert len(derived) == 2, "must leave Q4 undetermined (not guess) when fewer than 3 quarters are known"
+    print("OK: _derive_q4 refuses to derive Q4 when the quarterly history has its own gaps")
+
+
+def test_extract_line_items_derives_q4_and_clusters_with_instant_concepts():
+    # End-to-end: a flow item (net_income, FY-only tagged) must get its Q4
+    # derived AND cluster correctly against an instant concept (total_assets)
+    # that DOES have a real Q4 data point -- the exact real-world shape found
+    # auditing the collected dataset.
+    facts = _facts({
+        "NetIncomeLoss": [
+            _fact("2020-01-01", "2020-03-31", 100.0, "2020-05-01"),
+            _fact("2020-04-01", "2020-06-30", 110.0, "2020-08-01"),
+            _fact("2020-07-01", "2020-09-30", 120.0, "2020-11-01"),
+            _fact("2020-01-01", "2020-12-31", 460.0, "2021-02-01"),
+        ],
+        "Assets": [
+            _fact(None, "2020-03-31", 1000.0, "2020-05-01"),
+            _fact(None, "2020-06-30", 1050.0, "2020-08-01"),
+            _fact(None, "2020-09-30", 1100.0, "2020-11-01"),
+            _fact(None, "2020-12-31", 1200.0, "2021-02-01"),
+        ],
+    })
+    li = companyfacts.extract_line_items(facts)
+    assert len(li) == 4, f"expected 4 quarters, got {len(li)}"
+    q4 = li[li["end"] == pd.Timestamp("2020-12-31")].iloc[0]
+    assert q4["net_income"] == 130.0, "Q4 net_income must be derived, not left NaN"
+    assert q4["total_assets"] == 1200.0, "derived Q4 row must still carry the real instant-concept value"
+    print("OK: extract_line_items derives Q4 for flow items and clusters it with instant concepts")
+
+
 if __name__ == "__main__":
     test_as_first_reported_takes_earliest_filing()
     test_quarterly_only_drops_annual_duplicate()
@@ -187,3 +258,6 @@ if __name__ == "__main__":
     test_extract_line_items_clusters_nearby_period_ends()
     test_shares_outstanding_does_not_fragment_periods()
     test_extract_line_items_picks_up_ifrs_full_taxonomy()
+    test_derive_q4_fills_missing_fiscal_year_end()
+    test_derive_q4_skips_when_quarters_incomplete()
+    test_extract_line_items_derives_q4_and_clusters_with_instant_concepts()

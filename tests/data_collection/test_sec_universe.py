@@ -8,13 +8,21 @@ Self-check for sec/universe.py's pure parsing/aggregation logic (no network):
     non-10-K/Q form (SC 13G, S-8, etc. -- the vast majority of any real quarter).
   - compute_coverage: per-year roster-vs-priced measurement, including the
     "not priced" case (tier-1 crosswalk can't resolve a dead company's ticker).
+  - fetch_quarter: only the CURRENT quarter used to get re-fetched -- the
+    moment the calendar rolls into the next quarter, whatever was cached
+    (possibly a partial in-progress snapshot) got trusted forever. Confirmed
+    live (2026-07-28): a running collection job's own 2026Q3 cache held 414
+    rows mid-quarter vs ~6,500 for a closed quarter. Fixed with a grace
+    window that re-fetches a quarter shortly after it closes too.
 
 Usage: python tests/data_collection/test_sec_universe.py
 """
 
 import sys
 import tempfile
+from datetime import date
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -81,7 +89,59 @@ def test_compute_coverage():
     print("OK: compute_coverage counts only ciks with BOTH a resolved ticker AND an on-disk price file")
 
 
+def test_fetch_quarter_refetches_within_grace_window():
+    # A quarter that closed a few days ago must still be re-fetched, not
+    # trusted from a cache that might be a partial in-progress snapshot from
+    # when it was still "current" -- confirmed live: a running job's own
+    # 2026Q3 cache (414 rows) would have frozen at that partial size forever
+    # the moment the calendar rolled into Q4, without this grace window.
+    with tempfile.TemporaryDirectory() as tmp:
+        cache_dir = Path(tmp)
+        pd.DataFrame({"cik": [1]}).to_parquet(cache_dir / "2026q3.parquet")  # stale partial snapshot
+        fresh = pd.DataFrame({"cik": [1, 2, 3]})  # the real, complete quarter
+
+        class FakeDate(date):
+            @classmethod
+            def today(cls):
+                return date(2026, 10, 5)  # 5 days after 2026Q3 closed (Sep 30)
+
+        with mock.patch.object(universe, "CACHE_DIR", cache_dir), \
+             mock.patch.object(universe, "date", FakeDate), \
+             mock.patch.object(universe, "_quarters_through_now", return_value=[(2026, 4)]), \
+             mock.patch.object(universe.http, "get", return_value=mock.Mock(text="ignored")), \
+             mock.patch.object(universe, "parse_master_idx", return_value=fresh):
+            df = universe.fetch_quarter(2026, 3)
+
+    assert len(df) == 3, "a recently-closed quarter must be re-fetched, not read from a stale partial cache"
+    print("OK: fetch_quarter re-fetches a quarter that closed within the grace window")
+
+
+def test_fetch_quarter_trusts_cache_once_grace_window_passes():
+    # Once well past the grace window, a closed quarter's cache IS trusted --
+    # confirms the fix doesn't regress into re-fetching every quarter forever.
+    with tempfile.TemporaryDirectory() as tmp:
+        cache_dir = Path(tmp)
+        pd.DataFrame({"cik": [1, 2, 3]}).to_parquet(cache_dir / "2026q3.parquet")
+
+        class FakeDate(date):
+            @classmethod
+            def today(cls):
+                return date(2027, 3, 1)  # months past 2026Q3's close
+
+        with mock.patch.object(universe, "CACHE_DIR", cache_dir), \
+             mock.patch.object(universe, "date", FakeDate), \
+             mock.patch.object(universe, "_quarters_through_now", return_value=[(2027, 1)]), \
+             mock.patch.object(universe.http, "get") as fake_get:
+            df = universe.fetch_quarter(2026, 3)
+
+    assert fake_get.call_count == 0, "a long-closed quarter must be read from cache, not re-fetched"
+    assert len(df) == 3
+    print("OK: fetch_quarter trusts the cache once a quarter is well past its grace window")
+
+
 if __name__ == "__main__":
     test_parse_master_idx()
     test_parse_master_idx_empty_input()
     test_compute_coverage()
+    test_fetch_quarter_refetches_within_grace_window()
+    test_fetch_quarter_trusts_cache_once_grace_window_passes()

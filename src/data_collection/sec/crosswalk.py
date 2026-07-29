@@ -57,6 +57,8 @@ CIK_OVERRIDES = {
 def build_crosswalk_tier1() -> pd.DataFrame:
     """CIK -> ticker for every currently-listed company (survivors only)."""
     resp = http.get(TICKERS_URL)
+    if resp is None:
+        raise RuntimeError(f"failed to fetch SEC ticker crosswalk from {TICKERS_URL}")
     data = json.loads(resp.text)
     df = pd.DataFrame(data.values())  # columns: cik_str, ticker, title
     df = df.rename(columns={"cik_str": "cik", "title": "company_name"})

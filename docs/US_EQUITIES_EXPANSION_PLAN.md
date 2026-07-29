@@ -860,6 +860,63 @@ verified on Intel/KO/AAPL/JPM/MSFT/ADP/KMB individually so far) and systematic b
 reconciliation against EX-27/XBRL across many companies (confirmed correct on the companies
 checked so far, not yet measured broadly).
 
+**Three more real bugs found auditing the scaled-up run (1,848 fundamentals files / 2,462 price
+files, 2026-07-29):**
+
+1. **`find_item6_table`/`_find_year_columns` flattened `df.head(3)` together, letting DATA-row
+   numbers get scanned for year-shaped substrings.** Confirmed on two real filings: AAPL's 2004
+   10-K produced a `fiscal_year=1909` row because its Selected Quarterly Financial Data table (not
+   Item 6 at all) got misidentified — three quarters' net sales ($2,014M / $1,909M / $2,006M) are
+   themselves 4-digit, year-shaped numbers, and with rows flattened together these joined the
+   genuine "2004" header year to cross the 3-year acceptance threshold. AMG's 2006 10-K hit a
+   second variant: a stock-comp footnote table where large bare numbers ("119069", "22054.0")
+   contain embedded year-shaped substrings ("1906", "2054") an unanchored regex still matched.
+   Fixed two ways: (a) year detection now scans one row at a time and skips any row containing
+   `"$"` — real Item 6 year-header rows are bare numbers, `"$"` only appears on data rows below,
+   verified this still correctly detects RGLD's real 5-year header; (b) `_YEAR_RE` now requires
+   digit boundaries (`(?<!\d)(?:19|20)\d{2}(?!\d)`) so a year can't be read out of the middle of a
+   longer, comma-less number.
+2. **The bogus years from bug 1 cascaded far beyond their own row.** Traced on AMG: its
+   `fiscal_year=2054` row (from the footnote-table bug) was the one that tripped
+   `fundamentals.py`'s non-calendar-FYE correction (`end > fundamentals_available_date`), which
+   derives a company-wide `(month, day, year_offset)` template from whichever row looks
+   "impossible" and reapplies it to *every* row for that CIK. Since 2054 was itself wrong, the
+   derived `year_offset` came out to -49, silently shifting AMG's otherwise-correct 2002-2006
+   `end` dates back by 49 years too (e.g. real 2002-12-31 stored as 1953-12-31) — turning one bad
+   row into a company-wide corruption, and the likely explanation for most of a separately-noticed
+   "751/1,848 tickers have a fundamentals gap" symptom (199 of those 751 have their earliest row on
+   the `item6` tier). Fixed with a last-line-of-defense bound in `item6.build_cik_history`: any
+   extracted `fiscal_year` outside `[1990, 2010]` (generous margin around `GAP_ERA`) is dropped
+   before it can reach fundamentals.py's cascade, independent of whatever mis-parse produces it.
+   **Not yet done:** the other 472 of those 751 have their earliest row on the `xbrl` tier instead
+   — a different, NOT-yet-fixed cause. One real instance confirmed (AA/Alcoa: ticker AA's current
+   CIK 1675149 is Alcoa Corp, spun off 2016; its first 10-K legitimately discloses 2013-2015
+   predecessor-entity comparatives under the new CIK, so the combined series silently blends two
+   legally distinct companies' books). But spot-checking the rest shows this is mixed with a
+   second, *benign* explanation — foreign filers that only recently converted from 20-F to 10-K
+   (TEVA, NXPI, SHOP, CNH, JHX, ENB, CP, WCN, FLUT and others: their XBRL history predates our
+   10-K/10-Q-only filing roster because 20-F filings, which aren't collected, came first) — same
+   shape as the already-cleared ABEV/AER case, not a bug. Distinguishing genuine predecessor-blend
+   from benign FPI-conversion across the full 472 is unscoped; needs a design decision before
+   fixing, not attempted here.
+3. **`_prices_fetch_start` trusted a truncated first fetch as "this is where history starts."**
+   Confirmed on GRTX (a real, actively-traded Nasdaq biotech listed since 2020): a rate-limited
+   batch run recorded only 2 rows, both from the same week collection ran. Because this collector
+   always re-anchors to the *earliest* on-disk yfinance row (by design, so the whole yfinance era
+   stays internally consistent — see its own docstring), that truncated span became permanent:
+   every subsequent run would just re-confirm the same 2 rows as "where GRTX starts," never
+   reaching back for its real multi-year history. Fixed with `TRUSTED_MIN_YF_ROWS = 10`: a
+   recorded span thinner than that is no longer anchored on — it's treated as a possibly-truncated
+   fetch and retried from the deep floor instead. Harmless for a genuinely brand-new listing (the
+   floor fetch just returns the same few real rows again). **Not yet done:** this only prevents
+   *new* truncation from becoming permanent; the fix doesn't retroactively repair files already on
+   disk. A scan found 10 currently-thin price files (`< 10` yfinance rows) — GRTX, AGGI, STDN, CSQR
+   look like the same rate-limiting truncation (dense, consecutive dates right at collection time);
+   AWATY/AZBLY/KERCY/IFHLY/LYTHF/BAWAY look like genuinely illiquid OTC ADRs (2 trades spread
+   across months) rather than truncation. The fix makes them self-correct on their next real
+   collection run — no separate reset script needed — but that run hasn't been executed as part of
+   this pass.
+
 ### Phase 8 — *deferred* — full-statement parsing
 
 Only for companies where Phase 7's Item 6 came up short (omitted, abbreviated, or missing

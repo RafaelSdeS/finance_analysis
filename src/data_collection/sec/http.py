@@ -20,6 +20,7 @@ log = logging.getLogger("sec")
 TIMEOUT = (15, 120)  # (connect, read)
 RETRIES = 2
 MIN_INTERVAL = 0.12  # SEC's 10 req/s cap -> floor 0.1s; 0.12 leaves margin
+BACKOFF_BASE = 2  # seconds; doubles each retry (2s, 4s, ...)
 
 _last_request = 0.0
 
@@ -59,4 +60,9 @@ def get(url: str) -> requests.Response | None:
                 log.warning("%s: network error after %d attempts: %s", url, RETRIES + 1, e)
                 return None
             log.warning("%s: %s — retrying (%d/%d)", url, type(e).__name__, attempt + 1, RETRIES)
+            # Backoff before the retry, distinct from _throttle's per-request floor:
+            # without this, all RETRIES+1 attempts fire ~0.12s apart, so a 429 or a
+            # transient 503 usually burns every attempt inside a fraction of a
+            # second and gives up -- no real recovery window at all.
+            time.sleep(BACKOFF_BASE * 2 ** attempt)
     return None
