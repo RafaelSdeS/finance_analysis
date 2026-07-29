@@ -888,8 +888,17 @@ files, 2026-07-29):**
    the `item6` tier). Fixed with a last-line-of-defense bound in `item6.build_cik_history`: any
    extracted `fiscal_year` outside `[1990, 2010]` (generous margin around `GAP_ERA`) is dropped
    before it can reach fundamentals.py's cascade, independent of whatever mis-parse produces it.
-   **Not yet done:** the other 472 of those 751 have their earliest row on the `xbrl` tier instead
-   — a different, NOT-yet-fixed cause. One real instance confirmed (AA/Alcoa: ticker AA's current
+   **Verified 2026-07-29** by rebuilding fundamentals for all 671 flagged tickers with the fix in
+   place: zero remaining implausible dates (earliest `end` across every still-"gapped" item6-tier
+   ticker now ranges 1990-2005, confirmed on AAPL and AMG directly). The 199→128 item6-tier count
+   didn't collapse to zero because the gap heuristic itself is blunt — it compares a ticker's
+   earliest fundamentals `end` against its CIK's earliest indexed SEC filing of *any* form type,
+   which flags plenty of legitimate cases too (a company's first e-filed 10-K legitimately showing
+   comparative data from a couple years before EDGAR e-filing became mandatory, e.g. MCD/NVDA/ITW)
+   — not a bug, just this measurement heuristic's own false-positive rate. The xbrl-tier count
+   (472) is unchanged before/after, as expected since this fix doesn't touch that tier.
+   **Not yet done:** those 472 xbrl-tier tickers have a different, NOT-yet-fixed cause. One real
+   instance confirmed (AA/Alcoa: ticker AA's current
    CIK 1675149 is Alcoa Corp, spun off 2016; its first 10-K legitimately discloses 2013-2015
    predecessor-entity comparatives under the new CIK, so the combined series silently blends two
    legally distinct companies' books). But spot-checking the rest shows this is mixed with a
