@@ -32,7 +32,7 @@ def collect_company_info(tickers: list[str]) -> pd.DataFrame:
     ticker_to_cik = dict(zip(cw["ticker"], cw["cik"]))
 
     rows = []
-    for ticker in tickers:
+    for i, ticker in enumerate(tickers, 1):
         cik = ticker_to_cik.get(ticker)
         if cik is None:
             log.info("company_info %s: no CIK in tier-1 crosswalk, skipping", ticker)
@@ -49,6 +49,9 @@ def collect_company_info(tickers: list[str]) -> pd.DataFrame:
             "sic": data.get("sic") or None,
             "sic_description": data.get("sicDescription") or None,
         })
+        if i % 500 == 0:
+            log.info("company_info: %d/%d tickers processed (%d resolved so far)",
+                      i, len(tickers), len(rows))
 
     df = pd.DataFrame(rows, columns=["ticker", "cik", "sic", "sic_description"])
     config.US_SEC_DIR.mkdir(parents=True, exist_ok=True)
