@@ -46,7 +46,7 @@ Re-run these probes before trusting any number here that is older than a few mon
 | **EX-27 Financial Data Schedule** | Structured tag-value financials (~30 fields) inside pre-XBRL filings. Sampled 10-Ks: **1996Q1 8/8 present, 1999Q1 6/8, 2001Q1 2/8, 2002Q1 0/8** |
 | FRED | **Works with no API key** via `fredgraph.csv?id=<series>`. `CPIAUCNS` returns **1913-01-01 → 2026-06-01**, 1,363 monthly rows |
 | Stooq (delisted-price fallback) | **Bot-blocked** — returns a JS challenge page, not CSV. Not usable |
-| Alpha Vantage `LISTING_STATUS` | demo key returns 0 rows; needs a real free key. **Untested — Phase 0 item** |
+| Alpha Vantage `LISTING_STATUS` | demo key returns 0 rows, but a **real free key works**: `state=delisted` returns 9,390 real symbols (symbol/name/exchange/ipoDate/delistingDate). `TIME_SERIES_DAILY` on two of them (AA-W, AABA) returned real daily OHLCV ending exactly on each one's delistingDate — **delisted prices are free-tier obtainable.** Verified 2026-07-29. Gating constraint: free tier is **25 requests/day total**, `outputsize=compact` (~100 rows) only tested, `full` history depth unverified — see §4.2 |
 | Current BR dataset (for scale comparison) | 1,308,104 rows, 510 tickers, 2000-01-03 → 2026-07-14 |
 | BR raw footprint | 1,199 price files / 104 MB; fundamentals 21 MB |
 
@@ -445,13 +445,21 @@ Each phase ends green before the next starts, per the standing rule in this repo
 - [x] Parsed real EX-27s (not just 20 synthetic ones): confirmed field set and `<MULTIPLIER>`
       handling against Coca-Cola's real FY1994 filing — reconciles exactly to $13.873B total
       assets (Phase 5, below).
-- [ ] Get a free Alpha Vantage key and test `LISTING_STATUS&state=delisted` — does it return
-      a delisted roster with dates, and does it serve *prices* for delisted symbols? If yes,
-      §4.1's "prices ❌" downgrades to "partial ✅" and Phase 3 changes materially.
+- [x] **Get a free Alpha Vantage key and test `LISTING_STATUS&state=delisted`** — ✅ DONE
+      2026-07-29. Yes on both counts: 9,390 real delisted symbols returned (symbol/name/
+      exchange/ipoDate/delistingDate), and `TIME_SERIES_DAILY` served real OHLCV for two of
+      them (AA-W, AABA) ending exactly on each one's delisting date. §4.1's "prices ❌"
+      downgrades to "partial ✅" as anticipated. **But** the free tier caps at 25 requests/
+      day total — at that rate, even just the ~9,390-symbol roster (one call each for
+      prices, ignoring the `LISTING_STATUS` call itself) is **~376 days** serially. Doesn't
+      change Phase 3's design, but does mean "free" here isn't "free at this universe's
+      scale" — see the sharpened §8 decision below.
 - [x] Check whether you have any university/WRDS affiliation — **answered: no.** Proceed with
       the free-source plan as designed (§4.4's paid options remain a later decision, not this).
-- [ ] Confirm yfinance mass-fetch behaviour at scale: rate limits / throttling on ~500
-      sequential tickers, to size Phase 3 runtime.
+- [x] Confirm yfinance mass-fetch behaviour at scale — **answered empirically, not by a
+      dedicated experiment:** Yahoo throttling was hit for real at ~2,462 tickers on a 0.3s
+      pace (see `git log`, `ceb7b52`), fixed by a separate, slower `YF_RATE_LIMIT_SLEEP=1.0`
+      just for yfinance calls. Closing this box with that finding rather than re-testing.
 
 **Gate:** if EX-27 prevalence is below ~50%, drop the 1994–2001 tier and revert to a 2009 floor.
 **Met, with a correction:** 56.3% clears the bar, but the *usable* window is 1995-2000, not
@@ -987,8 +995,13 @@ equity), and only if the missing ratios prove to matter. Table *selection* is th
 
 ## 8. Decisions still open
 
-1. **Alpha Vantage / CRSP check (Phase 0).** If either yields delisted prices, §4 changes
-   substantially — worth resolving before Phase 3.
+1. ~~**Alpha Vantage / CRSP check (Phase 0).**~~ **Resolved 2026-07-29:** Alpha Vantage's
+   free tier does serve delisted prices (verified, see §2/Phase 0), but its 25-request/day
+   cap makes bulk collection at this universe's scale (~9,390 delisted symbols) a
+   ~376-day serial pull — free in dollars, not in practice. The real open question is now
+   decision 2 below: is Alpha Vantage *premium* (uncapped daily calls) worth it, as an
+   alternative to Sharadar, to actually close the survivorship gap? CRSP was never checked
+   (no university/WRDS access, per Phase 0's other closed box) and remains untested.
 2. **Paid price data.** If a genuinely survivorship-bias-free US backtest is a hard
    requirement rather than a nice-to-have, Sharadar (~$50/mo) is the cheapest credible route
    and should be decided now, not after Phase 6.

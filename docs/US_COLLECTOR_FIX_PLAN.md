@@ -107,25 +107,39 @@ most credible "recently disappeared, plausibly once-investable" bound.
 - [ ] **Tighten the number** before building anything: restrict roster CIKs to those with
       real equity characteristics (e.g. non-trivial filing history + a resolvable former
       ticker) to convert 37,951 into a defensible figure.
-- [ ] **Run the never-executed Phase 0 test: does Alpha Vantage's free
-      `LISTING_STATUS&state=delisted` return a delisted roster *with prices*?** This is one
-      afternoon and it decides everything downstream. Fundamentals for dead CIKs are
-      recoverable free (SEC keeps every filing; `build_company_fundamentals` already keys
-      on CIK) — but **fundamentals without prices are near-worthless**: a company with no
-      price series can't be a dataset row, can't contribute returns, and can't enter
-      cross-sectional stats. Build the recovery ladder only if prices are obtainable.
-- [ ] **Then decide, explicitly:**
-      - AV serves delisted prices → build crosswalk tiers 2-4 (dead-company CIK recovery)
-        and collect the dead universe. Note this forces the file-naming question: dead
-        companies have no current ticker, so output must key on **CIK**, with ticker
-        demoted to a join column (which is what the plan's own risk table already
-        prescribes — "key everything on CIK, never on ticker").
-      - AV doesn't → either accept the bias and *document it loudly* in the dataset
-        manifest (mirroring BR's `TOP50_UNIVERSE_VALIDATION.md` treatment), or resolve
-        §8's paid-data decision (Sharadar, ~$50/mo) if a bias-free US backtest is a hard
-        requirement rather than a nice-to-have.
+- [x] **Run the never-executed Phase 0 test: does Alpha Vantage's free
+      `LISTING_STATUS&state=delisted` return a delisted roster *with prices*?** ✅ DONE
+      2026-07-29, both YES:
+      - `LISTING_STATUS&state=delisted` (real free key, not `demo`) returned **9,390** real
+        symbols with `symbol/name/exchange/ipoDate/delistingDate/status`.
+      - `TIME_SERIES_DAILY` on two of them (AA-W, AABA) returned real daily OHLCV data
+        ending exactly on each symbol's `delistingDate` — confirmed against known
+        history (AABA/Altaba delisted 2019-11-06, price series ends that exact date with
+        real volume, not a placeholder).
+      - **The catch:** free tier is capped at **25 requests/day, total**. At that rate,
+        pulling prices for all 9,390 delisted symbols is ~376 days serially — technically
+        free, not practically free at this universe's scale. `outputsize=compact` (~100
+        rows) is what was tested; `full` history depth is unverified and doesn't change
+        the rate-limit math anyway (still 1 request per symbol).
+      - Not yet checked: whether AV's roster is ticker-only or also exposes/derivable-to a
+        CIK (needed to join delisted prices back to SEC fundamentals for the same company).
+- [ ] **Then decide, explicitly** (sharpened by the result above — this is no longer "does
+      free work," it's "is paying for AV premium or Sharadar worth it"):
+      - Pay for AV premium (lifts the 25/day cap) or Sharadar (~$50/mo, per §8) → build
+        crosswalk tiers 2-4 (dead-company CIK recovery, to join AV's ticker-keyed delisted
+        roster back to a CIK for fundamentals) and collect the dead universe. Forces the
+        file-naming question: dead companies have no current ticker, so output must key on
+        **CIK**, with ticker demoted to a join column (already prescribed by the plan's own
+        risk table — "key everything on CIK, never on ticker").
+      - Stay free tier → the 25/day cap makes a full recovery impractical; either accept
+        the bias and *document it loudly* in the dataset manifest (mirroring BR's
+        `TOP50_UNIVERSE_VALIDATION.md` treatment), or use the free tier for a small,
+        deliberately-scoped subset (e.g. only the largest/most-known delisted names) rather
+        than the full ~9,390.
 
 Until one of those lands, any US backtest is survivorship-biased and must be labelled so.
+This is a spend-money-or-accept-bias decision now, not a research question — the research
+is done.
 
 ---
 
