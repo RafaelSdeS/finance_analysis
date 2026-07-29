@@ -998,14 +998,16 @@ equity), and only if the missing ratios prove to matter. Table *selection* is th
 1. ~~**Alpha Vantage / CRSP check (Phase 0).**~~ **Resolved 2026-07-29:** Alpha Vantage's
    free tier does serve delisted prices (verified, see §2/Phase 0), but its 25-request/day
    cap makes bulk collection at this universe's scale (~9,390 delisted symbols) a
-   ~376-day serial pull — free in dollars, not in practice. The real open question is now
-   decision 2 below: is Alpha Vantage *premium* (uncapped daily calls) worth it, as an
-   alternative to Sharadar, to actually close the survivorship gap? CRSP was never checked
-   (no university/WRDS access, per Phase 0's other closed box) and remains untested.
-2. **Paid price data.** If a genuinely survivorship-bias-free US backtest is a hard
-   requirement rather than a nice-to-have, Sharadar (~$50/mo) is the cheapest credible route
-   and should be decided now, not after Phase 6.
-3. **Universe breadth.** All ~10,432 tickers, or a liquidity/market-cap screen? Full breadth
-   pulls in thousands of microcaps and OTC shells whose data quality is poor (the BR pipeline
-   already needed a quarantine list for exactly this). Suggest: collect broadly, filter at
-   Stage 2, mirroring the existing BR approach.
+   ~376-day serial pull — free in dollars, not in practice. CRSP was never checked (no
+   university/WRDS access, per Phase 0's other closed box) and remains untested, moot now
+   given decision 2.
+2. ~~**Paid price data.**~~ **Resolved 2026-07-29: declined.** User will not pay for Alpha
+   Vantage premium or Sharadar. Survivorship bias is accepted, not fixed — see
+   `US_COLLECTOR_FIX_PLAN.md` §4 for the tightened gap measurement (a name-matched floor of
+   ~2,503 confirmed-delisted equities, vs. the raw 37,951-CIK ceiling, both approximate) and
+   the closed decision record. Crosswalk tiers 2-4 (dead-company CIK recovery) are **NOT
+   DOING**. Any US backtest must disclose this bias; the permanent home for that disclosure
+   is the `us_ml_dataset.parquet` manifest once Stage 2 builds it (not yet).
+3. ~~**Universe breadth.**~~ **Resolved in practice:** the running collection already
+   covers the full ~10,432-ticker tier-1 crosswalk (not a narrower screen), matching the
+   "collect broadly, filter at Stage 2" recommendation below.

@@ -77,9 +77,11 @@ with this finding.
 
 ---
 
-## 4. Survivorship bias — the one that actually matters
+## 4. Survivorship bias — accepted, documented, not fixed (decision made 2026-07-29)
 
-Present and unfixed. Two independent halves, and the cheap half gates the expensive half.
+Present and **staying unfixed by deliberate decision** — not paying for Alpha Vantage
+premium or Sharadar. This section records the measurement and the decision, not an open
+TODO. Two independent halves existed; both are now closed the same way.
 
 **What's on disk already:** `sec/universe.py` builds a genuinely point-in-time,
 survivorship-bias-free roster (`us_universe_roster.parquet`) — verified to drop Lehman,
@@ -101,12 +103,35 @@ reads the *current-listings* crosswalk instead. The instrument exists; the wirin
 **Do not quote 87.5% as the equity survivorship gap.** The roster counts every 10-K/10-Q
 filer, which sweeps in debt-only registrants (bond covenants, no public stock), subsidiary
 co-registrants, LPs/trusts, and blank-check shells that never had listed common equity.
-It's an upper bound, and an inflated one. The ~5,405 that last filed since 2020 are the
-most credible "recently disappeared, plausibly once-investable" bound.
+It's an upper bound, and an inflated one.
 
-- [ ] **Tighten the number** before building anything: restrict roster CIKs to those with
-      real equity characteristics (e.g. non-trivial filing history + a resolvable former
-      ticker) to convert 37,951 into a defensible figure.
+- [x] **Tighten the number.** ✅ DONE 2026-07-29, cross-referenced the 37,951 orphan CIKs'
+      company names against Alpha Vantage's confirmed delisted-equity roster (9,390 real
+      symbols, see below) via normalized-name matching:
+
+      | | count |
+      |---|---|
+      | raw orphan CIKs (roster minus current crosswalk) | 37,951 |
+      | name-matched against AV's confirmed delisted-equity roster | 2,503 (6.6%) |
+      | of those, last filed ≥ 2020 | 1,208 |
+
+      **2,503 is a rough floor, not a precise count.** Name-matching SEC filer names
+      against AV listing names has real noise both directions: formatting drift
+      (punctuation, suffixes, historical renames) causes undercounts; generic-name
+      collisions across ~38K × 9K comparisons cause some overcounts. Not worth chasing
+      more precision — the decision below is "accept the bias," not "build a precise
+      recovery," so an honest approximate bracket is enough.
+      - **Distinct finding, not survivorship bias:** spot-checking an "unmatched, long
+        filing history" orphan (Xerox Corp, CIK 108772) found it isn't missing at all —
+        Xerox's 2019 holdco restructuring moved filings to a *new* CIK (1770450, "Xerox
+        Holdings Corp"), which **is** in the current crosswalk under ticker XRX and
+        already fully collected. The old CIK is retired, not delisted. This is a
+        measurement artifact (an old, superseded CIK reads as "orphaned" when the company
+        is alive under a successor CIK), not evidence of additional bias — but it means
+        even the tightened 2,503 could include a few more such false positives on the
+        "unmatched" side that weren't individually checked. Not pursued further: fixing
+        this class of artifact for real would mean building the same kind of CIK-succession
+        detection as the dead-company recovery ladder below, which isn't being built.
 - [x] **Run the never-executed Phase 0 test: does Alpha Vantage's free
       `LISTING_STATUS&state=delisted` return a delisted roster *with prices*?** ✅ DONE
       2026-07-29, both YES:
@@ -118,28 +143,19 @@ most credible "recently disappeared, plausibly once-investable" bound.
         real volume, not a placeholder).
       - **The catch:** free tier is capped at **25 requests/day, total**. At that rate,
         pulling prices for all 9,390 delisted symbols is ~376 days serially — technically
-        free, not practically free at this universe's scale. `outputsize=compact` (~100
-        rows) is what was tested; `full` history depth is unverified and doesn't change
-        the rate-limit math anyway (still 1 request per symbol).
-      - Not yet checked: whether AV's roster is ticker-only or also exposes/derivable-to a
-        CIK (needed to join delisted prices back to SEC fundamentals for the same company).
-- [ ] **Then decide, explicitly** (sharpened by the result above — this is no longer "does
-      free work," it's "is paying for AV premium or Sharadar worth it"):
-      - Pay for AV premium (lifts the 25/day cap) or Sharadar (~$50/mo, per §8) → build
-        crosswalk tiers 2-4 (dead-company CIK recovery, to join AV's ticker-keyed delisted
-        roster back to a CIK for fundamentals) and collect the dead universe. Forces the
-        file-naming question: dead companies have no current ticker, so output must key on
-        **CIK**, with ticker demoted to a join column (already prescribed by the plan's own
-        risk table — "key everything on CIK, never on ticker").
-      - Stay free tier → the 25/day cap makes a full recovery impractical; either accept
-        the bias and *document it loudly* in the dataset manifest (mirroring BR's
-        `TOP50_UNIVERSE_VALIDATION.md` treatment), or use the free tier for a small,
-        deliberately-scoped subset (e.g. only the largest/most-known delisted names) rather
-        than the full ~9,390.
+        free, not practically free at this universe's scale.
+- [x] **Decision (2026-07-29): stay on the free tier, accept the bias, do not build the
+      recovery ladder.** User declined to pay for AV premium or Sharadar. Crosswalk tiers
+      2-4 (dead-company CIK recovery) are **NOT DOING** — not deferred, not blocked,
+      closed. The 25/day free-tier cap makes a full recovery impractical, and a small
+      hand-picked subset (a dozen famous delisted names, illustrative only) was offered
+      and explicitly not requested — nothing partial is being built either.
 
-Until one of those lands, any US backtest is survivorship-biased and must be labelled so.
-This is a spend-money-or-accept-bias decision now, not a research question — the research
-is done.
+**What's actually left, now that the decision is made:** document it, don't fix it. The
+natural permanent home for this disclosure is the `us_ml_dataset.parquet` manifest, as a
+first-class field (Stage 2, §5 below) — but that dataset doesn't exist until Stage 2 is
+built. Until then, this section *is* the disclosure. Any US backtest run before Stage 2
+records this properly is survivorship-biased and must be labelled so by whoever runs it.
 
 ---
 
