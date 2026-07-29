@@ -54,6 +54,7 @@ Usage: python tests/data_collection/test_sec_fundamentals.py
 """
 
 import sys
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -223,6 +224,47 @@ def test_predecessor_entity_rows_are_dropped():
     print("OK: predecessor-entity rows are dropped for known spinoff/split-off CIKs, other CIKs untouched")
 
 
+def test_skip_existing_resumes_past_already_collected_tickers():
+    # collect_fundamentals_us has no resume by design -- a derivation fix (item6
+    # cascade, a CONCEPT_MAP addition) must reach every already-collected company,
+    # not just new ones. skip_existing=True is the opt-in escape hatch for
+    # resuming a crashed/killed run instead: confirms it actually skips a ticker
+    # whose output parquet already exists, and that the default (False) still
+    # rebuilds everything regardless of what's on disk.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        cw_path = tmp / "crosswalk.parquet"
+        pd.DataFrame({"ticker": ["AAA", "BBB"], "cik": [1, 2]}).to_parquet(cw_path, index=False)
+        filings_path = tmp / "filings.parquet"
+        pd.DataFrame({"cik": [1, 2]}).to_parquet(filings_path, index=False)
+        fund_dir = tmp / "fund"
+        fund_dir.mkdir()
+        (fund_dir / "AAA.parquet").write_bytes(b"placeholder")  # pre-existing output
+
+        built = []
+
+        def fake_build(cik, filings):
+            built.append(cik)
+            return pd.DataFrame({"end": pd.to_datetime(["2020-12-31"]),
+                                  "fundamentals_tier": ["xbrl"]})
+
+        with mock.patch.object(fundamentals.crosswalk, "CROSSWALK_PATH", cw_path), \
+             mock.patch.object(fundamentals.universe, "FILINGS_PATH", filings_path), \
+             mock.patch.object(fundamentals, "build_company_fundamentals", side_effect=fake_build):
+            fundamentals.collect_fundamentals_us(["AAA", "BBB"], fund_dir=fund_dir,
+                                                  workers=1, skip_existing=True)
+        assert built == [2], f"AAA already has an output file -- skip_existing must skip rebuilding it, built={built}"
+
+        built.clear()
+        with mock.patch.object(fundamentals.crosswalk, "CROSSWALK_PATH", cw_path), \
+             mock.patch.object(fundamentals.universe, "FILINGS_PATH", filings_path), \
+             mock.patch.object(fundamentals, "build_company_fundamentals", side_effect=fake_build):
+            fundamentals.collect_fundamentals_us(["AAA", "BBB"], fund_dir=fund_dir,
+                                                  workers=1, skip_existing=False)
+        assert sorted(built) == [1, 2], f"default (skip_existing=False) must rebuild every ticker, got {built}"
+    print("OK: skip_existing resumes past already-collected tickers; default still rebuilds everything")
+
+
 if __name__ == "__main__":
     test_non_calendar_fiscal_year_end_does_not_precede_filing()
     test_non_calendar_fiscal_year_end_fixes_every_row_not_just_the_flagged_one()
@@ -230,3 +272,4 @@ if __name__ == "__main__":
     test_tier_boundary_near_duplicate_end_dates_are_deduped()
     test_source_data_anomaly_is_dropped_not_left_in()
     test_predecessor_entity_rows_are_dropped()
+    test_skip_existing_resumes_past_already_collected_tickers()

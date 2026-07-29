@@ -11,6 +11,7 @@ in as if it were a real quarterly observation.
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
@@ -214,11 +215,26 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def collect_fundamentals_us(tickers: list[str], fund_dir=None) -> None:
+def collect_fundamentals_us(tickers: list[str], fund_dir=None, workers: int = 8,
+                             skip_existing: bool = False) -> None:
     """Batch driver: ticker -> CIK (tier-1 crosswalk) -> build_company_fundamentals()
     -> data/raw/us/fundamentals/{ticker}.parquet. Skips tickers the tier-1 crosswalk
     can't resolve (dead companies -- see plan §4.3) or that yield no fundamentals at
     all from either tier, logging why rather than silently continuing.
+
+    Runs `workers` tickers concurrently (I/O-bound: mostly waiting on SEC HTTP
+    responses). This does NOT lift SEC's 10 req/s cap -- http._throttle() is a
+    single lock shared by every thread, so total request rate is unchanged.
+    The speedup instead comes from overlapping each ticker's own per-request
+    latency/backoff with other tickers' work, rather than one ticker's full
+    multi-request build finishing before the next one even starts.
+
+    `skip_existing` (default off) is for resuming a crashed/killed run only --
+    it skips a ticker whose output parquet already exists rather than rebuilding
+    it. Leave off for a real rebuild (e.g. after a derivation fix like the item6
+    cascade or a CONCEPT_MAP addition): those need every already-collected
+    company redone, not just new ones, or the fix silently never reaches rows
+    already on disk.
     """
     fund_dir = fund_dir or config.US_FUNDAMENTALS_DIR
     fund_dir.mkdir(parents=True, exist_ok=True)
@@ -227,22 +243,27 @@ def collect_fundamentals_us(tickers: list[str], fund_dir=None) -> None:
     ticker_to_cik = dict(zip(cw["ticker"], cw["cik"]))
     filings = pd.read_parquet(universe.FILINGS_PATH)
 
-    for ticker in tickers:
+    def _one(ticker: str) -> None:
+        if skip_existing and (fund_dir / f"{ticker}.parquet").exists():
+            return
         cik = ticker_to_cik.get(ticker)
         if cik is None:
             log.info("fundamentals %s: no CIK in tier-1 crosswalk, skipping", ticker)
-            continue
+            return
         try:
             df = build_company_fundamentals(int(cik), filings)
         except Exception as e:
             log.warning("fundamentals %s (CIK %s): skipping after error: %s", ticker, cik, e)
-            continue
+            return
         if df.empty:
             log.info("fundamentals %s (CIK %s): no data from either tier", ticker, cik)
-            continue
+            return
         df.to_parquet(fund_dir / f"{ticker}.parquet", index=False)
         log.info("fundamentals %s: %d rows (%s)", ticker, len(df),
                   df["fundamentals_tier"].value_counts().to_dict())
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(_one, tickers))
 
 
 if __name__ == "__main__":

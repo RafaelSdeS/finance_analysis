@@ -9,6 +9,7 @@ CVM open-data.
 """
 
 import logging
+import threading
 import time
 
 import requests
@@ -23,14 +24,18 @@ MIN_INTERVAL = 0.12  # SEC's 10 req/s cap -> floor 0.1s; 0.12 leaves margin
 BACKOFF_BASE = 2  # seconds; doubles each retry (2s, 4s, ...)
 
 _last_request = 0.0
+_lock = threading.Lock()  # callers now run from a ThreadPoolExecutor (fundamentals.py) --
+# check-then-set on _last_request isn't atomic, so concurrent threads could both see
+# a stale gap and fire together, bursting past the 10 req/s cap this exists to enforce.
 
 
 def _throttle():
     global _last_request
-    wait = MIN_INTERVAL - (time.monotonic() - _last_request)
-    if wait > 0:
-        time.sleep(wait)
-    _last_request = time.monotonic()
+    with _lock:
+        wait = MIN_INTERVAL - (time.monotonic() - _last_request)
+        if wait > 0:
+            time.sleep(wait)
+        _last_request = time.monotonic()
 
 
 def get(url: str) -> requests.Response | None:
