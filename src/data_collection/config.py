@@ -103,7 +103,15 @@ RATE_LIMIT_SLEEP = 0.3      # polite pause between per-ticker calls (BolsAI, a p
 # throttle, not an IP ban, so a slower per-ticker pace should avoid retriggering it. Kept
 # separate from RATE_LIMIT_SLEEP (not just raised globally) so BolsAI backfill runs aren't
 # slowed down by a fix that has nothing to do with them.
-YF_RATE_LIMIT_SLEEP = 1.0
+#
+# Re-tested 0.5s deliberately (2026-07-29), since 1.0s was picked without probing anything
+# between 0.3s (broken) and 1.0s (safe) -- 330 cold tickers across two isolated runs (a
+# scale comparable to where 0.3s actually failed: "a few hundred tickers in"), empty-rate
+# DECREASING across the batch (3/83 -> 1/83 -> 0/83), the opposite of the throttle-onset
+# signature above -- not the flat/rising pattern a real throttle would show. Actual
+# per-ticker cost (~2.1s) is dominated by yfinance's own network+processing time, not this
+# sleep, so the real gain is modest (~35%) but genuine, not guessed.
+YF_RATE_LIMIT_SLEEP = 0.5
 
 # --- Paths ---
 RAW_DIR = PROJECT / "data/raw"
