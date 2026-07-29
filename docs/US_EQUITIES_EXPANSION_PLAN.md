@@ -897,17 +897,51 @@ files, 2026-07-29):**
    comparative data from a couple years before EDGAR e-filing became mandatory, e.g. MCD/NVDA/ITW)
    — not a bug, just this measurement heuristic's own false-positive rate. The xbrl-tier count
    (472) is unchanged before/after, as expected since this fix doesn't touch that tier.
-   **Not yet done:** those 472 xbrl-tier tickers have a different, NOT-yet-fixed cause. One real
-   instance confirmed (AA/Alcoa: ticker AA's current
-   CIK 1675149 is Alcoa Corp, spun off 2016; its first 10-K legitimately discloses 2013-2015
-   predecessor-entity comparatives under the new CIK, so the combined series silently blends two
-   legally distinct companies' books). But spot-checking the rest shows this is mixed with a
-   second, *benign* explanation — foreign filers that only recently converted from 20-F to 10-K
-   (TEVA, NXPI, SHOP, CNH, JHX, ENB, CP, WCN, FLUT and others: their XBRL history predates our
-   10-K/10-Q-only filing roster because 20-F filings, which aren't collected, came first) — same
-   shape as the already-cleared ABEV/AER case, not a bug. Distinguishing genuine predecessor-blend
-   from benign FPI-conversion across the full 472 is unscoped; needs a design decision before
-   fixing, not attempted here.
+   **Fixed 2026-07-29** (`fundamentals.PREDECESSOR_CUTOFFS`, `sec/fundamentals.py`) for the
+   confirmed-genuine subset of those 472 xbrl-tier tickers. One real instance (AA/Alcoa: ticker
+   AA's current CIK 1675149 is Alcoa Corp, spun off 2016; its first 10-K legitimately discloses
+   2013-2015 predecessor-entity comparatives under the new CIK, silently blending two legally
+   distinct companies' books) turned out to generalize to a real category, not a one-off — but the
+   472 as a whole is a mix of several *different* things, most of them NOT this bug:
+   - **Same-entity/different-form-type noise** (~151 of 472): cleared by comparing against a CIK's
+     *true* earliest-known existence via `submissions.json`'s `formerNames` + filing history
+     (covers ALL SEC form types, unlike this repo's 10-K/10-Q-only filing roster) instead of the
+     crude full_index-based check. TEVA, NXPI, SHOP, CNH, JHX, ENB, CP, WCN, FLUT and others are
+     this: their XBRL history predates our 10-K/10-Q roster because 20-F filings (not collected)
+     came first — same shape as the already-cleared ABEV/AER case, not a bug.
+   - **Normal pre-IPO comparative disclosure** (majority of the remaining ~321): a company that
+     IPO'd showing 2-3 years of pre-IPO financials in its first 10-K/S-1 is completely standard SEC
+     practice, not predecessor blending — there's no OTHER ticker anywhere claiming the same
+     history, so no double-counting/misattribution risk. Confirmed via SEC's own structural
+     signal: these CIKs' earliest filing is an **S-1** (traditional IPO registration), not a
+     **Form 10-12B/G** (the mechanism used specifically to distribute shares to an existing
+     parent's shareholders).
+   - **Genuine predecessor blend, confirmed and fixed (40 tickers)**: verified via SEC's own
+     structural filing-type signal, not memory — 33 confirmed by an earliest filing of Form
+     10-12B/G; 7 more registered via an S-4 exchange offer instead (a spin-off variant) but with an
+     independently-confirmed continuing separate parent (e.g. ATMU/Cummins, CRBG/AIG,
+     ADEA/Xperi, KVUE/J&J, VNOM/Diamondback) or, for KHC and NE, a different mechanism (a
+     multi-generation merger predating Kraft Foods Group's own 2012 Mondelez spinoff; a 2021
+     Chapter 11 successor entity) with the same "wrong legally-distinct entity's numbers"
+     shape. Full list and rationale in `sec/fundamentals.py`'s `PREDECESSOR_CUTOFFS` dict.
+   - **Explicitly rejected as NOT this bug, ~60 more candidates checked**: redomiciliations/tax
+     inversions (AVGO, MDT, ETN, STE, WFRD, ALKS, OVV, CNH — same single company, re-incorporated
+     abroad), pre-IPO holdco insertions and PE-backed re-IPOs (BURL, ARMK, ADT, SFM, SHC, SAIL,
+     DRVN, TPG, ESTC and ~15 more — same company, no second entity created), one holdco
+     reorganization of a 95-year-old company ahead of an acquisition (**Disney** — "TWDC Holdco 613
+     Corp" looks exactly like a spinoff shell but isn't one), two pure name-typo false positives
+     (PSN, VSXY's initial match before its Form 10 confirmed it WAS real), and — the genuinely
+     unresolved residue — mergers of two comparably-sized companies where NEITHER survives
+     separately today (EVRG, QRVO, FTI, ALKS, CRGY, FUN, BKR, LNTH, QSR, ATAI): no *live*
+     double-counting risk since there's no separately-trading sibling to conflict with, but "whose
+     history is this, really" is unresolvable without deeper research and not worth guessing at —
+     left alone rather than risk wrongly truncating legitimate data.
+   - Automated full-text search (SEC's EDGAR full-text search API, querying for "spin-off"/"merger"
+     language near each CIK's registration date) was tried to speed up the S-4-bucket
+     sub-classification and abandoned — boilerplate risk-factor language about unrelated spin-offs
+     pollutes results too much to discriminate reliably (KHC, a merger, scored the MOST spin-off-
+     language hits of the whole batch). The structural filing-TYPE signal (which form was actually
+     filed) proved far more reliable than searching filing TEXT.
 3. **`_prices_fetch_start` trusted a truncated first fetch as "this is where history starts."**
    Confirmed on GRTX (a real, actively-traded Nasdaq biotech listed since 2020): a rate-limited
    batch run recorded only 2 rows, both from the same week collection ran. Because this collector

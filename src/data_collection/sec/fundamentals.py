@@ -27,6 +27,76 @@ log = logging.getLogger("sec")
 # than leave a silent duplicate `end` if one does.
 _TIER_PRIORITY = {"xbrl": 0, "ex27": 1, "item6": 2}
 
+# A handful of CIKs are genuine corporate spinoffs/split-offs/post-bankruptcy
+# successors whose SEC companyfacts XBRL data includes PRE-SEPARATION
+# comparative financials describing a legally different predecessor entity --
+# not this company's own standalone history. Unlike CIK_OVERRIDES
+# (crosswalk.py's shell-CIK fix), the CIK here is already the right one for
+# the ticker; the problem is upstream SEC XBRL data blending a predecessor's
+# books into the new registrant's own facts, an inverse-shaped version of the
+# same "wrong entity's numbers under this ticker" risk. Found auditing a
+# "751/1,848 tickers have a fundamentals gap" symptom (2026-07-29): most of
+# that gap turned out to be the item6.py cascade bug (see item6.py's
+# _FISCAL_YEAR_MIN/_MAX), but 40 of the remaining xbrl-tier cases are this,
+# confirmed via SEC's own filing-type signal (Form 10-12B/G = share
+# distribution to existing shareholders, the standard spin-off registration
+# mechanism) or, for the smaller remainder registered via an S-4 exchange
+# offer instead, independently confirmed the pre-separation business still
+# trades separately today under its own ticker. Many more candidates were
+# checked and rejected: redomiciliations/tax inversions (same single company,
+# re-incorporated abroad), pre-IPO holdco insertions and PE-backed re-IPOs
+# (same company, no second entity created), and mergers where neither
+# original party still trades separately (no live double-counting risk, just
+# an unresolvable "whose history is this" question not worth guessing at) --
+# see docs/US_EQUITIES_EXPANSION_PLAN.md's Phase 7 section for the full
+# category breakdown and the ~60 rejected candidates.
+#
+# Cutoff = the date the NEW entity actually came into existence (its CIK's
+# earliest filing or formerName); fundamentals rows with `end` before this
+# are dropped, not blended -- there is no correct predecessor value to keep.
+PREDECESSOR_CUTOFFS = {
+    1675149: "2016-06-29",  # AA: Alcoa Corp, spun from Alcoa Inc (now Arconic)
+    2035989: "2024-09-06",  # AMRZ: Amrize, spun from Holcim
+    1501585: "2010-10-15",  # HII: Huntington Ingalls, spun from Northrop Grumman
+    1524472: "2011-07-11",  # XYL: Xylem, spun from ITT Corporation
+    1560385: "2012-10-19",  # FWONA: Liberty Media tracking-stock spinoff vehicle
+    2064953: "2025-05-01",  # SOLS: Solstice Advanced Materials, spun from Honeywell
+    1856437: "2021-04-16",  # VSXY: Victoria's Secret & Co, spun from L Brands (Bath & Body Works)
+    2011286: "2024-03-07",  # AMTM: Amentum, reverse-Morris-trust spin/merger with Jacobs Engineering
+    1710366: "2017-07-11",  # CNR: Core Natural Resources, ex-CONSOL Mining spinoff lineage
+    1795250: "2019-12-03",  # SPHR: Sphere Entertainment, spun from MSG Entertainment
+    1727263: "2018-01-23",  # FTDR: Frontdoor, spun from ServiceMaster (now Terminix)
+    1965040: "2023-02-13",  # FTRE: Fortrea, spun from Labcorp
+    1751788: "2018-09-07",  # DOW: Dow Inc, DowDuPont 3-way split (siblings DD/CTVA)
+    1996810: "2023-10-27",  # GEV: GE Vernova, spun from General Electric
+    2058873: "2025-04-24",  # Q: Qnity Electronics, spun from DuPont
+    2041385: "2024-12-17",  # RAL: Ralliant, spun from Fortive
+    1670541: "2016-04-26",  # ADNT: Adient, spun from Johnson Controls
+    1754301: "2018-10-09",  # FOXA: Fox Corp, split from 21st Century Fox (rest acquired by Disney)
+    1571123: "2013-03-07",  # SAIC: "new" SAIC, spun from original SAIC (kept name Leidos)
+    1519751: "2011-05-06",  # FBIN: Fortune Brands Innovations, spun from Fortune Brands Inc
+    1624794: "2014-12-02",  # CSW: CSW Industrials, spun from Capital Southwest Corporation
+    1627223: "2014-12-18",  # CC: Chemours, spun from DuPont
+    1932393: "2022-07-29",  # GEHC: GE HealthCare, spun from General Electric
+    1679049: "2016-07-15",  # INSW: International Seaways, spun from Overseas Shipholding Group
+    1673358: "2016-05-03",  # YUMC: Yum China, spun from Yum! Brands
+    1636519: "2015-03-27",  # MSGS: Madison Square Garden Sports, spun from MSG Entertainment
+    1868275: "2021-07-26",  # CEG: Constellation Energy, spun from Exelon
+    1564708: "2012-12-21",  # NWSA: "new" News Corp, split from original News Corporation (-> 21CF/Disney)
+    1740332: "2018-06-14",  # REZI: Resideo, spun from Honeywell
+    1929561: "2022-06-01",  # RXO: RXO Inc, spun from XPO Logistics
+    1735707: "2018-05-01",  # GTX: Garrett Motion, spun from Honeywell
+    1603923: "2014-04-02",  # WFRD: Weatherford International, 2019 Ch.11 successor entity
+    1935979: "2022-07-01",  # BHVN: "new" Biohaven, remainder after main business sold to Pfizer
+    1921963: "2022-04-21",  # ATMU: Atmus Filtration, carved out of Cummins
+    2074176: "2025-06-30",  # VNOM: Viper Energy, Diamondback Energy mineral-rights tracking entity
+    1889539: "2021-12-21",  # CRBG: Corebridge Financial, carved out of AIG
+    1803696: "2020-02-18",  # ADEA: Adeia, spun from Xperi (rest continues as "new" Xperi)
+    1944048: "2022-08-30",  # KVUE: Kenvue, spun from Johnson & Johnson
+    1637459: "2015-03-25",  # KHC: Kraft Heinz -- predates Kraft Foods Group's OWN 2012 spinoff from Mondelez
+    1895262: "2021-12-20",  # NE: Noble Corp, 2021 Chapter 11 successor (old Noble legally dissolved)
+}
+
 
 def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     """One CIK's combined fundamentals across all three built tiers, one row
@@ -133,6 +203,14 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
                     "(source data anomaly) -- %s", cik, bad.sum(),
                     result.loc[bad, "end"].dt.date.tolist())
         result = result[~bad].reset_index(drop=True)
+
+    cutoff = PREDECESSOR_CUTOFFS.get(cik)
+    if cutoff:
+        predecessor = result["end"] < pd.Timestamp(cutoff)
+        if predecessor.any():
+            log.warning("fundamentals CIK %s: dropping %d predecessor-entity row(s) before %s -- %s",
+                        cik, predecessor.sum(), cutoff, result.loc[predecessor, "end"].dt.date.tolist())
+            result = result[~predecessor].reset_index(drop=True)
     return result
 
 

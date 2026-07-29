@@ -192,9 +192,41 @@ def test_source_data_anomaly_is_dropped_not_left_in():
     print("OK: a source-data tagging anomaly (end > filed) is dropped, not left in the output")
 
 
+def test_predecessor_entity_rows_are_dropped():
+    # Real bug, found auditing a "751/1,848 tickers have a fundamentals gap"
+    # symptom (2026-07-29): AA's CIK (1675149, Alcoa Corp, spun off from Alcoa
+    # Inc/Arconic in 2016) has real XBRL comparative rows going back to 2013 --
+    # legally a different, predecessor entity's books, not AA's own standalone
+    # history. Also confirms a non-predecessor CIK is left untouched.
+    xbrl_rows = pd.DataFrame({
+        "end": pd.to_datetime(["2013-12-31", "2016-12-31"]),
+        "fundamentals_available_date": pd.to_datetime(["2017-03-15", "2017-03-15"]),
+        "net_income": [100.0, 200.0],
+    })
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value={"placeholder": True}), \
+         mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_rows), \
+         mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.item6, "build_cik_history", return_value=pd.DataFrame()):
+        df = fundamentals.build_company_fundamentals(1675149, pd.DataFrame())
+
+    assert len(df) == 1, "the pre-spinoff (2013) predecessor row must be dropped, the real 2016 row kept"
+    assert str(df.iloc[0]["end"].date()) == "2016-12-31"
+
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value={"placeholder": True}), \
+         mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_rows), \
+         mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.item6, "build_cik_history", return_value=pd.DataFrame()):
+        df_other = fundamentals.build_company_fundamentals(999999999, pd.DataFrame())
+    assert len(df_other) == 2, "a CIK not in PREDECESSOR_CUTOFFS must be completely unaffected"
+    print("OK: predecessor-entity rows are dropped for known spinoff/split-off CIKs, other CIKs untouched")
+
+
 if __name__ == "__main__":
     test_non_calendar_fiscal_year_end_does_not_precede_filing()
     test_non_calendar_fiscal_year_end_fixes_every_row_not_just_the_flagged_one()
     test_short_filing_lag_does_not_round_derived_end_past_filing_date()
     test_tier_boundary_near_duplicate_end_dates_are_deduped()
     test_source_data_anomaly_is_dropped_not_left_in()
+    test_predecessor_entity_rows_are_dropped()
