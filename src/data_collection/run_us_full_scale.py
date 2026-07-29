@@ -12,16 +12,25 @@ docs/US_COLLECTOR_BUG_AUDIT.md).
 
 Mode "us_full_scale_v2" resumes prices/dividends exactly where the prior run
 left off (real incremental checkpoints, untouched by any of the above fixes).
-Fundamentals has no such resume -- collect_fundamentals_us() always rebuilds
-every currently-priced ticker from scratch, which is what's needed here since
-the item6/Q4 fixes must reach every already-collected company, not just new
-ones.
+Fundamentals has no such resume by default -- collect_fundamentals_us() rebuilds
+every currently-priced ticker from scratch, which is what's needed after a
+derivation fix (item6/Q4, a CONCEPT_MAP addition) that must reach every
+already-collected company, not just new ones.
+
+Set RESUME=1 to instead pass skip_existing=True -- skips tickers that already
+have an output fundamentals file. Two real uses: resuming after a crash/kill
+with no derivation change since, and running fundamentals CONCURRENTLY with a
+separate `prices` run (they hit different services -- yfinance vs SEC EDGAR --
+so there's no rate-limit conflict) without redoing tickers a prior pass already
+covered.
 
 Usage: python -m src.data_collection.run_us_full_scale [prices|dividends|fundamentals|universe]
        (no argument runs all four, in order)
+       RESUME=1 python -m src.data_collection.run_us_full_scale fundamentals
 """
 
 import logging
+import os
 import sys
 
 import pandas as pd
@@ -57,7 +66,7 @@ def run_dividends():
 
 def run_fundamentals():
     all_priced = sorted(p.stem for p in config.US_PRICES_DIR.glob("*.parquet"))
-    fundamentals.collect_fundamentals_us(all_priced)
+    fundamentals.collect_fundamentals_us(all_priced, skip_existing=os.environ.get("RESUME") == "1")
 
 
 STEPS = {"universe": run_universe, "prices": run_prices,
