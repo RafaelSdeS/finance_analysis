@@ -365,7 +365,7 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
         except Exception as e:
             log.warning("prices %s: skipping after error: %s", ticker, e)
         finally:
-            sleep(config.RATE_LIMIT_SLEEP)
+            sleep(config.YF_RATE_LIMIT_SLEEP)
 
 
 def _flat_run_fraction(close: pd.Series, min_run: int = 10) -> float:
@@ -602,7 +602,7 @@ def collect_fundamentals_yf(tickers: list[str], mode: str):
         except Exception as e:
             log.warning("fundamentals %s: skipping after error: %s", ticker, e)
         finally:
-            sleep(config.RATE_LIMIT_SLEEP)
+            sleep(config.YF_RATE_LIMIT_SLEEP)
 
 
 # ---------------------------------------------------------------------------
@@ -654,7 +654,7 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
         except Exception as e:
             log.warning("dividends %s: skipping after error: %s", ticker, e)
         finally:
-            sleep(config.RATE_LIMIT_SLEEP)
+            sleep(config.YF_RATE_LIMIT_SLEEP)
 
 
 # ---------------------------------------------------------------------------

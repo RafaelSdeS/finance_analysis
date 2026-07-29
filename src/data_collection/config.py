@@ -93,7 +93,17 @@ MAX_RETRIES = 1             # fail fast on first error; skip-list catches no-dat
 BACKOFF_BASE = 1            # seconds; wait = min(BACKOFF_BASE * 2**attempt, BACKOFF_MAX)
 BACKOFF_MAX = 30
 HTTP_TIMEOUT = 60
-RATE_LIMIT_SLEEP = 0.3      # polite pause between per-ticker calls
+RATE_LIMIT_SLEEP = 0.3      # polite pause between per-ticker calls (BolsAI, a paid/permissive API)
+
+# yfinance is an unofficial scraper, not a rate-limited-but-documented API like BolsAI --
+# confirmed 2026-07-29 at ~2,462-ticker US scale: RATE_LIMIT_SLEEP's 0.3s pace triggered
+# sustained Yahoo-side throttling (widespread "possibly delisted; no price data found" on
+# real, actively-traded tickers like EQH/EQIX) a few hundred tickers in. Re-probing the
+# same tickers directly minutes later returned instantly with correct data -- a rate-based
+# throttle, not an IP ban, so a slower per-ticker pace should avoid retriggering it. Kept
+# separate from RATE_LIMIT_SLEEP (not just raised globally) so BolsAI backfill runs aren't
+# slowed down by a fix that has nothing to do with them.
+YF_RATE_LIMIT_SLEEP = 1.0
 
 # --- Paths ---
 RAW_DIR = PROJECT / "data/raw"
