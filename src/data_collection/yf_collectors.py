@@ -253,6 +253,29 @@ def _repair_bad_ohlc(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
 # prices
 # ---------------------------------------------------------------------------
 
+# No real security has ever traded anywhere near this (Berkshire Hathaway
+# Class A, the most expensive legitimate US stock ever, tops out around
+# $700K) -- a generous ceiling with zero false-positive risk on genuine
+# stocks, however expensive. Found scaling US price collection to the long
+# tail of deeply-diluted penny stocks (2026-07-30): yfinance's OWN raw
+# (auto_adjust=False) history for tickers with many extreme cumulative
+# reverse splits is itself corrupted at the source -- confirmed on 9 tickers
+# (ADTX, MRDN, XTIA, NXPL, JAGX, TOPS, PPCB, NUWE, BINI), all classic
+# repeated-reverse-split penny stocks: 60-90% of EACH ticker's rows show a
+# "Close" in the billions to quadrillions (ADTX max $3.71e12/share, BINI max
+# $3.00e17/share) -- not something our split-repair introduces (confirmed by
+# inspecting raw yfinance output directly, before any of our code touches
+# it), and not something recoverable (there's no way to reconstruct the true
+# historical price from data this corrupted). Left unguarded, this fed into
+# the split-reverse-adjustment multiplication and failed validate_prices with
+# a confusing "adj_open/adj_close outside [adj_low, adj_high]" error that
+# gives no hint of the real cause. Same "unfixable vendor corruption ->
+# quarantine, don't try to repair" precedent as BR's WDCN3, just detected
+# rather than hardcoded, since the signature (implausible absolute magnitude)
+# is mechanically checkable.
+_MAX_PLAUSIBLE_PRICE = 10_000_000.0
+
+
 def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = None) -> pd.DataFrame | None:
     """Fetch one ticker's yfinance OHLCV from fetch_start through now and shape
     it into the on-disk raw-prices schema. Shared by collect_prices_yf (auto-
@@ -267,6 +290,12 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = 
     raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False), f"prices/{ticker}",
                  retry_on_empty=True)
     if raw.empty:
+        return None
+
+    if (raw["Close"] > _MAX_PLAUSIBLE_PRICE).any():
+        log.warning("prices %s: %d row(s) with an implausible Close (max $%.3g/share) -- "
+                    "yfinance's own source data is corrupted for this ticker, not repairable, "
+                    "skipping entirely", ticker, (raw["Close"] > _MAX_PLAUSIBLE_PRICE).sum(), raw["Close"].max())
         return None
 
     raw = _repair_bad_ohlc(raw, ticker)
@@ -910,6 +939,27 @@ def _demo():
     r = validate.validate_prices(out)
     assert r.passed, f"masked NaN must not fail validate_prices' non-positive-adj_* check, got {r.errors}"
     print("_fetch_and_shape_prices negative adj_close: OK")
+
+    # Implausible-price guard: yfinance's OWN raw data can be corrupted at the
+    # source for penny stocks with many extreme cumulative reverse splits
+    # (confirmed on ADTX/MRDN/XTIA/NXPL/JAGX/TOPS/PPCB/NUWE/BINI, 2026-07-30) --
+    # must skip the whole ticker cleanly (return None) rather than let it
+    # cascade into a confusing validate_prices bracket-violation failure.
+    class _FakeTickerCorruptedPrice:
+        def __init__(self, symbol):
+            self.splits = pd.Series([], dtype=float)
+
+        def history(self, start, auto_adjust):
+            idx = _idx3[:2]
+            close = [1.5, 2.5] if auto_adjust else [1.5, 5e12]  # one row wildly implausible
+            return pd.DataFrame({"Open": close, "High": close, "Low": close, "Close": close,
+                                  "Volume": [100, 100]}, index=idx) if not auto_adjust \
+                else pd.DataFrame({"Close": close}, index=idx)
+
+    with mock.patch.object(yf, "Ticker", _FakeTickerCorruptedPrice):
+        out = _fetch_and_shape_prices("CORRUPT", "2020-01-01", suffix="")
+    assert out is None, "a ticker with an implausible (multi-trillion) Close must be skipped entirely, not partially written"
+    print("_fetch_and_shape_prices implausible-price guard: OK")
 
     # _flat_run_fraction must flag yfinance's coverage-padding signature
     # (mostly one repeated value) and pass real, varying data through clean.
