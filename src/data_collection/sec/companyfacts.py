@@ -138,7 +138,7 @@ def _quarterly_only(df: pd.DataFrame) -> pd.DataFrame:
     """
     if "start" not in df.columns or df.empty:
         return df
-    dur = (pd.to_datetime(df["end"]) - pd.to_datetime(df["start"])).dt.days
+    dur = (pd.to_datetime(df["end"], errors="coerce") - pd.to_datetime(df["start"], errors="coerce")).dt.days
     is_ifrs = df["_taxonomy"] == "ifrs-full" if "_taxonomy" in df.columns else False
     return df[is_ifrs | dur.between(60, 100)]
 
@@ -153,7 +153,7 @@ def _annual_only(df: pd.DataFrame) -> pd.DataFrame:
     """
     if "start" not in df.columns or df.empty:
         return df
-    dur = (pd.to_datetime(df["end"]) - pd.to_datetime(df["start"])).dt.days
+    dur = (pd.to_datetime(df["end"], errors="coerce") - pd.to_datetime(df["start"], errors="coerce")).dt.days
     is_ifrs = df["_taxonomy"] == "ifrs-full" if "_taxonomy" in df.columns else False
     return df[~is_ifrs & dur.between(300, 380)]
 
@@ -164,6 +164,18 @@ def as_first_reported(facts: dict, concept: str, annual: bool = False) -> pd.Dat
     (plan §3.3), not whatever the latest restatement holds. `annual=True` restricts
     to full fiscal-year durations instead (see _annual_only) -- used only to derive
     a missing Q4 duration, not as a general-purpose alternate view.
+
+    All four pd.to_datetime() calls in this function/its two duration helpers use
+    errors="coerce" -- real bug, confirmed on MIND (CIK 926423, 2026-07-30): a raw
+    XBRL fact's `start` was literally "0202-02-01" (a year-digit typo in the source
+    filing, almost certainly meant "2002"), which pandas can't represent at
+    nanosecond resolution and raised OutOfBoundsDatetime uncaught -- discarding
+    MIND's ENTIRE fundamentals build (every tier, not just the one bad fact), the
+    same "one bad filing shouldn't lose everything else" failure class already
+    fixed for item6's pd.read_html crash. Coercing to NaT lets dur.between(...)
+    correctly exclude just that one malformed fact (NaN comparisons are False),
+    same principle as this file's cluster_period_ends already relying on NaT-safe
+    comparisons elsewhere.
     """
     df = _facts_to_frame(facts, concept)
     if df.empty:
@@ -171,8 +183,8 @@ def as_first_reported(facts: dict, concept: str, annual: bool = False) -> pd.Dat
     df = _annual_only(df) if annual else _quarterly_only(df)
     if df.empty:
         return df
-    df["filed"] = pd.to_datetime(df["filed"])
-    df["end"] = pd.to_datetime(df["end"])
+    df["filed"] = pd.to_datetime(df["filed"], errors="coerce")
+    df["end"] = pd.to_datetime(df["end"], errors="coerce")
     key = ["start", "end"] if "start" in df.columns else ["end"]
     return (df.sort_values("filed")
               .drop_duplicates(subset=key, keep="first")

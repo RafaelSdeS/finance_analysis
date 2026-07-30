@@ -82,6 +82,22 @@ def test_quarterly_only_drops_annual_duplicate():
     print("OK: _quarterly_only resolves same-end duration collisions to the quarterly figure")
 
 
+def test_malformed_start_date_dropped_not_crashing():
+    # Real bug, confirmed on MIND (CIK 926423, 2026-07-30): a raw XBRL fact's
+    # `start` was literally "0202-02-01" (a year-digit typo in the SOURCE
+    # filing) -- pandas can't represent that at nanosecond resolution and
+    # used to raise OutOfBoundsDatetime uncaught, discarding this company's
+    # ENTIRE fundamentals build (every tier), not just the one bad fact.
+    facts = _facts({"NetIncomeLoss": [
+        _fact("0202-02-01", "2008-09-27", 999_000_000, "2009-10-27"),  # malformed, must be dropped
+        _fact("2008-06-29", "2008-09-27", 4_834_000_000, "2009-10-27"),  # genuine quarterly fact
+    ]})
+    df = companyfacts.as_first_reported(facts, "NetIncomeLoss")  # must not raise
+    assert len(df) == 1, f"the malformed-date fact must be dropped, only the good one kept, got {len(df)} rows"
+    assert df.iloc[0]["val"] == 4_834_000_000
+    print("OK: a malformed start/end date is dropped (coerced to NaT), not a crash that loses the whole company")
+
+
 def test_resolve_item_unions_across_concepts_per_period():
     # The real bug: old tag covers early periods, new tag covers later ones -- must NOT
     # pick one concept for the whole company just because it happens to be checked first.
@@ -252,6 +268,7 @@ def test_extract_line_items_derives_q4_and_clusters_with_instant_concepts():
 if __name__ == "__main__":
     test_as_first_reported_takes_earliest_filing()
     test_quarterly_only_drops_annual_duplicate()
+    test_malformed_start_date_dropped_not_crashing()
     test_resolve_item_unions_across_concepts_per_period()
     test_resolve_item_priority_on_overlap()
     test_extract_line_items_conservative_available_date()
