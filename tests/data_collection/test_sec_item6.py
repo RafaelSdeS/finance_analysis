@@ -91,6 +91,33 @@ def test_parenthesized_negative():
     print("OK: _parse_value handles parenthesized negatives, $ signs, commas, and blanks")
 
 
+def test_row_values_strips_footnote_marker_not_real_negative():
+    # Real bug, confirmed on ORCL's actual 2006 10-K (2026-07-30): "Total
+    # assets" carries a "(3)" footnote-reference cell for 2006 and 2005 only
+    # (not 2004-2002), shaped identically to a real parenthesized negative
+    # under _parse_value. Left in, it doesn't just corrupt one cell -- it
+    # shifts every LATER year's real value one position early. Shape below
+    # mirrors the real row (5 years, markers on the first two).
+    row = pd.Series(["Total assets", None, None, 29029, "(3)", None, None,
+                      20687, "(3)", None, None, 12763, None, None, 10967,
+                      None, None, 10800])
+    vals = item6._row_values(row.iloc[1:], 5)
+    assert vals == [29029.0, 20687.0, 12763.0, 10967.0, 10800.0], (
+        f"footnote markers must be stripped and real values kept aligned to their year, got {vals}")
+    print("OK: _row_values strips excess footnote-marker tokens without disturbing alignment")
+
+
+def test_row_values_keeps_genuine_small_negative_when_already_aligned():
+    # The marker-stripping fix above must never fire on a row that's already
+    # correctly aligned (token count == n_years) -- a real small negative
+    # dollar figure (e.g. a loss year) must survive untouched.
+    row = pd.Series(["Net income", None, 100, None, -3, None, 50])
+    vals = item6._row_values(row.iloc[1:], 3)
+    assert vals == [100.0, -3.0, 50.0], (
+        f"a genuine negative value in an already-aligned row must not be stripped, got {vals}")
+    print("OK: _row_values leaves a genuine small negative alone when the row is already aligned")
+
+
 def test_build_cik_history_skips_filing_that_crashes_read_html():
     # Real bug, found retrying fundamentals collection at scale (2026-07-28):
     # pd.read_html raises more than ValueError on malformed real-world HTML.
@@ -268,6 +295,8 @@ if __name__ == "__main__":
     test_find_item6_table_picks_best_scoring_candidate()
     test_extract_years_reconciles_real_intel_figures()
     test_parenthesized_negative()
+    test_row_values_strips_footnote_marker_not_real_negative()
+    test_row_values_keeps_genuine_small_negative_when_already_aligned()
     test_build_cik_history_skips_filing_that_crashes_read_html()
     test_extract_years_scales_dollar_rows_but_not_per_share()
     test_find_item6_table_rejects_quarterly_and_embedded_digit_false_positives()

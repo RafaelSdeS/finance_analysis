@@ -46,6 +46,14 @@ _UNITS_RE = re.compile(r"in\s+(thousands|millions|billions)\b", re.I)
 _UNIT_MULTIPLIER = {"thousands": 1e3, "millions": 1e6, "billions": 1e9}
 _PER_SHARE_ITEMS = {"eps_basic", "eps_diluted", "dividends_per_share"}
 
+# A bare "(3)"-style cell referencing a table footnote -- present in some
+# year-columns of a row but not others (confirmed on ORCL's real 2006 10-K:
+# "Total assets" carries a "(3)" marker cell for 2006 and 2005 only, not
+# 2004-2002). _parse_value can't tell it apart from a genuine small negative
+# dollar figure by shape alone. See _row_values for why this only strips
+# marker-shaped tokens when the row's raw token count exceeds n_years.
+_FOOTNOTE_RE = re.compile(r"^\(\d{1,2}\)$")
+
 
 def detect_unit_multiplier(text: str) -> float:
     """Scale factor implied by the filing's units caption ("(in millions)" etc.),
@@ -192,15 +200,32 @@ def _parse_value(s) -> float | None:
 def _row_values(row: pd.Series, n_years: int) -> list[float | None]:
     """Up to n_years numeric tokens from a row, left to right -- positional,
     not column-index-based, since $ signs and NaN spacers interleave
-    inconsistently across real filings."""
-    vals = []
+    inconsistently across real filings.
+
+    Real bug, confirmed on ORCL's actual 2006 10-K (2026-07-30): a footnote
+    reference marker like "(3)" sits in its own cell, parses as a valid
+    negative number under _parse_value, and inflates this row's token count
+    beyond n_years -- which doesn't just produce one wrong value, it shifts
+    EVERY later year's real figure one position early (ORCL's "Total assets"
+    read 2006 correctly, then read 2005's marker cell as the 2005 value,
+    corrupting 2005 through 2002 too; the impossible -3,000,000 total_assets
+    was only the visible symptom). A genuine row's token count always equals
+    n_years, so marker-shaped tokens are only ever stripped when the raw
+    count is in EXCESS of n_years -- a real small negative dollar figure in
+    an already-aligned row must never be discarded.
+    """
+    tokens: list[tuple[str, float]] = []
     for cell in row:
         if pd.isna(cell):
             continue
         v = _parse_value(cell)
         if v is not None:
-            vals.append(v)
-    vals = vals[:n_years]
+            tokens.append((str(cell).strip(), v))
+    if len(tokens) > n_years:
+        kept = [(s, v) for s, v in tokens if not _FOOTNOTE_RE.match(s)]
+        if len(kept) == n_years:
+            tokens = kept
+    vals = [v for _, v in tokens][:n_years]
     return vals + [None] * (n_years - len(vals))
 
 
