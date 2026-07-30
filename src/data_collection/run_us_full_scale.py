@@ -17,16 +17,23 @@ every currently-priced ticker from scratch, which is what's needed after a
 derivation fix (item6/Q4, a CONCEPT_MAP addition) that must reach every
 already-collected company, not just new ones.
 
-Set RESUME=1 to instead pass skip_existing=True -- skips tickers that already
-have an output fundamentals file. Two real uses: resuming after a crash/kill
-with no derivation change since, and running fundamentals CONCURRENTLY with a
-separate `prices` run (they hit different services -- yfinance vs SEC EDGAR --
-so there's no rate-limit conflict) without redoing tickers a prior pass already
-covered.
+Set RESUME=1 to instead pass skip_existing=True to fundamentals AND prices --
+skips a ticker outright if its output file already exists. For fundamentals,
+two real uses: resuming after a crash/kill with no derivation change since,
+and running fundamentals CONCURRENTLY with a separate `prices` run (they hit
+different services -- yfinance vs SEC EDGAR -- so there's no rate-limit
+conflict) without redoing tickers a prior pass already covered. For prices,
+this is narrower still -- a normal run always re-fetches every ticker's
+ENTIRE span on purpose (a dividend paid after collection needs its whole
+history's adj_close revisited, see collect_prices_yf's docstring), so
+RESUME=1 is only safe for resuming an interrupted FIRST-TIME backfill within
+the same short window (hours). Never use it to resume a --mode update run
+spanning weeks/months -- that's exactly the staleness bug the full re-fetch
+design fixed.
 
 Usage: python -m src.data_collection.run_us_full_scale [prices|dividends|fundamentals|universe|company_info]
        (no argument runs all five, in order)
-       RESUME=1 python -m src.data_collection.run_us_full_scale fundamentals
+       RESUME=1 python -m src.data_collection.run_us_full_scale prices fundamentals
 """
 
 import logging
@@ -56,7 +63,7 @@ def run_universe():
 
 def run_prices():
     collect_prices_yf(_all_tickers(), mode=MODE, price_dir=config.US_PRICES_DIR,
-                       suffix="", floor="1900-01-01")
+                       suffix="", floor="1900-01-01", skip_existing=os.environ.get("RESUME") == "1")
 
 
 def run_dividends():

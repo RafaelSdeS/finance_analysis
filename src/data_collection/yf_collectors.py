@@ -339,17 +339,30 @@ MAX_CONSECUTIVE_FAILURES = 25  # a systemic problem, not a legitimate coverage-g
 
 
 def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str | None = None,
-                       floor: str | None = None):
+                       floor: str | None = None, skip_existing: bool = False):
     """`price_dir`/`suffix`/`floor` default to the BR globals (config.PRICES_DIR /
     config.YF_SUFFIX / config.START_DATE). Pass price_dir=config.US_PRICES_DIR, suffix="",
     floor="1900-01-01" for the pure-yfinance US path — there is no BolsAI history to
     reconcile against, so _bolsai_junction_date/_reconcile_yfinance_junction below are
     no-ops for that case (confirmed: both short-circuit when no on-disk row has a non-NaN
-    num_trades, which is true for every row in a US-only file)."""
+    num_trades, which is true for every row in a US-only file).
+
+    `skip_existing` (default off) skips a ticker outright if its file already exists --
+    NOT a general-purpose flag, a narrow escape hatch for resuming an interrupted FIRST-TIME
+    backfill within the same short window (hours, not months). Every ticker normally
+    re-fetches its ENTIRE span every run on purpose (see _prices_fetch_start): a dividend
+    paid after one collection would otherwise never get backward-adjusted into
+    already-stored history. Setting this True skips that re-check entirely for whatever's
+    already on disk -- fine when "already on disk" means "collected a few hours ago in this
+    same backfill," wrong for --mode update's quarterly cadence, where months can pass and a
+    real new dividend needs exactly the re-fetch this flag skips.
+    """
     price_dir = price_dir or config.PRICES_DIR
     cp = checkpoint.load("yf_prices", mode)
     consecutive_failures = 0
     for ticker in tickers:
+        if skip_existing and (price_dir / f"{ticker}.parquet").exists():
+            continue
         ok = False
         try:
             path = price_dir / f"{ticker}.parquet"
