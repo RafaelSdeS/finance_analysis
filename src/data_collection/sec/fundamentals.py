@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
-from .. import config
+from .. import config, validate
 from . import companyfacts, crosswalk, fds, item6, universe
 
 log = logging.getLogger("sec")
@@ -258,6 +258,9 @@ def collect_fundamentals_us(tickers: list[str], fund_dir=None, workers: int = 8,
         if df.empty:
             log.info("fundamentals %s (CIK %s): no data from either tier", ticker, cik)
             return
+        vr = validate.validate_us_fundamentals(df)
+        for w in vr.warnings:
+            log.warning("fundamentals %s (CIK %s): %s", ticker, cik, w)
         df.to_parquet(fund_dir / f"{ticker}.parquet", index=False)
         log.info("fundamentals %s: %d rows (%s)", ticker, len(df),
                   df["fundamentals_tier"].value_counts().to_dict())

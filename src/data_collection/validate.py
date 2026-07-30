@@ -8,6 +8,7 @@ ValidationResult; collectors refuse to save on errors, log on warnings.
 
 from dataclasses import dataclass, field
 
+import numpy as np
 import pandas as pd
 
 PRICE_COLS = ["ticker", "trade_date", "open", "high", "low", "close",
@@ -98,6 +99,36 @@ def validate_fundamentals(df: pd.DataFrame) -> ValidationResult:
             null_rate = late["cagr_earnings_5y"].isna().mean()
             if null_rate > 0.5:
                 r.warn(f"cagr_earnings_5y null rate {null_rate:.0%} after q20 (negative-base years, or data issue)")
+    return r
+
+
+def validate_us_fundamentals(df: pd.DataFrame) -> ValidationResult:
+    """Sanity gate for SEC fundamentals (combined xbrl/ex27/item6 tiers).
+
+    collect_fundamentals_us writes df.to_parquet() directly, unlike every
+    other collector, which all go through _merge_save()'s validate-then-write
+    (found auditing the US pipeline, 2026-07-30 -- SEC fundamentals had never
+    been through any automated schema/sanity gate). Row-level anomalies here
+    are warned, not blocked: build_company_fundamentals() rebuilds a
+    company's entire multi-decade history in one shot each run, so refusing
+    the whole write over one bad historical row (BR's all-or-nothing gate,
+    fine for an incremental batch) would cost far more good data than it
+    protects. Schema differs from BR's FUND_COLS (keyed on `end`, no
+    `ticker`/`reference_date` columns), so this doesn't reuse validate_fundamentals.
+    """
+    r = ValidationResult()
+    if df.empty:
+        r.error("empty dataframe")
+        return r
+    numeric = df.select_dtypes(include="number")
+    if not numeric.empty and np.isinf(numeric.to_numpy(dtype="float64", na_value=0.0)).any():
+        r.warn("Inf value(s) present")
+    if "total_assets" in df.columns and (df["total_assets"] < 0).any():
+        r.warn(f"{(df['total_assets'] < 0).sum()} row(s) with negative total_assets (accounting-impossible)")
+    if "shares_outstanding" in df.columns and (df["shares_outstanding"] < 0).any():
+        r.warn(f"{(df['shares_outstanding'] < 0).sum()} row(s) with negative shares_outstanding")
+    if "end" in df.columns and df["end"].duplicated().any():
+        r.warn(f"{df['end'].duplicated().sum()} duplicate 'end' period(s)")
     return r
 
 

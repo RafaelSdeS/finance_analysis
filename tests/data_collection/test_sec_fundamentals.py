@@ -62,6 +62,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pandas as pd
 
+from src.data_collection import validate
 from src.data_collection.sec import fundamentals
 
 
@@ -224,6 +225,60 @@ def test_predecessor_entity_rows_are_dropped():
     print("OK: predecessor-entity rows are dropped for known spinoff/split-off CIKs, other CIKs untouched")
 
 
+def test_validate_us_fundamentals_warns_on_impossible_values():
+    # collect_fundamentals_us writes df.to_parquet() directly, unlike every
+    # other collector -- SEC fundamentals had never been through any
+    # automated schema/sanity gate (found auditing the US pipeline,
+    # 2026-07-30). This is the gate itself: warn (not block) on
+    # accounting-impossible values, since a full-history rebuild shouldn't
+    # lose 80+ good years over one bad row.
+    good = pd.DataFrame({"end": pd.to_datetime(["2020-12-31", "2021-12-31"]),
+                          "total_assets": [1000.0, 1100.0],
+                          "shares_outstanding": [500.0, 510.0]})
+    r = validate.validate_us_fundamentals(good)
+    assert r.passed and not r.warnings, f"clean data must not warn, got {r.warnings}"
+
+    bad = pd.DataFrame({"end": pd.to_datetime(["2020-12-31", "2021-12-31"]),
+                         "total_assets": [1000.0, -3_000_000.0],
+                         "shares_outstanding": [500.0, 510.0]})
+    r = validate.validate_us_fundamentals(bad)
+    assert r.passed, "row-level anomalies must warn, not block the write"
+    assert any("total_assets" in w for w in r.warnings), f"must flag negative total_assets, got {r.warnings}"
+
+    empty_r = validate.validate_us_fundamentals(pd.DataFrame())
+    assert not empty_r.passed, "an empty dataframe must still be a hard error"
+    print("OK: validate_us_fundamentals warns on accounting-impossible values, errors only on empty")
+
+
+def test_collect_fundamentals_us_logs_validation_warnings():
+    # Confirms the gate is actually wired into the write path, not just
+    # defined and unused.
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        cw_path = tmp / "crosswalk.parquet"
+        pd.DataFrame({"ticker": ["AAA"], "cik": [1]}).to_parquet(cw_path, index=False)
+        filings_path = tmp / "filings.parquet"
+        pd.DataFrame({"cik": [1]}).to_parquet(filings_path, index=False)
+        fund_dir = tmp / "fund"
+        fund_dir.mkdir()
+
+        def fake_build(cik, filings):
+            return pd.DataFrame({"end": pd.to_datetime(["2020-12-31"]),
+                                  "total_assets": [-5.0],
+                                  "fundamentals_tier": ["item6"]})
+
+        with mock.patch.object(fundamentals.crosswalk, "CROSSWALK_PATH", cw_path), \
+             mock.patch.object(fundamentals.universe, "FILINGS_PATH", filings_path), \
+             mock.patch.object(fundamentals, "build_company_fundamentals", side_effect=fake_build), \
+             mock.patch.object(fundamentals.log, "warning") as mock_warn:
+            fundamentals.collect_fundamentals_us(["AAA"], fund_dir=fund_dir, workers=1)
+
+        assert (fund_dir / "AAA.parquet").exists(), "the file must still be written despite the warning"
+        assert any("total_assets" in str(call.args) for call in mock_warn.call_args_list), (
+            "validate_us_fundamentals's warning must actually reach log.warning")
+    print("OK: collect_fundamentals_us runs validate_us_fundamentals and logs its warnings before writing")
+
+
 def test_skip_existing_resumes_past_already_collected_tickers():
     # collect_fundamentals_us has no resume by design -- a derivation fix (item6
     # cascade, a CONCEPT_MAP addition) must reach every already-collected company,
@@ -272,4 +327,6 @@ if __name__ == "__main__":
     test_tier_boundary_near_duplicate_end_dates_are_deduped()
     test_source_data_anomaly_is_dropped_not_left_in()
     test_predecessor_entity_rows_are_dropped()
+    test_validate_us_fundamentals_warns_on_impossible_values()
+    test_collect_fundamentals_us_logs_validation_warnings()
     test_skip_existing_resumes_past_already_collected_tickers()
