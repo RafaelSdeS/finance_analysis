@@ -274,6 +274,26 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = 
     adj_close = _retry(lambda: t.history(start=fetch_start, auto_adjust=True)["Close"],
                        f"prices/{ticker} adj_close", retry_on_empty=True)
 
+    # Real bugs, found scaling US collection to the long tail of obscure tickers
+    # (2026-07-30): the auto_adjust=False and auto_adjust=True history calls are
+    # two INDEPENDENT yfinance requests and aren't guaranteed to agree.
+    # 1. Different row counts -- confirmed on DEC: auto_adjust=False returned 39
+    #    MORE rows than auto_adjust=True for the exact same span. Using
+    #    adj_close.values positionally against raw-derived columns of a
+    #    different length crashed the whole ticker ("All arrays must be of the
+    #    same length"). Reindexing to raw's index first turns a genuine gap
+    #    into NaN for that row instead of a crash.
+    # 2. Impossible values -- confirmed on SAFE: 1,024 rows of its 1989-1993
+    #    history came back with a literally NEGATIVE Close from yfinance's OWN
+    #    auto_adjust=True call (stock prices can't be negative -- vendor data
+    #    corruption, not our computation). Unmasked, it poisoned ratio/adj_open/
+    #    adj_high/adj_low for those rows (a negative ratio flips High<Low), which
+    #    failed validate_prices and dropped SAFE's ENTIRE ~9,240-row history --
+    #    same "one bad vendor value blocks all good data forever" failure mode
+    #    _repair_bad_ohlc already exists to prevent for raw OHLC.
+    adj_close = adj_close.reindex(raw.index)
+    adj_close = adj_close.mask(adj_close <= 0)
+
     # Split-boundary fix: reverse-adjust any pre-split rows within THIS fetch
     # (which may re-span multiple quarters now, see _prices_fetch_start) back to
     # BolsAI's unadjusted convention. Always logged loudly so it can be spot-checked.
@@ -841,6 +861,55 @@ def _demo():
     assert list(fixed.loc[0]) == list(raw.loc[0])  # untouched otherwise
     assert list(fixed.loc[2]) == list(raw.loc[2])
     print("_repair_bad_ohlc: OK")
+
+    # Two real bugs in _fetch_and_shape_prices, found scaling US collection to
+    # the long tail of obscure tickers (2026-07-30): auto_adjust=False and
+    # auto_adjust=True are two INDEPENDENT yfinance requests, not guaranteed to
+    # agree on row count or sanity.
+    from unittest import mock
+    _idx3 = pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"]).tz_localize("America/New_York")
+
+    class _FakeTickerRowMismatch:
+        def __init__(self, symbol):
+            self.splits = pd.Series([], dtype=float)
+
+        def history(self, start, auto_adjust):
+            if not auto_adjust:
+                return pd.DataFrame({"Open": [1.0, 2.0, 3.0], "High": [1.0, 2.0, 3.0],
+                                      "Low": [1.0, 2.0, 3.0], "Close": [1.0, 2.0, 3.0],
+                                      "Volume": [100, 100, 100]}, index=_idx3)
+            return pd.DataFrame({"Close": [1.0, 3.0]}, index=_idx3[[0, 2]])  # middle date missing, like DEC
+
+    with mock.patch.object(yf, "Ticker", _FakeTickerRowMismatch):
+        out = _fetch_and_shape_prices("MISMATCH", "2020-01-01", suffix="")
+    assert len(out) == 3, f"must keep raw's row count (3), not crash or truncate to adj_close's (2), got {len(out)}"
+    assert pd.isna(out.loc[out['trade_date'] == '2020-01-02', 'adj_close'].iloc[0]), \
+        "the date missing from adj_close must become NaN there, not misalign the other rows"
+    assert out.loc[out["trade_date"] == "2020-01-01", "adj_close"].iloc[0] == 1.0
+    assert out.loc[out["trade_date"] == "2020-01-03", "adj_close"].iloc[0] == 3.0
+    print("_fetch_and_shape_prices row-count mismatch: OK")
+
+    class _FakeTickerNegativeAdjClose:
+        def __init__(self, symbol):
+            self.splits = pd.Series([], dtype=float)
+
+        def history(self, start, auto_adjust):
+            idx = _idx3[:2]
+            if not auto_adjust:
+                return pd.DataFrame({"Open": [10.0, 10.0], "High": [10.0, 10.0],
+                                      "Low": [10.0, 10.0], "Close": [10.0, 10.0],
+                                      "Volume": [100, 100]}, index=idx)
+            return pd.DataFrame({"Close": [10.0, -5.0]}, index=idx)  # impossible negative, like SAFE
+
+    with mock.patch.object(yf, "Ticker", _FakeTickerNegativeAdjClose):
+        out = _fetch_and_shape_prices("NEGADJ", "2020-01-01", suffix="")
+    bad_row = out.loc[out["trade_date"] == "2020-01-02"].iloc[0]
+    assert pd.isna(bad_row["adj_close"]), "a negative adj_close must be masked to NaN, not written as-is"
+    assert pd.isna(bad_row["adj_open"]) and pd.isna(bad_row["adj_high"]) and pd.isna(bad_row["adj_low"]), \
+        "adj_open/high/low are derived from adj_close's ratio -- must also come out NaN, not a corrupted negative"
+    r = validate.validate_prices(out)
+    assert r.passed, f"masked NaN must not fail validate_prices' non-positive-adj_* check, got {r.errors}"
+    print("_fetch_and_shape_prices negative adj_close: OK")
 
     # _flat_run_fraction must flag yfinance's coverage-padding signature
     # (mostly one repeated value) and pass real, varying data through clean.
