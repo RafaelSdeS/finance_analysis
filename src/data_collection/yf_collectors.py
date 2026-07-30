@@ -377,7 +377,7 @@ def _drop_incomplete_today(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["trade_date"] < today].reset_index(drop=True)
 
 
-MAX_CONSECUTIVE_FAILURES = 25  # a systemic problem, not a legitimate coverage-gap cluster --
+MAX_CONSECUTIVE_FAILURES = 40  # a systemic problem, not a legitimate coverage-gap cluster --
 # confirmed 2026-07-29: a stale yfinance session after a laptop suspend/resume failed EVERY
 # subsequent ticker, each one individually logged as "no yfinance coverage" though a fresh
 # process fetched every one of them instantly and correctly. Real coverage gaps do cluster
@@ -385,6 +385,13 @@ MAX_CONSECUTIVE_FAILURES = 25  # a systemic problem, not a legitimate coverage-g
 # order) but not indefinitely -- this catches "everything is failing", not "this stretch of
 # small caps has thin coverage", and fails loudly rather than silently mislabeling the rest
 # of a multi-hour run.
+# Bumped 25 -> 40 (2026-07-30): a genuine, individually-verified coincidental cluster of 25
+# consecutive OTC/shell tickers right around PPCB tripped the old threshold with no real
+# connectivity problem -- every ticker in the stretch was confirmed legitimate (delisted/no
+# yfinance coverage, or caught by the implausible-price guard above) by fetching each one
+# directly, and the very next 40 tickers after the cluster succeeded 38/40 with no further
+# clustering. The deep long tail of the full 10,432-ticker US crosswalk runs denser
+# coverage-gap clusters than whatever this constant was originally calibrated against.
 
 
 def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str | None = None,
