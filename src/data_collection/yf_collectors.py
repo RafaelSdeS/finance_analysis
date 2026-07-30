@@ -328,6 +328,16 @@ def _drop_incomplete_today(df: pd.DataFrame) -> pd.DataFrame:
     return df[df["trade_date"] < today].reset_index(drop=True)
 
 
+MAX_CONSECUTIVE_FAILURES = 25  # a systemic problem, not a legitimate coverage-gap cluster --
+# confirmed 2026-07-29: a stale yfinance session after a laptop suspend/resume failed EVERY
+# subsequent ticker, each one individually logged as "no yfinance coverage" though a fresh
+# process fetched every one of them instantly and correctly. Real coverage gaps do cluster
+# (OTC/foreign/shell tickers grouped together in the crosswalk's roughly market-cap-sorted
+# order) but not indefinitely -- this catches "everything is failing", not "this stretch of
+# small caps has thin coverage", and fails loudly rather than silently mislabeling the rest
+# of a multi-hour run.
+
+
 def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str | None = None,
                        floor: str | None = None):
     """`price_dir`/`suffix`/`floor` default to the BR globals (config.PRICES_DIR /
@@ -338,7 +348,9 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
     num_trades, which is true for every row in a US-only file)."""
     price_dir = price_dir or config.PRICES_DIR
     cp = checkpoint.load("yf_prices", mode)
+    consecutive_failures = 0
     for ticker in tickers:
+        ok = False
         try:
             path = price_dir / f"{ticker}.parquet"
             fetch_start = _prices_fetch_start(cp, ticker, path, floor)
@@ -351,21 +363,31 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
             df = _fetch_and_shape_prices(ticker, actual_fetch_start, suffix)
             if df is None:
                 log.info("prices %s: no new rows (delisted/renamed/no yfinance coverage?)", ticker)
-                continue
-            df = _reconcile_yfinance_junction(ticker, path, df, junction_date)
-            if df.empty:
-                log.info("prices %s: no new rows past the reconciled junction", ticker)
-                continue
-
-            saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"prices/{ticker}")
-            if saved is not None:
-                cp[ticker] = {"last_date": str(saved["trade_date"].max().date()), "rows": len(saved)}
-                checkpoint.save("yf_prices", mode, cp)
-                log.info("prices %s: %d total rows", ticker, len(saved))
+            else:
+                df = _reconcile_yfinance_junction(ticker, path, df, junction_date)
+                if df.empty:
+                    log.info("prices %s: no new rows past the reconciled junction", ticker)
+                    ok = True  # a real fetch succeeded, just nothing new -- not a failure signal
+                else:
+                    saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"prices/{ticker}")
+                    if saved is not None:
+                        ok = True
+                        cp[ticker] = {"last_date": str(saved["trade_date"].max().date()), "rows": len(saved)}
+                        checkpoint.save("yf_prices", mode, cp)
+                        log.info("prices %s: %d total rows", ticker, len(saved))
         except Exception as e:
             log.warning("prices %s: skipping after error: %s", ticker, e)
         finally:
             sleep(config.YF_RATE_LIMIT_SLEEP)
+
+        consecutive_failures = 0 if ok else consecutive_failures + 1
+        if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+            raise RuntimeError(
+                f"{consecutive_failures} consecutive tickers failed (most recently {ticker}) -- "
+                "genuine coverage gaps don't run this deep; this looks systemic (stale "
+                "connection, real Yahoo throttling, an outage), not coincidence. Aborting "
+                "rather than silently mislabeling the rest of the run as 'no coverage'."
+            )
 
 
 def _flat_run_fraction(close: pd.Series, min_run: int = 10) -> float:

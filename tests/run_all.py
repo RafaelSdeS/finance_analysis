@@ -52,6 +52,7 @@ FAST = [
     "tests/data_collection/test_merge_save_new_rows_only.py",
     "tests/data_collection/test_macro_bare_object.py",
     "tests/data_collection/test_prices_concat_dtype.py",
+    "tests/data_collection/test_prices_consecutive_failures.py",
     "tests/data_collection/test_ratios_no_inf.py",
     "tests/data_collection/test_skip_existing.py",
     "tests/data_collection/test_yf_collectors_demo.py",
