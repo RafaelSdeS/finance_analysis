@@ -79,6 +79,7 @@ DATA = [
     "tests/data_collection/test_blue_chip_tickers.py",
     "tests/data_collection/validate_vs_yfinance.py",
     "tests/data_collection/test_collect_delisted.py",
+    "tests/data_collection/test_us_data_quality.py",
     "tests/data_collection/test_cvm_statements.py",
     "tests/portfolio/test_universe.py",
     "tests/portfolio/test_features.py",

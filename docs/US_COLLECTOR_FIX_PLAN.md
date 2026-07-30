@@ -40,17 +40,30 @@ Takes effect next run. No behavioral change beyond the header value.
 
 ---
 
-## 2. `collect_fundamentals_us` has no resume — pothole #8
+## 2. `collect_fundamentals_us` has no resume — pothole #8 — ✅ DONE (checkbox was stale)
 
 Rebuilds every ticker from scratch and overwrites each parquet outright. This is *partly
 deliberate*: a derivation fix (item6 cascade, predecessor cutoffs, CONCEPT_MAP below) must
 reach every already-collected company, not just new ones — a naive checkpoint would freeze
 old, wrong rows in place. The real gap is crash-resume, not incremental collection.
 
-- [ ] Add `skip_existing: bool = False` to `collect_fundamentals_us`; in the per-ticker
-      worker, return early if the output parquet already exists. Two lines.
-- [ ] Default **off** so today's rebuild-everything semantics are unchanged; pass
-      `skip_existing=True` only when resuming an interrupted run.
+- [x] `skip_existing: bool = False` on `collect_fundamentals_us` — already implemented
+      (confirmed reading `fundamentals.py` 2026-07-30, tested in
+      `test_skip_existing_resumes_past_already_collected_tickers`). This box was never
+      checked off when the code landed.
+- [x] Default **off** — confirmed, matches the code.
+
+**New gap found instead (2026-07-30): staleness, not resume.** `skip_existing` only
+distinguishes "has a file" from "doesn't" — it can't tell "collected before today's fix
+landed" from "fresh." Confirmed concretely: `INTC.parquet` predates commit `dfc5b90`
+(the item6 unit-scaling fix) and still carries the pre-fix bug, even though the fix
+itself is verified correct in code (see `US_COLLECTOR_BUG_AUDIT.md`'s 2026-07-30 section).
+The full-scale run is also still incomplete — 5,446/10,432 price tickers, 2,289/10,432
+fundamentals tickers, stopped without any error in the logs. A fresh, full
+`collect_fundamentals_us` (default `skip_existing=False`) run against the whole crosswalk
+would both finish the coverage gap and refresh every stale ticker in one pass — not run
+here (multi-hour, heavy SEC EDGAR traffic), left as an explicit next step pending
+go-ahead.
 
 Do **not** wire in `checkpoint.py` + `_merge_save` here — the per-ticker output parquet
 already is the idempotent unit, and `_merge_save`'s append-and-dedup is wrong for a table
