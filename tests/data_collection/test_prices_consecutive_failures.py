@@ -28,7 +28,7 @@ import pandas as pd
 from src.data_collection import yf_collectors as yfc
 
 
-def _run(tickers, fetch_results, price_dir):
+def _run(tickers, fetch_results, price_dir, skip_existing=False):
     """fetch_results: dict ticker -> return value for _fetch_and_shape_prices
     (None = no coverage/failure, a DataFrame = success)."""
     with mock.patch.object(yfc, "checkpoint") as mock_cp, \
@@ -39,7 +39,8 @@ def _run(tickers, fetch_results, price_dir):
          mock.patch.object(yfc, "_merge_save", side_effect=lambda df, *a, **k: df), \
          mock.patch.object(yfc, "sleep"):
         mock_cp.load.return_value = {}
-        yfc.collect_prices_yf(tickers, mode="test", price_dir=price_dir, suffix="", floor="1900-01-01")
+        yfc.collect_prices_yf(tickers, mode="test", price_dir=price_dir, suffix="", floor="1900-01-01",
+                              skip_existing=skip_existing)
 
 
 def _fake_price_df():
@@ -83,7 +84,39 @@ def test_success_resets_the_streak_just_under_threshold():
     print("OK: a single success resets the streak, so two near-threshold runs don't combine")
 
 
+def test_resume_mode_tolerates_a_streak_past_the_normal_threshold():
+    # Real bug, found live (2026-07-30): skip_existing=True permanently skips every
+    # ticker that already succeeded, so each successive resume pass draws its
+    # "still to fetch" pool from an increasingly concentrated remainder of exactly
+    # the tickers that failed last time -- a streak well past the normal (non-resume)
+    # threshold is EXPECTED here, not a sign of a stale connection (individually
+    # verified live: a fresh session fetched AAPL/MSFT instantly right after a 40-long
+    # streak of genuinely-uncoverable tickers). A streak strictly between the two
+    # thresholds must NOT abort in resume mode, though it would in normal mode.
+    n = yfc.MAX_CONSECUTIVE_FAILURES + 20
+    assert n < yfc.MAX_CONSECUTIVE_FAILURES_RESUME, "test assumes the resume threshold is much looser"
+    tickers = [f"T{i}" for i in range(n)]
+    fetch_results = {t: None for t in tickers}
+    with tempfile.TemporaryDirectory() as tmp:
+        _run(tickers, fetch_results, Path(tmp), skip_existing=True)  # must NOT raise
+    print("OK: resume mode tolerates a failure streak that would abort a normal run")
+
+
+def test_resume_mode_still_aborts_past_its_own_much_higher_threshold():
+    tickers = [f"T{i}" for i in range(yfc.MAX_CONSECUTIVE_FAILURES_RESUME + 5)]
+    fetch_results = {t: None for t in tickers}
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            _run(tickers, fetch_results, Path(tmp), skip_existing=True)
+            assert False, "even resume mode must eventually abort on a truly catastrophic streak"
+        except RuntimeError as e:
+            assert str(yfc.MAX_CONSECUTIVE_FAILURES_RESUME) in str(e)
+    print("OK: resume mode still has a ceiling, just a much higher one")
+
+
 if __name__ == "__main__":
     test_long_failure_streak_aborts_loudly()
     test_occasional_failures_interspersed_with_successes_do_not_abort()
     test_success_resets_the_streak_just_under_threshold()
+    test_resume_mode_tolerates_a_streak_past_the_normal_threshold()
+    test_resume_mode_still_aborts_past_its_own_much_higher_threshold()
