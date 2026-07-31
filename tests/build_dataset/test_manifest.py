@@ -9,6 +9,7 @@ or: pytest tests/build_dataset/test_manifest.py -v
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -147,6 +148,40 @@ def test_manifest_column_units_empty_when_absent(tmp_path, monkeypatch) -> None:
     manifest = bmd.write_manifest(dataset)
 
     assert manifest["column_units"] == {}
+
+
+def test_manifest_parquet_path_matches_in_memory_result(tmp_path, monkeypatch) -> None:
+    """write_manifest(parquet_path=...) streams column_stats from disk one
+    column at a time instead of requiring the full dataset resident in
+    memory (docs/US_DATASET_BUILD_PLAN.md §8.2 -- at US scale a dense
+    pd.read_parquet before this call is itself the OOM). Must produce the
+    exact same manifest as the original in-memory path, just sourced from
+    disk instead of a DataFrame already in hand."""
+    monkeypatch.setattr(bmd, "OUTPUT_PATH", tmp_path / "ml_dataset.parquet")
+    parquet_path = tmp_path / "us_ml_dataset.parquet"
+
+    dataset = pd.DataFrame({
+        "ticker": ["A", "A", "B", "B"],
+        "trade_date": pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-01", "2020-01-03"]),
+        "status": ["ATIVO", "ATIVO", "CANCELADA", "CANCELADA"],
+        "pl": [10.0, 11.0, 5.0, np.nan],
+        "sector": ["Tech", "Tech", "Finance", "Finance"],
+    })
+    dataset.to_parquet(parquet_path)
+    dropped = {"gap_unexplained": ["ZZZZ"]}
+
+    in_memory = bmd.write_manifest(dataset, dropped_no_fundamentals=dropped)
+    from_disk = bmd.write_manifest(dropped_no_fundamentals=dropped, parquet_path=parquet_path)
+
+    assert from_disk["rows"] == in_memory["rows"] == 4
+    assert from_disk["tickers"] == in_memory["tickers"] == 2
+    assert from_disk["date_min"] == in_memory["date_min"]
+    assert from_disk["date_max"] == in_memory["date_max"]
+    assert set(from_disk["columns"]) == set(in_memory["columns"])
+    assert from_disk["lookahead_tainted_columns"] == in_memory["lookahead_tainted_columns"]
+    assert from_disk["dropped_no_fundamentals"] == in_memory["dropped_no_fundamentals"] == dropped
+    assert from_disk["column_stats"]["pl"] == in_memory["column_stats"]["pl"]
+    assert "sector" not in from_disk["column_stats"]  # non-numeric, excluded same as in-memory
 
 
 if __name__ == "__main__":

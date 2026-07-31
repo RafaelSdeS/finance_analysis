@@ -14,12 +14,25 @@ FUNDAMENTALS_NULL_COLS = [
     "stock_type",
 ]
 
+# Collection-time provenance: per-line-item filing dates (`*_filed`, one per
+# SEC concept) and XBRL/item6/EX-27 source-document metadata. Real value
+# columns (`fds_multiplier` -- actually applied to rescale figures) are NOT
+# in this set. Present only in US fundamentals files (SEC source); BR
+# (BolsAI) never has them, confirmed by column-name inspection, so dropping
+# these unconditionally is a no-op for BR and trims ~19 columns' width off
+# the US fundamentals frame before it gets forward-filled onto the (far
+# larger) daily panel -- docs/US_DATASET_BUILD_PLAN.md §8.0.
+FUNDAMENTALS_PROVENANCE_COLS = {
+    "item6_filename", "item6_form", "fds_filename", "fds_form",
+    "fds_article", "fds_multiplier_explicit",
+}
+
 
 # =============================================================================
 # LOAD ALL PRICE FILES
 # =============================================================================
 
-def load_prices(dir=None):
+def load_prices(dir=None, tickers=None):
     # `dir=None` (not `dir=PRICES_DIR`) deliberately -- a bound default is
     # captured at import time, so monkeypatching module.PRICES_DIR in a test
     # would silently be ignored. Re-read the module global at call time instead.
@@ -28,6 +41,15 @@ def load_prices(dir=None):
 
     dfs = []
     files = sorted(dir.glob("*.parquet"))
+    if tickers is not None:
+        # US-scale callers pre-gate the universe from a cheap per-file scan
+        # (build_us_dataset.build_universe_gate_from_files) before this ever
+        # runs -- loading only the qualifying files avoids ever holding the
+        # full 9,593-ticker/34M-row US universe resident just to filter it
+        # down afterward (docs/US_DATASET_BUILD_PLAN.md §8.0). None (default)
+        # preserves the "load everything" behavior every existing caller
+        # (BR, and any test not passing tickers=) relies on.
+        files = [f for f in files if f.stem in tickers]
 
     print()
     print("=" * 80)
@@ -53,7 +75,14 @@ def load_prices(dir=None):
 # LOAD ALL FUNDAMENTALS
 # =============================================================================
 
-def load_fundamentals(dir=None):
+def load_fundamentals(dir=None, optimize_dtypes=False):
+    """optimize_dtypes: downcast numeric columns to float32 and
+    `fundamentals_tier` to category (`cik` excluded -- stays an identifier).
+    Default False preserves BR's exact float64 precision (existing tests
+    assert fill_cagr_columns output to 1e-6 tolerance against real BR
+    figures); build_us_dataset.py passes True, since at US scale this
+    fundamentals frame gets forward-filled onto a 15.4M-row daily panel where
+    the width otherwise risks OOM (docs/US_DATASET_BUILD_PLAN.md §8.0)."""
     if dir is None:  # see load_prices's comment on why not `dir=FUNDAMENTALS_DIR`
         dir = FUNDAMENTALS_DIR
 
@@ -95,6 +124,24 @@ def load_fundamentals(dir=None):
     if "corporate_name" in fundamentals.columns:
         fundamentals = fundamentals.drop(columns=["corporate_name"])
         print("Dropped redundant 'corporate_name' from fundamentals")
+
+    provenance_cols = [
+        c for c in fundamentals.columns
+        if c.endswith("_filed") or c in FUNDAMENTALS_PROVENANCE_COLS
+    ]
+    if provenance_cols:
+        fundamentals = fundamentals.drop(columns=provenance_cols)
+        print(f"Dropped collection-time provenance columns: {provenance_cols}")
+
+    if optimize_dtypes:
+        numeric_cols = fundamentals.select_dtypes(include="number").columns.drop(
+            "cik", errors="ignore"
+        )
+        fundamentals[numeric_cols] = fundamentals[numeric_cols].astype("float32")
+        if "fundamentals_tier" in fundamentals.columns:
+            fundamentals["fundamentals_tier"] = fundamentals["fundamentals_tier"].astype("category")
+        print(f"Downcast {len(numeric_cols)} numeric columns to float32 "
+              f"(+ fundamentals_tier to category)")
 
     fundamentals = fundamentals.sort_values(["ticker", "reference_date"])
 

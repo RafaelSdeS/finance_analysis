@@ -243,6 +243,19 @@ def compute_valuation_daily_us(df):
 # UNIVERSE GATE
 # =============================================================================
 
+def _qualifying_tickers(stats, min_rows, min_median_close, min_median_dollar_volume):
+    """stats: per-ticker DataFrame indexed by ticker with n/med_close/med_dv
+    columns -- shared by build_universe_gate (in-memory) and
+    build_universe_gate_from_files (per-file scan) so the two can never
+    silently disagree on what "qualifies" means."""
+    qualifies = (
+        (stats["n"] >= min_rows)
+        & (stats["med_close"] >= min_median_close)
+        & (stats["med_dv"] >= min_median_dollar_volume)
+    )
+    return set(stats.index[qualifies])
+
+
 def build_universe_gate(prices, min_rows=MIN_PRICE_ROWS, min_median_close=MIN_MEDIAN_CLOSE,
                          min_median_dollar_volume=MIN_MEDIAN_DOLLAR_VOLUME):
     """Quality/scale gate over the full US universe (plan §D1) -- a lifetime
@@ -251,6 +264,11 @@ def build_universe_gate(prices, min_rows=MIN_PRICE_ROWS, min_median_close=MIN_ME
     what a ticker's *lifetime* median volume would turn out to be). Same class
     of gate as build_top50_universe.py; point-in-time universe construction
     stays a separate downstream step.
+
+    Takes an already-loaded `prices` DataFrame -- fine for tests and small
+    universes, but see build_universe_gate_from_files for the real US build
+    (loading all 9,593 tickers just to gate them down to ~2,960 is itself an
+    OOM risk, docs/US_DATASET_BUILD_PLAN.md §8.0).
 
     Returns the set of qualifying tickers.
     """
@@ -263,12 +281,38 @@ def build_universe_gate(prices, min_rows=MIN_PRICE_ROWS, min_median_close=MIN_ME
     g = prices.assign(_dv=dollar_volume).groupby("ticker")
     stats = g.agg(n=("close", "size"), med_close=("close", "median"), med_dv=("_dv", "median"))
 
-    qualifies = (
-        (stats["n"] >= min_rows)
-        & (stats["med_close"] >= min_median_close)
-        & (stats["med_dv"] >= min_median_dollar_volume)
-    )
-    tickers = set(stats.index[qualifies])
+    tickers = _qualifying_tickers(stats, min_rows, min_median_close, min_median_dollar_volume)
+    print(f"Universe gate: {len(tickers)}/{len(stats)} tickers qualify "
+          f"(n>={min_rows}, med_close>=${min_median_close}, med_dollar_volume>=${min_median_dollar_volume:,.0f})")
+    return tickers
+
+
+def build_universe_gate_from_files(dir, min_rows=MIN_PRICE_ROWS, min_median_close=MIN_MEDIAN_CLOSE,
+                                    min_median_dollar_volume=MIN_MEDIAN_DOLLAR_VOLUME):
+    """Same gate as build_universe_gate, computed from a per-file, column-
+    projected scan (only `close`/`volume`) instead of an already-loaded
+    `prices` DataFrame -- avoids ever holding the full 9,593-ticker/34M-row
+    US universe resident just to filter it down to ~2,960 tickers
+    (measured: ~16GB peak in load_prices alone vs. ~8GB available,
+    docs/US_DATASET_BUILD_PLAN.md §8.0 Failure 1). Feed the result straight
+    into load_prices(tickers=...) so only qualifying files are ever loaded.
+
+    Returns the set of qualifying tickers.
+    """
+    print()
+    print("=" * 80)
+    print("US UNIVERSE GATE (per-file scan)")
+    print("=" * 80)
+
+    rows = []
+    for file in sorted(dir.glob("*.parquet")):
+        d = pd.read_parquet(file, columns=["close", "volume"])
+        dv = d["close"] * d["volume"]
+        rows.append({"ticker": file.stem, "n": len(d),
+                      "med_close": d["close"].median(), "med_dv": dv.median()})
+    stats = pd.DataFrame(rows).set_index("ticker")
+
+    tickers = _qualifying_tickers(stats, min_rows, min_median_close, min_median_dollar_volume)
     print(f"Universe gate: {len(tickers)}/{len(stats)} tickers qualify "
           f"(n>={min_rows}, med_close>=${min_median_close}, med_dollar_volume>=${min_median_dollar_volume:,.0f})")
     return tickers
@@ -282,12 +326,16 @@ def main():
 
     US_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-    prices = load_prices(dir=US_PRICES_DIR)
-    fundamentals = load_fundamentals(dir=US_FUNDAMENTALS_DIR)
+    # Gate BEFORE loading: computing the gate from an already-loaded `prices`
+    # frame (build_universe_gate) would first require loading all 9,593
+    # tickers / 34M rows just to filter them down to ~2,960 -- ~16GB peak
+    # against ~8GB available, an OOM before a single row is written
+    # (docs/US_DATASET_BUILD_PLAN.md §8.0 Failure 1). The per-file scan reads
+    # only close/volume per ticker.
+    universe = build_universe_gate_from_files(US_PRICES_DIR)
+    prices = load_prices(dir=US_PRICES_DIR, tickers=universe | {BENCHMARK_TICKER})
+    fundamentals = load_fundamentals(dir=US_FUNDAMENTALS_DIR, optimize_dtypes=True)
     prices = drop_orphan_prefix_rows(prices)  # no-op for US tickers, kept for parity
-
-    universe = build_universe_gate(prices)
-    prices = prices[prices["ticker"].isin(universe) | (prices["ticker"] == BENCHMARK_TICKER)]
 
     # Capture SPY (market benchmark) before the fundamentals-coverage filter
     # drops it -- same reasoning as build_ml_dataset.main()'s BOVA11 capture.
@@ -301,7 +349,11 @@ def main():
         prices, fundamentals, known_no_fundamentals=KNOWN_NO_FUNDAMENTALS_US
     )
     fundamentals = compute_fundamental_features(fundamentals)
-    fundamentals = fill_missing_cagr(fundamentals)
+    # anchor_month=None: US fiscal year ends vary by company (8.6% of tickers
+    # have zero December-ending quarters, e.g. Agilent's Oct 31 FYE) with no
+    # reliable per-ticker FYE column to anchor to instead -- see
+    # cagr_handler.calc_annual_cagr's docstring.
+    fundamentals = fill_missing_cagr(fundamentals, anchor_month=None)
     company_info = pd.read_parquet(US_COMPANY_INFO_PATH)
     dividends = load_dividends(dir=US_DIVIDENDS_DIR)
 
@@ -321,14 +373,19 @@ def main():
     print("WRITING US MANIFEST & SPLIT CONFIG")
     print("=" * 80)
 
-    dataset = pd.read_parquet(US_OUTPUT_PATH)
-    write_manifest(
-        dataset, dropped_no_fundamentals=dropped_no_fundamentals, output_path=US_OUTPUT_PATH
+    # Stream from disk column-by-column instead of a dense pd.read_parquet:
+    # at US scale (15.4M rows x ~190 cols) that read-back alone is ~20GB,
+    # comfortably over this machine's available RAM (docs/US_DATASET_BUILD_PLAN.md
+    # §8.2). write_split_config only ever needs trade_date.
+    manifest = write_manifest(
+        dropped_no_fundamentals=dropped_no_fundamentals,
+        output_path=US_OUTPUT_PATH,
+        parquet_path=US_OUTPUT_PATH,
     )
-    write_split_config(dataset, path=US_SPLIT_CONFIG_PATH)
+    write_split_config(pd.read_parquet(US_OUTPUT_PATH, columns=["trade_date"]), path=US_SPLIT_CONFIG_PATH)
 
     print(f"Saved to: {US_OUTPUT_PATH}")
-    print(f"Rows: {len(dataset)}  Columns: {len(dataset.columns)}")
+    print(f"Rows: {manifest['rows']}  Columns: {len(manifest['columns'])}")
 
 
 if __name__ == "__main__":

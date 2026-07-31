@@ -18,6 +18,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.build_dataset import build_us_dataset as us  # noqa: E402
+from src.build_dataset import cagr_handler as ch  # noqa: E402
 
 
 def approx(a: float, b: float, tol: float = 1e-6) -> bool:
@@ -238,6 +239,77 @@ def test_build_universe_gate_thresholds() -> None:
                                    min_median_dollar_volume=1_000_000)
 
     assert gate == {"GOOD"}
+
+
+def test_build_universe_gate_from_files_matches_in_memory_gate(tmp_path) -> None:
+    """The per-file-scan gate (build_us_dataset.py's fix for §8.0 Failure 1 --
+    load_prices() OOMs on the full 9,593-ticker universe before the in-memory
+    gate ever runs) must decide exactly the same qualifying set as
+    build_universe_gate on the same data, just without ever holding it all in
+    memory at once. Same 3 fixtures as test_build_universe_gate_thresholds,
+    written to real per-ticker parquet files this time."""
+    n = 300
+    dates = pd.bdate_range("2020-01-01", periods=n)
+    fixtures = {
+        "GOOD": pd.DataFrame({"trade_date": dates, "close": 50.0, "volume": 1_000_000}),
+        "PENNY": pd.DataFrame({"trade_date": dates, "close": 0.05, "volume": 1_000_000}),
+        "SHORT": pd.DataFrame({"trade_date": dates[:10], "close": 50.0, "volume": 1_000_000}),
+    }
+    for ticker, df in fixtures.items():
+        df.to_parquet(tmp_path / f"{ticker}.parquet")
+
+    gate = us.build_universe_gate_from_files(
+        tmp_path, min_rows=250, min_median_close=1.0, min_median_dollar_volume=1_000_000
+    )
+
+    assert gate == {"GOOD"}
+
+
+# =============================================================================
+# CAGR ANCHOR MONTH (US fiscal-year-end fix, docs/US_DATASET_BUILD_PLAN.md §8.1)
+# =============================================================================
+
+def _quarterly_income(start, periods=28, growth_per_year=0.05):
+    """Steady growth_per_year%-a-year net_income/net_revenue on a quarterly
+    grid starting at `start` -- CAGR over any 20-quarter (5y) window should
+    read back as growth_per_year*100 wherever it's defined."""
+    dates = pd.date_range(start=start, periods=periods, freq="3ME")
+    quarterly_growth = (1 + growth_per_year) ** (1 / 4)
+    values = 100.0 * quarterly_growth ** np.arange(periods)
+    return pd.DataFrame({"reference_date": dates, "net_income": values, "net_revenue": values * 3})
+
+
+def test_fill_cagr_columns_default_anchor_still_december():
+    """Regression guard: fill_cagr_columns's default (anchor_month=12) must
+    stay byte-identical to pre-fix BR behavior -- December-anchored, annual
+    update, held constant through the following Q1-Q3."""
+    df = _quarterly_income("2015-03-31")  # Mar/Jun/Sep/Dec cycle -> hits December
+    result = ch.fill_cagr_columns(df)
+    # December rows are at index 3, 7, 11, ...; the first with a full 20-quarter
+    # lookback is index 23 (row 3 + 20) -- rows 20-22 (Mar/Jun/Sep) precede it.
+    assert result["cagr_earnings_5y_final"].iloc[23:].notna().all()
+    assert np.allclose(result["cagr_earnings_5y_final"].iloc[23:], 5.0, atol=0.5)
+    # broadcast: the 3 non-December quarters after an anchor share its value
+    assert result["cagr_earnings_5y_final"].iloc[23:27].nunique() == 1
+
+
+def test_fill_cagr_columns_anchor_month_none_fixes_non_december_fye():
+    """The bug: a company whose fiscal year never lands on December (e.g.
+    Agilent, FYE Oct 31 -- confirmed 8.6% of real US tickers) got 100% NaN
+    CAGR under the December-only anchor, since raw Bolsai-style cagr_*_5y is
+    unpopulated for the whole US universe and the calculated fallback was
+    the only source. anchor_month=None (what build_us_dataset.py now passes
+    via fill_missing_cagr) fixes it."""
+    df = _quarterly_income("2015-01-31")  # Jan/Apr/Jul/Oct cycle -> never December
+
+    broken = ch.fill_cagr_columns(df)  # old default (anchor_month=12)
+    assert broken["cagr_earnings_5y_final"].isna().all(), (
+        "fixture should reproduce the bug under the December-only default"
+    )
+
+    fixed = ch.fill_cagr_columns(df, anchor_month=None)
+    assert fixed["cagr_earnings_5y_final"].iloc[20:].notna().all()
+    assert np.allclose(fixed["cagr_earnings_5y_final"].iloc[20:], 5.0, atol=0.5)
 
 
 if __name__ == "__main__":

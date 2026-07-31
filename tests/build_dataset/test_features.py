@@ -460,6 +460,42 @@ def test_fundamental_features_ratios() -> None:
     assert approx(result.iloc[0]["working_capital_ratio"], 0.4)
 
 
+def test_fundamental_features_missing_market_cap_and_ebitda_columns() -> None:
+    """market_cap/ebitda are not just sparse for the US build -- confirmed
+    0% populated across the FULL 8,143-file US fundamentals corpus, so
+    load_fundamentals's existing per-file dropna(how="all") drops both
+    columns entirely (not merely NaN-valued). Regression guard: reading
+    df["market_cap"]/df["ebitda"] when the column is genuinely ABSENT must
+    produce NaN, not KeyError (docs/US_DATASET_BUILD_PLAN.md §8.0)."""
+    df = pd.DataFrame({
+        "ticker": ["A"] * 5,
+        "reference_date": pd.date_range("2025-01-01", periods=5, freq="QE"),
+        "equity": [500.0] * 5,
+        "net_income": [100.0] * 5,
+        "net_revenue": [1000.0] * 5,
+        "cash": [200.0] * 5,
+        "current_assets": [1200.0] * 5,
+        "current_liabilities": [400.0] * 5,
+        "total_assets": [2000.0] * 5,
+        "total_debt": [600.0] * 5,
+        "net_debt": [300.0] * 5,
+        "gross_margin": [0.5] * 5,
+        "net_margin": [0.1] * 5,
+        "roe": [0.2] * 5,
+        "roa": [0.05] * 5,
+        "current_ratio": [1.5] * 5,
+        "debt_equity": [0.6] * 5,
+        # market_cap, ebitda deliberately absent
+    })
+
+    result = compute_fundamental_features(df)  # must not raise KeyError
+
+    assert result["book_to_market"].isna().all()
+    assert result["ebitda_growth_yoy"].isna().all()
+    # every OTHER ratio (columns that are genuinely present) still computes normally
+    assert approx(result.iloc[0]["cash_ratio"], 0.5)
+
+
 def test_yoy_qoq_fscore_nan_across_a_missing_quarter() -> None:
     """revenue_growth_yoy/QoQ/f_score index by ROW position (pct_change(4)/
     diff(1)/shift(4)), not calendar time -- correct only when quarters are
@@ -830,6 +866,21 @@ def test_dividend_coverage_ratio_nan_when_no_dividend() -> None:
     assert pd.isna(result.iloc[0]["dividend_coverage_ratio"])
     expected = 100.0 / (0.5 * 1000.0)  # ebitda / (div_value_recent * shares_outstanding)
     assert approx(result.iloc[1]["dividend_coverage_ratio"], expected)
+
+
+def test_dividend_coverage_and_ebitda_margin_nan_when_ebitda_column_absent() -> None:
+    """Same absent-column case as
+    test_fundamental_features_missing_market_cap_and_ebitda_columns, but for
+    compute_advanced_features's two direct df["ebitda"] reads -- confirmed
+    0% populated across the full US corpus, so the column simply doesn't
+    exist post-load (docs/US_DATASET_BUILD_PLAN.md §8.0)."""
+    df = _advanced_features_fixture(2)
+    df = df.drop(columns=["ebitda"])
+
+    result = compute_advanced_features(df)  # must not raise KeyError
+
+    assert result["dividend_coverage_ratio"].isna().all()
+    assert result["ebitda_margin"].isna().all()
 
 
 def test_ratio_columns_nan_when_denominator_near_zero() -> None:

@@ -16,7 +16,9 @@ from .cagr_handler import fill_cagr_columns
 # FILL MISSING CAGR VALUES
 # =============================================================================
 
-def fill_missing_cagr(fundamentals):
+def fill_missing_cagr(fundamentals, anchor_month=12):
+    """anchor_month: see cagr_handler.fill_cagr_columns. Default 12 (BR/CVM's
+    mandated December fiscal year end); build_us_dataset.py passes None."""
 
     print()
     print("=" * 80)
@@ -36,7 +38,7 @@ def fill_missing_cagr(fundamentals):
         revenue_before = ticker_df["cagr_revenue_5y"].isna().sum() if "cagr_revenue_5y" in ticker_df.columns else 0
 
         # Fill CAGR
-        ticker_df = fill_cagr_columns(ticker_df)
+        ticker_df = fill_cagr_columns(ticker_df, anchor_month=anchor_month)
 
         # Track coverage after
         earnings_after = ticker_df["cagr_earnings_5y_final"].isna().sum()
@@ -327,7 +329,13 @@ def compute_fundamental_features(df):
         # function used to also define it as net_income/market_cap, silently
         # overwritten by the later definition every time; removed as dead
         # code (confirmed 2026-07-15, no code path ever read this value).
-        g["book_to_market"]        = g["equity"] / g["market_cap"]
+        # market_cap/ebitda: NOT just sparse -- confirmed 0% populated across
+        # the FULL US fundamentals corpus (8,143/8,143 files, 2026-07-31).
+        # load_fundamentals's existing per-file dropna(how="all") correctly
+        # drops an all-NaN column, so for the US these are entirely absent
+        # from `df`, not merely NaN-valued -- an unguarded read here
+        # KeyErrors. BR always has real data in both (guard is a no-op there).
+        g["book_to_market"]        = g["equity"] / g["market_cap"] if "market_cap" in g.columns else np.nan
         g["cash_ratio"]            = g["cash"] / g["current_liabilities"]
         g["net_debt_to_assets"]    = g["net_debt"] / g["total_assets"]
         g["working_capital_ratio"] = (g["current_assets"] - g["current_liabilities"]) / g["total_assets"]
@@ -336,7 +344,9 @@ def compute_fundamental_features(df):
         yoy_ok = _within_calendar_gap(g["reference_date"], 4, *YOY_GAP_DAYS)
         g["revenue_growth_yoy"]       = g["net_revenue"].pct_change(4, fill_method=None).where(yoy_ok)
         g["earnings_growth_yoy"]      = g["net_income"].pct_change(4, fill_method=None).where(yoy_ok)
-        g["ebitda_growth_yoy"]        = g["ebitda"].pct_change(4, fill_method=None).where(yoy_ok)
+        g["ebitda_growth_yoy"]        = (
+            g["ebitda"].pct_change(4, fill_method=None).where(yoy_ok) if "ebitda" in g.columns else np.nan
+        )
         g["total_assets_growth_yoy"]  = g["total_assets"].pct_change(4, fill_method=None).where(yoy_ok)
         g["total_debt_growth_yoy"]    = g["total_debt"].pct_change(4, fill_method=None).where(yoy_ok)
 
@@ -526,7 +536,11 @@ def compute_advanced_features(df):
     # uses a >0 guard (annual_dividend is never legitimately negative) rather
     # than _safe_ratio's abs()-near-zero guard.
     annual_dividend = df["div_value_12m"] * df["shares_outstanding"]
-    df["dividend_coverage_ratio"] = df["ebitda"] / annual_dividend.where(annual_dividend > 0)
+    # ebitda: absent (not just NaN) for the whole US corpus -- see
+    # compute_fundamental_features's book_to_market comment above.
+    df["dividend_coverage_ratio"] = (
+        df["ebitda"] / annual_dividend.where(annual_dividend > 0) if "ebitda" in df.columns else np.nan
+    )
 
     # --- EARNINGS QUALITY (raw signals, no classification) ---
 
@@ -539,7 +553,9 @@ def compute_advanced_features(df):
     )
 
     # EBITDA margin as quality proxy (higher = better operational efficiency, but let model learn)
-    df["ebitda_margin"] = _safe_ratio(df["ebitda"], df["net_revenue"])
+    df["ebitda_margin"] = (
+        _safe_ratio(df["ebitda"], df["net_revenue"]) if "ebitda" in df.columns else np.nan
+    )
 
     # --- LIQUIDITY (raw volume vs. float -- lives here, not compute_price_features,
     # since shares_outstanding is a fundamentals column) ---

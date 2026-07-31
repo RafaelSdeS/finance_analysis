@@ -45,72 +45,91 @@ def cagr_standard(v_now: float, v_ago: float, years: int = 5) -> float:
     return ((v_now / v_ago) ** (1 / years) - 1) * 100
 
 
-def _december_periods(df: pd.DataFrame) -> pd.Series:
-    """Group id that increments at each December row: the December row and
-    every quarter up to (excluding) the next December share one id. Group 0
-    is whatever comes before the first December (no anchor yet)."""
-    is_december = df["reference_date"].dt.month == 12
-    return is_december.cumsum()
+def _anchor_periods(df: pd.DataFrame, anchor_month) -> pd.Series:
+    """Group id that increments at each anchor row: the anchor row and every
+    quarter up to (excluding) the next anchor share one id. Group 0 is
+    whatever comes before the first anchor (no anchor yet).
+
+    anchor_month=None means every row is its own anchor -- used when there is
+    no reliable fiscal-year-end signal to anchor to (US tickers; see
+    fill_cagr_columns). The cumsum then increments every row, so each group
+    has exactly one member and the "broadcast to following quarters" behavior
+    below degenerates to "just this row's own value" with no extra code."""
+    if anchor_month is None:
+        is_anchor = pd.Series(True, index=df.index)
+    else:
+        is_anchor = df["reference_date"].dt.month == anchor_month
+    return is_anchor.cumsum()
 
 
-def calc_annual_cagr(df: pd.DataFrame, col: str, lookback: int = 20) -> pd.Series:
+def calc_annual_cagr(df: pd.DataFrame, col: str, lookback: int = 20, anchor_month=12) -> pd.Series:
     """
-    Calculate CAGR at December rows only (annual anchors), then broadcast
-    each anchor's own value across itself and the following Q1-Q3.
+    Calculate CAGR at anchor rows only, then broadcast each anchor's own
+    value across itself and the following quarters up to the next anchor.
 
-    This matches Bolsai's reported methodology where CAGR is anchored
-    to fiscal year ends: the value updates once a year, at December,
-    and holds constant through the following Q1-Q3.
+    anchor_month=12 matches Bolsai's reported methodology for BR, where CAGR
+    is anchored to the (CVM-mandated) December fiscal year end: the value
+    updates once a year and holds constant through the following Q1-Q3.
+    anchor_month=None (US) treats every quarter as its own anchor instead --
+    US fiscal year ends vary by company (measured: 8.6% of US tickers have
+    zero December-ending quarters, e.g. Agilent's Oct 31 FYE) and there is no
+    reliable per-ticker FYE column to anchor to instead, so this recomputes
+    the trailing-5-year CAGR every quarter rather than annually.
 
     Parameters:
         df: DataFrame with 'reference_date' and a data column
         col: Column name containing values to calculate CAGR from
         lookback: Number of quarters to look back (default 20 = 5 years)
+        anchor_month: calendar month that anchors the annual value (1-12),
+            or None to anchor every quarter (see above)
 
     Returns:
-        Series with CAGR values, held constant from each December anchor
-        through the following Q1-Q3 (NaN if that anchor's own base year
-        was invalid — never silently reused from an older anchor)
+        Series with CAGR values, held constant from each anchor through the
+        following quarters (NaN if that anchor's own base year was invalid —
+        never silently reused from an older anchor)
     """
     values = df[col].to_numpy()
     result = np.full(len(values), np.nan, dtype=np.float64)
-    is_december = (df["reference_date"].dt.month == 12).to_numpy()
+    if anchor_month is None:
+        is_anchor = np.full(len(values), True)
+    else:
+        is_anchor = (df["reference_date"].dt.month == anchor_month).to_numpy()
 
     # ponytail: vectorized CAGR calculation using numpy shift
     # Avoid loop over .iloc[], use numpy slicing instead
     v_now = values[lookback:]
     v_ago = values[:-lookback]
 
-    # Apply CAGR formula element-wise: only at December rows (the annual
-    # anchor) where both values are positive. A non-December row must never
-    # produce its own value here — that would let an unrelated quarter's
-    # computation leak into December's slot, silently overriding an anchor
-    # whose own base year was negative/zero (see had_negative_base) with an
-    # earlier, unrelated quarter's number.
+    # Apply CAGR formula element-wise: only at anchor rows where both values
+    # are positive. A non-anchor row must never produce its own value here —
+    # that would let an unrelated quarter's computation leak into the
+    # anchor's slot, silently overriding an anchor whose own base year was
+    # negative/zero (see had_negative_base) with an earlier, unrelated
+    # quarter's number.
     # lookback is in quarters; CAGR exponent is per-year → years = lookback / 4
     years = lookback / 4
     valid = ((v_now > 0) & (v_ago > 0) & (~np.isnan(v_now)) & (~np.isnan(v_ago))
-             & is_december[lookback:])
+             & is_anchor[lookback:])
     result[lookback:][valid] = ((v_now[valid] / v_ago[valid]) ** (1 / years) - 1) * 100
 
-    # Broadcast each December's own raw value (a number, or NaN if its base
-    # year was invalid) across itself and the following Q1-Q3. A plain
-    # ffill() would instead skip an invalid December and reach back to an
-    # older, stale anchor — wrong: an invalid anchor must read as "undefined
+    # Broadcast each anchor's own raw value (a number, or NaN if its base
+    # year was invalid) across itself and the following quarters. A plain
+    # ffill() would instead skip an invalid anchor and reach back to an
+    # older, stale one — wrong: an invalid anchor must read as "undefined
     # this year," not "same as last year." Safe because within a period only
-    # the December row (the group's first member) can ever be non-NaN, so
+    # the anchor row (the group's first member) can ever be non-NaN, so
     # "first" is exactly that anchor's value, whether a number or NaN.
-    period = _december_periods(df)
+    period = _anchor_periods(df, anchor_month)
     return pd.Series(result, index=df.index).groupby(period).transform("first")
 
 
-def had_negative_base(df: pd.DataFrame, col: str, lookback: int = 20) -> pd.Series:
+def had_negative_base(df: pd.DataFrame, col: str, lookback: int = 20, anchor_month=12) -> pd.Series:
     """
     Binary flag indicating whether the currently-active annual anchor's base
-    year (December, lookback quarters back) had negative or zero value,
-    making standard CAGR undefined. Anchored to December and broadcast the
-    same way as calc_annual_cagr, so the two never disagree about which
-    quarter's base year they're describing.
+    year (lookback quarters back) had negative or zero value, making
+    standard CAGR undefined. Anchored and broadcast the same way as
+    calc_annual_cagr, so the two never disagree about which quarter's base
+    year they're describing.
 
     This is important for earnings: negative earnings 5 years ago
     means we can't compute a meaningful CAGR.
@@ -119,54 +138,62 @@ def had_negative_base(df: pd.DataFrame, col: str, lookback: int = 20) -> pd.Seri
         Series with 1 where base was negative/zero, 0 otherwise
     """
     values = df[col].to_numpy()
-    is_december = (df["reference_date"].dt.month == 12).to_numpy()
+    if anchor_month is None:
+        is_anchor = np.full(len(values), True)
+    else:
+        is_anchor = (df["reference_date"].dt.month == anchor_month).to_numpy()
     flag = np.full(len(values), np.nan)
 
     # ponytail: vectorized flag check using numpy slicing
     v_ago = values[:-lookback]
-    at_december = is_december[lookback:]
-    flag[lookback:][at_december] = ((v_ago <= 0) | np.isnan(v_ago))[at_december]
+    at_anchor = is_anchor[lookback:]
+    flag[lookback:][at_anchor] = ((v_ago <= 0) | np.isnan(v_ago))[at_anchor]
 
-    period = _december_periods(df)
+    period = _anchor_periods(df, anchor_month)
     result = pd.Series(flag, index=df.index).groupby(period).transform("first")
     return result.fillna(0).astype(int)
 
 
-def fill_cagr_columns(df: pd.DataFrame) -> pd.DataFrame:
+def fill_cagr_columns(df: pd.DataFrame, anchor_month=12) -> pd.DataFrame:
     """
     Main CAGR filling function.
-    
+
     Fills missing CAGR values in df with calculated values where valid,
     and adds a flag for cases where calculation is impossible.
-    
+
     Input columns required:
         - cagr_earnings_5y (from Bolsai, may be null)
         - cagr_revenue_5y (from Bolsai, may be null)
         - net_income (from Bolsai fundamentals)
         - net_revenue (from Bolsai fundamentals)
         - reference_date (datetime)
-    
+
+    anchor_month: fiscal-year-end month (1-12) the annual CAGR anchors to;
+        default 12 matches BR/CVM's mandated December year end. Pass None
+        for universes without a reliable single fiscal-year-end month (the
+        US build passes None -- see calc_annual_cagr's docstring).
+
     Output columns added:
         - cagr_earnings_5y_final: Bolsai value or calculated, or NaN
         - cagr_revenue_5y_final: Bolsai value or calculated
         - had_negative_earnings_5y: Binary flag (1 if negative base, 0 otherwise)
-    
+
     Returns:
         DataFrame with filled CAGR columns added
     """
     df = df.copy()
     df = df.sort_values("reference_date").reset_index(drop=True)
-    
+
     # Calculate CAGR from fundamentals
     if "net_income" in df.columns:
-        df["cagr_earnings_calc"] = calc_annual_cagr(df, "net_income")
-        df["had_negative_earnings"] = had_negative_base(df, "net_income")
+        df["cagr_earnings_calc"] = calc_annual_cagr(df, "net_income", anchor_month=anchor_month)
+        df["had_negative_earnings"] = had_negative_base(df, "net_income", anchor_month=anchor_month)
     else:
         df["cagr_earnings_calc"] = np.nan
         df["had_negative_earnings"] = 0
-    
+
     if "net_revenue" in df.columns:
-        df["cagr_revenue_calc"] = calc_annual_cagr(df, "net_revenue")
+        df["cagr_revenue_calc"] = calc_annual_cagr(df, "net_revenue", anchor_month=anchor_month)
     else:
         df["cagr_revenue_calc"] = np.nan
     

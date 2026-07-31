@@ -40,13 +40,13 @@ Verified live, not assumed:
 - [x] **macro** — 14 FRED series, all clean.
 - [x] **company_info** — 10,432 rows (`ticker`, `cik`, `sic`, `sic_description`).
       1,336 rows have a null `sic`.
-- [ ] **dividends** — **STILL RUNNING.** PID 124339, log
-      `artifacts/logs/collection/collection-us_dividends_full-20260731_083307.log`.
-      2,092 / 10,432 files at 09:25. Monitor task `b31st398r`.
-      → *Blocks Phase D only.* Everything through Phase C can be built and tested now;
-      `merge_dividends` already has a `has_dividends` 0/1 flag for exactly this
-      "collected vs. confirmed zero" ambiguity, so an incomplete run degrades gracefully
-      rather than corrupting anything.
+- [x] **dividends** — **COMPLETE** (corrected 2026-07-31, see §8.4 — the original "2,092/10,432
+      at 09:25, still running" line above was superseded, and the file-count-vs-10,432 completion
+      criterion it implied was wrong to begin with: a file only exists for a ticker that has ever
+      *paid* a dividend, and most of the 10,432 crosswalk tickers never do). Confirmed done: the
+      `us_full_scale_v2` checkpoint holds 4,209 entries with current 2026-05/06/07 `last_date`s,
+      4,214 files on disk, and the last run walked all 10,432 tickers writing 0 new rows before
+      exiting cleanly. Phase D is unblocked.
 
 All 8,143 fundamentals tickers are a strict subset of the 9,593 priced tickers — the
 `filter_tickers_with_no_fundamentals` gate will cut exactly 1,450 tickers, and the
@@ -528,3 +528,221 @@ Ported from `tests/build_dataset/test_final_dataset.py`, as
   2,960 tickers speculatively.
 - **No point-in-time universe in this dataset.** Same split of responsibilities as BR: the
   dataset is the full gated panel, universe construction is a separate downstream filter.
+
+---
+
+## 8. Fix plan — 2026-07-31 review
+
+Re-checked the three things standing between here and a real Phase C run, against live data.
+One is a new bug, one is the known §4.6 work, one turned out to be a false alarm.
+
+### 8.0 The build dies at line 285, not at the manifest — MEASURED, blocks everything
+
+§4.6 calls the manifest read-back "the one remaining blocker before Phase C can actually be run."
+**That is wrong, and §8.2 below inherited the error.** Measured against the real files today, the
+build OOMs twice *before* it ever reaches the manifest — and the first time, it has written
+nothing to disk at all.
+
+**Failure 1 — `load_prices()` (`build_us_dataset.py:285`), the first statement in `main()`.**
+The universe gate runs on line 289, *after* the load. So `load_prices` reads **all 9,593 tickers /
+34,026,021 rows**, not the gated 2,960 / 15.4M. Measured at **157 B/row** (deep, incl. the object
+`ticker` column) → **5.3 GB** for the result, and `load_prices` holds the 9,593-frame `dfs` list,
+the `pd.concat` result, and the `sort_values` copy live simultaneously → **~16 GB peak**. Machine
+has ~8 GB available. The gate cannot rescue a load that already died.
+
+**Failure 2 — the merged frame, resident in `main()` before `compute_features_chunked`.**
+D1 listed this as break point (1) and then only §4.6-fixed break point (2). Measured: US
+fundamentals carry **71 columns — 49 numeric, 15 datetime, 7 object** — which once forward-filled
+onto the daily panel costs **~1,002 B/row**. At the gated 15.4M rows that is **15.4 GB for the
+fundamentals block alone, ~17.9 GB with prices**, before a single feature is computed.
+
+**The saving grace: almost all of that width is collection-time provenance, not features.**
+
+| what | cols | B/row | keep? |
+|---|---|---|---|
+| `*_filed` per-line-item dates | 13 | 104 | **drop** — only used at collection time to derive `fundamentals_available_date` (the MAX across items, Phase C.5); nothing in Stage 2 reads them |
+| `item6_filename`, `fds_filename`, `fds_article`, `fds_form`, `item6_form`, `fds_multiplier_explicit` | 6 | 420 | **drop** — pure provenance, ≤49 unique values each, `item6_filename`/`fds_filename` average 42 chars |
+| `fundamentals_tier` | 1 | 70 | **keep as `category`** (~1 B/row) — D2 relies on the model seeing it |
+| numeric | 49 | 392 | **`float32`** → 196 |
+
+- [x] **Gate before the full load — DONE 2026-07-31.** `build_universe_gate_from_files(dir)`
+      (`build_us_dataset.py`) reads only `close`/`volume` per file, no concat; `load_prices` gained
+      a `tickers=` filter (default `None` = load everything, zero behavior change for BR).
+      `main()` now gates before loading. Measured against the real files: gate alone finds
+      **3,134/9,593** qualifying tickers — **not a drift from the plan's 2,960, verified**: the
+      gate now necessarily runs before `filter_tickers_with_no_fundamentals` (it has to — that
+      filter needs fundamentals loaded first, which is exactly what this fix avoids doing
+      upfront), so it sees all 9,593 priced tickers, not just the 8,143 with fundamentals
+      coverage. Restricting the same gate to the fundamentals-covered subset reproduces **exactly
+      2,960**; the other 174 are liquid price-only tickers with zero fundamentals files (mostly
+      closed-end funds/ADRs — ACP, ADX, AIO, AWF, BAESY, ...) that `filter_tickers_with_no_fundamentals`
+      still drops one step later, same as before this fix. Loading the gated 3,134-ticker set +
+      fundamentals peaked at **5.5 GB RSS** (was ~16 GB for the old full-then-filter order) — well
+      inside the ~8 GB available.
+- [x] **Trim fundamentals width at load — DONE.** `load_fundamentals` drops the `*_filed`/
+      `item6_*`/`fds_*` provenance columns unconditionally (confirmed absent from BR, a no-op
+      there) and gained `optimize_dtypes=False` (BR keeps float64 exactly; US passes `True` →
+      numeric columns to `float32`, `fundamentals_tier` to `category`, `cik` excluded — an
+      identifier, not a value).
+- [ ] **Skipped: `ticker` → `category` on prices.** ~0.9 GB of the projected savings, but touches
+      `.str`/`.groupby`/`.merge` call sites shared with BR across several modules — real risk for a
+      win that turned out to be unnecessary once the two items above landed (5.5 GB measured, not
+      the ~5.9 GB projected). Add only if a real Phase C run still runs tight on memory.
+
+**Correction to §8.2's float32 call:** I dismissed float32 there on the grounds that it doesn't
+rescue the *final read-back* (11.7 GB still > 8.7 GB free). That reasoning holds for the read-back
+and nowhere else — for the merged frame above, float32 is one of the three levers that make the
+build possible at all. Dropping it wholesale was wrong.
+
+**A third bug, found while verifying this fix (not in the original measurement): `market_cap` and
+`ebitda` aren't just NaN in the raw US fundamentals — confirmed 0% populated across the FULL
+8,143-file corpus (every single file, zero exceptions), which means `load_fundamentals`'s existing
+per-file `dropna(axis=1, how="all")` (pre-existing code, unrelated to this fix) drops both columns
+*entirely*, not merely NaN-fills them.** Four unguarded reads assumed the columns would at least
+exist: `features.py`'s `compute_fundamental_features` (`book_to_market`, `ebitda_growth_yoy`) and
+`compute_advanced_features` (`dividend_coverage_ratio`, `ebitda_margin`) — all four `KeyError`'d
+the instant a real, gated US load reached them (confirmed by actually running the merge on a small
+real ticker sample, not just unit fixtures). Fixed with `if "market_cap"/"ebitda" in df.columns`
+guards at each site (a no-op for BR, which always has real data in both) — root-cause-sized, since
+these are 4 independent feature computations with no single shared choke point to patch instead.
+Regression-tested in `test_features.py`. **Not caught by Phase B/C.5's mini/adversarial runs** —
+those used tiny hand-picked ticker sets and never hit this combination of columns at the real
+gated scale.
+
+**Verification note:** the full 3,134-ticker `merge_prices_and_fundamentals` loop was NOT run to
+completion interactively — a first attempt was backgrounded past its timeout and the sustained
+memory pressure (on top of everything else already running) crashed the user's VS Code. The load
+stage (5.5 GB peak) and the crash fix above were both confirmed correct on a small real-ticker
+sample (AAPL/GE/KO/A/WMT/ACN/ADI/SPY) instead. **A real Phase C attempt should be launched
+`nohup ... &`/`disown` and left to run unattended, not driven interactively** — same lesson as
+[[feedback_nohup_background_jobs]], now doubly true given this machine's tight memory margin.
+
+### 8.1 CAGR is silently 100% NaN for 8.6% of US tickers — NEW BUG
+
+**Measured, full corpus:** **701 / 8,143** fundamentals tickers have *zero* rows ending in
+December — A (Agilent, FYE Oct 31), ACN (Aug), ADI (Oct), AEO, ABM, ...
+
+`cagr_handler.py` hardcodes the fiscal-year anchor as `reference_date.dt.month == 12`, in both
+`calc_annual_cagr` and `had_negative_base`. Correct for BR (CVM mandates a December FYE); wrong
+for the US. Because raw `cagr_earnings_5y`/`cagr_revenue_5y` are **0% populated** for US
+fundamentals (§4.4), the calculated fallback is the *only* source — so for those 701 tickers
+`cagr_{earnings,revenue}_5y_final` is NaN across their entire history, and `cagr_*_defined`
+dutifully reads 0 everywhere. Nothing crashes, nothing flags it.
+
+Phase C.5's adversarial integration run *included* `A` and still missed this: that audit only
+checked for lookahead violations, never CAGR fill coverage.
+
+**Fix (~6 lines, BR output bit-identical) — DONE 2026-07-31:** threaded an `anchor_month` parameter.
+
+- [x] `_december_periods(df)` → `_anchor_periods(df, anchor_month)`; `is_anchor` is
+      `dt.month == anchor_month`, or all-True when `anchor_month is None`.
+- [x] Same substitution in `calc_annual_cagr` and `had_negative_base` (both already build their
+      own local `is_december`).
+- [x] Threaded `anchor_month=12` through `fill_cagr_columns` → `features.fill_missing_cagr`;
+      `build_us_dataset.main()` passes `anchor_month=None`.
+- [x] Two tests added (`test_build_us_dataset.py`): Dec-FYE fixture output unchanged (byte-identical
+      to the pre-fix formula), Oct-FYE fixture (Agilent's real cadence) goes from 100% NaN to fully
+      populated at ~5%/year. Also re-ran `test_cagr_calculation.py` against 4 real BR tickers
+      (PETR4/VALE3/ITUB4/WEGE3) to confirm the default path is untouched.
+- [x] `python tests/run_all.py --group fast`: 47/47 green. `ruff check`: clean.
+
+`anchor_month=None` (every quarter is an anchor → 5y CAGR that updates quarterly) rather than
+per-ticker FYE detection, for two reasons: the existing `_december_periods` cumsum already
+degenerates to one group per row when every row is an anchor, so the broadcast logic needs *no*
+extra code; and there is **no reliable FYE signal to detect from** — `fiscal_year` is not even a
+column in every fundamentals file (confirmed: the schema genuinely differs per tier;
+`load_fundamentals`' `pd.concat(sort=False)` is what absorbs that today).
+
+Cost: US CAGR updates quarterly where BR's updates annually. Say the word if matching BR's annual
+cadence matters more than coverage — that's the per-ticker-FYE version, and it needs a FYE source
+found first.
+
+**Known ceiling, deliberately not fixed here:** `calc_annual_cagr` looks back 20 *rows*, not 20
+real quarters — a vendor-missing quarter silently stretches the window, the same landmine
+`features._within_calendar_gap` already guards YoY/QoQ against. Pre-existing for BR too. Add the
+guard only if a gap audit shows it actually bites.
+
+### 8.2 Manifest read-back will OOM at full scale — FIXED 2026-07-31
+
+`main()` used to end with a dense `pd.read_parquet(US_OUTPUT_PATH)` → ~20–23 GB at 15.4M rows ×
+~190 columns. Machine: 15 GB total, ~8 GB available.
+
+- [x] `write_split_config`: call site now passes
+      `pd.read_parquet(US_OUTPUT_PATH, columns=["trade_date"])` — the only column it ever touches.
+      Zero changes inside `write_split_config` itself.
+- [x] `write_manifest` gained an optional `parquet_path=` branch (`dataset=None` now, `parquet_path`
+      required in its place). When given: schema/dtypes read from the parquet footer (no rows read)
+      via `pf.schema_arrow.empty_table().to_pandas().select_dtypes(...)` — reusing pandas' own
+      numeric-selection so "what counts as numeric" can never diverge from the in-memory branch —
+      `rows` from `ParquetFile.metadata.num_rows` (free), `tickers`/`date_min`/`date_max` from
+      single-column reads, and `column_stats` one column at a time. The final manifest-dict
+      construction is shared between both branches (not duplicated) — only how the pieces get
+      computed differs. Default (`parquet_path=None`) is byte-identical to the original in-memory
+      path; BR's existing call in `build_ml_dataset.py` is untouched.
+- [x] Regression test (`test_manifest.py`): `parquet_path=` produces the identical manifest to the
+      in-memory path on the same data (rows/tickers/dates/columns/tainted-cols/dropped-report/
+      column_stats all compared directly).
+- [x] **Skipped: the float32 cast.** Turned out unnecessary once §8.0's gate-before-load +
+      fundamentals-width fixes landed (measured 5.5 GB peak through the merge stage, not the
+      ~11.7-17.9 GB this section was written against).
+- [ ] **Skipped: porting `sync_dataset_version`.** There is no previous US build to diff against.
+      Add at the second build.
+
+### 8.3 Undocumented second OOM risk: Pass 2 — MEASURE, don't pre-fix
+
+§4.6 only ever counted the final read-back. `compute_features_chunked`'s Pass 2 holds the slim
+frame for the whole universe at once, and `compute_cross_sectional_features` then keeps roughly
+three live copies of it: the `df.merge(bench)` result, plus the per-ticker `result` list *and* its
+`pd.concat` in the beta loop. `ticker`/`sector` are object dtype — ~15.4M × 2 Python strings ≈
+1.8 GB before any copy is made.
+
+- [ ] Run Phase C and watch RSS across the Pass 1→2 boundary. Do not pre-optimize.
+- [ ] If it bites: cast `ticker`/`sector` to `category` before Pass 2 — one line, kills the
+      object-dtype cost. Rewriting the beta loop as a groupby transform is the next rung, only if
+      that isn't enough.
+
+### 8.4 Dividends — NOT dead, actually COMPLETE. Phase D unblocked.
+
+`collection-us_dividends_threaded2` ran 15:00→15:37, walked **all 10,432 distinct tickers**, wrote
+**0 new rows**, and exited. It did not die — it *finished*. Corroborated three ways: the checkpoint
+`artifacts/checkpoints/us_full_scale_v2/yf_dividends.json` holds 4,209 entries with current
+`last_date`s (2026-05/06/07); 4,214 files on disk; KO/JNJ/PG/XOM/T/MMM/PEP/CVX/IBM/WMT all present.
+
+The two `NVRM ... Out of memory` kernel messages at 14:56 are GPU VRAM, predate the 15:00 launch,
+and are unrelated — not an OOM-kill of this job.
+
+- [ ] **Correct the completion criterion** in §1 (and in the session memory note): `ls
+      data/raw/us/dividends | wc -l == 10432` is **unreachable by construction** — a file is only
+      written when a ticker has *ever* paid a dividend, and most of the 10,432 (warrants `*W`,
+      units `*U`, shells, plain non-payers) never do. Use the checkpoint entry count or a clean log
+      exit instead.
+- [ ] Drop "blocked on PID 124339" from Phase D — nothing is blocking it.
+
+### 8.5 Cosmetic
+
+- [ ] `close_price` survives into the US output: BR's `recompute_valuation_daily` drops it at the
+      end, `compute_valuation_daily_us` doesn't. One line, or just leave it — it's a real column
+      (close at filing date), merely unused.
+
+### Order
+
+1. **8.4** — [x] done, docs/memory corrected.
+2. **8.1** — [x] CAGR fix + tests, fast suite green.
+3. **8.0** — [x] gate-before-load + fundamentals width trim, **including a 3rd bug found while
+   verifying it** (`market_cap`/`ebitda` absent, not just NaN — 4 crash sites fixed). Measured
+   5.5 GB peak through the merge stage on the real gated universe (was ~16 GB). Full 3,134-ticker
+   merge not run to completion interactively (see verification note in §8.0) — confirmed correct
+   on a small real-ticker sample instead.
+4. **8.2** — [x] manifest/split-config streaming, regression-tested.
+5. **Run Phase C** — launch `nohup`'d/`disown`'d, not interactively (see §8.0's verification
+   note), watching **8.3**.
+6. Phase D + the §6 gates (`tests/build_dataset/test_us_final_dataset.py`).
+
+**Status as of 2026-07-31 (later session): §8.0/8.1/8.2 all implemented and tested** — 47/47 fast
+tests, 12/12 data-group tests (incl. real BR `ml_dataset.parquet` validation and US data-quality
+checks), 24 new/updated unit tests across `test_build_us_dataset.py`/`test_loaders.py`/
+`test_features.py`/`test_manifest.py`, `ruff check` clean. **Phase C itself has NOT been run at
+full scale** — the remaining risk is real but unmeasured beyond the merge stage (Pass 2, §8.3;
+`compute_features_chunked`'s per-batch Pass 1 arithmetic upcasting float32 back to float64, not
+separately measured either). Next session should launch the real build backgrounded
+(`nohup ... & disown`) and watch, not assume clean based on this session's smaller-scale checks.

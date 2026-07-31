@@ -14,6 +14,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from .paths import OUTPUT_PATH, ROOT, SCALER_DIR, SPLIT_CONFIG_PATH
 
@@ -60,7 +61,7 @@ COLUMN_UNITS = {
 # BUILD MANIFEST
 # =============================================================================
 
-def write_manifest(dataset, dropped_no_fundamentals=None, output_path=None):
+def write_manifest(dataset=None, dropped_no_fundamentals=None, output_path=None, parquet_path=None):
     """Reproducibility record + per-column distribution snapshot, one per build.
 
     Written next to the parquet as ml_dataset.manifest.json. Comparing two
@@ -75,6 +76,13 @@ def write_manifest(dataset, dropped_no_fundamentals=None, output_path=None):
     recorded as an explicit "not tracked" marker) so callers that build a
     dataset without running the real Stage 2 filter pipeline (most tests)
     don't need to fabricate one.
+
+    parquet_path: stream column_stats from disk one column at a time instead
+    of requiring the full `dataset` resident in memory -- at US scale
+    (15.4M rows x ~190 cols) a dense `pd.read_parquet` before this call is
+    itself the OOM (~20GB, docs/US_DATASET_BUILD_PLAN.md §8.2). `dataset` may
+    be omitted when this is given. Default None preserves the original
+    in-memory path exactly -- BR's existing call is unaffected.
     """
     # `output_path=None` (not `output_path=OUTPUT_PATH`) deliberately -- a
     # bound default is captured at import time, so a test monkeypatching
@@ -93,31 +101,58 @@ def write_manifest(dataset, dropped_no_fundamentals=None, output_path=None):
     def _f(x):
         return None if pd.isna(x) else round(float(x), 6)
 
-    numeric = dataset.select_dtypes(include="number")
+    def _col_stats(s):
+        return {
+            "nan_pct": round(float(s.isna().mean()) * 100, 2),
+            "mean": _f(s.mean()),
+            "std": _f(s.std()),
+            "p1": _f(s.quantile(0.01)),
+            "p50": _f(s.quantile(0.50)),
+            "p99": _f(s.quantile(0.99)),
+        }
+
+    if parquet_path is not None:
+        pf = pq.ParquetFile(parquet_path)
+        # Schema/dtypes only, no rows read (cheap) -- select_dtypes reused
+        # so "what counts as numeric" can never diverge from the in-memory
+        # branch below.
+        empty = pf.schema_arrow.empty_table().to_pandas()
+        columns = list(empty.columns)
+        numeric_cols = list(empty.select_dtypes(include="number").columns)
+
+        rows = pf.metadata.num_rows
+        tickers = int(pd.read_parquet(parquet_path, columns=["ticker"])["ticker"].nunique())
+        trade_date = pd.read_parquet(parquet_path, columns=["trade_date"])["trade_date"]
+        date_min, date_max = str(trade_date.min().date()), str(trade_date.max().date())
+        del trade_date
+
+        column_stats = {
+            c: _col_stats(pd.read_parquet(parquet_path, columns=[c])[c])
+            for c in numeric_cols
+        }
+    else:
+        rows = len(dataset)
+        tickers = int(dataset["ticker"].nunique())
+        date_min = str(dataset["trade_date"].min().date())
+        date_max = str(dataset["trade_date"].max().date())
+        columns = list(dataset.columns)
+        numeric = dataset.select_dtypes(include="number")
+        column_stats = {c: _col_stats(numeric[c]) for c in numeric.columns}
+
     manifest = {
         "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "git_commit": commit,
         "pandas": pd.__version__,
         "numpy": np.__version__,
-        "rows": len(dataset),
-        "tickers": int(dataset["ticker"].nunique()),
-        "date_min": str(dataset["trade_date"].min().date()),
-        "date_max": str(dataset["trade_date"].max().date()),
-        "columns": list(dataset.columns),
-        "lookahead_tainted_columns": [c for c in LOOKAHEAD_TAINTED_COLS if c in dataset.columns],
-        "column_units": {c: u for c, u in COLUMN_UNITS.items() if c in dataset.columns},
+        "rows": rows,
+        "tickers": tickers,
+        "date_min": date_min,
+        "date_max": date_max,
+        "columns": columns,
+        "lookahead_tainted_columns": [c for c in LOOKAHEAD_TAINTED_COLS if c in columns],
+        "column_units": {c: u for c, u in COLUMN_UNITS.items() if c in columns},
         "dropped_no_fundamentals": dropped_no_fundamentals if dropped_no_fundamentals is not None else "not tracked",
-        "column_stats": {
-            c: {
-                "nan_pct": round(float(numeric[c].isna().mean()) * 100, 2),
-                "mean": _f(numeric[c].mean()),
-                "std": _f(numeric[c].std()),
-                "p1": _f(numeric[c].quantile(0.01)),
-                "p50": _f(numeric[c].quantile(0.50)),
-                "p99": _f(numeric[c].quantile(0.99)),
-            }
-            for c in numeric.columns
-        },
+        "column_stats": column_stats,
     }
     path = output_path.with_suffix(".manifest.json")
     path.write_text(json.dumps(manifest, indent=1))
