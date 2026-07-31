@@ -10,6 +10,8 @@ company_info and macro have no yfinance equivalent and stay BolsAI/BCB-only
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor
+from threading import Lock
 from time import sleep
 
 import numpy as np
@@ -709,17 +711,39 @@ def collect_fundamentals_yf(tickers: list[str], mode: str):
 # ---------------------------------------------------------------------------
 
 def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
-                          suffix: str | None = None, floor: str | None = None):
+                          suffix: str | None = None, floor: str | None = None, workers: int = 4):
     """`dividend_dir`/`suffix`/`floor` default to the BR globals (config.DIVIDENDS_DIR /
     config.YF_SUFFIX / config.START_DATE) -- mirrors collect_prices_yf's override pattern
     for the pure-yfinance US path (price_dir=config.US_DIVIDENDS_DIR, suffix="",
     floor="1900-01-01"). Verified back to 1994 against 5 real long-history payers
     (KO/GE/IBM/PG/XOM, 2026-07-28): plausible quarterly values, and KO's reconciles
     exactly to its known real 1994 dividend once un-split (0.04875 x 4 = $0.195/share,
-    matching its real 1996 + 2012 2:1 splits)."""
+    matching its real 1996 + 2012 2:1 splits).
+
+    `workers` runs multiple tickers concurrently -- real speedup found needed
+    2026-07-31: a strictly sequential pass over the full 10,432-ticker US
+    universe (each request already throttled to config.YF_RATE_LIMIT_SLEEP,
+    same deliberate pace as collect_prices_yf) projected ~13 more hours for the
+    remaining long tail. Each thread keeps its OWN YF_RATE_LIMIT_SLEEP pace --
+    this doesn't remove the per-request throttle that pace exists for (the
+    2026-07-31 Yahoo rate-limit incident earlier today), it runs a modest
+    number of independently-throttled lanes in parallel instead of one,
+    default kept low (4, not fundamentals.py's 8) since that incident was
+    about cumulative volume over hours, not pure concurrency, and this is the
+    same vendor prices' own throttle exists to protect. `cp` (the shared
+    checkpoint dict) is mutated and persisted from multiple threads -- real
+    race found while designing this: checkpoint.save()'s own lock only
+    protects its file write, not a caller mutating the same dict object
+    concurrently from another thread while save() is mid-snapshot
+    (`{**data}` can raise "dictionary changed size during iteration" if
+    another thread inserts a new key at that exact moment) -- _cp_lock
+    serializes the whole "mutate cp, then persist it" step per ticker.
+    """
     dividend_dir = dividend_dir or config.DIVIDENDS_DIR
     cp = checkpoint.load("yf_dividends", mode)
-    for ticker in tickers:
+    cp_lock = Lock()
+
+    def _one(ticker: str) -> None:
         try:
             path = dividend_dir / f"{ticker}.parquet"
             start = _seed_last_date(cp, ticker, path, "ex_date")
@@ -730,11 +754,11 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
             hist = _retry(lambda: t.history(start=fetch_start, actions=True), f"dividends/{ticker}")
             if hist.empty or "Dividends" not in hist.columns:
                 log.info("dividends %s: no new rows", ticker)
-                continue
+                return
             divs = hist[hist["Dividends"] > 0]["Dividends"]
             if divs.empty:
                 log.info("dividends %s: no new rows", ticker)
-                continue
+                return
 
             df = pd.DataFrame({
                 "ex_date": divs.index.tz_localize(None),
@@ -747,13 +771,17 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
 
             saved = _merge_save(df, path, "ex_date", validate.validate_dividends, f"dividends/{ticker}")
             if saved is not None:
-                cp[ticker] = {"last_date": str(saved["ex_date"].max().date()), "rows": len(saved)}
-                checkpoint.save("yf_dividends", mode, cp)
+                with cp_lock:
+                    cp[ticker] = {"last_date": str(saved["ex_date"].max().date()), "rows": len(saved)}
+                    checkpoint.save("yf_dividends", mode, cp)
                 log.info("dividends %s: %d total payments", ticker, len(saved))
         except Exception as e:
             log.warning("dividends %s: skipping after error: %s", ticker, e)
         finally:
             sleep(config.YF_RATE_LIMIT_SLEEP)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(_one, tickers))
 
 
 # ---------------------------------------------------------------------------
@@ -1096,6 +1124,39 @@ def _demo():
         assert len(saved) == 1
         assert abs(saved["value_per_share"].iloc[0] - 0.195) < 1e-9
     print("collect_dividends_yf US overrides: OK")
+
+    # Threading speedup (2026-07-31): workers>1 runs multiple tickers
+    # concurrently, sharing the SAME checkpoint dict `cp` across threads. Real
+    # race found designing this: checkpoint.save()'s own lock only protects its
+    # file write, not a caller mutating the same dict object from ANOTHER
+    # thread while save() is mid-snapshot. 20 tickers, 8 workers, every one
+    # must land in the final checkpoint state -- a lost update (the race this
+    # guards against) would silently drop one or more tickers.
+    n = 20
+    tickers = [f"DIV{i}" for i in range(n)]
+
+    class _FakeTickerMulti:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, start, actions):
+            return pd.DataFrame({"Dividends": [1.0]}, index=pd.to_datetime(["2020-01-01"]))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        div_dir = Path(tmp)
+        with mock.patch.object(yf, "Ticker", _FakeTickerMulti), \
+             mock.patch.object(checkpoint, "load", return_value={}), \
+             mock.patch.object(checkpoint, "save") as mock_save, \
+             mock.patch.object(config, "YF_RATE_LIMIT_SLEEP", 0):
+            collect_dividends_yf(tickers, mode="test", dividend_dir=div_dir, suffix="", floor="2020-01-01", workers=8)
+        final_cp = mock_save.call_args_list[-1].args[2]
+        missing = set(tickers) - set(final_cp)
+        assert not missing, f"concurrent checkpoint writes lost {len(missing)} ticker(s): {missing}"
+        assert len(mock_save.call_args_list) == n, (
+            f"every successful ticker must persist its own checkpoint update, got {len(mock_save.call_args_list)}")
+        for tk in tickers:
+            assert (div_dir / f"{tk}.parquet").exists(), f"{tk}'s file must exist despite concurrent execution"
+    print("collect_dividends_yf threading: OK (no lost checkpoint updates across 20 tickers/8 workers)")
 
 
 if __name__ == "__main__":
