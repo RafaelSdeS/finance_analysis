@@ -108,9 +108,21 @@ def extract_line_items(tags: dict) -> dict:
     this tier's job is annual data anyway (matching EX-27's primary 10-K use).
     """
     article = (tags.get("ARTICLE") or "").strip()
+    # <MULTIPLIER> is genuinely OPTIONAL per SEC's EX-27 schema -- confirmed on WMT's
+    # real filings (2026-07-30): its 1995/1996 10-Ks tag <MULTIPLIER> 1,000,000
+    # explicitly, but 1997-2000 omit the tag entirely (not malformed -- simply absent
+    # from the exhibit), even though the raw figures are STILL reported at the same
+    # implicit millions scale (1997's TOTAL-ASSETS=39,604 is Walmart's real ~$39.6B,
+    # not $39,604). Silently defaulting an absent tag to 1.0 understated net_revenue/
+    # total_assets/etc. by up to 10^6 for exactly the filings that omit it -- a
+    # different failure mode than a malformed/zero tag (which legitimately means "no
+    # scaling"). fds_multiplier_explicit lets build_cik_history tell the two apart and
+    # borrow a sibling exhibit's real multiplier for this CIK when the tag is missing.
+    multiplier_explicit = "MULTIPLIER" in tags
     multiplier = _to_number(tags.get("MULTIPLIER", "1"))
     multiplier = 1.0 if np.isnan(multiplier) or multiplier == 0 else multiplier
-    out = {"fds_article": article, "fds_multiplier": multiplier}
+    out = {"fds_article": article, "fds_multiplier": multiplier,
+           "fds_multiplier_explicit": multiplier_explicit}
     if article != "5" or (tags.get("PERIOD-TYPE") or "").strip().upper() != "YEAR":
         return out
 
@@ -148,6 +160,42 @@ def extract_and_compute(text: str) -> list[dict]:
 
 EX27_ERA_END = "2002-12-31"  # one-year buffer past EX-27's 2001 elimination (plan §2.0)
 
+# The dollar-valued fields a <MULTIPLIER> actually scales -- everything
+# extract_line_items populates under Article 5 except the fds_*/ratio outputs.
+_DOLLAR_FIELDS = [*ARTICLE_5_MAP.keys(), "equity"]
+
+
+def _fill_missing_multipliers(df: pd.DataFrame) -> pd.DataFrame:
+    """Borrow this CIK's own multiplier from a sibling exhibit for any row whose
+    <MULTIPLIER> tag was absent (see extract_line_items's docstring on WMT's real
+    1997-2000 filings). A company's own EX-27 scale convention is consistent across
+    its own filings even when one year's exhibit happens to omit the declaring tag
+    -- confirmed on WMT (1995/1996 explicit at 1,000,000; 1997-2000 all implicitly
+    the same scale, just undeclared) and SWK (1994-98 explicit at 1,000; 1999
+    undeclared, same scale). Rows with NO sibling exhibit anywhere in this CIK's own
+    history to borrow from (confirmed on TXT: every single collected exhibit omits
+    the tag) are left as-is -- fds_multiplier_explicit stays False so this remains
+    visible/auditable rather than silently indistinguishable from a confirmed "no
+    scaling" declaration.
+    """
+    explicit = df[df["fds_multiplier_explicit"]]
+    if explicit.empty:
+        return df
+    canonical = explicit["fds_multiplier"].mode().iloc[0]
+    missing = ~df["fds_multiplier_explicit"] & (df["fds_multiplier"] != canonical)
+    if not missing.any():
+        return df
+    df = df.copy()
+    factor = canonical / df.loc[missing, "fds_multiplier"]
+    for col in _DOLLAR_FIELDS:
+        if col in df.columns:
+            df.loc[missing, col] = df.loc[missing, col] * factor
+    df.loc[missing, "fds_multiplier"] = canonical
+    corrected = df.loc[missing]
+    ratios = corrected.apply(lambda r: compute_ratios(r.to_dict(), unit_scale=1), axis=1, result_type="expand")
+    df.loc[missing, ratios.columns] = ratios
+    return df
+
 
 def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     """Every qualifying (Article-5) EX-27 exhibit for one CIK across the Phase 3
@@ -184,6 +232,7 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
+    df = _fill_missing_multipliers(df)
     # as-first-reported: whichever filing disclosed a given fiscal period EARLIEST
     # wins, whether that's the period's own original filing or a later filing's
     # bundled comparative exhibit reporting it first for some other reason.

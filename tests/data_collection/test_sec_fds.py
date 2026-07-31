@@ -168,7 +168,7 @@ def test_extract_and_compute_returns_one_result_per_exhibit():
 def test_non_article_5_not_silently_mapped():
     tags = {"ARTICLE": "9", "MULTIPLIER": "1000", "TOTAL-ASSETS": "999"}  # bank schema, different tags
     items = fds.extract_line_items(tags)
-    assert items == {"fds_article": "9", "fds_multiplier": 1000.0}, (
+    assert items == {"fds_article": "9", "fds_multiplier": 1000.0, "fds_multiplier_explicit": True}, (
         "non-Article-5 filings must NOT get Article-5 tags mapped onto their (different) schema")
     print("OK: non-Article-5 filings (banks/insurers/investment cos/utilities) are flagged, not misparsed")
 
@@ -179,6 +179,7 @@ def test_zero_multiplier_defaults_to_one():
     items = fds.extract_line_items(tags)
     assert items["total_assets"] == 100.0
     assert items["fds_multiplier"] == 1.0
+    assert items["fds_multiplier_explicit"] is False, "an absent tag must be distinguishable from a genuine '1'"
     print("OK: missing/zero <MULTIPLIER> defaults to 1, doesn't zero out every figure")
 
 
@@ -194,8 +195,53 @@ def test_non_annual_period_not_silently_mapped():
             "TOTAL-ASSETS": "999", "MULTIPLIER": "1000000"}
     items = fds.extract_line_items(tags)
     assert "total_assets" not in items, "non-annual exhibits must not get Article-5 tags mapped"
-    assert items == {"fds_article": "5", "fds_multiplier": 1000000.0}
+    assert items == {"fds_article": "5", "fds_multiplier": 1000000.0, "fds_multiplier_explicit": True}
     print("OK: non-annual (PERIOD-TYPE != YEAR) exhibits are skipped, not mapped with a misleading period end")
+
+
+def test_missing_multiplier_borrows_from_sibling_exhibit():
+    # Real bug, confirmed on WMT's actual filings (2026-07-30): <MULTIPLIER> is
+    # genuinely OPTIONAL per SEC's EX-27 schema -- WMT's 1995/1996 10-Ks tag it
+    # explicitly (1,000,000), but 1997-2000 omit the tag entirely even though the
+    # raw figures are STILL reported at the same implicit millions scale (1997's
+    # real TOTAL-ASSETS=39,604 is Walmart's actual ~$39.6B, not $39,604 -- silently
+    # defaulting the absent tag to 1.0 understated every dollar field by 10^6 for
+    # exactly the filings that omit it).
+    tags = {"ARTICLE": "5", "PERIOD-TYPE": "YEAR", "MULTIPLIER": "1,000,000",
+            "TOTAL-ASSETS": "32819", "NET-INCOME": "1608", "TOTAL-REVENUES": "83412",
+            "CURRENT-ASSETS": "0", "CURRENT-LIABILITIES": "0", "CASH": "0", "BONDS": "0", "CGS": "0"}
+    explicit_row = {**fds.extract_line_items(tags), "fds_period_end": pd.Timestamp("1995-01-31")}
+    tags_missing = {**tags, "TOTAL-ASSETS": "39604", "NET-INCOME": "3056", "TOTAL-REVENUES": "106146"}
+    del tags_missing["MULTIPLIER"]
+    missing_row = {**fds.extract_line_items(tags_missing), "fds_period_end": pd.Timestamp("1997-01-31")}
+    assert missing_row["fds_multiplier_explicit"] is False
+    assert missing_row["total_assets"] == 39604.0, "before the fix: undeclared multiplier defaults to 1"
+
+    df = pd.DataFrame([explicit_row, missing_row])
+    fixed = fds._fill_missing_multipliers(df)
+    borrowed = fixed[fixed["fds_period_end"] == pd.Timestamp("1997-01-31")].iloc[0]
+    assert borrowed["total_assets"] == 39_604_000_000.0, (
+        f"must borrow the sibling exhibit's 1,000,000 multiplier, got {borrowed['total_assets']}")
+    assert borrowed["net_revenue"] == 106_146_000_000.0
+    assert borrowed["fds_multiplier"] == 1_000_000.0
+    print("OK: a missing <MULTIPLIER> borrows the value from a sibling exhibit of the same CIK")
+
+
+def test_missing_multiplier_left_flagged_when_no_sibling_available():
+    # Confirmed on TXT's actual filing history (2026-07-30): every single
+    # collected EX-27 exhibit omits <MULTIPLIER> -- there is no sibling to
+    # borrow a real scale from. Must stay visibly flagged (fds_multiplier_explicit
+    # stays False) rather than silently presented as equally trustworthy as a
+    # confirmed exhibit -- guessing a scale with zero evidence would be worse
+    # than leaving it honestly unresolved.
+    tags = {"ARTICLE": "5", "PERIOD-TYPE": "YEAR", "TOTAL-ASSETS": "20925",
+            "NET-INCOME": "100", "TOTAL-REVENUES": "9683"}
+    row = {**fds.extract_line_items(tags), "fds_period_end": pd.Timestamp("1994-12-31")}
+    df = pd.DataFrame([row])
+    result = fds._fill_missing_multipliers(df)
+    assert result.iloc[0]["total_assets"] == 20925.0, "no sibling to borrow from -- must stay unchanged"
+    assert result.iloc[0]["fds_multiplier_explicit"] == False  # noqa: E712 (real bool, not np.bool_)
+    print("OK: a missing multiplier with no sibling anywhere in the CIK's history stays honestly flagged, not guessed")
 
 
 def test_build_cik_history_skips_post_ex27_era_filings():
@@ -252,5 +298,7 @@ if __name__ == "__main__":
     test_non_article_5_not_silently_mapped()
     test_zero_multiplier_defaults_to_one()
     test_non_annual_period_not_silently_mapped()
+    test_missing_multiplier_borrows_from_sibling_exhibit()
+    test_missing_multiplier_left_flagged_when_no_sibling_available()
     test_build_cik_history_skips_post_ex27_era_filings()
     test_measure_prevalence_handles_list_return_from_parse_fds()
