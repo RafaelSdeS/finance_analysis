@@ -32,6 +32,21 @@ log = logging.getLogger("sec")
 
 COMPANYFACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
 
+# Nothing in this pipeline claims fundamentals data before this floor (it's
+# fds.py's own EX-27 tier boundary; XBRL itself didn't exist yet) -- any XBRL
+# fact with an `end` this old is a garbage/placeholder context, not real
+# financial data. Real bug, confirmed on NG/CLSK/TENX (2026-07-30): each has
+# a genuine fact in its own companyfacts (e.g. NG's
+# StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest,
+# end=1984-12-04; TENX's CashAndCashEquivalentsAtCarryingValue,
+# end=1967-05-25/08-25) -- every one carries val=0, a filer-side XBRL-tooling
+# artifact, not something this repo introduces. item6.py already has an
+# equivalent last-line-of-defense year bound (_FISCAL_YEAR_MIN/MAX) for its
+# own version of this exact failure shape; instant (balance-sheet) concepts
+# have no `start` and so no duration filter to catch this at all here, unlike
+# item6's table-derived rows -- this bound is the only guard for them.
+_MIN_PLAUSIBLE_END = pd.Timestamp("1995-01-01")
+
 # raw line item (compute_ratios' expected key) -> ordered XBRL concept fallback list.
 # First concept present in a filer's facts wins; verified present across a 10-company
 # sample (AAPL/MSFT/KO/INTC/XOM/JNJ/WMT/CAT/HD/NKE, 2026-07-28) at the rates noted.
@@ -185,6 +200,9 @@ def as_first_reported(facts: dict, concept: str, annual: bool = False) -> pd.Dat
         return df
     df["filed"] = pd.to_datetime(df["filed"], errors="coerce")
     df["end"] = pd.to_datetime(df["end"], errors="coerce")
+    df = df[df["end"] >= _MIN_PLAUSIBLE_END]
+    if df.empty:
+        return df
     key = ["start", "end"] if "start" in df.columns else ["end"]
     return (df.sort_values("filed")
               .drop_duplicates(subset=key, keep="first")

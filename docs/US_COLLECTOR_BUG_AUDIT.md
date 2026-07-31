@@ -14,7 +14,11 @@ first fetch).
 **Status (2026-07-30):** Full-universe sweep (not a sample) found 2 more real bugs (11-12,
 both fixed) plus 4 measured-but-checked-not-a-bug findings — see the dated section below.
 Pothole #8 (`skip_existing`) turns out to already be implemented in code; the fix plan's
-checkbox was just stale.
+checkbox was just stale. **Follow-up the same day:** the bug-11 fix turned out incomplete —
+re-collecting the stale tickers it named surfaced 3 more real bugs (13-15, all fixed) in the
+same subsystem; see the second dated section below. `sec/item6.py` renamed to
+`sec/selected_financial_data.py` in the same pass (content + bugfixes, not just the name —
+see `CLAUDE.md`'s `sec/` module table for the rationale).
 
 ## Bugs
 
@@ -130,7 +134,8 @@ things that measured as anomalies but checked out as not bugs.
   small negative dollar figure in an already-aligned row is never touched. Verified
   against ORCL's real filing text end-to-end: all 5 years now correctly aligned and
   scaled (2006 total_assets = $29.029B, matching Oracle's real FY2006 figure).
-  Regression tests in `test_sec_item6.py`.
+  Regression tests in `test_sec_selected_financial_data.py` (renamed from
+  `test_sec_item6.py` the same day — see the follow-up section below).
 - [x] **12. SEC fundamentals had never been through any write-time validation gate
   — FIXED 2026-07-30.** `collect_fundamentals_us` writes `df.to_parquet()` directly
   (`fundamentals.py:261`, pre-fix) — unlike every other collector in this codebase,
@@ -186,3 +191,72 @@ things that measured as anomalies but checked out as not bugs.
   guessing otherwise (own docstring, `companyfacts.py`). The residual reflects
   companies whose quarterly history has its own gaps, where no safe derivation
   exists — working as designed.
+
+## 2026-07-30 follow-up #2: the bug-11 fix was incomplete — 3 more real bugs
+
+Per the "action, not a code fix" note above, a fresh `collect_fundamentals_us` run was
+made to propagate bug 11's footnote-marker fix onto the 4 known-stale tickers (NEM,
+ORCL, plus BOOM/ZION spotted in the same negative-`total_assets` flag list). NEM/ORCL
+came back clean as expected — but BOOM and ZION still showed impossible negative
+`total_assets` in the *freshly regenerated* output, proving they weren't stale leftovers
+at all. Root-caused both live against their actual EDGAR filings, turning up two more,
+distinct bugs in the same table-selection/extraction path, plus a third, unrelated bug
+in `companyfacts.py` found the same day by the same full-sweep methodology.
+
+- [x] **13. `find_item6_table` ranked keyword score above year coverage, picking a
+  business-segment fragment over the real Item 6 table — FIXED 2026-07-30.** Confirmed
+  on ZION's actual 2005 10-K: Item 6 there is incorporated by reference (no real table
+  in the parsed document at all), so the old `(score, len(years), rows)` sort key let a
+  3-year business-segment condensed income statement — which happens to spell out
+  "Total assets"/"Net income (loss)"/"Total revenue" verbatim (score 3) — outrank the
+  actual company-wide 5-year table, whose equivalent row is labeled just "Assets" under
+  an "AT YEAR-END" header (score 2, since "Assets" alone doesn't match "TOTAL ASSETS").
+  A genuine Item 6 table's defining trait is covering more of the requested history, not
+  how many keywords its labels spell out. Fixed by reordering the sort key to
+  `(len(years), score, rows)` — year count decides first.
+- [x] **14. Unit-caption detection scanned the whole filing instead of the winning
+  table's own caption, silently rescaling ZION 1000x too small — FIXED 2026-07-30.**
+  Once bug 13's fix picked the *correct* table, its figures were still wrong: the
+  winning table's own caption said "(Amounts in millions)", but `detect_unit_multiplier`
+  scanned the entire filing text and picked up "thousands" instead — the dominant
+  caption belonging to the much larger main financial statements elsewhere in the same
+  combined submission. Fixed to prefer the winning table's own caption text (searched
+  within the table's own flattened cells) and fall back to the whole-document scan only
+  when the winning table states no units of its own.
+- [x] **15. Colspan-duplicated HTML cells defeated the bug-11 footnote-marker guard,
+  corrupting BOOM's `total_assets` row — FIXED 2026-07-30.** Confirmed on BOOM (Dynamic
+  Materials) actual 2005 10-K: its "Total assets" row round-trips through
+  `pandas.read_html` with every year's value duplicated into two adjacent columns (a
+  colspan-to-columns rendering artifact specific to that row), stacked with one genuine
+  footnote-marker cell. Stripping only the marker left 10 tokens for `n_years=5` — not
+  an exact match — so bug 11's fix (which only strips markers when doing so exactly
+  resolves a token-count excess) silently gave up and fell through to the first 5 raw,
+  still-duplicated tokens, corrupting every year one position off. Fixed by collapsing
+  adjacent equal-value token pairs first (only once a row is already known to have too
+  many tokens, same conservative trigger as the footnote-marker check), recovering the
+  true per-year values before the footnote marker is even considered.
+- [x] **16. `companyfacts.as_first_reported` had no floor on implausibly ancient `end`
+  dates, unlike item6's equivalent guard — FIXED 2026-07-30.** Unrelated to 13-15,
+  found by the same full-sweep audit: NG, CLSK and TENX each carry a genuine XBRL fact
+  with an `end` date decades before the company plausibly existed (NG:
+  `StockholdersEquityIncludingPortionAttributableToNoncontrollingInterest`,
+  end=1984-12-04; TENX: `CashAndCashEquivalentsAtCarryingValue`, end=1967-05-25/08-25).
+  Checked directly against SEC's own companyfacts API: every one carries `val=0`, a
+  filer-side XBRL-tooling placeholder artifact, not something this repo produces.
+  `item6.build_cik_history` already has an equivalent last-line-of-defense year bound
+  (`_FISCAL_YEAR_MIN`/`_MAX`, bug 2 above) for its own version of this failure shape,
+  but instant (balance-sheet) concepts have no `start`/duration for
+  `as_first_reported`'s existing filters to catch this at all. Fixed by adding
+  `_MIN_PLAUSIBLE_END = 1995-01-01` (the earliest era any tier in this pipeline claims
+  fundamentals data from) and dropping any fact with `end` before it.
+  `tests/data_collection/test_us_data_quality.py` now also rate-checks the xbrl tier for
+  this pattern (`_MIN_PLAUSIBLE_XBRL_END`), tolerating the known-stale pre-fix count
+  while still catching a new regression.
+
+**Verified 2026-07-30:** full re-collection of both prices (9,593/10,432 tickers) and
+fundamentals (8,142/10,432 tickers) with all of 11-16 in place. Final sweep:
+`test_us_data_quality.py` reports 0 `validate_prices` errors / 0 Inf across all price
+files, 0 gate errors / 0 Inf / 0 implausible xbrl end dates across all fundamentals
+files, and exactly one remaining known-stale negative-`total_assets` file (RMSL, within
+the test's rate ceiling) — down from the NEM/ORCL/BOOM/ZION set this section started
+from. All 14 macro series still clean.

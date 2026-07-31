@@ -9,15 +9,29 @@ across every file already on disk so a systemic regression (not just a single
 bad collection run) gets caught.
 
 Two real findings this test encodes as regression guards, not just narrative:
-  1. item6.py's footnote-marker parsing bug (fixed 2026-07-30, see
+  1. item6.py's footnote-marker bug (originally fixed 2026-07-30, see
      test_sec_item6.py) produced accounting-impossible negative total_assets
-     for a small number of tickers (NEM, ORCL, ZION) collected before the
-     fix. Those on-disk files are stale, not re-fixed by re-running this
-     test -- a fresh `collect_fundamentals_us` pass is needed to actually
-     regenerate them (collect_fundamentals_us has no auto-refresh of
-     already-collected tickers; see fix plan's pothole #8 note). The rate
-     ceiling below tolerates today's small known-stale count while still
-     catching a systemic regression.
+     on NEM/ORCL, collected before that first fix. BOOM and ZION, found in
+     the SAME run's negative-total_assets flags, turned out NOT to be stale
+     pre-fix leftovers -- both were freshly regenerated in a run that
+     happened AFTER the first fix, and root-causing them live (fetching the
+     real EDGAR filings directly) turned up two more, DIFFERENT bugs in the
+     same subsystem: ZION's Item 6 is incorporated by reference, so
+     find_item6_table picked a business-segment fragment over the real
+     table (fixed by ranking on year count first); BOOM's real "Total
+     assets" row had a colspan-duplication artifact that defeated the
+     footnote-marker guard (fixed by collapsing duplicate pairs first). Both
+     now fixed (2026-07-30) alongside a third, unrelated bug found the same
+     way: implausibly ancient `end` dates (TENX/NG/CLSK, e.g. end=1967) in
+     the xbrl tier, from genuine val=0 placeholder XBRL contexts in the
+     filers' own data -- companyfacts.py never had item6.py's equivalent
+     plausibility bound; it does now. All 4 on-disk tickers (NEM, ORCL,
+     BOOM, ZION) plus the ancient-date tickers are stale until a fresh
+     `collect_fundamentals_us` pass regenerates them (no auto-refresh of
+     already-collected tickers; see fix plan's pothole #8 note) -- this test
+     doesn't re-fix on-disk data, only guards against a NEW, systemic
+     regression. The rate ceiling below tolerates today's small known-stale
+     count.
   2. Everything else checked here (Inf, OHLC bracket sanity, macro
      completeness) was already clean at audit time -- these are hard
      zero-tolerance assertions, not rate ceilings.
@@ -47,6 +61,14 @@ US_ROOT = ROOT / "data/raw/us"
 # regenerated. A rate ceiling (not an exact-zero assert) tolerates these
 # while still catching a NEW, systemic negative-total_assets regression.
 _NEGATIVE_ASSETS_RATE_CEILING = 0.01  # currently 3/2289 = 0.13%
+
+# xbrl tier only -- item6 (>=1990) and ex27 (1995-2000) tiers have their own,
+# earlier, legitimate floors; nothing in the xbrl tier should ever predate
+# companyfacts.py's own _MIN_PLAUSIBLE_END guard (2026-07-30 fix). A rate
+# ceiling tolerates today's known-stale pre-fix tickers (TENX/NG/CLSK/etc.)
+# while still catching a NEW regression.
+_MIN_PLAUSIBLE_XBRL_END = pd.Timestamp("1995-01-01")
+_ANCIENT_END_RATE_CEILING = 0.02  # currently 48/4775 tickers = 1.01%
 
 
 def _has_inf(df: pd.DataFrame) -> bool:
@@ -92,6 +114,7 @@ def test_fundamentals_clean():
     gate_errors = 0
     inf_files = []
     neg_assets_files = []
+    ancient_end_files = []
     total_warnings = 0
     for f in files:
         df = pd.read_parquet(f)
@@ -104,9 +127,16 @@ def test_fundamentals_clean():
             inf_files.append(f.stem)
         if "total_assets" in df.columns and (df["total_assets"] < 0).any():
             neg_assets_files.append(f.stem)
+        if "fundamentals_tier" in df.columns and "end" in df.columns:
+            xbrl_ends = df.loc[df["fundamentals_tier"] == "xbrl", "end"]
+            if (xbrl_ends < _MIN_PLAUSIBLE_XBRL_END).any():
+                ancient_end_files.append(f.stem)
 
     neg_rate = len(neg_assets_files) / len(files)
-    ok = gate_errors == 0 and not inf_files and neg_rate <= _NEGATIVE_ASSETS_RATE_CEILING
+    ancient_rate = len(ancient_end_files) / len(files)
+    ok = (gate_errors == 0 and not inf_files
+          and neg_rate <= _NEGATIVE_ASSETS_RATE_CEILING
+          and ancient_rate <= _ANCIENT_END_RATE_CEILING)
     if inf_files:
         print(f"FAIL  fundamentals: Inf present in {len(inf_files)} file(s): {inf_files[:10]}")
     if neg_rate > _NEGATIVE_ASSETS_RATE_CEILING:
@@ -115,9 +145,16 @@ def test_fundamentals_clean():
     elif neg_assets_files:
         print(f"note  fundamentals: {len(neg_assets_files)} known-stale file(s) with negative "
               f"total_assets, within ceiling: {neg_assets_files}")
+    if ancient_rate > _ANCIENT_END_RATE_CEILING:
+        print(f"FAIL  fundamentals: implausible xbrl-tier end date rate {ancient_rate:.2%} exceeds "
+              f"{_ANCIENT_END_RATE_CEILING:.0%} ceiling -- {ancient_end_files[:10]}")
+    elif ancient_end_files:
+        print(f"note  fundamentals: {len(ancient_end_files)} known-stale file(s) with an "
+              f"implausible xbrl-tier end date (pre-fix), within ceiling: {ancient_end_files[:10]}")
     print(f"{'PASS' if ok else 'FAIL'}  fundamentals: {len(files)} files, {gate_errors} gate errors, "
           f"{len(inf_files)} with Inf, {len(neg_assets_files)} with negative total_assets "
-          f"({neg_rate:.2%}), {total_warnings} total warnings")
+          f"({neg_rate:.2%}), {len(ancient_end_files)} with implausible xbrl end dates "
+          f"({ancient_rate:.2%}), {total_warnings} total warnings")
     return ok
 
 

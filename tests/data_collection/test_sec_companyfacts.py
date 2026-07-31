@@ -23,6 +23,10 @@ companyfacts-shaped dicts):
   - extract_line_items: fundamentals_available_date = MAX of populated items'
     filed dates (conservative bundling -- never exposes a row before every
     item in it was genuinely public).
+  - as_first_reported must drop facts with an implausibly ancient `end` date
+    (2026-07-30, NG/CLSK/TENX): garbage placeholder XBRL contexts (always
+    val=0) that predate any plausible fiscal period, unguarded for instant
+    concepts since they have no `start`/duration to filter on at all.
   - _derive_q4: most 10-K filers never tag a standalone ~90-day Q4 duration --
     only the full fiscal year -- so _quarterly_only alone leaves every flow
     item (revenue, net income, ...) NaN at fiscal year-end. Confirmed on a
@@ -96,6 +100,26 @@ def test_malformed_start_date_dropped_not_crashing():
     assert len(df) == 1, f"the malformed-date fact must be dropped, only the good one kept, got {len(df)} rows"
     assert df.iloc[0]["val"] == 4_834_000_000
     print("OK: a malformed start/end date is dropped (coerced to NaT), not a crash that loses the whole company")
+
+
+def test_as_first_reported_drops_implausible_ancient_end_date():
+    # Real bug, confirmed on NG/CLSK/TENX (2026-07-30): a small number of
+    # small-cap filers' XBRL carries a genuine fact with an "end" date decades
+    # before the company plausibly existed (e.g. NG: end=1984-12-04,
+    # CLSK: end=1991-10-01, TENX: end=1967-05-25/08-25) -- checked directly
+    # against SEC's own companyfacts API, every one carries val=0, a garbage
+    # placeholder context from the filer's own XBRL-tooling, not real data.
+    # Instant concepts (no "start") have no duration filter to catch this at
+    # all; item6.py already has an equivalent year bound for its own version
+    # of this failure shape, companyfacts.py never had one.
+    facts = _facts({"Assets": [
+        _fact(None, "1984-12-04", 0, "2014-02-12"),             # garbage placeholder context
+        _fact(None, "2013-12-31", 500_000_000, "2014-02-12"),  # genuine
+    ]})
+    df = companyfacts.as_first_reported(facts, "Assets")
+    assert len(df) == 1, f"the implausible ancient end date must be dropped, got {len(df)} rows"
+    assert df.iloc[0]["val"] == 500_000_000
+    print("OK: as_first_reported drops an implausibly ancient end date instead of treating it as real data")
 
 
 def test_resolve_item_unions_across_concepts_per_period():
@@ -269,6 +293,7 @@ if __name__ == "__main__":
     test_as_first_reported_takes_earliest_filing()
     test_quarterly_only_drops_annual_duplicate()
     test_malformed_start_date_dropped_not_crashing()
+    test_as_first_reported_drops_implausible_ancient_end_date()
     test_resolve_item_unions_across_concepts_per_period()
     test_resolve_item_priority_on_overlap()
     test_extract_line_items_conservative_available_date()
