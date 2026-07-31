@@ -609,13 +609,73 @@ Regression-tested in `test_features.py`. **Not caught by Phase B/C.5's mini/adve
 those used tiny hand-picked ticker sets and never hit this combination of columns at the real
 gated scale.
 
-**Verification note:** the full 3,134-ticker `merge_prices_and_fundamentals` loop was NOT run to
-completion interactively — a first attempt was backgrounded past its timeout and the sustained
-memory pressure (on top of everything else already running) crashed the user's VS Code. The load
-stage (5.5 GB peak) and the crash fix above were both confirmed correct on a small real-ticker
-sample (AAPL/GE/KO/A/WMT/ACN/ADI/SPY) instead. **A real Phase C attempt should be launched
-`nohup ... &`/`disown` and left to run unattended, not driven interactively** — same lesson as
-[[feedback_nohup_background_jobs]], now doubly true given this machine's tight memory margin.
+**Verification note (superseded, see §8.0.1):** the full 3,134-ticker `merge_prices_and_fundamentals`
+loop was NOT run to completion interactively in this session — a first attempt was backgrounded
+past its timeout and the sustained memory pressure (on top of everything else already running)
+crashed the user's VS Code. The load stage (5.5 GB peak) and the crash fix above were both
+confirmed correct on a small real-ticker sample (AAPL/GE/KO/A/WMT/ACN/ADI/SPY) instead. Turned out
+this caution was warranted: the user ran the build themselves shortly after and hit a REAL kernel
+OOM-kill inside this exact function — see §8.0.1, a 4th bug, found and fixed the same day.
+
+### 8.0.1 `merge_prices_and_fundamentals` OOM-killed for real — FOUND + FIXED 2026-07-31
+
+The user ran `python -m src.build_dataset.build_us_dataset` directly (not backgrounded) and it
+died: `... Merging ZWS / Merging ZYME / Killed`. `journalctl -k` confirmed a real kernel OOM-kill,
+~10 GB anon-rss, right after the last (alphabetically) ticker's merge — i.e. inside
+`merge_prices_and_fundamentals` (`merge.py`), which §8.0's analysis never covered (it measured the
+*load* stage only, never ran the merge to completion).
+
+**Root cause:** the function looped per ticker (3,134 iterations for the real US universe),
+accumulating a Python list of per-ticker merged frames, then did one `pd.concat` at the end — an
+unbounded "hold everything then concat" pattern, unlike `compute_features_chunked`'s Pass 1, which
+deliberately streams to a temp parquet for exactly this reason. Fine at BR's ~500 tickers; not at
+US's 3,134.
+
+**Fix:** replaced the loop with a single `pd.merge_asof(..., by="ticker")` call — pandas' own
+grouped asof-join, not custom logic (ladder rung 5). No accumulation, no per-ticker `.get(ticker,
+empty)` fallback either (a grouped asof naturally NaNs a ticker absent from the right frame).
+
+**Two real correctness bugs found and fixed while building this, both caught before shipping —
+not found by unit tests with hand-picked fixtures, only by adversarial/real-data testing:**
+
+1. `merge_asof(by=...)` requires its "on" column sorted **globally** across the whole frame, not
+   just within each `by`-group — confirmed via a minimal pandas repro. Sorting by `[ticker, on_col]`
+   raises `"keys must be sorted"` the instant two tickers' date ranges interleave (the normal case
+   at real scale) — it only looked fine in a first pass because the existing hand-picked test
+   fixtures' per-ticker ranges happened not to overlap. Fixed: sort by the "on" column alone;
+   `by="ticker"` still correctly isolates each ticker's matches (verified directly). Added
+   `test_merge_survives_interleaved_ticker_date_ranges` (5 tickers, deliberately interleaved) as a
+   lasting regression guard — every other existing test in `test_merge.py` uses ≤2 tickers whose
+   ranges don't overlap, which is exactly what let the first version of this bug through.
+2. **105 real `(ticker, fundamentals_available_date)` duplicate pairs exist in the actual BR data**
+   (e.g. AALR3: two quarters, `2016-03-31` and `2016-06-30`, both received the same day —
+   `2016-10-28`, a late catch-up filing). With `direction="backward"`, a tie in the "on" key
+   resolves to whichever duplicate sorts last — and pandas' default sort is not stable, so sorting
+   by `fundamentals_available_date` alone left that pick effectively arbitrary. The OLD
+   per-ticker-loop implementation happened to get this right by accident: it sorted by
+   `reference_date` first, then re-sorted (stably) by `fundamentals_available_date`, so the later
+   quarter always won ties. **Found by an old-vs-new empirical diff against the FULL real BR
+   dataset** (2,128,541 rows), not a unit test — 145+ rows differed across dozens of fundamentals
+   columns on an initial 60-ticker sample. Fixed: sort by
+   `["fundamentals_available_date", "reference_date"]` (the later quarter wins ties, matching the
+   old behavior exactly).
+
+**Verification, this time to completion:**
+- Old-vs-new implementations diffed row-for-row against the **entire real BR universe**
+  (2,128,541 rows, all 77 columns, `merge_prices_and_fundamentals` run standalone on real
+  `load_prices()`/`load_fundamentals()` output): **0 real mismatches** after both fixes (an
+  `inf == inf` false-positive in the diff script itself was the only thing separating "0" from a
+  misleading "32 columns differ" — fixed the comparison, not the code, for that one).
+- `test_merge.py`: 11/11 pass, including the 3 new regression tests above.
+- Real US data, 800 tickers (safely below the full 3,134 given the crash history) through load +
+  merge: **4,145,648 rows, 72 columns, 5.9 GB peak RSS** — comfortably under the ~10 GB available,
+  and barely above the load-only stage's own 5.5 GB, i.e. the merge itself isn't adding a second
+  multiplier on top of §8.0's fix.
+- Full fast suite (47/47) and data-group suite (12/12) green, `ruff` clean.
+
+**Still not run to full 3,134-ticker completion** — deliberately, given the crash history. The
+800-ticker measurement is a strong signal, not a guarantee. Launch the real attempt
+`nohup ... & disown`, per [[feedback_nohup_background_jobs]].
 
 ### 8.1 CAGR is silently 100% NaN for 8.6% of US tickers — NEW BUG
 

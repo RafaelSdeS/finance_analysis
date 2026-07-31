@@ -145,6 +145,113 @@ def test_merge_honors_actual_filing_date() -> None:
     assert approx(result.loc[("LATE", late + pd.Timedelta(days=1)), "pl"], 20.0)  # day after: visible
 
 
+def test_merge_close_price_lookup_does_not_cross_tickers() -> None:
+    """close_price's asof lookup (merge.py's replace-with-actual-price-at-
+    filing step) must use each ticker's OWN price history -- regression
+    guard for the single-grouped-merge_asof refactor (2026-07-31, replacing
+    a per-ticker Python loop that OOM'd at US scale): a naive global asof
+    without by="ticker" would let a cheap ticker's filing pull a price from
+    an expensive ticker's history if their dates interleaved."""
+    ref_date = pd.Timestamp("2026-03-31")
+    filed = ref_date + pd.Timedelta(days=20)
+
+    fundamentals = pd.DataFrame({
+        "ticker": ["CHEAP", "PRICEY"],
+        "reference_date": [ref_date, ref_date],
+        "fundamentals_available_date": [filed, filed],
+        "pl": [10.0, 20.0],
+    })
+    # Same filing date for both tickers, wildly different price levels --
+    # if the lookup ever crossed tickers, one side's close_price would show
+    # the other's price level.
+    prices = pd.DataFrame({
+        "ticker": ["CHEAP", "CHEAP", "PRICEY", "PRICEY"],
+        "trade_date": [filed, filed + pd.Timedelta(days=1), filed, filed + pd.Timedelta(days=1)],
+        "close": [1.0, 1.5, 9000.0, 9500.0],
+    })
+
+    result = merge_prices_and_fundamentals(prices, fundamentals).set_index(
+        ["ticker", "trade_date"])
+
+    assert approx(result.loc[("CHEAP", filed + pd.Timedelta(days=1)), "close_price"], 1.0)
+    assert approx(result.loc[("PRICEY", filed + pd.Timedelta(days=1)), "close_price"], 9000.0)
+
+
+def test_merge_ticker_with_zero_fundamentals_gets_nan_not_crash() -> None:
+    """A ticker present in prices but entirely absent from fundamentals
+    (previously handled by a per-ticker .get(ticker, empty-frame) fallback)
+    must get NaN fundamentals columns, not a KeyError/crash, and must not
+    affect a sibling ticker that DOES have fundamentals coverage."""
+    fundamentals = pd.DataFrame({
+        "ticker": ["COVERED"],
+        "reference_date": [pd.Timestamp("2026-01-01")],
+        "fundamentals_available_date": [pd.Timestamp("2026-01-15")],
+        "pl": [12.0],
+    })
+    prices = pd.DataFrame({
+        "ticker": ["COVERED", "NOFUNDAMENTALS"],
+        "trade_date": [pd.Timestamp("2026-02-01"), pd.Timestamp("2026-02-01")],
+        "close": [50.0, 75.0],
+    })
+
+    result = merge_prices_and_fundamentals(prices, fundamentals).set_index("ticker")
+
+    assert approx(result.loc["COVERED", "pl"], 12.0)
+    assert pd.isna(result.loc["NOFUNDAMENTALS", "pl"])
+
+
+def test_merge_survives_interleaved_ticker_date_ranges() -> None:
+    """merge_asof(by="ticker") needs its "on" column sorted GLOBALLY across
+    the whole frame, not merely within each ticker's own rows -- a real,
+    hand-caught bug (2026-07-31): sorting by ["ticker", on_col] instead
+    raises "keys must be sorted" the instant two tickers' date ranges
+    interleave. Every OTHER test in this file uses only 1-2 tickers whose
+    ranges happen not to overlap (by luck, not by design) -- this is the one
+    adversarial case with several tickers deliberately interleaved (A's
+    range spans B's, C's, D's, E's), the real-world shape at any scale
+    beyond a couple of hand-picked tickers."""
+    tickers = ["A", "B", "C", "D", "E"]
+    fundamentals = pd.concat([
+        pd.DataFrame({
+            "ticker": [t],
+            "reference_date": [pd.Timestamp("2026-01-01")],
+            "fundamentals_available_date": [pd.Timestamp("2026-01-15")],
+            "pl": [float(i)],
+        })
+        for i, t in enumerate(tickers)
+    ], ignore_index=True)
+
+    # A trades every business day 2026-01-16..2026-03-01 (all AFTER every
+    # ticker's shared 2026-01-15 filing date, so pl is never NaN here for
+    # any ticker -- that "before filing" case is covered by
+    # test_merge_applies_filing_lag/test_merge_honors_actual_filing_date
+    # already); B-E each trade a few scattered days within that same span --
+    # interleaves every ticker's dates with every other's when the frame is
+    # sorted by ticker then date.
+    prices = pd.concat(
+        [pd.DataFrame({
+            "ticker": "A", "trade_date": pd.bdate_range("2026-01-16", "2026-03-01"),
+            "close": 1.0,
+        })]
+        + [
+            pd.DataFrame({
+                "ticker": t,
+                "trade_date": pd.to_datetime([f"2026-{month:02d}-20"]),
+                "close": float(i),
+            })
+            for i, (t, month) in enumerate(zip(tickers[1:], [1, 2, 2, 3]), start=1)
+        ],
+        ignore_index=True,
+    )
+
+    result = merge_prices_and_fundamentals(prices, fundamentals)  # must not raise
+
+    assert len(result) == len(prices)
+    for i, t in enumerate(tickers):
+        rows = result[result["ticker"] == t]
+        assert (rows["pl"] == float(i)).all()
+
+
 def test_merge_macro_aligns_by_date_no_lookahead(tmp_path, monkeypatch) -> None:
     """merge_macro is ticker-independent (one calendar-date series applies to
     every ticker) and must never look ahead: a trade_date before the series'

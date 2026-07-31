@@ -33,78 +33,107 @@ TRADING_DAYS_PER_MONTH = 21
 # =============================================================================
 
 def merge_prices_and_fundamentals(prices, fundamentals):
+    """merge_asof(by="ticker") is a single grouped asof-join, not a loop --
+    the OLD implementation ran one merge_asof per ticker, accumulating a
+    Python list of ~n_tickers merged frames before one final pd.concat. That
+    "hold everything then concat" pattern was fine at BR's ~500 tickers but
+    OOM-killed for real at the US build's 3,134 (confirmed: kernel OOM-killer,
+    ~10GB anon-rss, 2026-07-31 -- the process was killed mid-build right after
+    the last ticker's merge). A single grouped call needs no such
+    accumulation and no per-ticker fallback for a ticker absent from
+    fundamentals either -- merge_asof(by=) naturally leaves those rows' right-
+    side columns NaN, same as the old .get(ticker, empty) branch did per-ticker."""
 
     print()
     print("=" * 80)
     print("MERGING PRICES + FUNDAMENTALS")
     print("=" * 80)
 
-    merged_dfs = []
-
-    # Split once via groupby instead of re-scanning the full frame per ticker
-    # (was O(tickers * total_rows) of repeated boolean filtering).
-    prices_by_ticker = dict(tuple(prices.groupby("ticker", sort=False)))
-    fundamentals_by_ticker = dict(tuple(fundamentals.groupby("ticker", sort=False)))
-
-    for ticker in sorted(prices["ticker"].unique()):
-
-        print(f"Merging {ticker}")
-
-        p = prices_by_ticker[ticker].sort_values("trade_date")
-
-        f = fundamentals_by_ticker.get(ticker, fundamentals.iloc[0:0]).copy()
-        f = f.sort_values("reference_date")
-
-        # attach_filing_dates() normally sets this (real CVM receipt date with
-        # statutory fallback); synthesize the fallback if called standalone
-        if "fundamentals_available_date" not in f.columns:
-            f["fundamentals_available_date"] = _statutory_available_date(f["reference_date"])
-        f = f.sort_values("fundamentals_available_date")
-
-        # merge_asof: uses the most recent fundamental whose filing date has
-        # already passed as of each trade_date (no lookahead bias).
-        # allow_exact_matches=False: a filing received ON trade_date T is not
-        # visible to T's own close -- CVM's DT_RECEB (and the statutory
-        # fallback) is date-granular with no intraday timestamp (confirmed:
-        # zero non-midnight receipts), and companies routinely file after the
-        # session closes. Visibility starts T+1, not T itself (2026-07-23 audit).
-        merged = pd.merge_asof(
-            p,
-            f,
-            left_on="trade_date",
-            right_on="fundamentals_available_date",
-            by="ticker",
-            direction="backward",
-            allow_exact_matches=False,
+    # attach_filing_dates() normally sets this (real CVM receipt date with
+    # statutory fallback); synthesize the fallback if called standalone. A
+    # whole-frame check, not a per-ticker one -- the column is either present
+    # for all of `fundamentals` (set upstream in one shot) or absent for all
+    # of it (this function called directly, e.g. from a test or the US build
+    # which skips attach_filing_dates entirely).
+    if "fundamentals_available_date" not in fundamentals.columns:
+        fundamentals = fundamentals.assign(
+            fundamentals_available_date=_statutory_available_date(fundamentals["reference_date"])
         )
 
-        # Replace close_price with actual price at fundamentals_available_date
-        # (BolsAI's close_price is from reference_date, 45-90 days earlier; comparing
-        # it to today's close gives false >50% jumps; use real close at filing instead).
-        # Vectorized asof lookup (was a per-row full-frame scan — the main build bottleneck,
-        # O(rows^2) per ticker).
-        if "fundamentals_available_date" in merged.columns:
-            has_filing = merged["fundamentals_available_date"].notna()
-            if has_filing.any():
-                filing_dates = merged.loc[has_filing, ["fundamentals_available_date"]].sort_values(
-                    "fundamentals_available_date"
-                )
-                price_at_filing = pd.merge_asof(
-                    filing_dates,
-                    p[["trade_date", "close"]].rename(columns={"trade_date": "fundamentals_available_date"}),
-                    on="fundamentals_available_date",
-                    direction="backward",
-                )["close"]
-                price_at_filing.index = filing_dates.index
-                merged.loc[has_filing, "close_price"] = price_at_filing
+    # merge_asof(by=...) needs its "on" column sorted GLOBALLY across the
+    # whole frame, not merely within each ticker's own rows -- confirmed via
+    # a real pandas repro (2026-07-31): sorting by ["ticker", on_col] instead
+    # raises "keys must be sorted" the moment two tickers' date ranges
+    # interleave (the common case at real scale; it only looked fine in a
+    # first pass because a couple of hand-picked test fixtures' ranges
+    # happened not to overlap). `by="ticker"` still correctly restricts each
+    # match to its own ticker regardless of this global date interleaving --
+    # verified directly, not assumed.
+    p = prices.sort_values("trade_date")
+    # reference_date as a secondary sort key, not just fundamentals_available_date
+    # alone: real BR data has 105 (ticker, fundamentals_available_date) DUPLICATE
+    # pairs (confirmed on the full corpus -- e.g. a company catching up two
+    # quarters in one late filing, both received the same day). With
+    # direction="backward", a tie in the "on" key resolves to whichever
+    # duplicate row sorts LAST -- pandas' default sort is not stable, so
+    # fundamentals_available_date alone left this effectively random and
+    # diverged from the old per-ticker implementation on 145/107,492 real
+    # rows across 60 real tickers (caught by an old-vs-new empirical diff,
+    # 2026-07-31). Sorting reference_date second makes the LATER quarter
+    # always win the tie -- the correct choice (the more current filing) and
+    # exactly what the old implementation's reference_date-then-
+    # fundamentals_available_date double-sort achieved.
+    f = fundamentals.sort_values(["fundamentals_available_date", "reference_date"])
 
-        merged_dfs.append(merged)
+    # merge_asof: uses the most recent fundamental whose filing date has
+    # already passed as of each trade_date (no lookahead bias).
+    # allow_exact_matches=False: a filing received ON trade_date T is not
+    # visible to T's own close -- CVM's DT_RECEB (and the statutory
+    # fallback) is date-granular with no intraday timestamp (confirmed:
+    # zero non-midnight receipts), and companies routinely file after the
+    # session closes. Visibility starts T+1, not T itself (2026-07-23 audit).
+    merged = pd.merge_asof(
+        p,
+        f,
+        left_on="trade_date",
+        right_on="fundamentals_available_date",
+        by="ticker",
+        direction="backward",
+        allow_exact_matches=False,
+    )
 
-    final_df = pd.concat(merged_dfs, ignore_index=True)
+    # Replace close_price with actual price at fundamentals_available_date
+    # (BolsAI's close_price is from reference_date, 45-90 days earlier; comparing
+    # it to today's close gives false >50% jumps; use real close at filing instead).
+    # Same grouped-asof shape as above (global sort on the "on" column, by
+    # ticker), so a filing's lookup only ever sees that SAME ticker's own
+    # price history, never another ticker's.
+    has_filing = merged["fundamentals_available_date"].notna()
+    if has_filing.any():
+        filing_dates = merged.loc[has_filing, ["ticker", "fundamentals_available_date"]].sort_values(
+            "fundamentals_available_date"
+        )
+        price_lookup = p[["ticker", "trade_date", "close"]].rename(
+            columns={"trade_date": "fundamentals_available_date"}
+        ).sort_values("fundamentals_available_date")
+        price_at_filing = pd.merge_asof(
+            filing_dates,
+            price_lookup,
+            on="fundamentals_available_date",
+            by="ticker",
+            direction="backward",
+        )["close"]
+        price_at_filing.index = filing_dates.index
+        merged.loc[has_filing, "close_price"] = price_at_filing
 
-    print(f"Merged rows: {len(final_df)}")
+    # Restore ticker/date row order (merge_asof's global date sort above
+    # scrambles it) -- matches the old per-ticker-loop implementation's
+    # output order and every other merge_* function's convention in this file.
+    merged = merged.sort_values(["ticker", "trade_date"], ignore_index=True)
 
-    return final_df
+    print(f"Merged rows: {len(merged)}")
+
+    return merged
 
 
 # =============================================================================
