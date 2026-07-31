@@ -10,6 +10,7 @@ company_info and macro have no yfinance equivalent and stay BolsAI/BCB-only
 """
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from time import sleep
@@ -404,7 +405,7 @@ MAX_CONSECUTIVE_FAILURES_RESUME = 300  # skip_existing=True gets a much looser b
 
 
 def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str | None = None,
-                       floor: str | None = None, skip_existing: bool = False):
+                       floor: str | None = None, skip_existing: bool = False, workers: int = 1):
     """`price_dir`/`suffix`/`floor` default to the BR globals (config.PRICES_DIR /
     config.YF_SUFFIX / config.START_DATE). Pass price_dir=config.US_PRICES_DIR, suffix="",
     floor="1900-01-01" for the pure-yfinance US path — there is no BolsAI history to
@@ -421,13 +422,36 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
     already on disk -- fine when "already on disk" means "collected a few hours ago in this
     same backfill," wrong for --mode update's quarterly cadence, where months can pass and a
     real new dividend needs exactly the re-fetch this flag skips.
+
+    `workers` defaults to 1 (unchanged, strictly-sequential behavior, same as before this
+    parameter existed) -- NOT collect_dividends_yf's default-4, deliberately. Prices makes
+    TWO yfinance requests per ticker (auto_adjust=False and True, see
+    _fetch_and_shape_prices) versus dividends' one, on the same vendor whose rate limit
+    prices' OWN throttle (YF_RATE_LIMIT_SLEEP) already exists to protect (a real Yahoo
+    429 incident hit THIS specific collector earlier the same day this parameter was
+    added) -- opt into a higher value explicitly for a large backfill, don't default to
+    it. Each thread keeps its own YF_RATE_LIMIT_SLEEP pace, same reasoning as
+    collect_dividends_yf's workers.
+
+    The consecutive-failure guard (MAX_CONSECUTIVE_FAILURES/_RESUME) is now PER-WORKER
+    (thread-local), not global -- a real design question, not an oversight: the original
+    global counter's whole premise is "a strict, unbroken RUN of failures in submission
+    order is implausible for genuine coverage gaps, so it signals a stuck session."
+    That premise breaks under concurrency -- several workers hitting scattered bad
+    tickers at once would look like one long "consecutive" streak despite being
+    unrelated coincidences. A per-worker streak preserves the actual signal (THIS
+    worker's own connection/session seems stuck) without being diluted or falsely
+    tripped by unrelated concurrent workers. With workers=1 this is exactly the
+    original global counter (one thread, so "per-worker" and "global" coincide).
     """
     price_dir = price_dir or config.PRICES_DIR
     cp = checkpoint.load("yf_prices", mode)
-    consecutive_failures = 0
-    for ticker in tickers:
+    cp_lock = Lock()
+    tl = threading.local()
+
+    def _one(ticker: str) -> None:
         if skip_existing and (price_dir / f"{ticker}.parquet").exists():
-            continue
+            return
         ok = False
         try:
             path = price_dir / f"{ticker}.parquet"
@@ -450,23 +474,28 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
                     saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"prices/{ticker}")
                     if saved is not None:
                         ok = True
-                        cp[ticker] = {"last_date": str(saved["trade_date"].max().date()), "rows": len(saved)}
-                        checkpoint.save("yf_prices", mode, cp)
+                        with cp_lock:
+                            cp[ticker] = {"last_date": str(saved["trade_date"].max().date()), "rows": len(saved)}
+                            checkpoint.save("yf_prices", mode, cp)
                         log.info("prices %s: %d total rows", ticker, len(saved))
         except Exception as e:
             log.warning("prices %s: skipping after error: %s", ticker, e)
         finally:
             sleep(config.YF_RATE_LIMIT_SLEEP)
 
-        consecutive_failures = 0 if ok else consecutive_failures + 1
+        streak = 0 if ok else getattr(tl, "consecutive_failures", 0) + 1
+        tl.consecutive_failures = streak
         threshold = MAX_CONSECUTIVE_FAILURES_RESUME if skip_existing else MAX_CONSECUTIVE_FAILURES
-        if consecutive_failures >= threshold:
+        if streak >= threshold:
             raise RuntimeError(
-                f"{consecutive_failures} consecutive tickers failed (most recently {ticker}) -- "
+                f"{streak} consecutive tickers failed (most recently {ticker}) -- "
                 "genuine coverage gaps don't run this deep; this looks systemic (stale "
                 "connection, real Yahoo throttling, an outage), not coincidence. Aborting "
                 "rather than silently mislabeling the rest of the run as 'no coverage'."
             )
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(_one, tickers))
 
 
 def _flat_run_fraction(close: pd.Series, min_run: int = 10) -> float:

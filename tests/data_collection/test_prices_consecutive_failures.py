@@ -28,7 +28,7 @@ import pandas as pd
 from src.data_collection import yf_collectors as yfc
 
 
-def _run(tickers, fetch_results, price_dir, skip_existing=False):
+def _run(tickers, fetch_results, price_dir, skip_existing=False, workers=1):
     """fetch_results: dict ticker -> return value for _fetch_and_shape_prices
     (None = no coverage/failure, a DataFrame = success)."""
     with mock.patch.object(yfc, "checkpoint") as mock_cp, \
@@ -40,7 +40,7 @@ def _run(tickers, fetch_results, price_dir, skip_existing=False):
          mock.patch.object(yfc, "sleep"):
         mock_cp.load.return_value = {}
         yfc.collect_prices_yf(tickers, mode="test", price_dir=price_dir, suffix="", floor="1900-01-01",
-                              skip_existing=skip_existing)
+                              skip_existing=skip_existing, workers=workers)
 
 
 def _fake_price_df():
@@ -114,9 +114,52 @@ def test_resume_mode_still_aborts_past_its_own_much_higher_threshold():
     print("OK: resume mode still has a ceiling, just a much higher one")
 
 
+def test_threaded_no_lost_checkpoint_updates():
+    # workers>1 (2026-07-31 speedup): same real race class already found and
+    # fixed for collect_dividends_yf -- checkpoint.save()'s own lock only
+    # protects its file write, not a caller mutating the shared `cp` dict from
+    # another thread while save() is mid-snapshot. 30 successful tickers, 8
+    # workers, every one must land in the final checkpoint.
+    n = 30
+    tickers = [f"T{i}" for i in range(n)]
+    fetch_results = {t: _fake_price_df() for t in tickers}
+    with tempfile.TemporaryDirectory() as tmp, \
+         mock.patch.object(yfc, "checkpoint") as mock_cp, \
+         mock.patch.object(yfc, "_prices_fetch_start", return_value="2020-01-01"), \
+         mock.patch.object(yfc, "_bolsai_junction_date", return_value=None), \
+         mock.patch.object(yfc, "_reconcile_yfinance_junction", side_effect=lambda t, p, df, j: df), \
+         mock.patch.object(yfc, "_fetch_and_shape_prices", side_effect=lambda t, *a, **k: fetch_results[t]), \
+         mock.patch.object(yfc, "_merge_save", side_effect=lambda df, *a, **k: df), \
+         mock.patch.object(yfc, "sleep"):
+        mock_cp.load.return_value = {}
+        yfc.collect_prices_yf(tickers, mode="test", price_dir=Path(tmp), suffix="", floor="1900-01-01", workers=8)
+        final_cp = mock_cp.save.call_args_list[-1].args[2]
+        missing = set(tickers) - set(final_cp)
+        assert not missing, f"concurrent checkpoint writes lost {len(missing)} ticker(s): {missing}"
+    print("OK: collect_prices_yf threading loses no checkpoint updates across 30 tickers/8 workers")
+
+
+def test_threaded_guard_still_fires_when_every_ticker_fails():
+    # The consecutive-failure guard is now PER-WORKER (thread-local), not
+    # global -- must confirm threading doesn't silently DISABLE it. If every
+    # single ticker fails, every worker's own local streak climbs regardless
+    # of interleaving with other workers, so this must still abort.
+    tickers = [f"T{i}" for i in range(yfc.MAX_CONSECUTIVE_FAILURES * 3)]
+    fetch_results = {t: None for t in tickers}
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            _run(tickers, fetch_results, Path(tmp), workers=4)
+            assert False, "an all-failing run must still abort under threading, not run to completion"
+        except RuntimeError as e:
+            assert "consecutive" in str(e).lower()
+    print("OK: the consecutive-failure guard still fires under threading (per-worker, not disabled)")
+
+
 if __name__ == "__main__":
     test_long_failure_streak_aborts_loudly()
     test_occasional_failures_interspersed_with_successes_do_not_abort()
     test_success_resets_the_streak_just_under_threshold()
     test_resume_mode_tolerates_a_streak_past_the_normal_threshold()
     test_resume_mode_still_aborts_past_its_own_much_higher_threshold()
+    test_threaded_no_lost_checkpoint_updates()
+    test_threaded_guard_still_fires_when_every_ticker_fails()
