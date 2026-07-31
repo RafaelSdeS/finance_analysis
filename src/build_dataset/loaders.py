@@ -19,10 +19,15 @@ FUNDAMENTALS_NULL_COLS = [
 # LOAD ALL PRICE FILES
 # =============================================================================
 
-def load_prices():
+def load_prices(dir=None):
+    # `dir=None` (not `dir=PRICES_DIR`) deliberately -- a bound default is
+    # captured at import time, so monkeypatching module.PRICES_DIR in a test
+    # would silently be ignored. Re-read the module global at call time instead.
+    if dir is None:
+        dir = PRICES_DIR
 
     dfs = []
-    files = sorted(PRICES_DIR.glob("*.parquet"))
+    files = sorted(dir.glob("*.parquet"))
 
     print()
     print("=" * 80)
@@ -48,10 +53,12 @@ def load_prices():
 # LOAD ALL FUNDAMENTALS
 # =============================================================================
 
-def load_fundamentals():
+def load_fundamentals(dir=None):
+    if dir is None:  # see load_prices's comment on why not `dir=FUNDAMENTALS_DIR`
+        dir = FUNDAMENTALS_DIR
 
     dfs = []
-    files = sorted(FUNDAMENTALS_DIR.glob("*.parquet"))
+    files = sorted(dir.glob("*.parquet"))
 
     print()
     print("=" * 80)
@@ -62,6 +69,14 @@ def load_fundamentals():
         print(f"Loading: {file.name}")
         df = pd.read_parquet(file)
         df = df.dropna(axis=1, how="all")  # Drop all-NA columns per-file
+        # US fundamentals files (data/raw/us/fundamentals/) carry no `ticker`
+        # column at all (only `cik`, which is many-to-one with ticker) and
+        # date the period as `end`, not `reference_date` -- filename IS the
+        # ticker (one file per ticker, same convention as prices/dividends).
+        if "ticker" not in df.columns:
+            df["ticker"] = file.stem
+        if "reference_date" not in df.columns and "end" in df.columns:
+            df = df.rename(columns={"end": "reference_date"})
         df["reference_date"] = pd.to_datetime(df["reference_date"])
         dfs.append(df)
 
@@ -123,10 +138,12 @@ def company_siblings(company_info):
 # LOAD DIVIDENDS
 # =============================================================================
 
-def load_dividends():
+def load_dividends(dir=None):
+    if dir is None:  # see load_prices's comment on why not `dir=DIVIDENDS_DIR`
+        dir = DIVIDENDS_DIR
 
     dfs = []
-    files = sorted(DIVIDENDS_DIR.glob("*.parquet"))
+    files = sorted(dir.glob("*.parquet"))
 
     print()
     print("=" * 80)

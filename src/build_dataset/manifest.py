@@ -60,7 +60,7 @@ COLUMN_UNITS = {
 # BUILD MANIFEST
 # =============================================================================
 
-def write_manifest(dataset, dropped_no_fundamentals=None):
+def write_manifest(dataset, dropped_no_fundamentals=None, output_path=None):
     """Reproducibility record + per-column distribution snapshot, one per build.
 
     Written next to the parquet as ml_dataset.manifest.json. Comparing two
@@ -76,6 +76,12 @@ def write_manifest(dataset, dropped_no_fundamentals=None):
     dataset without running the real Stage 2 filter pipeline (most tests)
     don't need to fabricate one.
     """
+    # `output_path=None` (not `output_path=OUTPUT_PATH`) deliberately -- a
+    # bound default is captured at import time, so a test monkeypatching
+    # module.OUTPUT_PATH would be silently ignored. Re-read at call time.
+    if output_path is None:
+        output_path = OUTPUT_PATH
+
     try:
         commit = subprocess.run(
             ["git", "rev-parse", "HEAD"],
@@ -113,7 +119,7 @@ def write_manifest(dataset, dropped_no_fundamentals=None):
             for c in numeric.columns
         },
     }
-    path = OUTPUT_PATH.with_suffix(".manifest.json")
+    path = output_path.with_suffix(".manifest.json")
     path.write_text(json.dumps(manifest, indent=1))
     print(f"Manifest saved to: {path}")
     return manifest
@@ -137,13 +143,15 @@ def compute_split_dates(dataset, train_frac=0.7, val_frac=0.15):
     return train_end, val_end
 
 
-def write_split_config(dataset, train_frac=0.7, val_frac=0.15):
+def write_split_config(dataset, train_frac=0.7, val_frac=0.15, path=None):
     """Leak-safe split boundaries as a small json, not materialized parquet copies.
 
     Filter ml_dataset.parquet by trade_date against these cutoffs at load time
     (train: <= train_end, val: train_end < d <= val_end, test: > val_end)
     instead of keeping three separate parquet files in sync with the source.
     """
+    if path is None:  # see write_manifest's comment on why not `path=SPLIT_CONFIG_PATH`
+        path = SPLIT_CONFIG_PATH
     train_end, val_end = compute_split_dates(dataset, train_frac, val_frac)
     is_train = dataset["trade_date"] <= train_end
     is_val = (dataset["trade_date"] > train_end) & (dataset["trade_date"] <= val_end)
@@ -161,8 +169,8 @@ def write_split_config(dataset, train_frac=0.7, val_frac=0.15):
             "test": int(is_test.sum()),
         },
     }
-    SPLIT_CONFIG_PATH.write_text(json.dumps(config, indent=1))
-    print(f"Split config saved to: {SPLIT_CONFIG_PATH}")
+    path.write_text(json.dumps(config, indent=1))
+    print(f"Split config saved to: {path}")
 
 
 # =============================================================================

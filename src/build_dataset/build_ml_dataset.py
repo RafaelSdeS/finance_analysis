@@ -74,8 +74,17 @@ BENCHMARK_TICKER = "BOVA11"
 # FEATURE COMPUTATION
 # =============================================================================
 
-def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_size=150):
+def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_size=150,
+                              valuation_fn=recompute_valuation_daily):
     """Three-pass, memory-bounded feature computation.
+
+    `valuation_fn`: the daily valuation-ratio step run in Pass 1, defaulting
+    to BR's recompute_valuation_daily (rescales a filing-date vendor ratio by
+    close/close_price). Injected rather than hardcoded so build_us_dataset.py
+    can pass compute_valuation_daily_us instead -- US fundamentals carry no
+    price-anchored ratio to rescale in the first place (measured 0% raw
+    coverage on market_cap/pl/pvp/etc., docs/US_DATASET_BUILD_PLAN.md §4.4),
+    so that function computes them fresh from the daily close instead.
 
     A fully unchunked pass OOM'd in practice — the dataset's dense-numeric
     size looks like ~1.3-2GB, but clean_dataset's inf->NaN replace() makes a
@@ -127,7 +136,7 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
             batch = compute_price_features(batch)
             batch = compute_dividend_features(batch, dividends)
             batch = compute_macro_features(batch)
-            batch = recompute_valuation_daily(batch)
+            batch = valuation_fn(batch)
             batch = compute_advanced_features(batch)
             batch = compute_history_relative_features(batch)
 

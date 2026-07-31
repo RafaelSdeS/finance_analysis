@@ -177,7 +177,7 @@ def _ticker_root(ticker: str) -> str:
     return ticker.rstrip("0123456789")
 
 
-def filter_tickers_with_no_fundamentals(prices, fundamentals):
+def filter_tickers_with_no_fundamentals(prices, fundamentals, known_no_fundamentals=None):
     """Drop any ticker from prices that has zero fundamental rows.
 
     Sparse fundamentals (e.g. PETR4 only goes back to 2010) are fine —
@@ -191,6 +191,9 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
     audit finding -- dropped tickers, esp. delisted/failed companies with no
     fundamentals coverage, are exactly the survivorship-relevant ones).
     """
+    # see loaders.load_prices's comment on why not `known_no_fundamentals=KNOWN_NO_FUNDAMENTALS`
+    if known_no_fundamentals is None:
+        known_no_fundamentals = KNOWN_NO_FUNDAMENTALS
 
     print()
     print("=" * 80)
@@ -221,7 +224,7 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
 
         known, dead, redundant, gap = [], [], [], []
         for t in sorted(missing):
-            if t in KNOWN_NO_FUNDAMENTALS:
+            if t in known_no_fundamentals:
                 known.append(t)
             elif (dataset_max_date - last_trade[t]).days > STALE_TICKER_DAYS:
                 dead.append(t)
@@ -235,8 +238,8 @@ def filter_tickers_with_no_fundamentals(prices, fundamentals):
         if known:
             print(f"  known non-company ({len(known)}):")
             for t in known:
-                print(f"    {t}: {KNOWN_NO_FUNDAMENTALS[t]}")
-                dropped_report["known_non_company"][t] = KNOWN_NO_FUNDAMENTALS[t]
+                print(f"    {t}: {known_no_fundamentals[t]}")
+                dropped_report["known_non_company"][t] = known_no_fundamentals[t]
         if dead:
             print(f"  delisted/renamed, last traded >{STALE_TICKER_DAYS}d before dataset end "
                   f"({len(dead)}): {dead}")

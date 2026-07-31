@@ -71,6 +71,11 @@ BCB_SERIES = {"selic": 11, "cdi": 12, "ipca": 433}
 #   VIXCLS      daily,     index points
 #   DTWEXBGS    daily,     index (broad trade-weighted USD)
 #   M2SL        monthly,   billions of dollars
+#   DTB3        daily,     percent (3-month T-bill, annualized) -- the US analogue of
+#               BR's `selic`: daily-frequency risk-free rate, needed so
+#               `merge_macro_us`'s `selic_trend_20d` (a literal 20-*row* shift on the raw
+#               daily series) has the same real-world meaning as BR's. `fed_funds` is only
+#               monthly and would silently turn that into a 20-*month* diff instead.
 FRED_BASE = "https://fred.stlouisfed.org/graph"
 FRED_SERIES = {
     "fed_funds": "FEDFUNDS", "treasury_2y": "DGS2", "treasury_10y": "DGS10",
@@ -78,6 +83,7 @@ FRED_SERIES = {
     "ppi": "PPIACO", "unemployment": "UNRATE", "real_gdp": "GDPC1",
     "industrial_production": "INDPRO", "term_spread_10y2y": "T10Y2Y",
     "vix": "VIXCLS", "dollar_index": "DTWEXBGS", "m2": "M2SL",
+    "risk_free_3m": "DTB3",
 }
 
 # --- Collection limits ---
