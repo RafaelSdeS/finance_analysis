@@ -413,6 +413,70 @@ Each phase ends green before the next starts, per the standing rule.
       uncoverable tickers), AND (2) §4.6 is done.
 - [ ] Expect ~15.4M rows and a build noticeably longer than BR's, once run.
 
+### Phase C.5 — no-lookahead audit ✅ DONE 2026-07-31, clean
+
+Requested explicitly before any full-scale run. Covered both the raw data (independent of
+any of this repo's code) and the builder code path, not just a repeat of Phase B's unit
+tests.
+
+- [x] **Full-corpus scan, all 8,143 fundamentals files / 333,515 rows** (not a sample):
+      `end > fundamentals_available_date` — **0 violations**. Null
+      `fundamentals_available_date` — **0**. Duplicate `end` per ticker (would corrupt
+      YoY/QoQ derivation) — **0**.
+- [x] **Investigated an initially alarming finding**: `fundamentals_available_date` is
+      NOT monotonically increasing with fiscal `end` within a ticker — true for 6,931/8,143
+      tickers (85%), 30,863 row-pairs. Traced to source (`sec/companyfacts.py:380`,
+      `extract_line_items`): a row's `fundamentals_available_date` is deliberately the
+      **MAX across each of its constituent line items' own `filed` date** — e.g. a balance-
+      sheet item can be tagged as a prior-period comparative in a later filing before that
+      quarter's income-statement figure is filed elsewhere, so the row waits for the
+      *last* piece before being considered available at all. Confirmed via inline
+      docstring: "the conservative (never-early) bundling date... guarantees no single
+      item in the row is ever exposed before it was genuinely public." Same reasoning
+      confirmed in `_derive_q4` (line 227: a derived Q4 keeps the FY total's own `filed`
+      date, since the Q4 figure isn't computable before the FY total itself was filed).
+      **Net effect: this can only make a row available LATER than a naive per-item view
+      would suggest, never earlier — safe, and a separate (already-known) staleness
+      characteristic, not a lookahead bug.**
+- [x] **Macro data** (`risk_free_3m.parquet` 18,134 rows, `cpi_sa.parquet` 953 rows): 0
+      nulls, 0 duplicate `reference_date`, both monotonic, plausible value ranges.
+- [x] **CPI publication-lag shift verified against REAL data** (not just the synthetic
+      Phase B fixture): recomputed the availability-respecting `ipca` independently and
+      diffed against `merge_macro_us`'s actual output across 16,250 real (trade_date,
+      ipca) pairs — **0 mismatches**.
+- [x] **Broader real-ticker integration run** (AAPL, A, WMT, TXT, ZION, BOOM, GE, KO, SWK,
+      SPY — deliberately including tickers that were the SUBJECT of prior real bugs:
+      WMT's ex27 multiplier fix, ZION/BOOM's item6 table-selection fix, A's mixed-tier/
+      off-calendar (Oct 31) fiscal year-end) through the full pipeline incl.
+      `compute_features_chunked`: **0 rows with `trade_date <= fundamentals_available_date`**,
+      checked both immediately post-`merge_asof` and in the final fully-featured output.
+- [x] **Dtype safety check**: `fundamentals_available_date`/`reference_date` stay
+      `datetime64[ns]` from raw parquet through `load_fundamentals()` — no silent
+      string-comparison risk in the asof merge.
+- [x] **Dividends data quality** (2,868 files collected so far): 0 null `ex_date`, 0 rows
+      with `ex_date` after `payment_date`. Found 255 rows (7 tickers: ABEO, AEHL, CMCT,
+      PSHG, SHIP, SUNE, SVRN — small-cap/penny-stock names) with `value_per_share` > 1000,
+      up to $2.1M/share (SUNE) — clearly vendor data corruption, not real dividends.
+      **Not a new problem**: `loaders.load_dividends()`'s existing >1000 sanity ceiling
+      (originally written for a BRL vendor bug) already catches and drops these for the
+      US too, since the loader is region-agnostic. Confirms the guard generalizes
+      correctly; nothing to fix.
+
+**The one real, already-documented caveat, restated for clarity**: `build_universe_gate()`
+computes each ticker's *lifetime* median close/dollar-volume to decide inclusion — this is
+NOT point-in-time (a 1995 row from a ticker that only becomes liquid decades later still
+qualifies), the same category of universe-selection bias as BR's `build_top50_universe.py`.
+This is conceptually distinct from a per-row feature lookahead (no future VALUE appears in
+any row's own feature columns, and every check above confirms that) — it affects which
+TICKERS are in the panel at all, not what any given row can see. Already called out in
+§D1/§7; restated here because it's the one place a lookahead-*adjacent* concept genuinely
+applies, and the audit would be incomplete without naming it explicitly.
+
+**Conclusion: no feature-level or fundamentals-merge lookahead found**, across both the
+full raw corpus and a targeted adversarial integration run. Phase C's real blockers remain
+exactly the two already listed (dividends completion, §4.6 memory safety) — this audit
+does not surface a new one.
+
 ### Phase D — dividends (blocked on PID 124339)
 - [ ] Confirm the dividends job finished; re-run the build with `merge_dividends` +
       `compute_dividend_features` active.
