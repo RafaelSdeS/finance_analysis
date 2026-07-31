@@ -267,6 +267,38 @@ def test_build_cik_history_skips_post_ex27_era_filings():
     print("OK: build_cik_history skips filings past the EX-27 era, not every 10-K ever filed")
 
 
+def test_build_cik_history_drops_unparseable_period_end_instead_of_merging():
+    # Real bug: fds_period_end is NaT whenever <FISCAL-YEAR-END> is missing/
+    # malformed (a documented unreliability of that tag -- see
+    # extract_line_items's ADP docstring). drop_duplicates(subset="fds_period_end")
+    # treats NaT == NaT, so two DIFFERENT real fiscal years that both fail to
+    # parse a period end used to collapse into one bogus survivor (the
+    # earlier-filed one, itself still useless with a NaT end) instead of both
+    # being dropped -- silently discarding the later one's real financial data.
+    good_text = ("<TYPE>EX-27\n<ARTICLE>5\n<PERIOD-TYPE>YEAR\n"
+                 "<FISCAL-YEAR-END>DEC-31-1994\n<TOTAL-ASSETS>100\n<NET-INCOME>10\n")
+    # <FISCAL-YEAR-END> omitted entirely -> fds_period_end = NaT
+    bad_text_1 = "<TYPE>EX-27\n<ARTICLE>5\n<PERIOD-TYPE>YEAR\n<TOTAL-ASSETS>200\n<NET-INCOME>20\n"
+    bad_text_2 = "<TYPE>EX-27\n<ARTICLE>5\n<PERIOD-TYPE>YEAR\n<TOTAL-ASSETS>300\n<NET-INCOME>30\n"
+
+    filings = pd.DataFrame({
+        "cik": [1, 1, 1],
+        "form_type": ["10-K", "10-K", "10-K"],
+        "date_filed": pd.to_datetime(["1994-03-01", "1995-03-01", "1996-03-01"]),
+        "filename": ["good.txt", "bad1.txt", "bad2.txt"],
+    })
+    with mock.patch.object(fds, "fetch_filing_text",
+                           side_effect=[good_text, bad_text_1, bad_text_2]):
+        result = fds.build_cik_history(1, filings)
+
+    assert len(result) == 1, (
+        f"both NaT-period-end exhibits must be dropped, not collapsed into one "
+        f"bogus survivor via drop_duplicates treating NaT == NaT; got {len(result)} row(s)")
+    assert result.iloc[0]["total_assets"] == 100.0
+    assert str(result.iloc[0]["fds_period_end"].date()) == "1994-12-31"
+    print("OK: build_cik_history drops (not merges) exhibits with an unparseable period end")
+
+
 def test_measure_prevalence_handles_list_return_from_parse_fds():
     # Real bug: parse_fds returns a LIST (a filing can bundle multiple EX-27
     # exhibits), but measure_prevalence used to treat it like a dict/None --
@@ -301,4 +333,5 @@ if __name__ == "__main__":
     test_missing_multiplier_borrows_from_sibling_exhibit()
     test_missing_multiplier_left_flagged_when_no_sibling_available()
     test_build_cik_history_skips_post_ex27_era_filings()
+    test_build_cik_history_drops_unparseable_period_end_instead_of_merging()
     test_measure_prevalence_handles_list_return_from_parse_fds()

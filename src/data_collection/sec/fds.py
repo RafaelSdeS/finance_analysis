@@ -233,6 +233,20 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     df = _fill_missing_multipliers(df)
+    # A row with no resolvable fds_period_end (missing/malformed <FISCAL-YEAR-END>,
+    # see extract_line_items's ADP docstring) can't be placed on the timeline
+    # regardless of dedup -- and drop_duplicates below treats NaT == NaT, so
+    # leaving these in would silently collapse two DIFFERENT real fiscal years'
+    # data into one bogus survivor (keeping only the earlier-filed one, itself
+    # still useless with a NaT period end) instead of dropping both.
+    missing_period = df["fds_period_end"].isna()
+    if missing_period.any():
+        log.warning("fds CIK %s: dropping %d exhibit(s) with an unparseable "
+                    "<FISCAL-YEAR-END> (can't be placed on the period timeline)",
+                    cik, missing_period.sum())
+        df = df[~missing_period]
+    if df.empty:
+        return pd.DataFrame()
     # as-first-reported: whichever filing disclosed a given fiscal period EARLIEST
     # wins, whether that's the period's own original filing or a later filing's
     # bundled comparative exhibit reporting it first for some other reason.
