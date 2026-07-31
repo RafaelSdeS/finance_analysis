@@ -18,6 +18,7 @@ Usage:
 """
 
 import sys
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -96,9 +97,36 @@ def test_fetch_year_returns_none_on_empty_register():
     print("OK: empty register returns None")
 
 
+def test_collect_filing_dates_noop_rerun_does_not_crash():
+    """A routine quarterly re-run where nothing new has been published (every
+    older year already 'covered', the current year's fetch returns None, as
+    is typical most of the time) must not crash: `result` must fall back to
+    the existing on-disk data instead of an unbound NameError at the final
+    summary print."""
+    existing_row = pd.DataFrame({
+        "cnpj": ["11111111000101"],
+        "cvm_code": ["1234"],
+        "reference_date": [pd.Timestamp("2026-03-31")],
+        "received_date": [pd.Timestamp("2026-04-20")],
+        "report_type": ["ITR"],
+    })
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = Path(tmp) / "filing_dates.parquet"
+        existing_row.to_parquet(out_path)
+
+        with mock.patch.object(filing_dates, "OUTPUT_PATH", out_path), \
+             mock.patch.object(filing_dates, "_fetch_year", return_value=None):
+            result = filing_dates.collect_filing_dates()
+
+    assert len(result) == 1
+    assert result.iloc[0]["cnpj"] == "11111111000101"
+    print("OK: a no-op rerun (nothing new published) returns existing data without crashing")
+
+
 if __name__ == "__main__":
     test_fetch_year_parses_and_strips_cnpj()
     test_fetch_year_keeps_earliest_receipt_for_restated_filing()
     test_fetch_year_drops_rows_with_unparseable_dates()
     test_fetch_year_returns_none_when_year_not_published()
     test_fetch_year_returns_none_on_empty_register()
+    test_collect_filing_dates_noop_rerun_does_not_crash()

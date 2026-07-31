@@ -12,12 +12,14 @@ Run from project root:
 
 import sys
 from pathlib import Path
+from unittest import mock
 
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
+from src.data_collection import collect_delisted, collectors  # noqa: E402
 from src.data_collection.collect_delisted import candidate_tickers  # noqa: E402
 
 # Known true last-trade dates, verified live against /stocks/{t}/history 2026-07-11.
@@ -67,6 +69,26 @@ def test_delisting_anchors():
     return all_ok
 
 
+def test_main_collects_all_tickers_in_one_call():
+    """collect_prices() loads/saves its own checkpoint dict per call and isn't
+    safe to invoke concurrently across ticker batches (each call's
+    checkpoint.save() overwrites the others' in-memory view). main() must
+    call it exactly once with the full candidate list, not batched/threaded
+    -- guards against re-introducing the ThreadPoolExecutor split."""
+    calls = []
+    with mock.patch.object(collectors, "collect_prices",
+                            side_effect=lambda t, m: calls.append((list(t), m))), \
+         mock.patch.object(sys, "argv", ["collect_delisted", "--tickers", "AAAA3", "BBBB3", "CCCC3"]):
+        collect_delisted.main()
+
+    assert len(calls) == 1, f"expected exactly one collect_prices call, got {len(calls)}"
+    tickers, mode = calls[0]
+    assert tickers == ["AAAA3", "BBBB3", "CCCC3"], tickers
+    assert mode == "full_scale"
+    print("PASS  main() collects all tickers in a single call")
+    return True
+
+
 if __name__ == "__main__":
-    ok = test_candidate_filter() & test_delisting_anchors()
+    ok = test_candidate_filter() & test_delisting_anchors() & test_main_collects_all_tickers_in_one_call()
     sys.exit(0 if ok else 1)

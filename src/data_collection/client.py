@@ -35,9 +35,10 @@ def get_json(client: httpx.Client, path: str, params: dict | None = None) -> dic
             r = client.get(path, params=params or {})
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
             last_err = e
-            wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
-            log.warning("%s: network error (%s), retry in %ds", path, e, wait)
-            time.sleep(wait)
+            if attempt + 1 < config.MAX_RETRIES:
+                wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
+                log.warning("%s: network error (%s), retry in %ds", path, e, wait)
+                time.sleep(wait)
             continue
 
         if r.status_code == 200:
@@ -46,16 +47,18 @@ def get_json(client: httpx.Client, path: str, params: dict | None = None) -> dic
             except ValueError:
                 # BCB intermittently returns an empty 200 body — transient, retry
                 last_err = "empty/non-JSON 200 body"
-                wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
-                log.warning("%s: %s, retry in %ds", path, last_err, wait)
-                time.sleep(wait)
+                if attempt + 1 < config.MAX_RETRIES:
+                    wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
+                    log.warning("%s: %s, retry in %ds", path, last_err, wait)
+                    time.sleep(wait)
                 continue
 
         if r.status_code in RETRYABLE_STATUS:
             last_err = f"HTTP {r.status_code}"
-            wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
-            log.warning("%s: HTTP %d, retry in %ds", path, r.status_code, wait)
-            time.sleep(wait)
+            if attempt + 1 < config.MAX_RETRIES:
+                wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
+                log.warning("%s: HTTP %d, retry in %ds", path, r.status_code, wait)
+                time.sleep(wait)
             continue
 
         # 4xx (other than 429): client error, don't retry
@@ -78,9 +81,10 @@ def get_text(client: httpx.Client, path: str, params: dict | None = None) -> str
             r = client.get(path, params=params or {})
         except (httpx.ConnectError, httpx.ReadTimeout, httpx.RemoteProtocolError) as e:
             last_err = e
-            wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
-            log.warning("%s: network error (%s), retry in %ds", path, e, wait)
-            time.sleep(wait)
+            if attempt + 1 < config.MAX_RETRIES:
+                wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
+                log.warning("%s: network error (%s), retry in %ds", path, e, wait)
+                time.sleep(wait)
             continue
 
         if r.status_code == 200:
@@ -88,9 +92,10 @@ def get_text(client: httpx.Client, path: str, params: dict | None = None) -> str
 
         if r.status_code in RETRYABLE_STATUS:
             last_err = f"HTTP {r.status_code}"
-            wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
-            log.warning("%s: HTTP %d, retry in %ds", path, r.status_code, wait)
-            time.sleep(wait)
+            if attempt + 1 < config.MAX_RETRIES:
+                wait = min(config.BACKOFF_BASE * 2 ** attempt, config.BACKOFF_MAX)
+                log.warning("%s: HTTP %d, retry in %ds", path, r.status_code, wait)
+                time.sleep(wait)
             continue
 
         r.raise_for_status()

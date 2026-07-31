@@ -81,8 +81,13 @@ def collect_filing_dates() -> pd.DataFrame:
             for t, y in zip(existing["report_type"], existing["reference_date"].dt.year)
         }
 
+    # Seeded from `existing` so a no-op rerun (nothing new published since last
+    # time -- the common case for a routine "re-run quarterly") has a defined
+    # result instead of crashing the summary below with a NameError.
+    result = existing if existing is not None else pd.DataFrame(
+        columns=["cnpj", "cvm_code", "reference_date", "received_date", "report_type"])
     total_collected = 0
-    total_companies = set()
+    total_companies = set(result["cnpj"].unique()) if len(result) else set()
 
     for report_type in ("itr", "dfp"):
         for year in range(http.START_YEAR, current_year + 1):
@@ -131,7 +136,10 @@ def collect_filing_dates() -> pd.DataFrame:
             print(f"    ✓ {len(result)} unique filings so far, "
                   f"{len(total_companies)} companies")
 
-    print(f"\nFinal: {len(result)} filings ({len(total_companies)} companies, "
-          f"{result['reference_date'].min().date()} → {result['reference_date'].max().date()}) "
-          f"saved to {OUTPUT_PATH}")
+    if result.empty:
+        print(f"\nNo filings collected (nothing published or fetched yet) -- {OUTPUT_PATH}")
+    else:
+        print(f"\nFinal: {len(result)} filings ({len(total_companies)} companies, "
+              f"{result['reference_date'].min().date()} → {result['reference_date'].max().date()}) "
+              f"saved to {OUTPUT_PATH}")
     return result

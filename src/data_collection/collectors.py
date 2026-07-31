@@ -41,13 +41,23 @@ PRICE_RENAME = {
 # ---------------------------------------------------------------------------
 
 def _chunk_dates(start: str, end: str, years: int):
-    """Yield (start, end) ISO windows of <= `years` each, to stay under API caps."""
+    """Yield (start, end) ISO windows of <= `years` each, to stay under API caps.
+
+    Uses pd.DateOffset (not raw datetime(s.year+years, s.month, s.day)) to
+    step forward: a plain datetime() construction raises ValueError whenever
+    `s` is Feb 29 and `s.year + years` isn't a leap year -- which, for
+    years=10, is EVERY time (adding 10 always shifts year%4 by 2). Reachable
+    in practice via collect_macro's incremental path: BCB's daily selic/cdi
+    series can have a checkpoint last_date of Feb 28 in a leap year, making
+    the next start date Feb 29. DateOffset clamps to Feb 28 on a non-leap
+    target year instead of raising.
+    """
     s = datetime.strptime(start, "%Y-%m-%d")
     e = datetime.strptime(end, "%Y-%m-%d")
     while s <= e:
-        chunk_end = min(datetime(s.year + years, s.month, s.day), e)
+        chunk_end = min(pd.Timestamp(s) + pd.DateOffset(years=years), pd.Timestamp(e))
         yield s.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")
-        s = chunk_end + timedelta(days=1)
+        s = chunk_end.to_pydatetime() + timedelta(days=1)
 
 
 def _merge_save(df_new, path, date_col, validator, ticker_label=""):
@@ -210,29 +220,27 @@ def collect_prices(tickers: list[str], mode: str):
                 log.info("prices %s: in skip list (no data on previous run)", ticker)
                 continue
             try:
+                # collect_prices is a one-time backfill (see test_skip_existing.py):
+                # a ticker is either not yet collected (fetch full history below) or
+                # already collected (skipped above) -- there is no incremental path
+                # here, freshness is --mode update's (yfinance) job. Always backfill
+                # from the floor rather than trusting cp[ticker]["last_date"]: a
+                # checkpoint entry can outlive its file (e.g. a corrupted parquet
+                # reverted by hand, see backfill_known_gaps.py), and trusting a
+                # stale last_date there would silently truncate the rebuilt history.
                 path = config.PRICES_DIR / f"{ticker}.parquet"
                 if path.exists():
                     log.info("prices %s: already collected, skipping", ticker)
                     continue
-                last = cp.get(ticker, {}).get("last_date")
                 end = datetime.now().strftime("%Y-%m-%d")
-
-                if last:  # incremental: one small window from day after last
-                    start = (pd.to_datetime(last) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-                    if start > end:
-                        log.info("prices %s: up to date", ticker)
-                        continue
-                    windows = [(start, end)]
-                else:      # backfill: chunk to stay under the 5000-row cap
-                    windows = list(_chunk_dates(config.START_DATE, end, config.PRICE_CHUNK_YEARS))
+                windows = list(_chunk_dates(config.START_DATE, end, config.PRICE_CHUNK_YEARS))
 
                 records = []
                 for s, e in windows:
                     records += _fetch_price_window(c, ticker, s, e)
                 if not records:
                     log.info("prices %s: no new rows", ticker)
-                    if not last:  # full-history fetch came back empty = API has nothing
-                        _mark_skip(ticker)
+                    _mark_skip(ticker)  # full-history fetch came back empty = API has nothing
                     continue
 
                 df = pd.DataFrame(records).rename(columns=PRICE_RENAME)

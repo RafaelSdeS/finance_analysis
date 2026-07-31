@@ -50,5 +50,40 @@ def test_skip_existing():
     print("OK: prices/fundamentals/dividends all skipped an already-collected ticker")
 
 
+def test_missing_file_ignores_stale_checkpoint():
+    """A checkpoint entry must not be trusted once its parquet is gone -- otherwise
+    collect_prices would fetch only a narrow incremental window from the stale
+    last_date instead of rebuilding full history, silently truncating the ticker
+    (e.g. after a corrupted file is manually reverted, see backfill_known_gaps.py,
+    but its checkpoint entry survives)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        prices_dir = Path(tmp) / "prices"
+        prices_dir.mkdir()
+
+        ticker = "GONE3"
+        fetch_starts = []
+
+        def _fake_get_json(c, path, params=None):
+            fetch_starts.append(params["start"])
+            return {"prices": []}
+
+        stale_cp = {ticker: {"last_date": "2025-06-01", "rows": 100}}
+
+        with mock.patch.object(config, "PRICES_DIR", prices_dir), \
+             mock.patch.object(collectors.client, "get_json", side_effect=_fake_get_json), \
+             mock.patch.object(collectors.client, "make_client", return_value=mock.MagicMock()), \
+             mock.patch.object(collectors.checkpoint, "load", return_value=stale_cp), \
+             mock.patch.object(collectors.checkpoint, "save"):
+            collectors.collect_prices([ticker], mode="full_scale")
+
+        assert fetch_starts, "expected at least one fetch window"
+        assert fetch_starts[0] == config.START_DATE, (
+            f"a missing file must trigger a full backfill from START_DATE, not the "
+            f"stale checkpoint's last_date; got start={fetch_starts[0]}")
+
+    print("OK: a stale checkpoint entry for a missing file doesn't truncate the refetch")
+
+
 if __name__ == "__main__":
     test_skip_existing()
+    test_missing_file_ignores_stale_checkpoint()

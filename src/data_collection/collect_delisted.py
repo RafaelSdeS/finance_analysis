@@ -20,7 +20,6 @@ Usage (from project root):
 
 import argparse
 import re
-from concurrent.futures import ThreadPoolExecutor
 
 from . import collectors, config
 
@@ -44,7 +43,6 @@ def main():
     p = argparse.ArgumentParser(description="Backfill prices for delisted tickers")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--tickers", nargs="+", help="override candidate list")
-    p.add_argument("--workers", type=int, default=10, help="parallel workers (default 10)")
     args = p.parse_args()
 
     if args.tickers:
@@ -66,15 +64,12 @@ def main():
         print(" ".join(cands))
         return
 
-    # Divide into batches and process in parallel (10 workers by default)
-    batch_size = max(1, len(cands) // args.workers)
-    batches = [cands[i:i + batch_size] for i in range(0, len(cands), batch_size)]
-
-    def process_batch(batch):
-        collectors.collect_prices(batch, "full_scale")
-
-    with ThreadPoolExecutor(max_workers=args.workers) as executor:
-        executor.map(process_batch, batches)
+    # collect_prices() loads its own checkpoint dict per call and isn't safe to
+    # call concurrently across ticker batches (each call's `checkpoint.save()`
+    # would overwrite the others' in-memory view, last-writer-wins) -- one
+    # call over the full list, relying on its existing per-ticker rate limit
+    # (config.RATE_LIMIT_SLEEP), same as how pipeline.py invokes it.
+    collectors.collect_prices(cands, "full_scale")
 
 
 if __name__ == "__main__":
