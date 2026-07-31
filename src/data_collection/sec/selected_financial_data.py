@@ -1,10 +1,19 @@
-"""sec/item6.py — Item 6 "Selected Financial Data" chaining (Phase 7, plan §3.4).
+"""sec/selected_financial_data.py — the "Item 6" gap tier (Phase 7, plan §3.4).
 
-Closes the 2001-2006 gap between the EX-27 tier (usably 1995-2000) and the
-XBRL tier (2007+). Until its 2021 elimination, the SEC required a standardized
-5-year summary table in every 10-K. Chaining two filings per company spans any
-window; consecutive filings' tables overlap by ~4 years, giving free
-cross-validation of every extracted figure against 2+ independent filings.
+What "Item 6" is: every 10-K annual report is split into numbered Items per
+SEC Regulation S-K. Item 6 was captioned "Selected Financial Data" -- a
+standardized 5-year summary table (net revenue, net income, EPS, total
+assets, ...) that Reg S-K Item 301 required in every 10-K until the SEC
+eliminated it in 2021 as redundant with the MD&A section. This module scrapes
+that table out of old filings; "item6"/"Item 6" still shows up throughout
+this codebase (column names, tier labels, docs) as the standard short name
+for exactly this data source -- this file just has the more legible one.
+
+Why it exists: it closes the 2001-2006 gap between the EX-27 tier (usably
+1995-2000) and the XBRL tier (2007+), the two other fundamentals sources this
+pipeline has. Chaining two filings per company spans any window; consecutive
+filings' tables overlap by ~4 years, giving free cross-validation of every
+extracted figure against 2+ independent filings.
 
 Table location is the hard part, not parsing (verified 2026-07-28: Intel's
 2010 10-K produced 342 pandas.read_html tables; the heuristic below picked
@@ -32,7 +41,7 @@ _APOSTROPHE = re.compile("’")
 
 # Item 6 tables print dollar figures under a "(in millions)"/"(in thousands)"
 # caption that lives in the filing's surrounding text, not inside the parsed
-# table itself -- extract_years/find_item6_table never saw it, so every
+# table itself -- extract_years/find_selected_financial_data_table never saw it, so every
 # gap-tier dollar figure was stored at face value (e.g. Intel's real
 # $35,127,000,000 1994-2009 net revenue stored as bare "35127"). Confirmed
 # against adjacent tiers for the SAME company (2026-07-28): INTC item6
@@ -67,7 +76,7 @@ def detect_unit_multiplier(text: str) -> float:
     return _UNIT_MULTIPLIER[mode]
 
 # Filings in this date-filed window can plausibly carry the target 2001-2006
-# gap years within their 5-year (or fragmented 3-year, see find_item6_table)
+# gap years within their 5-year (or fragmented 3-year, see find_selected_financial_data_table)
 # lookback. Bounded the same way fds.py's EX27_ERA_END is -- fetching a
 # company's ENTIRE filing history just to check a handful of years was
 # already a confirmed real bug there; same principle applies here.
@@ -119,7 +128,7 @@ def _year_header_row(df: pd.DataFrame) -> list[str]:
     confirmed on two real false-positive filings (2026-07-29) where combining
     rows let unrelated data-row figures get counted alongside a genuine year
     header, tipping a wrong table over the >=3-years threshold in
-    find_item6_table -- AAPL's 2004 10-K misread its Selected Quarterly
+    find_selected_financial_data_table -- AAPL's 2004 10-K misread its Selected Quarterly
     Financial Data table as Item 6 because three quarters' net sales
     ($2,014M / $1,909M / $2,006M) are themselves 4-digit year-shaped numbers;
     AMG's misread a stock-comp footnote table where large figures like
@@ -141,7 +150,7 @@ def _year_header_row(df: pd.DataFrame) -> list[str]:
     return best
 
 
-def find_item6_table(tables: list[pd.DataFrame]) -> pd.DataFrame | None:
+def find_selected_financial_data_table(tables: list[pd.DataFrame]) -> pd.DataFrame | None:
     """Best-scoring candidate among ALL of a filing's pandas.read_html tables.
     Score = (year_count>=3) AND >=1 of the core keywords in the first column;
     ties broken by keyword-hit count, then row count (favors the real,
@@ -157,6 +166,18 @@ def find_item6_table(tables: list[pd.DataFrame]) -> pd.DataFrame | None:
     matters more here than which item officially captioned it, and the
     Phase 7 chaining strategy recovers full coverage across MORE filings
     rather than needing every single filing's table to be complete.
+
+    Ranks by YEAR COUNT first, keyword score second -- real bug, confirmed
+    on ZION's actual 2005 10-K (2026-07-30): Item 6 there is incorporated by
+    reference to an exhibit (no real table in the parsed document at all), so
+    the old (score, years, rows) ordering let a business SEGMENT's condensed
+    income statement -- a 3-year MD&A fragment that happens to spell out
+    "Total assets"/"Net income (loss)"/"Total revenue" verbatim (score 3) --
+    beat the actual company-wide 5-year table, which labels its equivalent
+    row just "Assets" under an "AT YEAR-END" header (score 2, since "Assets"
+    alone doesn't match "TOTAL ASSETS"). A genuine Item 6 table's defining
+    trait is covering more of the requested history, not how many keywords
+    its labels happen to spell out -- year count now decides first.
     """
     best, best_score = None, (0, 0, 0)
     for df in tables:
@@ -170,7 +191,7 @@ def find_item6_table(tables: list[pd.DataFrame]) -> pd.DataFrame | None:
                     ("TOTAL ASSETS", "NET INCOME", "NET REVENUE", "NET SALES", "REVENUE"))
         if score < 1:
             continue
-        key = (score, len(years), df.shape[0])
+        key = (len(years), score, df.shape[0])
         if key > best_score:
             best, best_score = df, key
     return best
@@ -213,6 +234,19 @@ def _row_values(row: pd.Series, n_years: int) -> list[float | None]:
     n_years, so marker-shaped tokens are only ever stripped when the raw
     count is in EXCESS of n_years -- a real small negative dollar figure in
     an already-aligned row must never be discarded.
+
+    Colspan-duplicated cells are collapsed BEFORE the footnote-marker check --
+    real bug, confirmed on BOOM's (Dynamic Materials) actual 2005 10-K
+    (2026-07-30): its "Total assets" row's HTML round-trips through
+    pandas.read_html with every year's value duplicated into two adjacent
+    columns (a colspan-to-columns rendering artifact specific to that row),
+    stacked with one genuine footnote-marker cell. Stripping only the marker
+    left 10 tokens for n_years=5 -- not an exact match -- so the check above
+    silently gave up and fell through to the first 5 RAW (still-duplicated)
+    tokens, corrupting every year one position off. Collapsing adjacent
+    equal-value pairs first (only once the row is already known to have too
+    many tokens, same conservative trigger as the footnote check) recovers
+    the true per-year values before the footnote marker is even considered.
     """
     tokens: list[tuple[str, float]] = []
     for cell in row:
@@ -221,6 +255,18 @@ def _row_values(row: pd.Series, n_years: int) -> list[float | None]:
         v = _parse_value(cell)
         if v is not None:
             tokens.append((str(cell).strip(), v))
+    if len(tokens) > n_years:
+        deduped: list[tuple[str, float]] = []
+        i = 0
+        while i < len(tokens):
+            if i + 1 < len(tokens) and tokens[i][1] == tokens[i + 1][1]:
+                deduped.append(tokens[i])
+                i += 2
+            else:
+                deduped.append(tokens[i])
+                i += 1
+        if len(deduped) < len(tokens):
+            tokens = deduped
     if len(tokens) > n_years:
         kept = [(s, v) for s, v in tokens if not _FOOTNOTE_RE.match(s)]
         if len(kept) == n_years:
@@ -299,10 +345,21 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
             # it. The whole point of this loop is "skip a filing that doesn't
             # parse cleanly, try the next one" -- any parse failure qualifies.
             continue
-        table = find_item6_table(tabs)
+        table = find_selected_financial_data_table(tabs)
         if table is None:
             continue
-        unit_multiplier = detect_unit_multiplier(resp.text)
+        # Prefer the WINNING table's own units caption over the whole
+        # document's -- real bug, confirmed on ZION's actual 2005 10-K
+        # (2026-07-30): the winning table's own caption said "(Amounts in
+        # millions)", but scanning the whole filing picked "thousands" instead
+        # (the dominant caption of the much larger main financial statements
+        # elsewhere in the same combined submission), silently rescaling this
+        # table's figures 1000x too small. Falls back to the whole document
+        # only when the winning table doesn't state its own units at all (a
+        # caption living in a preceding paragraph, outside the parsed table).
+        table_text = " ".join(str(c) for c in table.to_numpy().flatten())
+        unit_multiplier = (detect_unit_multiplier(table_text) if _UNITS_RE.search(table_text)
+                            else detect_unit_multiplier(resp.text))
         for year_str, items in extract_years(table, unit_multiplier).items():
             year = int(year_str)
             if not (_FISCAL_YEAR_MIN <= year <= _FISCAL_YEAR_MAX):

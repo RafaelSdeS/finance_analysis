@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pandas as pd
 
 from .. import config, validate
-from . import companyfacts, crosswalk, fds, item6, universe
+from . import companyfacts, crosswalk, fds, selected_financial_data, universe
 
 log = logging.getLogger("sec")
 
@@ -37,7 +37,7 @@ _TIER_PRIORITY = {"xbrl": 0, "ex27": 1, "item6": 2}
 # books into the new registrant's own facts, an inverse-shaped version of the
 # same "wrong entity's numbers under this ticker" risk. Found auditing a
 # "751/1,848 tickers have a fundamentals gap" symptom (2026-07-29): most of
-# that gap turned out to be the item6.py cascade bug (see item6.py's
+# that gap turned out to be the selected_financial_data.py cascade bug (see its
 # _FISCAL_YEAR_MIN/_MAX), but 40 of the remaining xbrl-tier cases are this,
 # confirmed via SEC's own filing-type signal (Form 10-12B/G = share
 # distribution to existing shareholders, the standard spin-off registration
@@ -119,7 +119,7 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         ex27["fundamentals_tier"] = "ex27"
         frames.append(ex27)
 
-    gap = item6.build_cik_history(cik, filings)
+    gap = selected_financial_data.build_cik_history(cik, filings)
     if not gap.empty:
         gap["end"] = pd.to_datetime(gap["fiscal_year"].astype(str) + "-12-31")
         # Non-calendar-fiscal-year companies break the Dec-31 assumption above,

@@ -1,11 +1,13 @@
 """
-test_sec_item6.py
-==================
-Self-check for sec/item6.py's pure parsing logic (no network). Fixtures below
+test_sec_selected_financial_data.py
+====================================
+Self-check for sec/selected_financial_data.py's pure parsing logic (no
+network) -- the "Item 6" gap tier, see that module's docstring for what
+SEC Item 6 "Selected Financial Data" actually is. Fixtures below
 mirror real structural quirks confirmed against Intel's actual 10-K filings
 (2026-07-28):
 
-  - find_item6_table: must pick the real financial-summary table out of many
+  - find_selected_financial_data_table: must pick the real financial-summary table out of many
     candidates by scoring (year count + keyword hits), not the first
     ≥3-year table found.
   - extract_years: alias-collision bug -- "Diluted" (real diluted EPS) and
@@ -21,8 +23,19 @@ mirror real structural quirks confirmed against Intel's actual 10-K filings
     company (2026-07-28): unscaled INTC item6 net_revenue read ~1e6 too small
     vs INTC's own xbrl tier. Per-share rows (EPS, dividends/share) must NOT be
     rescaled even when every other row in the same table is.
+  - find_selected_financial_data_table must rank by YEAR COUNT first, keyword score second (2026-07-30,
+    ZION): a business-segment income-statement fragment can spell out "Total
+    assets" verbatim and outscore the real, fuller company-wide table, which
+    sometimes just says "Assets".
+  - _row_values must collapse colspan-duplicated adjacent cells BEFORE the
+    footnote-marker check (2026-07-30, BOOM): stacking both anomalies in one
+    row defeats the footnote-only guard, which requires an EXACT token-count
+    match to fire.
+  - build_cik_history's unit_multiplier must come from the WINNING TABLE's own
+    caption, not a whole-document scan (2026-07-30, ZION): a huge combined
+    submission's dominant caption can belong to an unrelated, larger table.
 
-Usage: python tests/data_collection/test_sec_item6.py
+Usage: python tests/data_collection/test_sec_selected_financial_data.py
 """
 
 import sys
@@ -33,10 +46,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pandas as pd
 
-from src.data_collection.sec import item6
+from src.data_collection.sec import selected_financial_data as sfd
 
 
-def test_find_item6_table_picks_best_scoring_candidate():
+def test_find_selected_financial_data_table_picks_best_scoring_candidate():
     # A small false-positive table (years present, no real financial keywords)
     # must lose to the real, fuller, keyword-matching table.
     noise = pd.DataFrame({0: ["Random label", "Another row"],
@@ -50,9 +63,9 @@ def test_find_item6_table_picks_best_scoring_candidate():
         5: ["2006", "35382", "5044", "48372"],
         6: ["2005", "38826", "8664", "48309"],
     })
-    best = item6.find_item6_table([noise, real])
+    best = sfd.find_selected_financial_data_table([noise, real])
     assert best is real, "must pick the table with real financial keywords, not just any 4-year table"
-    print("OK: find_item6_table scores by keyword hits, not just year count")
+    print("OK: find_selected_financial_data_table scores by keyword hits, not just year count")
 
 
 def test_extract_years_reconciles_real_intel_figures():
@@ -68,7 +81,7 @@ def test_extract_years_reconciles_real_intel_figures():
         4: [None, "2008", "$", "$", None, "$", "$", None, "$"],
         5: [None, "2008", "37586", "5292", None, "0.93", "0.92", "5748", "50472"],
     })
-    years = item6.extract_years(table)
+    years = sfd.extract_years(table)
     assert years["2009"]["net_revenue"] == 35127.0
     assert years["2009"]["net_income"] == 4369.0
     assert years["2009"]["eps_basic"] == 0.79
@@ -84,10 +97,10 @@ def test_extract_years_reconciles_real_intel_figures():
 
 
 def test_parenthesized_negative():
-    assert item6._parse_value("(1,234)") == -1234.0
-    assert item6._parse_value("$1,234") == 1234.0
-    assert item6._parse_value("$") is None
-    assert item6._parse_value("NaN") is None
+    assert sfd._parse_value("(1,234)") == -1234.0
+    assert sfd._parse_value("$1,234") == 1234.0
+    assert sfd._parse_value("$") is None
+    assert sfd._parse_value("NaN") is None
     print("OK: _parse_value handles parenthesized negatives, $ signs, commas, and blanks")
 
 
@@ -101,7 +114,7 @@ def test_row_values_strips_footnote_marker_not_real_negative():
     row = pd.Series(["Total assets", None, None, 29029, "(3)", None, None,
                       20687, "(3)", None, None, 12763, None, None, 10967,
                       None, None, 10800])
-    vals = item6._row_values(row.iloc[1:], 5)
+    vals = sfd._row_values(row.iloc[1:], 5)
     assert vals == [29029.0, 20687.0, 12763.0, 10967.0, 10800.0], (
         f"footnote markers must be stripped and real values kept aligned to their year, got {vals}")
     print("OK: _row_values strips excess footnote-marker tokens without disturbing alignment")
@@ -112,7 +125,7 @@ def test_row_values_keeps_genuine_small_negative_when_already_aligned():
     # correctly aligned (token count == n_years) -- a real small negative
     # dollar figure (e.g. a loss year) must survive untouched.
     row = pd.Series(["Net income", None, 100, None, -3, None, 50])
-    vals = item6._row_values(row.iloc[1:], 3)
+    vals = sfd._row_values(row.iloc[1:], 3)
     assert vals == [100.0, -3.0, 50.0], (
         f"a genuine negative value in an already-aligned row must not be stripped, got {vals}")
     print("OK: _row_values leaves a genuine small negative alone when the row is already aligned")
@@ -136,11 +149,11 @@ def test_build_cik_history_skips_filing_that_crashes_read_html():
     fake_resp = mock.Mock(text="<html>irrelevant, read_html is mocked directly</html>")
     good_table = pd.DataFrame({0: ["Net revenue"], 1: ["2003"], 2: ["100"]})
 
-    with mock.patch.object(item6.http, "get", return_value=fake_resp), \
-         mock.patch.object(item6.pd, "read_html", side_effect=[IndexError("list index out of range"), [good_table]]), \
-         mock.patch.object(item6, "find_item6_table", return_value=good_table), \
-         mock.patch.object(item6, "extract_years", return_value={"2003": {"net_revenue": 100.0}}):
-        df = item6.build_cik_history(1, filings)
+    with mock.patch.object(sfd.http, "get", return_value=fake_resp), \
+         mock.patch.object(sfd.pd, "read_html", side_effect=[IndexError("list index out of range"), [good_table]]), \
+         mock.patch.object(sfd, "find_selected_financial_data_table", return_value=good_table), \
+         mock.patch.object(sfd, "extract_years", return_value={"2003": {"net_revenue": 100.0}}):
+        df = sfd.build_cik_history(1, filings)
 
     assert len(df) == 1, "must skip the crashing filing and still recover the next one, not lose the whole CIK"
     assert df.iloc[0]["fiscal_year"] == 2003
@@ -160,7 +173,7 @@ def test_extract_years_scales_dollar_rows_but_not_per_share():
         2: [None, "2009", "$", "$", None, "$", "$", "$"],
         3: [None, "2009", "35127", "4369", None, "0.79", "0.77", "53095"],
     })
-    years = item6.extract_years(table, unit_multiplier=1_000_000.0)
+    years = sfd.extract_years(table, unit_multiplier=1_000_000.0)
     assert years["2009"]["net_revenue"] == 35_127_000_000.0
     assert years["2009"]["net_income"] == 4_369_000_000.0
     assert years["2009"]["total_assets"] == 53_095_000_000.0
@@ -169,9 +182,9 @@ def test_extract_years_scales_dollar_rows_but_not_per_share():
     print("OK: extract_years scales dollar rows by unit_multiplier but leaves per-share rows alone")
 
 
-def test_find_item6_table_rejects_quarterly_and_embedded_digit_false_positives():
+def test_find_selected_financial_data_table_rejects_quarterly_and_embedded_digit_false_positives():
     # Real bug, found auditing the collected dataset (2026-07-29): AAPL got a
-    # fiscal_year=1909 row because find_item6_table picked its Selected
+    # fiscal_year=1909 row because find_selected_financial_data_table picked its Selected
     # Quarterly Financial Data table -- quarterly net sales figures ($2,014M /
     # $1,909M / $2,006M) are themselves 4-digit, year-shaped numbers, and the
     # old code flattened df.head(3) together instead of checking one row at a
@@ -211,20 +224,102 @@ def test_find_item6_table_rejects_quarterly_and_embedded_digit_false_positives()
         5: ["2006", "35382", "5044", "48372"],
         6: ["2005", "38826", "8664", "48309"],
     })
-    assert item6._year_header_row(quarterly) == ["2004"], (
+    assert sfd._year_header_row(quarterly) == ["2004"], (
         "quarterly-earnings table's data rows (all carrying '$') must not "
         "contribute their dollar figures as extra 'years'")
-    assert item6._year_header_row(footnote) == ["2003"], (
+    assert sfd._year_header_row(footnote) == ["2003"], (
         "footnote table must not yield '1906'/'2054' embedded-digit false years")
-    best = item6.find_item6_table([quarterly, footnote, real])
+    best = sfd.find_selected_financial_data_table([quarterly, footnote, real])
     assert best is real, "must pick the real Item 6 table over both false-positive shapes"
-    print("OK: find_item6_table rejects quarterly-data and embedded-digit false-positive tables")
+    print("OK: find_selected_financial_data_table rejects quarterly-data and embedded-digit false-positive tables")
+
+
+def test_find_selected_financial_data_table_prefers_more_years_over_keyword_count():
+    # Real bug, confirmed on ZION's actual 2005 10-K (2026-07-30): Item 6
+    # there is incorporated by reference to an exhibit, so no real table
+    # exists in the parsed document -- but a business SEGMENT's condensed
+    # income statement buried in the MD&A spells out "Total assets"/"Net
+    # income (loss)"/"Total revenue" verbatim (score 3, only 3 years: its own
+    # segment history), while the REAL 5-year company-wide table just says
+    # "Assets" under an "AT YEAR-END" header (score 2, since "Assets" alone
+    # doesn't match "TOTAL ASSETS"). The old (score, years, rows) ordering let
+    # the keyword-richer fragment beat the real, fuller table.
+    segment_fragment = pd.DataFrame({
+        0: ["CONDENSED INCOME STATEMENT", "Total revenue", "Net income (loss)", "Total assets"],
+        1: ["2004", "3.5", "-21.8", "-572.0"],
+        2: ["2003", "82.1", "10.4", "1120.0"],
+        3: ["2002", "0.4", "-15.2", "900.0"],
+    })
+    real_table = pd.DataFrame({
+        0: ["FOR THE YEAR", "Total revenue", "Net income", "Assets"],
+        1: ["2004", "3500", "191.8", "39958"],
+        2: ["2003", "3900", "-21.2", "42115"],
+        3: ["2002", "3200", "-21.8", "40200"],
+        4: ["2001", "1585.6", "337.8", "38500"],
+        5: ["2000", "1411.9", "256.3", "37000"],
+    })
+    best = sfd.find_selected_financial_data_table([segment_fragment, real_table])
+    assert best is real_table, "the real 5-year table must win over a keyword-richer 3-year segment fragment"
+    print("OK: find_selected_financial_data_table ranks by year count first, keyword score second")
+
+
+def test_row_values_collapses_colspan_duplicated_cells_before_footnote_check():
+    # Real bug, confirmed on BOOM's (Dynamic Materials) actual 2005 10-K
+    # (2026-07-30): the "Total assets" row's HTML renders each year's value as
+    # TWO identical adjacent cells (a colspan-to-columns artifact unique to
+    # this row), stacked with one genuine footnote-marker cell after the 2003
+    # value. Stripping only the marker left 10 tokens for n_years=5 -- not an
+    # exact match -- so the existing guard silently gave up and returned the
+    # first 5 RAW (still-duplicated) tokens, corrupting every year one
+    # position off. Real values reconciled against the live EDGAR filing:
+    # 2004=43752521, 2003=35261408, 2002=33697992, 2001=36913345, 2000=35406455.
+    row = pd.Series([
+        43752521, 43752521, 35261408, 35261408, "(1)",
+        33697992, 33697992, 36913345, 36913345, 35406455, 35406455,
+    ])
+    vals = sfd._row_values(row, 5)
+    assert vals == [43752521.0, 35261408.0, 33697992.0, 36913345.0, 35406455.0], (
+        f"colspan-duplicated cells must collapse before the footnote-marker check, got {vals}")
+    print("OK: _row_values collapses colspan-duplicated cell pairs before the footnote-marker check")
+
+
+def test_build_cik_history_uses_winning_tables_own_unit_caption():
+    # Real bug, confirmed on ZION's actual 2005 10-K (2026-07-30): the winning
+    # table's own caption said "(Amounts in millions)", but detect_unit_multiplier
+    # was run over the WHOLE filing document, whose dominant caption (from the
+    # much larger main financial statements elsewhere in the same combined
+    # submission) was "thousands" -- silently rescaling the winning table's
+    # figures 1000x too small. The multiplier must come from the winning
+    # table's own text first, falling back to the whole document only if the
+    # table doesn't state its own units.
+    filings = pd.DataFrame({
+        "cik": [7],
+        "form_type": ["10-K"],
+        "date_filed": pd.to_datetime(["2005-03-01"]),
+        "filename": ["zion.txt"],
+    })
+    doc_text = "figures in thousands " * 5 + "(Amounts in millions)"
+    fake_resp = mock.Mock(text=doc_text)
+    table = pd.DataFrame({
+        0: ["(Amounts in millions)", "Net revenue", "Net income", "Total assets"],
+        1: [None, None, None, None],
+        2: ["2004", "3.5", "0.3", "43.8"],
+    })
+    with mock.patch.object(sfd.http, "get", return_value=fake_resp), \
+         mock.patch.object(sfd.pd, "read_html", return_value=[table]), \
+         mock.patch.object(sfd, "find_selected_financial_data_table", return_value=table):
+        df = sfd.build_cik_history(7, filings)
+
+    assert len(df) == 1
+    assert df.iloc[0]["net_revenue"] == 3_500_000.0, (
+        "must scale by the WINNING TABLE's own 'millions' caption, not the document-wide 'thousands' mention")
+    print("OK: build_cik_history scales by the winning table's own unit caption, not the whole document's")
 
 
 def test_detect_unit_multiplier():
-    assert item6.detect_unit_multiplier("Some prose (In Millions, Except Per Share)") == 1_000_000.0
-    assert item6.detect_unit_multiplier("figures in thousands of dollars") == 1_000.0
-    assert item6.detect_unit_multiplier("no caption anywhere") == 1.0
+    assert sfd.detect_unit_multiplier("Some prose (In Millions, Except Per Share)") == 1_000_000.0
+    assert sfd.detect_unit_multiplier("figures in thousands of dollars") == 1_000.0
+    assert sfd.detect_unit_multiplier("no caption anywhere") == 1.0
     print("OK: detect_unit_multiplier reads the filing's units caption, defaults to 1.0 if absent")
 
 
@@ -248,10 +343,10 @@ def test_build_cik_history_scales_and_computes_ratios():
         2: [None, "2002", "$", "$", "$"],
         3: [None, "2002", "25000", "3000", "50000"],
     })
-    with mock.patch.object(item6.http, "get", return_value=fake_resp), \
-         mock.patch.object(item6.pd, "read_html", return_value=[table]), \
-         mock.patch.object(item6, "find_item6_table", return_value=table):
-        df = item6.build_cik_history(8, filings)
+    with mock.patch.object(sfd.http, "get", return_value=fake_resp), \
+         mock.patch.object(sfd.pd, "read_html", return_value=[table]), \
+         mock.patch.object(sfd, "find_selected_financial_data_table", return_value=table):
+        df = sfd.build_cik_history(8, filings)
 
     assert len(df) == 1
     row = df.iloc[0]
@@ -263,7 +358,7 @@ def test_build_cik_history_scales_and_computes_ratios():
 def test_build_cik_history_drops_implausible_fiscal_year():
     # Real bug, found auditing the collected dataset (2026-07-29): AMG's
     # chained history had fiscal_year=1906/1961/2054 rows (from a mis-selected
-    # footnote table, since fixed in find_item6_table). Those bogus years
+    # footnote table, since fixed in find_selected_financial_data_table). Those bogus years
     # didn't just add junk rows -- fundamentals.py's non-calendar-FYE
     # correction picked the 2054 row as "impossible" (end > filing date) and
     # derived a company-wide -49-year offset from it, corrupting AMG's
@@ -279,12 +374,12 @@ def test_build_cik_history_drops_implausible_fiscal_year():
     fake_resp = mock.Mock(text="irrelevant, read_html is mocked")
     table = pd.DataFrame({0: ["Net revenue"], 1: ["2005"], 2: ["100"]})
 
-    with mock.patch.object(item6.http, "get", return_value=fake_resp), \
-         mock.patch.object(item6.pd, "read_html", return_value=[table]), \
-         mock.patch.object(item6, "find_item6_table", return_value=table), \
-         mock.patch.object(item6, "extract_years",
+    with mock.patch.object(sfd.http, "get", return_value=fake_resp), \
+         mock.patch.object(sfd.pd, "read_html", return_value=[table]), \
+         mock.patch.object(sfd, "find_selected_financial_data_table", return_value=table), \
+         mock.patch.object(sfd, "extract_years",
                             return_value={"2054": {"net_revenue": 100.0}, "2005": {"net_revenue": 200.0}}):
-        df = item6.build_cik_history(9, filings)
+        df = sfd.build_cik_history(9, filings)
 
     assert len(df) == 1, "the implausible fiscal_year=2054 row must be dropped, not just the good one kept"
     assert df.iloc[0]["fiscal_year"] == 2005
@@ -292,14 +387,17 @@ def test_build_cik_history_drops_implausible_fiscal_year():
 
 
 if __name__ == "__main__":
-    test_find_item6_table_picks_best_scoring_candidate()
+    test_find_selected_financial_data_table_picks_best_scoring_candidate()
     test_extract_years_reconciles_real_intel_figures()
     test_parenthesized_negative()
     test_row_values_strips_footnote_marker_not_real_negative()
     test_row_values_keeps_genuine_small_negative_when_already_aligned()
     test_build_cik_history_skips_filing_that_crashes_read_html()
     test_extract_years_scales_dollar_rows_but_not_per_share()
-    test_find_item6_table_rejects_quarterly_and_embedded_digit_false_positives()
+    test_find_selected_financial_data_table_rejects_quarterly_and_embedded_digit_false_positives()
+    test_find_selected_financial_data_table_prefers_more_years_over_keyword_count()
+    test_row_values_collapses_colspan_duplicated_cells_before_footnote_check()
+    test_build_cik_history_uses_winning_tables_own_unit_caption()
     test_detect_unit_multiplier()
     test_build_cik_history_scales_and_computes_ratios()
     test_build_cik_history_drops_implausible_fiscal_year()
