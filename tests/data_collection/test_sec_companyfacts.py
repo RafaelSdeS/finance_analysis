@@ -262,6 +262,22 @@ def test_derive_q4_skips_when_quarters_incomplete():
     print("OK: _derive_q4 refuses to derive Q4 when the quarterly history has its own gaps")
 
 
+def test_derive_q4_handles_a_quarterly_frame_with_no_start_column():
+    # Real bug, confirmed on EPWKF (CIK 1900720, 2026-07-30): a concept can
+    # have facts with no `start` at all (an instant-shaped tag used for a
+    # nominally flow item). _quarterly_only/_annual_only already return such a
+    # frame UNCHANGED rather than crash, but _derive_q4 didn't mirror that --
+    # quarterly["start"] raised KeyError, discarding EPWKF's whole
+    # fundamentals build (every tier) over this one concept.
+    facts = _facts({"NetIncomeLoss": [_fact(None, "2020-03-31", 100.0, "2020-05-01")]})
+    quarterly = companyfacts._resolve_item(facts, ["NetIncomeLoss"])
+    annual = companyfacts._resolve_item(facts, ["NetIncomeLoss"], annual=True)
+    assert "start" not in quarterly.columns, "test setup: fact has no start, so _facts_to_frame must not invent one"
+    derived = companyfacts._derive_q4(quarterly, annual)  # must not raise
+    assert len(derived) == len(quarterly), "a start-less frame must pass through unchanged, not crash"
+    print("OK: _derive_q4 passes a start-less quarterly frame through unchanged instead of crashing")
+
+
 def test_extract_line_items_derives_q4_and_clusters_with_instant_concepts():
     # End-to-end: a flow item (net_income, FY-only tagged) must get its Q4
     # derived AND cluster correctly against an instant concept (total_assets)
@@ -293,6 +309,7 @@ if __name__ == "__main__":
     test_as_first_reported_takes_earliest_filing()
     test_quarterly_only_drops_annual_duplicate()
     test_malformed_start_date_dropped_not_crashing()
+    test_derive_q4_handles_a_quarterly_frame_with_no_start_column()
     test_as_first_reported_drops_implausible_ancient_end_date()
     test_resolve_item_unions_across_concepts_per_period()
     test_resolve_item_priority_on_overlap()

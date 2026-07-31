@@ -231,6 +231,16 @@ def _derive_q4(quarterly: pd.DataFrame, annual: pd.DataFrame) -> pd.DataFrame:
     """
     if annual.empty or quarterly.empty:
         return quarterly
+    if "start" not in quarterly.columns or "start" not in annual.columns:
+        # Real bug, confirmed on EPWKF (CIK 1900720, 2026-07-30): a concept can
+        # have facts with no `start` at all (an instant-shaped tag used for a
+        # nominally flow item, or similar filer-side tagging oddity) -- both
+        # _quarterly_only and _annual_only already return such a frame
+        # UNCHANGED rather than crash (their own "start" not in df.columns
+        # guard), but this function never mirrored that, so a non-empty
+        # start-less frame reached quarterly["start"] and raised KeyError,
+        # discarding the whole company's fundamentals build over one concept.
+        return quarterly
     have_ends = set(quarterly["end"])
     rows = []
     for _, fy in annual.iterrows():
