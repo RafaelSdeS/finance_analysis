@@ -64,14 +64,35 @@ _PER_SHARE_ITEMS = {"eps_basic", "eps_diluted", "dividends_per_share"}
 _FOOTNOTE_RE = re.compile(r"^\(\d{1,2}\)$")
 
 
-def detect_unit_multiplier(text: str) -> float:
+def detect_unit_multiplier(text: str, prefer_first: bool = False) -> float:
     """Scale factor implied by the filing's units caption ("(in millions)" etc.),
     1.0 if none found. A filing can mention units more than once (other tables,
     MD&A prose) -- takes the most frequent mention, not just the first, since
-    Item 6's own caption is virtually always the dominant one in a 10-K."""
+    Item 6's own caption is virtually always the dominant one in a 10-K.
+
+    `prefer_first=True` (used when `text` is a single winning table's own
+    cells, not the whole filing) instead takes the FIRST mention outright --
+    real bug, confirmed on AAPL's actual 2005 10-K (2026-07-30): its Item 6
+    table states its governing caption once up front, "(In millions, except
+    share and per share amounts)", then separately captions its
+    shares-outstanding sub-row "(in thousands)" -- a 1-vs-1 tie under the old
+    mode-based `max(set(hits), key=hits.count)` selection, whose outcome
+    depends on `set()`'s hash-seed-dependent iteration order (not even
+    deterministic across runs). Confirmed live: AAPL's FY2001-2005 net_revenue
+    stored 1000x too small (e.g. FY2001 $5,363,000 instead of the real
+    $5,363,000,000 -- Home Depot's FY1994-1999 show the identical exact-1000x
+    pattern). The table's own governing caption is always stated in its
+    header, before any per-row exception caption further down -- first
+    mention is the correct, deterministic tiebreak for a single table's text;
+    the whole-filing fallback below keeps the frequency heuristic, where
+    disambiguating Item 6's caption among many unrelated mentions elsewhere
+    in the document is a genuinely fuzzier problem.
+    """
     hits = [m.group(1).lower() for m in _UNITS_RE.finditer(text)]
     if not hits:
         return 1.0
+    if prefer_first:
+        return _UNIT_MULTIPLIER[hits[0]]
     mode = max(set(hits), key=hits.count)
     return _UNIT_MULTIPLIER[mode]
 
@@ -248,13 +269,32 @@ def _row_values(row: pd.Series, n_years: int) -> list[float | None]:
     many tokens, same conservative trigger as the footnote check) recovers
     the true per-year values before the footnote marker is even considered.
     """
+    # A parenthesized negative split across two adjacent HTML cells -- real
+    # bug, confirmed on AAPL's actual 2005 10-K (2026-07-30): the "Net income
+    # (loss)" row's FY2001 column literally renders as two separate cells,
+    # "(25" and ")", not one "(25)" cell. _parse_value only recognizes a
+    # negative when BOTH parens are in the SAME string, so "(25" alone (no
+    # trailing ")") fell through as a positive 25 -- Apple's real $25M
+    # FY2001 net LOSS was stored as a $25M profit. Merge any cell that opens
+    # a paren without closing it into its very next non-blank cell first.
+    raw_cells = [str(c).strip() for c in row if not pd.isna(c)]
+    merged_cells: list[str] = []
+    i = 0
+    while i < len(raw_cells):
+        cell = raw_cells[i]
+        if (cell.startswith("(") and not cell.endswith(")")
+                and i + 1 < len(raw_cells) and raw_cells[i + 1].startswith(")")):
+            merged_cells.append(cell + raw_cells[i + 1])
+            i += 2
+        else:
+            merged_cells.append(cell)
+            i += 1
+
     tokens: list[tuple[str, float]] = []
-    for cell in row:
-        if pd.isna(cell):
-            continue
+    for cell in merged_cells:
         v = _parse_value(cell)
         if v is not None:
-            tokens.append((str(cell).strip(), v))
+            tokens.append((cell, v))
     if len(tokens) > n_years:
         deduped: list[tuple[str, float]] = []
         i = 0
@@ -357,8 +397,23 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         # table's figures 1000x too small. Falls back to the whole document
         # only when the winning table doesn't state its own units at all (a
         # caption living in a preceding paragraph, outside the parsed table).
-        table_text = " ".join(str(c) for c in table.to_numpy().flatten())
-        unit_multiplier = (detect_unit_multiplier(table_text) if _UNITS_RE.search(table_text)
+        #
+        # A share-count row's OWN local caption (e.g. "...shares outstanding,
+        # in thousands") must not be read as the table's governing caption --
+        # real bug, confirmed on TXN's actual 2006 10-K (2026-07-30): that
+        # table states no dollar-figure caption in its own cells at all (its
+        # real "(in millions)" caption lives in a preceding paragraph outside
+        # the parsed table), so its ONLY units mention is the shares row's
+        # local "in thousands" -- which the code below then wrongly applied
+        # to net_revenue/net_income too, understating both 1000x. Excluding
+        # any row whose label mentions "shares" from caption detection (never
+        # from value extraction -- that's extract_years' own per_share_items
+        # exemption, untouched here) empties table_text's unit mentions for a
+        # table like this, correctly falling through to the whole-document
+        # scan instead.
+        caption_rows = table[~table.apply(lambda r: "shares" in _row_text(r).lower(), axis=1)]
+        table_text = " ".join(str(c) for c in caption_rows.to_numpy().flatten())
+        unit_multiplier = (detect_unit_multiplier(table_text, prefer_first=True) if _UNITS_RE.search(table_text)
                             else detect_unit_multiplier(resp.text))
         for year_str, items in extract_years(table, unit_multiplier).items():
             year = int(year_str)

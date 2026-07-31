@@ -131,6 +131,40 @@ def test_row_values_keeps_genuine_small_negative_when_already_aligned():
     print("OK: _row_values leaves a genuine small negative alone when the row is already aligned")
 
 
+def test_row_values_merges_paren_split_across_cells():
+    # Real bug, confirmed on AAPL's actual 2005 10-K (2026-07-30): the "Net
+    # income (loss)" row's FY2001 column renders as two separate table cells,
+    # "(25" and ")", not one "(25)" cell -- pandas.read_html splits them
+    # because of how that row's HTML is padded. _parse_value only recognizes
+    # a negative when both parens are in the SAME cell, so "(25" alone parsed
+    # as a positive 25 -- Apple's real $25M FY2001 net LOSS was silently
+    # stored as a $25M profit. Row shape below is the real one (verified
+    # against the live filing text).
+    row = pd.Series(["Net income (loss)", "$", 1335, "$", 276, "$", 69, "$", 65, "$", "(25", ")"])
+    vals = sfd._row_values(row.iloc[1:], 5)
+    assert vals == [1335.0, 276.0, 69.0, 65.0, -25.0], (
+        f"a paren split across two cells must still parse as one negative value, got {vals}")
+    print("OK: _row_values merges a parenthesized negative split across two adjacent cells")
+
+
+def test_detect_unit_multiplier_prefer_first_breaks_ties_deterministically():
+    # Real bug, confirmed on AAPL's actual 2005 10-K (2026-07-30): the Item 6
+    # table states its governing caption once, "(In millions, except share
+    # and per share amounts)", then separately captions its shares-outstanding
+    # sub-row "(in thousands)" -- a 1-vs-1 tie under the old mode-based
+    # `max(set(hits), key=hits.count)` selection, whose outcome depends on
+    # set() iteration order (hash-seed dependent, not even deterministic
+    # across runs). Confirmed live: AAPL's FY2001-2005 net_revenue stored
+    # 1000x too small. prefer_first=True must pick whichever unit word
+    # appears FIRST in the text, regardless of tie or set ordering -- proven
+    # here both ways, not just "always millions wins".
+    millions_first = "(In millions, except share amounts) ... shares (in thousands): ..."
+    thousands_first = "(In thousands) ... shares (in millions): ..."
+    assert sfd.detect_unit_multiplier(millions_first, prefer_first=True) == 1_000_000.0
+    assert sfd.detect_unit_multiplier(thousands_first, prefer_first=True) == 1_000.0
+    print("OK: detect_unit_multiplier(prefer_first=True) breaks a unit-caption tie by first occurrence, not set order")
+
+
 def test_build_cik_history_skips_filing_that_crashes_read_html():
     # Real bug, found retrying fundamentals collection at scale (2026-07-28):
     # pd.read_html raises more than ValueError on malformed real-world HTML.
@@ -316,6 +350,44 @@ def test_build_cik_history_uses_winning_tables_own_unit_caption():
     print("OK: build_cik_history scales by the winning table's own unit caption, not the whole document's")
 
 
+def test_build_cik_history_ignores_shares_row_caption_falls_back_to_document():
+    # Real bug, confirmed on TXN's actual 2006 10-K (2026-07-30): the winning
+    # table states NO table-wide dollar caption in its own cells at all (its
+    # real "(in millions)" caption lives in a preceding paragraph outside the
+    # parsed table) -- its ONLY units mention is a share-count row's own local
+    # caption, "...shares outstanding ... in thousands". The bug-14 fix above
+    # (prefer the winning table's own caption) then wrongly read THAT as the
+    # table's governing caption, applying x1000 to net_revenue/net_income too
+    # and understating both 1000x (TXN's real 2005 net_revenue $13.392B was
+    # stored as $13.392M). A row whose label mentions "shares" must be
+    # excluded from caption detection so this table correctly falls through
+    # to the whole-document scan (dominated by "millions" elsewhere in TI's
+    # combined annual-report exhibit, same as any other filing's fallback).
+    filings = pd.DataFrame({
+        "cik": [10],
+        "form_type": ["10-K"],
+        "date_filed": pd.to_datetime(["2006-02-28"]),
+        "filename": ["txn.txt"],
+    })
+    doc_text = "reported in millions " * 5 + "elsewhere in thousands"
+    fake_resp = mock.Mock(text=doc_text)
+    table = pd.DataFrame({
+        0: [None, "Net revenue", "Net income",
+            "Average common and dilutive potential common shares outstanding, in thousands"],
+        1: [None, None, None, None],
+        2: ["2005", "13392", "1198", "1670916"],
+    })
+    with mock.patch.object(sfd.http, "get", return_value=fake_resp), \
+         mock.patch.object(sfd.pd, "read_html", return_value=[table]), \
+         mock.patch.object(sfd, "find_selected_financial_data_table", return_value=table):
+        df = sfd.build_cik_history(10, filings)
+
+    assert len(df) == 1
+    assert df.iloc[0]["net_revenue"] == 13_392_000_000.0, (
+        "must fall back to the whole-document 'millions' caption, not the shares row's local 'thousands'")
+    print("OK: build_cik_history ignores a shares-count row's local caption, falls back to the whole document")
+
+
 def test_detect_unit_multiplier():
     assert sfd.detect_unit_multiplier("Some prose (In Millions, Except Per Share)") == 1_000_000.0
     assert sfd.detect_unit_multiplier("figures in thousands of dollars") == 1_000.0
@@ -392,12 +464,15 @@ if __name__ == "__main__":
     test_parenthesized_negative()
     test_row_values_strips_footnote_marker_not_real_negative()
     test_row_values_keeps_genuine_small_negative_when_already_aligned()
+    test_row_values_merges_paren_split_across_cells()
+    test_detect_unit_multiplier_prefer_first_breaks_ties_deterministically()
     test_build_cik_history_skips_filing_that_crashes_read_html()
     test_extract_years_scales_dollar_rows_but_not_per_share()
     test_find_selected_financial_data_table_rejects_quarterly_and_embedded_digit_false_positives()
     test_find_selected_financial_data_table_prefers_more_years_over_keyword_count()
     test_row_values_collapses_colspan_duplicated_cells_before_footnote_check()
     test_build_cik_history_uses_winning_tables_own_unit_caption()
+    test_build_cik_history_ignores_shares_row_caption_falls_back_to_document()
     test_detect_unit_multiplier()
     test_build_cik_history_scales_and_computes_ratios()
     test_build_cik_history_drops_implausible_fiscal_year()

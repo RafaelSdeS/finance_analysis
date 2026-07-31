@@ -260,3 +260,81 @@ files, 0 gate errors / 0 Inf / 0 implausible xbrl end dates across all fundament
 files, and exactly one remaining known-stale negative-`total_assets` file (RMSL, within
 the test's rate ceiling) — down from the NEM/ORCL/BOOM/ZION set this section started
 from. All 14 macro series still clean.
+
+## 2026-07-30 follow-up #3: cross-checked item6 figures against real published financials — 2 more confirmed bugs, 1 open
+
+A user request to verify dataset figures against real-world published numbers (not just
+internal consistency) surfaced that the item6 tier's dollar figures, not just its dates
+(bugs 11-16), can be silently wrong. Recent-quarter xbrl-tier data for AAPL/MSFT/AMZN/
+GOOGL/META/TSLA/NVDA was cross-checked against known real results and matched almost
+exactly (e.g. MSFT Q1 FY25 revenue $65.585B, Apple's EU-tax-charge quarter net income
+$14.736B, Tesla's Q1 2025 slump to $409M net income) — the xbrl tier is trustworthy. The
+item6 tier was not: a dataset-wide scan comparing every item6 row's `net_revenue` against
+the nearest xbrl/ex27 row for the same ticker found 119 rows across 1,806 item6-bearing
+tickers off by ≥10x, split into two directions with two different root causes.
+
+- [x] **17. `detect_unit_multiplier`'s tie-break was hash-seed-dependent, not
+  deterministic — FIXED 2026-07-30.** Confirmed on AAPL's actual 2005 10-K: the Item 6
+  table states its governing caption once, "(In millions, except share and per share
+  amounts)", then separately captions its shares-outstanding sub-row "(in thousands)" —
+  a 1-vs-1 tie under the old mode-based `max(set(hits), key=hits.count)` selection, whose
+  outcome depends on `set()`'s iteration order (Python's string hash randomization is on
+  by default, so this could even flip between separate process runs). Confirmed live:
+  AAPL's FY2001-2005 net_revenue stored 1000x too small (FY2001 $5,363,000 instead of the
+  real $5,363,000,000); Home Depot's FY1994-1999 showed the identical exact-1000x pattern
+  across 6 consecutive years. The same row also exposed a second bug: AAPL's FY2001 net
+  LOSS of $(25) million rendered as two separate HTML cells, "(25" and ")" — `_parse_value`
+  only recognizes a negative when both parens are in the same cell, so it silently stored
+  a $25M *profit*. Fixed with `detect_unit_multiplier(text, prefer_first=True)` (takes the
+  first units mention, not the mode, when scanning a single winning table's own text — the
+  table's governing caption is always stated before any per-row exception) and a
+  paren-merge step in `_row_values` (joins an unclosed "(NNN" cell with an immediately
+  following ")" cell before parsing). Verified end-to-end against AAPL's real filings via
+  `build_cik_history` directly: FY2001 net_revenue $5.363B, net_income **-$25M** (correct
+  sign), total_assets $6.021B — exact match to the filed 10-K text.
+- [x] **18. A share-count row's own local "(in thousands)" caption could be read as the
+  whole table's governing caption — FIXED 2026-07-30.** Found re-collecting TXN
+  post-fix-17: its real Item 6 is incorporated by reference (no table in the primary 10-K
+  document at all, same shape as ZION/bug 13), so `build_cik_history` fell through to the
+  full combined submission `.txt` and found TI's real annual-report table there. That
+  table states NO table-wide dollar caption in its own cells (the real "(in millions)"
+  caption lives in a preceding paragraph outside the parsed table) — its only units
+  mention was "Average common and dilutive potential common shares outstanding ... in
+  thousands", which fix 17's `prefer_first=True` then wrongly applied to net_revenue too,
+  understating TXN's real FY2005 $13.392B revenue as $13.392M. Fixed by excluding any row
+  whose label mentions "shares" from caption detection entirely (never from value
+  extraction — `extract_years`'s own per-share exemption is untouched), so a table shaped
+  like this correctly falls through to the whole-document scan instead (which correctly
+  found "millions" as TI's dominant caption). Verified against TXN's real filing:
+  FY2005 net_revenue now $13.392B, matching the filed figure exactly.
+- [ ] **Open, NOT fixed: item6 has more than these 2 root causes.** Re-scanning
+  dataset-wide after 17+18 and re-collecting the 30 tickers the original 119-row scan
+  flagged: the "too small" bucket dropped from 54 to 38 rows, i.e. most of that list
+  (AMD, ASYS, AZO, BBWI, CMI, EGAN, GAP [partially — 1994-97 fixed, 1999-2001 still
+  wrong], GEF, GRC, HVT, KTCC, M, MBOT, PAYX, PKOH, RS, SHW, THO, TWAV, WSM, XOM) is
+  **still wrong**, each for its own filing-specific reason, not 17 or 18. Two confirmed
+  live: **PAYX** — its real 2002-filed table (correctly captioned "in thousands", not a
+  caption bug at all) has label text duplicated across two columns with inconsistent
+  blanks depending on row-indentation depth (sub-items like "Total revenues" carry their
+  label only in column 1 with column 0 NaN; section headers carry it in both) — the
+  extracted net_revenue (35,600) doesn't match ANY value in the real table at all,
+  meaning `extract_years`'s row-label matching picked the wrong row entirely, a parsing
+  bug distinct from both units-caption bugs above. **XOM** — shows the familiar
+  ~1000x-too-small pattern for 1999-2002 (from one filing) but ALSO a garbage
+  near-zero net_revenue for FY2003 and missing FY2004-2005 entirely (from later
+  filings) — at least two more distinct failures in the same ticker's chained history,
+  not diagnosed further. **Also still separately open (found the same day, different
+  root cause, NOT an item6 bug):** the "too big" bucket (65 rows, mostly WMT/TXT/SWK/
+  ZBRA/GAP-1994-97/ANF/APH/BIO/FLEX/EL and more) — item6 is actually CORRECT in these
+  cases (verified WMT: item6 FY1999 revenue $137.634B matches Walmart's real reported
+  figure exactly); it's the **ex27 tier's own comparator value that's wrong** for these
+  tickers (e.g. WMT's ex27 row shows $139,208 — not even plausible at any thousands/
+  millions/billions scale for a company that size), a separate bug in `fds.py`'s
+  EX-27 `<MULTIPLIER>` handling, not investigated at all yet. **Net assessment:** the
+  item6 (and possibly ex27) tiers have accumulated many *different*, filing-specific
+  extraction bugs, not one remaining shared cause — continuing to fix them one ticker at
+  a time has sharply diminishing returns per bug found. A more systematic approach (flag
+  every item6/ex27 row whose value deviates implausibly from a neighboring tier for the
+  same ticker, and either quarantine or manually review those specific rows, rather than
+  trying to make the HTML table parser handle every real-world formatting variant) is
+  likely more effective than continuing this per-ticker chase. Not started.
