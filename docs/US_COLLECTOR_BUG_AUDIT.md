@@ -384,3 +384,40 @@ for tickers with an unusually large number of cumulative reverse splits.
     independent source to derive the right per-era factor from — genuinely
     unrecoverable, same as `adj_close`'s other documented vendor quirks.
     Not pursued further; the guard is the correct, final handling.
+
+## 2026-07-31 follow-up: the "too big" ex27 bucket root-caused and fixed — 866-ticker recollection measured
+
+Follow-up #3's "too big" bucket (65 rows, WMT/TXT/SWK/ZBRA/GAP/ANF/APH/BIO/FLEX/EL
+and more) was marked "not investigated at all yet." Investigated and fixed.
+
+- [x] **20. EX-27 filings that omit `<MULTIPLIER>` understated figures by up to
+  10⁶× — FIXED 2026-07-31.** `<MULTIPLIER>` is genuinely OPTIONAL per SEC's EX-27
+  schema. Confirmed on WMT's real filings: 1995/1996 10-Ks tag it explicitly
+  (1,000,000), but 1997-2000 omit the tag entirely — not malformed, simply
+  absent — even though the raw figures are still reported at the same implicit
+  millions scale (1997's real `TOTAL-ASSETS`=39,604 is Walmart's actual ~$39.6B,
+  not $39,604). `extract_line_items` silently defaulted the absent tag to 1.0.
+  Fixed by tracking whether `<MULTIPLIER>` was explicitly present
+  (`fds_multiplier_explicit`) and, when absent, borrowing the multiplier from a
+  sibling EX-27 exhibit of the SAME CIK that does declare one — a company's own
+  scale convention is consistent across its own filings even when one year's
+  exhibit omits the declaring tag (confirmed fixes WMT and SWK). `compute_ratios`'
+  dollar/dollar ratios are scale-invariant, so only the raw dollar fields needed
+  correcting; ratios are recomputed from the corrected values.
+  **Measured after recollecting all 866 currently-collected ex27-bearing
+  tickers:** 130 tickers had at least one row genuinely fixed this way; 202
+  tickers have at least one row that's STILL unresolved because there's no
+  sibling exhibit ANYWHERE in their own EX-27 history to borrow a real multiplier
+  from (confirmed on TXT: every single collected exhibit omits the tag) — these
+  stay honestly flagged (`fds_multiplier_explicit=False` AND `fds_multiplier==1.0`)
+  rather than guessed at with zero evidence, same "flag, don't fabricate"
+  precedent as every other genuinely-unrecoverable case in this doc. The
+  remaining 534 tickers had no missing-multiplier issue at all.
+- **New, smaller findings surfaced by the same recollection, not investigated
+  further (out of scope for this fix, each affecting exactly 1-2 tickers):**
+  BELFA/BELFB (literally the same company's two share classes, same CIK) both
+  show `total_assets`=-7,600 for `end`=2001-12-31 in the item6 tier — same
+  scattered-per-filing category as follow-up #3's "too small" bucket (PAYX/XOM),
+  not the ex27 bug this section fixes. OXY shows `shares_outstanding`=-891,624,558
+  for `end`=2016-03-31 in the xbrl tier — a different subsystem again, genuinely
+  new, not root-caused.
