@@ -338,3 +338,49 @@ tickers off by ≥10x, split into two directions with two different root causes.
   same ticker, and either quarantine or manually review those specific rows, rather than
   trying to make the HTML table parser handle every real-world formatting variant) is
   likely more effective than continuing this per-ticker chase. Not started.
+
+## 2026-07-30 follow-up #3: raw `Close` corrupted at the source for extreme multi-reverse-split penny stocks — confirmed NOT a units/decimal error
+
+Separate from the `adj_close` one-day-move finding above (follow-up #1) and from
+item6/ex27's own bugs (follow-up #2's numbered list) — this is yfinance's
+`auto_adjust=False` **raw** `Close`, corrupted before any of our code touches it,
+for tickers with an unusually large number of cumulative reverse splits.
+
+- [x] **19. Implausible raw `Close` values (billions to quadrillions per share) —
+  guarded, not fixable.** Confirmed on 9 tickers (ADTX, MRDN, XTIA, NXPL, JAGX,
+  TOPS, PPCB, NUWE, BINI — later joined by more of the same shape as collection
+  continued): 60-90% of each ticker's own row count shows a `Close` in the
+  billions-to-quadrillions range (ADTX max $3.71e12/share, BINI max
+  $3.00e17/share). A `$10M/share` sanity ceiling (`_MAX_PLAUSIBLE_PRICE` in
+  `yf_collectors.py`, `_fetch_and_shape_prices`) now skips the whole ticker
+  cleanly with a clear log message instead of letting it cascade into a
+  confusing `validate_prices` bracket-violation failure.
+  - **User asked directly: could this just be a misplaced decimal point (e.g.
+    "$3.7 trillion" is really "$3.7")?** Checked properly rather than assumed.
+    Answer: **no.** Traced ADTX's raw `Close` at the boundary of each of its 7
+    real reverse splits (2022-09-14 through 2026-05-18): the value doesn't jump
+    by a fixed factor at each split boundary the way a genuine reverse split
+    would (nor does it match the recorded split ratio) — instead it just keeps
+    getting **larger the further back in time you go**, roughly tracking how
+    many of the 7 splits *hadn't happened yet* at that date:
+    | date | raw Close |
+    |---|---|
+    | 2026-07-30 (today) | $0.003 — a genuinely plausible price for this ticker |
+    | 2026-05-18 (last split) | $1.7 |
+    | 2025-11-03 | $1,440 |
+    | 2024-10-02 | $27M |
+    | 2023-08-18 | $3.9B |
+    | 2022-09-14 (first split) | $180B |
+    | 2020-06-30 (oldest row) | $2.47 trillion |
+    Today's price is genuinely correct (matches what a heavily-diluted,
+    multiply-reverse-split penny stock actually trades at). A fixed unit/decimal
+    error would distort every date by the *same* factor; this instead compounds
+    — each additional reverse split further back in time multiplies the
+    distortion again. That's the signature of yfinance's own split-adjustment
+    computation compounding incorrectly for tickers with an unusually high
+    reverse-split count, not a scale/currency mistake on any one field. There is
+    no single divisor that recovers real history across the whole series (each
+    era would need a different, split-count-dependent correction), and no
+    independent source to derive the right per-era factor from — genuinely
+    unrecoverable, same as `adj_close`'s other documented vendor quirks.
+    Not pursued further; the guard is the correct, final handling.
