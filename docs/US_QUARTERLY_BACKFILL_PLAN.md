@@ -111,18 +111,26 @@ Each phase is independently shippable and verifiable.
 **Verify:** ✅ all 47 fast tests pass incl. the real CIK 1000366 FY1999 reconciliation
 (Q4 NI = −4,176 exactly) and the AAPL/HSBC-style ifrs-full period_months=12 case.
 
-### Phase 2 — EX-27 quarterly, 1995–2000
-- [ ] `fds.py`: accept `PERIOD-TYPE ∈ {3-MOS,6-MOS,9-MOS,YEAR}` → `period_months`;
-      form filter `10-K` → `10-[KQ]`.
-- [ ] **Take the period end from `<PERIOD-END>`, not `<FISCAL-YEAR-END>`.** Mandatory: the
-      `PERIOD-TYPE != YEAR` guard exists *because* of the ADP bug (`fds.py:96-120`).
-- [ ] Ordering: `_fill_missing_multipliers` → `ytd_to_discrete` → **recompute ratios**.
-- [ ] Q4 needs no separate code path — the 10-K's `YEAR` exhibit joins the same frame and
-      is just the 4th YTD link, transformed in place. No annual/Q4 collision in this tier.
-- [ ] Tests in `tests/data_collection/test_sec_fds.py`.
-- [ ] Rebuild scoped to the 1,523 affected CIKs.
+### Phase 2 — EX-27 quarterly, 1995–2000 — ✅ DONE 2026-08-01
+- [x] `fds.py`: accept `PERIOD-TYPE ∈ {3-MOS,6-MOS,9-MOS,YEAR}` → `period_months`;
+      form filter widened to `("10-K", "10-Q")` prefixes.
+- [x] **Period end from `<PERIOD-END>` for quarterly exhibits, `<FISCAL-YEAR-END>` only for
+      `YEAR`** (new `_fds_period_end` helper) — never a fallback, guards the exact ADP bug
+      (`fds.py`'s own docstring) at 26,071-filing scale instead of one.
+- [x] Ordering: as-first-reported dedup (moved before differencing — it needs exactly one
+      row per period) → `_fill_missing_multipliers` (unchanged position) → `ytd_to_discrete`
+      → **recompute ratios**.
+- [x] Q4 needed no separate code path — the 10-K's `YEAR` exhibit joins the same frame and
+      is just the 4th YTD link, transformed in place by `ytd_to_discrete`. No annual/Q4
+      collision in this tier (confirmed: EX27_ERA_END's existing 1-year buffer already
+      covers the "early-2001 stragglers" case, no change needed there).
+- [x] Tests in `tests/data_collection/test_sec_fds.py` (4 new, 1 rewritten to match the new
+      "quarterly IS mapped" behavior).
 
-**Verify:** CIK 1000366 FY1999 reproduces all four quarters incl. **Q4 NI = −4,176**.
+**Verify:** ✅ CIK 1000366 FY1999 reproduces all four quarters end-to-end through the real
+fetch→parse→multiplier-fill→dedup→differencing→ratio-recompute pipeline incl.
+**Q4 NI = −4,176** and Q4's `net_margin` computed on the discrete (not annual YTD) figures.
+All 47 fast tests pass.
 
 ### Phase 3 — HTML 10-Q, 2001–2006
 - [ ] Dry run ~50 filings first, measuring hit rate and prior-year agreement.

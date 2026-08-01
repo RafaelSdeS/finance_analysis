@@ -183,20 +183,39 @@ def test_zero_multiplier_defaults_to_one():
     print("OK: missing/zero <MULTIPLIER> defaults to 1, doesn't zero out every figure")
 
 
-def test_non_annual_period_not_silently_mapped():
+def test_quarterly_period_type_is_mapped_with_period_months():
+    # Phase 2 (docs/US_QUARTERLY_BACKFILL_PLAN.md): 3/6/9-MOS exhibits are now
+    # genuinely mapped (they carry real quarterly data), unlike the pre-Phase-2
+    # behavior of skipping every non-YEAR exhibit outright.
+    tags = {"ARTICLE": "5", "PERIOD-TYPE": "6-MOS", "TOTAL-ASSETS": "999", "MULTIPLIER": "1000000"}
+    items = fds.extract_line_items(tags)
+    assert items.get("total_assets") == 999_000_000.0
+    assert items.get("period_months") == 6
+    print("OK: a 6-MOS exhibit is mapped with period_months=6, not skipped")
+
+
+def test_fiscal_year_end_never_used_as_a_quarterly_exhibits_own_period_end():
     # Real bug, found scaling to ~250 companies (2026-07-28): <FISCAL-YEAR-END> is
     # only reliable as an exhibit's OWN period end when PERIOD-TYPE is YEAR.
     # Confirmed on ADP's real 1998-09-23 10-K: it bundles an Article-5 exhibit with
     # PERIOD-TYPE=6-MOS but FISCAL-YEAR-END=DEC-31-1998 (the eventual full-year
     # cutoff, not the ~1998-06-30 the 6-month figures actually describe) --
     # produced a fundamentals_available_date earlier than its own fds_period_end,
-    # a lookahead-shaped artifact. Non-YEAR exhibits must be skipped, not mapped.
+    # a lookahead-shaped artifact. _fds_period_end (not extract_line_items) is
+    # where this is now enforced: a quarterly exhibit with no <PERIOD-END> tag
+    # must yield NaT, never fall back to the misleading <FISCAL-YEAR-END>.
     tags = {"ARTICLE": "5", "PERIOD-TYPE": "6-MOS", "FISCAL-YEAR-END": "DEC-31-1998",
             "TOTAL-ASSETS": "999", "MULTIPLIER": "1000000"}
-    items = fds.extract_line_items(tags)
-    assert "total_assets" not in items, "non-annual exhibits must not get Article-5 tags mapped"
-    assert items == {"fds_article": "5", "fds_multiplier": 1000000.0, "fds_multiplier_explicit": True}
-    print("OK: non-annual (PERIOD-TYPE != YEAR) exhibits are skipped, not mapped with a misleading period end")
+    assert pd.isna(fds._fds_period_end(tags)), \
+        "a quarterly exhibit with no <PERIOD-END> must not fall back to <FISCAL-YEAR-END>"
+    tags["PERIOD-END"] = "JUN-30-1998"
+    assert fds._fds_period_end(tags) == pd.Timestamp("1998-06-30"), \
+        "<PERIOD-END>, when present, is this exhibit's real own period end"
+    # A YEAR exhibit still correctly uses <FISCAL-YEAR-END> (unchanged, already-
+    # verified annual behavior -- the two tags coincide there).
+    year_tags = {"ARTICLE": "5", "PERIOD-TYPE": "YEAR", "FISCAL-YEAR-END": "DEC-31-1998"}
+    assert fds._fds_period_end(year_tags) == pd.Timestamp("1998-12-31")
+    print("OK: <FISCAL-YEAR-END> is never a quarterly exhibit's period end, only <PERIOD-END> is")
 
 
 def test_missing_multiplier_borrows_from_sibling_exhibit():
@@ -321,6 +340,49 @@ def test_measure_prevalence_handles_list_return_from_parse_fds():
     print("OK: measure_prevalence handles parse_fds's list return without crashing or misreporting")
 
 
+def test_build_cik_history_produces_discrete_quarters_end_to_end():
+    # End-to-end Phase 2 (docs/US_QUARTERLY_BACKFILL_PLAN.md): real EX-27 tag
+    # shape, CIK 1000366 FY1999 (fetched live from EDGAR 2026-08-01), through
+    # the FULL pipeline -- fetch -> parse -> multiplier-fill -> as-first-
+    # reported dedup -> ytd_to_discrete -> ratio recompute. MULTIPLIER=1
+    # throughout so raw tag values are directly comparable to
+    # test_ytd_to_discrete_reconciles_to_real_filing's companyfacts-level fixture.
+    def exhibit(period_type, period_end, revenue, ni, assets):
+        return (f"<TYPE>EX-27\n<ARTICLE>5\n<PERIOD-TYPE>{period_type}\n"
+                f"<FISCAL-YEAR-END>DEC-31-1999\n<PERIOD-END>{period_end}\n"
+                f"<MULTIPLIER>1\n<TOTAL-REVENUES>{revenue}\n<NET-INCOME>{ni}\n"
+                f"<TOTAL-ASSETS>{assets}\n")
+
+    texts = {
+        "q1.txt": exhibit("3-MOS", "MAR-31-1999", 121701, 9212, 1061164),
+        "q2.txt": exhibit("6-MOS", "JUN-30-1999", 275712, 18369, 1131387),
+        "q3.txt": exhibit("9-MOS", "SEP-30-1999", 428558, 36739, 850394),
+        "fy.txt": exhibit("YEAR", "DEC-31-1999", 576997, 32563, 971809),
+    }
+    filings = pd.DataFrame({
+        "cik": [1] * 4,
+        "form_type": ["10-Q", "10-Q", "10-Q", "10-K"],
+        "date_filed": pd.to_datetime(["1999-05-14", "1999-08-13", "1999-11-12", "2000-03-30"]),
+        "filename": list(texts.keys()),
+    })
+    with mock.patch.object(fds, "fetch_filing_text", lambda fn: texts[fn]):
+        df = fds.build_cik_history(1, filings)
+
+    assert len(df) == 4, f"expected 4 discrete quarters, got {len(df)}"
+    df = df.sort_values("fds_period_end").reset_index(drop=True)
+    assert df["net_revenue"].tolist() == [121701.0, 154011.0, 152846.0, 148439.0]
+    assert df["net_income"].tolist() == [9212.0, 9157.0, 18370.0, -4176.0], \
+        "Q4 must be a real loss quarter, invisible in the old annual-only row"
+    assert df["total_assets"].tolist() == [1061164.0, 1131387.0, 850394.0, 971809.0], \
+        "instant column must never be differenced"
+    q4 = df.iloc[3]
+    assert q4["net_margin"] == q4["net_income"] / q4["net_revenue"] * 100, \
+        "ratios must be recomputed on the DISCRETE Q4 figures, not the annual YTD ones"
+    assert (df["period_months"] == 3).all()
+    assert df["flows_derived"].tolist() == [0, 1, 1, 1]
+    print("OK: build_cik_history end-to-end produces discrete quarters with ratios recomputed on them")
+
+
 if __name__ == "__main__":
     test_parse_fds_extracts_tags()
     test_parse_fds_empty_when_absent()
@@ -329,9 +391,11 @@ if __name__ == "__main__":
     test_extract_and_compute_returns_one_result_per_exhibit()
     test_non_article_5_not_silently_mapped()
     test_zero_multiplier_defaults_to_one()
-    test_non_annual_period_not_silently_mapped()
+    test_quarterly_period_type_is_mapped_with_period_months()
+    test_fiscal_year_end_never_used_as_a_quarterly_exhibits_own_period_end()
     test_missing_multiplier_borrows_from_sibling_exhibit()
     test_missing_multiplier_left_flagged_when_no_sibling_available()
     test_build_cik_history_skips_post_ex27_era_filings()
     test_build_cik_history_drops_unparseable_period_end_instead_of_merging()
     test_measure_prevalence_handles_list_return_from_parse_fds()
+    test_build_cik_history_produces_discrete_quarters_end_to_end()

@@ -27,6 +27,13 @@ Only ARTICLE 5 (commercial/industrial) is mapped to compute_ratios' schema:
 (investment companies/insurance/banks/utilities) have entirely different tag
 vocabularies -- flagged via `fds_article` rather than silently misparsed
 against the wrong schema; extending to them is future work, not attempted.
+
+Quarterly (Phase 2, docs/US_QUARTERLY_BACKFILL_PLAN.md): 10-Qs in this same
+window carry an EX-27 too (3-MOS/6-MOS/9-MOS), reporting cumulative YTD flow
+figures -- build_cik_history turns these into discrete ~3-month figures via
+companyfacts.ytd_to_discrete. The prevalence numbers above were measured on
+10-Ks only; quarterly coverage is not separately re-measured, same caveat as
+every other tier's "verified on" column in the plan doc.
 """
 
 import logging
@@ -35,7 +42,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from . import http
+from . import companyfacts, http
 from ..yf_collectors import compute_ratios
 
 log = logging.getLogger("sec")
@@ -90,22 +97,29 @@ def _to_number(s: str) -> float:
         return np.nan
 
 
+_QUARTERLY_PERIOD_TYPES = {"3-MOS": 3, "6-MOS": 6, "9-MOS": 9}
+
+
 def extract_line_items(tags: dict) -> dict:
     """Article-5 raw line items, scaled by <MULTIPLIER>. Non-Article-5 filings
     return just {fds_article, fds_multiplier} -- caller can see why nothing else
     is populated rather than getting silently wrong numbers under Article 5's tags.
 
-    Also requires <PERIOD-TYPE> YEAR. Real bug, found scaling to ~250 companies
-    (2026-07-28): <FISCAL-YEAR-END> is only reliable as the exhibit's OWN period
-    end when the exhibit covers the full year. Confirmed on ADP's real 1998-09-23
-    10-K: it bundles an Article-5 exhibit with PERIOD-TYPE=6-MOS but
-    FISCAL-YEAR-END=DEC-31-1998 -- the company's eventual full-year cutoff (likely
-    a fiscal-year-transition stub filing), not the ~1998-06-30 the 6-month figures
-    actually describe. Using it as-is produced a filing DATED BEFORE its own
-    claimed period end (a fundamentals_available_date earlier than fds_period_end
-    -- the exact class of bug this whole pipeline exists to prevent). Non-annual
-    exhibits are skipped entirely rather than guessing at the true interim date;
-    this tier's job is annual data anyway (matching EX-27's primary 10-K use).
+    Accepts <PERIOD-TYPE> YEAR (annual, from a 10-K) and 3-MOS/6-MOS/9-MOS
+    (quarterly, cumulative YTD, from a 10-Q) -- see docs/US_QUARTERLY_BACKFILL_PLAN.md
+    Phase 2. Any other/missing PERIOD-TYPE is skipped, same as before.
+
+    <FISCAL-YEAR-END> is only reliable as the exhibit's OWN period end when the
+    exhibit covers the full year -- real bug, found scaling to ~250 companies
+    (2026-07-28). Confirmed on ADP's real 1998-09-23 10-K: it bundles an
+    Article-5 exhibit with PERIOD-TYPE=6-MOS but FISCAL-YEAR-END=DEC-31-1998 --
+    the company's eventual full-year cutoff (likely a fiscal-year-transition
+    stub filing), not the ~1998-06-30 the 6-month figures actually describe.
+    Using it as-is produced a filing DATED BEFORE its own claimed period end (a
+    fundamentals_available_date earlier than fds_period_end -- the exact class
+    of bug this whole pipeline exists to prevent). `_fds_period_end` (below)
+    is where this is actually enforced: <PERIOD-END> for a quarterly exhibit,
+    never <FISCAL-YEAR-END> as a fallback.
     """
     article = (tags.get("ARTICLE") or "").strip()
     # <MULTIPLIER> is genuinely OPTIONAL per SEC's EX-27 schema -- confirmed on WMT's
@@ -123,8 +137,10 @@ def extract_line_items(tags: dict) -> dict:
     multiplier = 1.0 if np.isnan(multiplier) or multiplier == 0 else multiplier
     out = {"fds_article": article, "fds_multiplier": multiplier,
            "fds_multiplier_explicit": multiplier_explicit}
-    if article != "5" or (tags.get("PERIOD-TYPE") or "").strip().upper() != "YEAR":
+    period_type = (tags.get("PERIOD-TYPE") or "").strip().upper()
+    if article != "5" or period_type not in ({"YEAR"} | _QUARTERLY_PERIOD_TYPES.keys()):
         return out
+    out["period_months"] = 12 if period_type == "YEAR" else _QUARTERLY_PERIOD_TYPES[period_type]
 
     for item, tag in ARTICLE_5_MAP.items():
         out[item] = _to_number(tags.get(tag)) * multiplier
@@ -141,16 +157,30 @@ def _parse_fds_date(s: str | None) -> pd.Timestamp:
     return pd.to_datetime(s, format="%b-%d-%Y", errors="coerce") if s else pd.NaT
 
 
+def _fds_period_end(tags: dict) -> pd.Timestamp:
+    """This exhibit's own period end. <FISCAL-YEAR-END> only for a full-year
+    (PERIOD-TYPE=YEAR) exhibit, where the two tags coincide -- for a quarterly
+    exhibit <FISCAL-YEAR-END> is the eventual full-year cutoff, not this
+    exhibit's own interim end (the ADP bug, see extract_line_items). <PERIOD-END>
+    is mandatory for a quarterly exhibit, never a fallback to <FISCAL-YEAR-END>;
+    a missing/unparseable one yields NaT, and build_cik_history already drops
+    NaT-period rows rather than guess."""
+    period_type = (tags.get("PERIOD-TYPE") or "").strip().upper()
+    tag = "FISCAL-YEAR-END" if period_type == "YEAR" else "PERIOD-END"
+    return _parse_fds_date(tags.get(tag))
+
+
 def extract_and_compute(text: str) -> list[dict]:
     """One filing's text -> a list of results, ONE PER EX-27 exhibit (a filing can
     bundle several -- see parse_fds's docstring). Each result is line items +
     compute_ratios(unit_scale=1) (already full-dollar via <MULTIPLIER>) + its own
-    `fds_period_end` (from that exhibit's <FISCAL-YEAR-END>). Empty list if no
-    EX-27 exhibit exists in this filing."""
+    `fds_period_end` (see _fds_period_end). Empty list if no EX-27 exhibit exists
+    in this filing. Ratios computed here are on RAW (possibly cumulative-YTD)
+    values -- build_cik_history recomputes them after ytd_to_discrete."""
     results = []
     for tags in parse_fds(text):
         items = extract_line_items(tags)
-        period_end = _parse_fds_date(tags.get("FISCAL-YEAR-END"))
+        period_end = _fds_period_end(tags)
         if items.get("fds_article") != "5":
             results.append({**items, "fds_period_end": period_end})
             continue
@@ -207,13 +237,19 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     earlier year as a comparative, or a 10-K/A amendment), the EARLIEST filing
     wins -- same as-first-reported rule as the XBRL tier (§3.3).
 
+    Covers both 10-K (annual) and 10-Q (quarterly) filings -- EX-27 exhibits
+    were required on both until the 2001 elimination. 10-Q exhibits report
+    cumulative YTD flow figures, turned into discrete ~3-month figures by
+    ytd_to_discrete before returning (docs/US_QUARTERLY_BACKFILL_PLAN.md).
+
     Filtered to filings up to EX27_ERA_END: an earlier version fetched EVERY
     10-K a CIK ever filed (including decades of post-2001 filings that
     structurally cannot contain an EX-27, per this tier's own prevalence
     measurement), making batch collection needlessly slow -- confirmed while
     scaling past a handful of companies, 2026-07-28.
     """
-    cik_filings = filings[(filings["cik"] == cik) & (filings["form_type"].str.startswith("10-K"))
+    cik_filings = filings[(filings["cik"] == cik)
+                           & filings["form_type"].str.startswith(("10-K", "10-Q"))
                            & (filings["date_filed"] <= EX27_ERA_END)]
     rows = []
     for row in cik_filings.itertuples():
@@ -221,10 +257,10 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         if text is None:
             continue
         for result in extract_and_compute(text):
-            # "total_assets" is only present when extract_line_items actually populated
-            # the exhibit (article==5 AND period-type==YEAR) -- covers both the wrong-
-            # article case and the wrong-period-type case (see extract_line_items) with
-            # one check, rather than needing a second explicit condition per reason.
+            # "total_assets" is only present when extract_line_items actually
+            # populated the exhibit (article==5 AND an accepted PERIOD-TYPE) --
+            # covers both the wrong-article and wrong-period-type cases (see
+            # extract_line_items) with one check.
             if "total_assets" not in result:
                 continue
             rows.append({**result, "cik": cik, "fundamentals_available_date": row.date_filed,
@@ -233,34 +269,39 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     df = _fill_missing_multipliers(df)
-    # A row with no resolvable fds_period_end (missing/malformed <FISCAL-YEAR-END>,
-    # see extract_line_items's ADP docstring) can't be placed on the timeline
+    # A row with no resolvable period end (missing/malformed <PERIOD-END> or
+    # <FISCAL-YEAR-END>, see _fds_period_end) can't be placed on the timeline
     # regardless of dedup -- and drop_duplicates below treats NaT == NaT, so
-    # leaving these in would silently collapse two DIFFERENT real fiscal years'
-    # data into one bogus survivor (keeping only the earlier-filed one, itself
-    # still useless with a NaT period end) instead of dropping both.
+    # leaving these in would silently collapse two DIFFERENT real fiscal
+    # periods' data into one bogus survivor (keeping only the earlier-filed
+    # one, itself still useless with a NaT period end) instead of dropping both.
     missing_period = df["fds_period_end"].isna()
     if missing_period.any():
         log.warning("fds CIK %s: dropping %d exhibit(s) with an unparseable "
-                    "<FISCAL-YEAR-END> (can't be placed on the period timeline)",
+                    "period end (<PERIOD-END>/<FISCAL-YEAR-END>)",
                     cik, missing_period.sum())
         df = df[~missing_period]
     if df.empty:
         return pd.DataFrame()
-    # Annual only as of this phase (extract_line_items still requires
-    # PERIOD-TYPE==YEAR) -- constant, never derived. Phase 2
-    # (docs/US_QUARTERLY_BACKFILL_PLAN.md) widens this to real quarterly
-    # PERIOD-TYPEs and replaces these with genuine per-row values.
-    df["period_months"] = pd.array([12] * len(df), dtype="Int8")
-    df["flows_derived"] = pd.Series(0, index=df.index, dtype="int8")
-    df["flows_defined"] = pd.Series(1, index=df.index, dtype="int8")
     # as-first-reported: whichever filing disclosed a given fiscal period EARLIEST
     # wins, whether that's the period's own original filing or a later filing's
-    # bundled comparative exhibit reporting it first for some other reason.
-    return (df.sort_values("fundamentals_available_date")
-              .drop_duplicates(subset="fds_period_end", keep="first")
-              .sort_values("fds_period_end")
-              .reset_index(drop=True))
+    # bundled comparative exhibit reporting it first for some other reason. Must
+    # happen BEFORE ytd_to_discrete, which needs exactly one row per period.
+    df = (df.sort_values("fundamentals_available_date")
+            .drop_duplicates(subset="fds_period_end", keep="first")
+            .sort_values("fds_period_end")
+            .reset_index(drop=True))
+
+    # 3/6/9-MOS exhibits report CUMULATIVE year-to-date figures, same convention
+    # as a 10-Q's own statements -- turn them into discrete ~3-month figures.
+    # Ratios above were computed per-exhibit on the RAW YTD values
+    # (extract_and_compute); recompute on the now-discrete flows, never the
+    # reverse order (see docs/US_QUARTERLY_BACKFILL_PLAN.md).
+    df = df.rename(columns={"fds_period_end": "end"})
+    df = companyfacts.ytd_to_discrete(df, flow_cols=["net_income", "net_revenue", "cost_of_revenue"])
+    ratios = df.apply(lambda r: compute_ratios(r.to_dict(), unit_scale=1), axis=1, result_type="expand")
+    df[ratios.columns] = ratios
+    return df.rename(columns={"end": "fds_period_end"})
 
 
 def measure_prevalence(filings: pd.DataFrame, years=range(1994, 2002), sample_per_year=28,
