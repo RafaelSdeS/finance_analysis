@@ -27,6 +27,16 @@ SELIC_TREND_LOOKBACK_DAYS = 20
 # already daily). See merge_macro's ipca_daily_equiv.
 TRADING_DAYS_PER_MONTH = 21
 
+# How stale a fundamental is allowed to be before a price row stops seeing it
+# at all. Not a lookahead concern (the value was genuinely public) -- this is
+# about a delisted-in-all-but-name company (SEC filing stopped, price still
+# trades) carrying years-old fundamentals forever. Confirmed 2026-08-01: US
+# info-age p90 is 569d, but p99 is 2,302d and max is 6,926d (HTHIY last filed
+# 2011-03-31, still emitting rows with that fundamental through 2026-07-28).
+# ~550d (~18mo) sits just past p90, so it barely touches BR's dense quarterly
+# cadence while killing the multi-year US tails.
+MAX_FUNDAMENTAL_STALENESS_DAYS = 550
+
 
 # =============================================================================
 # MERGE DAILY PRICES + QUARTERLY FUNDAMENTALS
@@ -100,6 +110,7 @@ def merge_prices_and_fundamentals(prices, fundamentals):
         by="ticker",
         direction="backward",
         allow_exact_matches=False,
+        tolerance=pd.Timedelta(days=MAX_FUNDAMENTAL_STALENESS_DAYS),
     )
 
     # Replace close_price with actual price at fundamentals_available_date

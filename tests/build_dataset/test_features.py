@@ -456,6 +456,81 @@ def test_fundamental_features_ratios() -> None:
     # net_debt_to_assets = net_debt / total_assets = 300 / 2000 = 0.15
     assert approx(result.iloc[0]["net_debt_to_assets"], 0.15)
 
+
+_FIVE_QUARTERS = pd.to_datetime(
+    ["2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31", "2026-03-31"])
+
+
+def test_fscore_missing_input_stays_nan_not_zero() -> None:
+    """A NaN raw input on an otherwise well-spaced (yoy_ok) quarter must
+    produce NaN, not a real 0/1 read as 'declining'/'unprofitable'.
+
+    Real bug, 2026-08-01 audit: f_roa_positive had NO guard at all (NaN > 0
+    -> False -> 0.0), and the other four components' .where(yoy_ok) checked
+    only calendar SPACING, never whether the compared values existed --
+    100% of the US build's populated f_score values had >=1 missing input.
+    5 quarters so shift(4) (the YoY lookback) has a real row to compare
+    against; roa is NaN only on the last one."""
+    df = pd.DataFrame({
+        "ticker": ["A"] * 5,
+        "reference_date": _FIVE_QUARTERS,
+        "roa": [0.01, 0.02, 0.03, 0.04, None],
+        "gross_margin": [0.5, 0.52, 0.54, 0.56, 0.6],
+        "net_margin": [0.1] * 5,
+        "debt_equity": [0.7, 0.68, 0.66, 0.64, 0.5],
+        "current_ratio": [1.0, 1.1, 1.2, 1.3, 1.6],
+        "equity": [500.0] * 5,
+        "cash": [200.0] * 5,
+        "current_liabilities": [400.0] * 5,
+        "net_debt": [300.0] * 5,
+        "total_assets": [2000.0] * 5,
+        "current_assets": [1200.0] * 5,
+        "net_revenue": [1000.0] * 5,
+        "net_income": [100.0] * 5,
+        "total_debt": [600.0] * 5,
+        "roe": [0.2] * 5,
+    })
+    result = compute_fundamental_features(df)
+    last = result.iloc[-1]
+
+    assert pd.isna(last["f_roa_positive"])    # NaN roa -> undefined, not 0.0
+    assert pd.isna(last["f_roa_improving"])
+    assert pd.isna(last["f_score"])           # skipna=False: one undefined component undefines the score
+
+    # The other components (all inputs present) still compute normally --
+    # the guard only bites the component whose input is actually missing.
+    assert last["f_margin_improving"] == 1.0       # 0.6 > 0.5
+    assert last["f_leverage_decreasing"] == 1.0    # 0.5 < 0.7
+
+
+def test_fscore_margin_col_is_swappable() -> None:
+    """margin_col lets a caller route f_margin_improving off a denser column
+    than gross_margin -- build_us_dataset.py passes "net_margin" (US
+    gross_margin is 93.6% null; net_margin only 49.98%, 2026-08-01 audit)."""
+    df = pd.DataFrame({
+        "ticker": ["A"] * 5,
+        "reference_date": _FIVE_QUARTERS,
+        "roa": [0.01, 0.02, 0.03, 0.04, 0.05],
+        "gross_margin": [np.nan] * 5,  # column present but null, like the real US frame
+        "net_margin": [0.1, 0.12, 0.14, 0.16, 0.2],
+        "debt_equity": [0.7, 0.68, 0.66, 0.64, 0.5],
+        "current_ratio": [1.0, 1.05, 1.1, 1.15, 1.2],
+        "equity": [500.0] * 5,
+        "cash": [200.0] * 5,
+        "current_liabilities": [400.0] * 5,
+        "net_debt": [300.0] * 5,
+        "total_assets": [2000.0] * 5,
+        "current_assets": [1200.0] * 5,
+        "net_revenue": [1000.0] * 5,
+        "net_income": [100.0] * 5,
+        "total_debt": [600.0] * 5,
+        "roe": [0.2] * 5,
+    })
+    result = compute_fundamental_features(df, margin_col="net_margin")
+    last = result.iloc[-1]
+    assert last["f_margin_improving"] == 1.0  # 0.2 > 0.1
+    assert pd.notna(last["f_score"])          # every input present -> a real, defined score
+
     # working_capital_ratio = (current_assets - current_liabilities) / total_assets = (1200 - 400) / 2000 = 0.4
     assert approx(result.iloc[0]["working_capital_ratio"], 0.4)
 

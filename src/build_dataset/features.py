@@ -308,8 +308,14 @@ def _within_calendar_gap(dates: pd.Series, lookback: int, lo_days: int, hi_days:
     return gap.between(lo_days, hi_days)
 
 
-def compute_fundamental_features(df):
-    """Called on the fundamentals DataFrame BEFORE the asof merge."""
+def compute_fundamental_features(df, margin_col="gross_margin"):
+    """Called on the fundamentals DataFrame BEFORE the asof merge.
+
+    `margin_col`: which margin feeds f_margin_improving. Default gross_margin
+    (dense in BR). build_us_dataset.py passes "net_margin" -- US gross_margin
+    is 93.6% null (SEC filers routinely skip a separate COGS/gross-profit
+    tag), which left f_margin_improving effectively hardwired to 0 and
+    f_score undefined for every row that touched it (2026-08-01 audit)."""
 
     print()
     print("=" * 80)
@@ -360,15 +366,24 @@ def compute_fundamental_features(df):
 
         # Partial Piotroski F-Score (5-point; omits cash-flow components we lack).
         # The 4 *_improving/*_decreasing components compare against shift(4)
-        # (same window as YoY above) -- guarded the same way, but as a
-        # boolean comparison rather than a diff, so the guard NaNs the
-        # comparison result directly (float, not the plain int the unguarded
-        # version used, to hold NaN) rather than masking an intermediate series.
-        g["f_roa_positive"]        = (g["roa"] > 0).astype(float)
-        g["f_roa_improving"]       = (g["roa"] > g["roa"].shift(4)).where(yoy_ok).astype(float)
-        g["f_margin_improving"]    = (g["gross_margin"] > g["gross_margin"].shift(4)).where(yoy_ok).astype(float)
-        g["f_leverage_decreasing"] = (g["debt_equity"] < g["debt_equity"].shift(4)).where(yoy_ok).astype(float)
-        g["f_liquidity_improving"] = (g["current_ratio"] > g["current_ratio"].shift(4)).where(yoy_ok).astype(float)
+        # (same window as YoY above), guarded the same way as the boolean
+        # comparison's OWN inputs -- yoy_ok alone only checks the two rows are
+        # genuinely 4 calendar quarters apart, it says nothing about whether
+        # the compared values exist. A NaN input on a well-spaced quarter used
+        # to silently compare as False -> 0.0 ("declining"), not undefined.
+        # Confirmed 2026-08-01: 100% of populated f_score values had >=1
+        # missing raw input (gross_margin alone is 93.6% null in the US
+        # build), defeating the skipna=False below before it ever ran.
+        def _yoy_flag(s, op):
+            prev = s.shift(4)
+            return op(s, prev).where(yoy_ok & s.notna() & prev.notna()).astype(float)
+
+        margin = g[margin_col] if margin_col in g.columns else pd.Series(np.nan, index=g.index)
+        g["f_roa_positive"]        = (g["roa"] > 0).where(g["roa"].notna()).astype(float)
+        g["f_roa_improving"]       = _yoy_flag(g["roa"], lambda a, b: a > b)
+        g["f_margin_improving"]    = _yoy_flag(margin, lambda a, b: a > b)
+        g["f_leverage_decreasing"] = _yoy_flag(g["debt_equity"], lambda a, b: a < b)
+        g["f_liquidity_improving"] = _yoy_flag(g["current_ratio"], lambda a, b: a > b)
         f_cols = ["f_roa_positive", "f_roa_improving", "f_margin_improving",
                   "f_leverage_decreasing", "f_liquidity_improving"]
         # skipna=False: a Piotroski-style composite score with an undefined

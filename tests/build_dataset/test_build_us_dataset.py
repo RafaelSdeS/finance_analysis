@@ -265,6 +265,47 @@ def test_build_universe_gate_from_files_matches_in_memory_gate(tmp_path) -> None
     assert gate == {"GOOD"}
 
 
+def test_is_non_common_drops_preferred_and_named_etns_keeps_dual_class() -> None:
+    """176 tickers share just 59 CIKs (2026-08-01 audit) because preferreds/
+    ETNs/baby bonds crosswalk to their issuer's CIK and inherit the COMMON
+    stock's fundamentals against their own unrelated price -- BAC-PL alone
+    accounted for 2,687 of the dataset's 3,511 market_cap > $10T rows.
+    Genuine dual-class COMMON (BRK-A/BRK-B, BF-A/BF-B, HEI-A) legitimately
+    shares a CIK too and must NOT be dropped."""
+    assert us._is_non_common("BAC-PL")    # preferred share
+    assert us._is_non_common("WFC-PA")    # preferred share
+    assert us._is_non_common("AMJB")      # ETN, named deny-list
+    assert us._is_non_common("SOJD")      # baby bond, named deny-list
+
+    assert not us._is_non_common("BRK-A")   # dual-class common
+    assert not us._is_non_common("BRK-B")
+    assert not us._is_non_common("BF-A")
+    assert not us._is_non_common("HEI-A")
+    assert not us._is_non_common("UHAL-B")
+    assert not us._is_non_common("AAPL")    # ordinary ticker
+
+
+def test_merge_company_info_us_adds_cik_ticker_count() -> None:
+    """cik_ticker_count lets a consumer spot the shared-fundamentals cases
+    the universe filter can't (and, for genuine dual-class common, shouldn't)
+    remove -- e.g. BRK-A and BRK-B both legitimately reading count=2."""
+    dataset = pd.DataFrame({
+        "ticker": ["BRK-A", "BRK-B", "AAPL"],
+        "trade_date": pd.to_datetime(["2024-01-02"] * 3),
+        "cik": ["1", "1", "2"],
+    })
+    company_info = pd.DataFrame({
+        "ticker": ["BRK-A", "BRK-B", "AAPL"],
+        "cik": ["1", "1", "2"],
+        "sic": [6311, 6311, 3571],
+        "sic_description": ["x", "x", "y"],
+    })
+    result = us.merge_company_info_us(dataset, company_info).set_index("ticker")
+    assert result.loc["BRK-A", "cik_ticker_count"] == 2
+    assert result.loc["BRK-B", "cik_ticker_count"] == 2
+    assert result.loc["AAPL", "cik_ticker_count"] == 1
+
+
 # =============================================================================
 # CAGR ANCHOR MONTH (US fiscal-year-end fix, docs/US_DATASET_BUILD_PLAN.md §8.1)
 # =============================================================================

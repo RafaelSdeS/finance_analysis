@@ -212,6 +212,34 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
             log.warning("fundamentals CIK %s: dropping %d predecessor-entity row(s) before %s -- %s",
                         cik, predecessor.sum(), cutoff, result.loc[predecessor, "end"].dt.date.tolist())
             result = result[~predecessor].reset_index(drop=True)
+
+    # Absolute-floor rejection: a company that cleared the universe gate
+    # cannot genuinely have $20 of total assets. Confirmed 2026-08-01: CVBF's
+    # 2006/2007 item6 rows read total_assets 0.0/20.0 against a real ~$6.5B
+    # (its very next xbrl-tier row); BPOP's item6 net_income reads as low as
+    # 740 against other years' ~$100M+ -- a per-filing unit-multiplier
+    # ((in thousands)/(in millions)) misapplication, not a uniform tier
+    # offset (see selected_financial_data.detect_unit_multiplier / fds.py's
+    # MULTIPLIER handling -- both tiers DO implement scaling, just not always
+    # correctly per-filing). NaN'd, never guessed (loaders.load_dividends'
+    # convention) -- deliberately NOT companyfacts._reject_sequential_outliers
+    # here: that seeds from a ticker's DOMINANT magnitude cluster, right for
+    # shares_outstanding but wrong for a company that legitimately grew 100x
+    # over 30 years of real filings.
+    # ponytail: floors, not a parser fix -- the underlying item6 year-label
+    # misparse (some rows' `end` traces back to a filing >10y later, see
+    # audit doc §3) is a separate, unattempted project.
+    _FLOORS = {"total_assets": 1e5, "net_revenue": 1e4, "equity": 1e4}
+    for col, floor in _FLOORS.items():
+        if col not in result.columns:
+            continue
+        bad_scale = result[col].abs().between(0, floor, inclusive="left") & result[col].notna()
+        if bad_scale.any():
+            log.warning("fundamentals CIK %s: rejecting %d implausible %s value(s) "
+                        "(< %.0f, below any real public filer's floor) -- now NaN",
+                        cik, bad_scale.sum(), col, floor)
+            result.loc[bad_scale, col] = float("nan")
+
     return result
 
 

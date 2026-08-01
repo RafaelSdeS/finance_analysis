@@ -150,6 +150,13 @@ def write_manifest(dataset=None, dropped_no_fundamentals=None, output_path=None,
         "date_max": date_max,
         "columns": columns,
         "lookahead_tainted_columns": [c for c in LOOKAHEAD_TAINTED_COLS if c in columns],
+        # Columns that are 100% NaN in this build -- e.g. ebitda_margin (US:
+        # ebitda itself is never collected, no D&A concept mapped) and its
+        # knock-ons (dividend_coverage_ratio, ebitda_growth_yoy). Derived from
+        # column_stats' existing nan_pct rather than a second full-column scan.
+        # Not dropped from the schema (keeps BR/US column sets aligned across
+        # builds) -- recorded so a consumer doesn't mistake "present" for "live".
+        "empty_columns": sorted(c for c, s in column_stats.items() if s["nan_pct"] >= 100.0),
         "column_units": {c: u for c, u in COLUMN_UNITS.items() if c in columns},
         "dropped_no_fundamentals": dropped_no_fundamentals if dropped_no_fundamentals is not None else "not tracked",
         "column_stats": column_stats,

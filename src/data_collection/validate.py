@@ -133,6 +133,23 @@ def validate_us_fundamentals(df: pd.DataFrame) -> ValidationResult:
                f"(companyfacts._reject_sequential_outliers) -- now NaN, not a guessed value")
     if "end" in df.columns and df["end"].duplicated().any():
         r.warn(f"{df['end'].duplicated().sum()} duplicate 'end' period(s)")
+
+    # Unit-invariant accounting identities -- hold regardless of whether a
+    # filing was parsed in units/thousands/millions, so a violation means a
+    # wrong row or inconsistent per-item scaling, not a mis-detected units
+    # caption. Cheap (no thresholds to tune) and would have caught the
+    # fundamentals._FLOORS cases (CVBF, BPOP) automatically. 2026-08-01 audit.
+    def _identity_warn(mask, label):
+        if mask.any():
+            r.warn(f"{int(mask.sum())} row(s) with {label}")
+
+    cols = df.columns
+    if {"equity", "total_assets"} <= set(cols):
+        _identity_warn(df["equity"] > df["total_assets"], "equity > total_assets")
+    if {"cash", "total_assets"} <= set(cols):
+        _identity_warn(df["cash"] > df["total_assets"], "cash > total_assets")
+    if {"current_assets", "total_assets"} <= set(cols):
+        _identity_warn(df["current_assets"] > df["total_assets"], "current_assets > total_assets")
     return r
 
 

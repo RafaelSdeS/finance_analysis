@@ -225,6 +225,35 @@ def test_predecessor_entity_rows_are_dropped():
     print("OK: predecessor-entity rows are dropped for known spinoff/split-off CIKs, other CIKs untouched")
 
 
+def test_implausibly_tiny_fundamental_is_rejected_not_left_in():
+    # Real cases, 2026-08-01 audit: CVBF's item6 total_assets reads 0.0/20.0
+    # against a real ~$6.5B (its very own next xbrl-tier row); a per-filing
+    # unit-multiplier ((in thousands)/(in millions)) misapplication, not a
+    # uniform tier offset. A company that cleared the universe gate cannot
+    # genuinely have $20 of total assets. Also includes one good row to
+    # confirm the floor only NaNs the actual violator, not the whole company.
+    xbrl_rows = pd.DataFrame({
+        "end": pd.to_datetime(["2006-12-31", "2011-03-31"]),
+        "fundamentals_available_date": pd.to_datetime(["2007-03-01", "2011-05-09"]),
+        "total_assets": [20.0, 6_498_352_128.0],
+        "net_income": [50_000_000.0, 60_000_000.0],
+    })
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value={"placeholder": True}), \
+         mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_rows), \
+         mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=pd.DataFrame()):
+        df = fundamentals.build_company_fundamentals(36104, pd.DataFrame())
+
+    assert len(df) == 2, "the row survives (NaN'd, not dropped), just the bad column"
+    tiny = df[df["end"] == pd.Timestamp("2006-12-31")].iloc[0]
+    good = df[df["end"] == pd.Timestamp("2011-03-31")].iloc[0]
+    assert pd.isna(tiny["total_assets"]), "the $20 value must be rejected to NaN"
+    assert tiny["net_income"] == 50_000_000.0, "other columns on the same row are untouched"
+    assert good["total_assets"] == 6_498_352_128.0, "a plausible value on another row must survive"
+    print("OK: an implausibly tiny total_assets is NaN'd, the row's other columns and other rows are untouched")
+
+
 def test_validate_us_fundamentals_warns_on_impossible_values():
     # collect_fundamentals_us writes df.to_parquet() directly, unlike every
     # other collector -- SEC fundamentals had never been through any
@@ -248,6 +277,26 @@ def test_validate_us_fundamentals_warns_on_impossible_values():
     empty_r = validate.validate_us_fundamentals(pd.DataFrame())
     assert not empty_r.passed, "an empty dataframe must still be a hard error"
     print("OK: validate_us_fundamentals warns on accounting-impossible values, errors only on empty")
+
+
+def test_validate_us_fundamentals_warns_on_identity_violations():
+    # Unit-invariant accounting identities (2026-08-01 audit) -- hold
+    # regardless of units/thousands/millions parsing, so a violation means a
+    # wrong row or inconsistent per-item scaling. Would have caught the
+    # CVBF/BPOP tiny-value cases above automatically, no threshold to tune.
+    bad = pd.DataFrame({
+        "end": pd.to_datetime(["2020-12-31"]),
+        "equity": [2000.0], "total_assets": [1000.0],   # equity > total_assets
+        "cash": [1500.0],                               # cash > total_assets
+        "current_assets": [1200.0],                     # current_assets > total_assets
+    })
+    r = validate.validate_us_fundamentals(bad)
+    assert r.passed, "row-level anomalies must warn, not block the write"
+    joined = " ".join(r.warnings)
+    assert "equity > total_assets" in joined
+    assert "cash > total_assets" in joined
+    assert "current_assets > total_assets" in joined
+    print("OK: validate_us_fundamentals flags unit-invariant identity violations")
 
 
 def test_collect_fundamentals_us_logs_validation_warnings():
@@ -327,6 +376,8 @@ if __name__ == "__main__":
     test_tier_boundary_near_duplicate_end_dates_are_deduped()
     test_source_data_anomaly_is_dropped_not_left_in()
     test_predecessor_entity_rows_are_dropped()
+    test_implausibly_tiny_fundamental_is_rejected_not_left_in()
     test_validate_us_fundamentals_warns_on_impossible_values()
+    test_validate_us_fundamentals_warns_on_identity_violations()
     test_collect_fundamentals_us_logs_validation_warnings()
     test_skip_existing_resumes_past_already_collected_tickers()

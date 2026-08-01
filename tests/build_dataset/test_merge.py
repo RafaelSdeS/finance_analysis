@@ -145,6 +145,36 @@ def test_merge_honors_actual_filing_date() -> None:
     assert approx(result.loc[("LATE", late + pd.Timedelta(days=1)), "pl"], 20.0)  # day after: visible
 
 
+def test_merge_stale_fundamental_expires_past_tolerance() -> None:
+    """A fundamental older than MAX_FUNDAMENTAL_STALENESS_DAYS stops attaching
+    to new price rows -- not a lookahead fix (the value was genuinely public),
+    but a company that stopped filing shouldn't carry years-old fundamentals
+    forever. Real case, 2026-08-01 audit: HTHIY last filed 2011-03-31, still
+    emitting rows with that fundamental through 2026-07-28 (info-age 5,486d).
+    One filing, two price rows: just inside vs. just outside the tolerance."""
+    available = pd.Timestamp("2024-01-01")
+    just_inside = available + pd.Timedelta(days=merge.MAX_FUNDAMENTAL_STALENESS_DAYS - 1)
+    just_outside = available + pd.Timedelta(days=merge.MAX_FUNDAMENTAL_STALENESS_DAYS + 1)
+
+    fundamentals = pd.DataFrame({
+        "ticker": ["A"],
+        "reference_date": [available - pd.Timedelta(days=45)],
+        "fundamentals_available_date": [available],
+        "pl": [10.0],
+    })
+    prices = pd.DataFrame({
+        "ticker": ["A", "A"],
+        "trade_date": [just_inside, just_outside],
+        "close": [100.0, 100.0],
+    })
+
+    result = merge_prices_and_fundamentals(prices, fundamentals).set_index(
+        ["ticker", "trade_date"])
+
+    assert approx(result.loc[("A", just_inside), "pl"], 10.0)
+    assert pd.isna(result.loc[("A", just_outside), "pl"])
+
+
 def test_merge_close_price_lookup_does_not_cross_tickers() -> None:
     """close_price's asof lookup (merge.py's replace-with-actual-price-at-
     filing step) must use each ticker's OWN price history -- regression

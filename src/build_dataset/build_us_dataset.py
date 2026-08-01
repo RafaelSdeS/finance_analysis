@@ -19,6 +19,8 @@ Usage:
     python -m src.build_dataset.build_us_dataset
 """
 
+import re
+
 import numpy as np
 import pandas as pd
 
@@ -59,6 +61,23 @@ KNOWN_NO_FUNDAMENTALS_US = {
 MIN_PRICE_ROWS = 250
 MIN_MEDIAN_CLOSE = 1.0
 MIN_MEDIAN_DOLLAR_VOLUME = 1_000_000
+
+# Non-common share classes crosswalk to their issuer's CIK and so inherit the
+# COMMON stock's fundamentals against their OWN (unrelated) price series --
+# every valuation ratio computed on one is meaningless. Confirmed 2026-08-01:
+# 176 tickers share just 59 CIKs this way; BAC-PL alone accounts for 2,687 of
+# the dataset's 3,511 market_cap > $10T rows. "-P<letters>" is SEC's standard
+# preferred-share ticker suffix; NON_COMMON_US names the handful of ETNs/baby
+# bonds that don't follow it (crosswalk.CIK_OVERRIDES/quality_filters.
+# QUARANTINED_TICKERS use the same explicit-deny-list pattern).
+# ponytail: genuine dual-class COMMON (BRK-A/BRK-B, BF-A/BF-B, HEI-A, UHAL-B)
+# is deliberately kept -- it's real equity, just also multiple tickers per CIK.
+_PREFERRED_RE = re.compile(r"-P[A-Z]*$")
+NON_COMMON_US = {"AMJB", "SOJD", "SOJE", "SOJF"}
+
+
+def _is_non_common(ticker: str) -> bool:
+    return bool(_PREFERRED_RE.search(ticker)) or ticker in NON_COMMON_US
 
 
 # =============================================================================
@@ -117,8 +136,17 @@ def merge_company_info_us(df, company_info):
     # traces back to. company_info.parquet's `cik` is the SAME crosswalk
     # value, just re-derived from the ticker; dropped here rather than
     # merged in a second time (pandas would otherwise suffix both cik_x/cik_y).
-    info = company_info.drop(columns=["cik"]).copy()
+    info = company_info.copy()
     info["sector"] = sic_to_sector(info["sic"])
+    # How many tickers share this ticker's CIK -- after the universe gate
+    # drops preferreds/ETNs/baby bonds (see NON_COMMON_US above), what's left
+    # sharing a CIK is genuine dual-class common (BRK-A/BRK-B, BF-A/BF-B,
+    # HEI-A/HEI, UHAL/UHAL-B) that legitimately has one set of fundamentals
+    # across multiple tickers. Computed on company_info's FULL roster, not
+    # just this build's gated universe, so the count is the true CIK
+    # cardinality rather than an artifact of which tickers passed the gate.
+    info["cik_ticker_count"] = info.groupby("cik")["ticker"].transform("nunique")
+    info = info.drop(columns=["cik"])
 
     merged = df.merge(info, on="ticker", how="left")
     print(f"Company info merged for {merged['ticker'].nunique()} tickers "
@@ -402,6 +430,10 @@ def main():
     # (docs/US_DATASET_BUILD_PLAN.md §8.0 Failure 1). The per-file scan reads
     # only close/volume per ticker.
     universe = build_universe_gate_from_files(US_PRICES_DIR)
+    n_before = len(universe)
+    universe = {t for t in universe if not _is_non_common(t)}
+    print(f"Dropped {n_before - len(universe)} non-common share class(es) "
+          f"(preferred/ETN/baby-bond) from the universe gate")
     prices = load_prices(dir=US_PRICES_DIR, tickers=universe | {BENCHMARK_TICKER})
     fundamentals = load_fundamentals(dir=US_FUNDAMENTALS_DIR, optimize_dtypes=True)
     prices = drop_orphan_prefix_rows(prices)  # no-op for US tickers, kept for parity
@@ -417,7 +449,11 @@ def main():
     prices, dropped_no_fundamentals = filter_tickers_with_no_fundamentals(
         prices, fundamentals, known_no_fundamentals=KNOWN_NO_FUNDAMENTALS_US
     )
-    fundamentals = compute_fundamental_features(fundamentals)
+    # net_margin, not the default gross_margin: SEC filers routinely skip a
+    # separate COGS/gross-profit tag (93.6% null in the US corpus vs
+    # net_margin's 49.98%), which left f_margin_improving/f_score effectively
+    # undefined for the whole US build (2026-08-01 audit).
+    fundamentals = compute_fundamental_features(fundamentals, margin_col="net_margin")
     # anchor_month=None: US fiscal year ends vary by company (8.6% of tickers
     # have zero December-ending quarters, e.g. Agilent's Oct 31 FYE) with no
     # reliable per-ticker FYE column to anchor to instead -- see
