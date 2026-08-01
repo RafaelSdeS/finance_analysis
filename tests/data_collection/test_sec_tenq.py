@@ -101,6 +101,33 @@ def test_find_statement_table_prefers_the_real_statement_over_a_decoy_summary():
     print("OK: find_statement_table prefers the real statement over a decoy that only 'looks' cleaner")
 
 
+def test_find_statement_table_rejects_a_percentage_of_sales_table():
+    # Real bug, confirmed on NSYS's actual 2003-08-14 10-Q (2026-08-01): a
+    # "Results of Operations as a Percentage of Net Sales" MD&A table has the
+    # identical period-block header shape and matches "NET SALES"/"COST OF
+    # GOODS SOLD" in its first column just as well as a real dollar
+    # statement -- picked, and extracted net_revenue=100 (its Net Sales row
+    # IS, by definition, ~100%) instead of the real dollar figure ($14.5M).
+    # The tell: "%"-placeholder cells outnumber "$"-placeholder cells
+    # table-wide, the inverse of a real statement.
+    percentage_table = pd.DataFrame([
+        [None, None, "Three Months Ended", "Three Months Ended", "Three Months Ended", None,
+         "Six Months Ended", "Six Months Ended", "Six Months Ended", None],
+        [None, None, "June 30,  2003", None, "June 30,  2002", None,
+         "June 30,  2003", None, "June 30,  2002", None],
+        ["Net Sales", None, "100", "%", "100", "%", "100", "%", "100", "%"],
+        ["Cost of Goods Sold", None, "88", "%", "81", "%", "88", "%", "82", "%"],
+    ])
+    picked = tenq.find_statement_table([percentage_table], tenq._INCOME_KEYWORDS)
+    assert picked is None, "a percentage-of-sales table must never be picked as the income statement"
+
+    # A real dollar statement (no "%" cells at all here) must NOT be rejected.
+    real = _real_income_table()
+    picked_real = tenq.find_statement_table([real], tenq._INCOME_KEYWORDS)
+    assert picked_real is not None, "a real dollar-dominant statement must still be picked"
+    print("OK: find_statement_table rejects a percentage-of-sales table, keeps a real $-dominant one")
+
+
 def test_current_quarter_items_picks_max_end_date():
     three_mo = {
         (pd.Timestamp("2002-12-28"), 3): {"net_revenue": 1472.0},
@@ -184,6 +211,7 @@ if __name__ == "__main__":
     test_parse_period_header_detects_blocks_with_colspan_duplication()
     test_extract_statement_reconciles_real_aapl_figures()
     test_find_statement_table_prefers_the_real_statement_over_a_decoy_summary()
+    test_find_statement_table_rejects_a_percentage_of_sales_table()
     test_current_quarter_items_picks_max_end_date()
     test_build_cik_history_end_to_end()
     test_build_cik_history_skips_a_filing_whose_html_crashes_pd_read_html()

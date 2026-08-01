@@ -218,6 +218,38 @@ def test_fiscal_year_end_never_used_as_a_quarterly_exhibits_own_period_end():
     print("OK: <FISCAL-YEAR-END> is never a quarterly exhibit's period end, only <PERIOD-END> is")
 
 
+def test_to_number_parses_parenthesized_negatives():
+    # Real bug, confirmed on TCX's actual 1998-09-30 10-Q (2026-08-01):
+    # <OTHER-SE>(2,424,212) -- standard accounting notation for a real
+    # negative (TCX's genuine financial distress that quarter) -- silently
+    # returned NaN, unlike selected_financial_data.py's _parse_value, which
+    # already handles this. Compounds in extract_line_items's equity =
+    # nan_to_num(COMMON) + nan_to_num(OTHER-SE): a missing COMPONENT
+    # masquerades as a real value of 0 instead of propagating NaN, turning a
+    # genuine -$2.4M equity into a false exact $0.00 -- caught by
+    # fundamentals.py's _FLOORS, but for the wrong reason (looks like a
+    # parsing gap, is actually a silently-dropped real negative).
+    assert fds._to_number("(2,424,212)") == -2424212.0
+    assert fds._to_number("500") == 500.0, "a plain positive must be unaffected"
+    assert fds._to_number("(500") == 500.0, (
+        "an unmatched leading paren (malformed, no real EX-27 case seen) must not crash -- "
+        "stripped and treated as positive, same as before this fix")
+    print("OK: _to_number parses a parenthesized negative, not just a leading-minus one")
+
+
+def test_extract_line_items_equity_survives_a_parenthesized_negative_component():
+    # End-to-end: the real TCX tags (verified live 2026-08-01) must derive
+    # equity as the real negative sum, not a false $0.
+    tags = {"ARTICLE": "5", "PERIOD-TYPE": "9-MOS", "PERIOD-END": "SEP-30-1998",
+            "COMMON": "0", "OTHER-SE": "(2,424,212)",
+            "TOTAL-ASSETS": "13,701,265", "TOTAL-REVENUES": "10,312,996"}
+    items = fds.extract_line_items(tags)
+    assert items["equity"] == -2424212.0, (
+        f"a missing/zero COMMON plus a real negative OTHER-SE must derive a real negative "
+        f"equity, not a false 0.0 -- got {items['equity']}")
+    print("OK: extract_line_items derives real negative equity, not a false $0 from a masked component")
+
+
 def test_missing_multiplier_borrows_from_sibling_exhibit():
     # Real bug, confirmed on WMT's actual filings (2026-07-30): <MULTIPLIER> is
     # genuinely OPTIONAL per SEC's EX-27 schema -- WMT's 1995/1996 10-Ks tag it
@@ -393,6 +425,8 @@ if __name__ == "__main__":
     test_zero_multiplier_defaults_to_one()
     test_quarterly_period_type_is_mapped_with_period_months()
     test_fiscal_year_end_never_used_as_a_quarterly_exhibits_own_period_end()
+    test_to_number_parses_parenthesized_negatives()
+    test_extract_line_items_equity_survives_a_parenthesized_negative_component()
     test_missing_multiplier_borrows_from_sibling_exhibit()
     test_missing_multiplier_left_flagged_when_no_sibling_available()
     test_build_cik_history_skips_post_ex27_era_filings()

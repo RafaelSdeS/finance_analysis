@@ -155,6 +155,21 @@ def find_statement_table(tables: list[pd.DataFrame], keywords: tuple[str, ...]) 
         blocks = parse_period_header(df)
         if len(blocks) < 2:
             continue
+        # Reject a common-size (percentage-of-revenue) MD&A table -- real bug,
+        # confirmed on NSYS's real 2003-08-14 10-Q (2026-08-01): a "Results of
+        # Operations as a Percentage of Net Sales" table has the identical
+        # period-block header shape and matches "NET SALES"/"COST OF..." in
+        # its first column just as well as the real dollar statement, so it
+        # won the block-count/keyword-score tie and got picked -- extracting
+        # net_revenue=100 (its Net Sales row IS, by definition, ~100%) instead
+        # of the real dollar figure. The tell: its "%"-placeholder cells
+        # outnumber "$"-placeholder cells table-wide, the inverse of a real
+        # statement (which may have ONE legitimate "gross margin %" sub-row,
+        # but is otherwise "$"-dominant -- confirmed on AAPL's real statement,
+        # 4 "$" cells vs 2 "%" cells).
+        symbols = [str(c).strip() for c in df.to_numpy().flatten()]
+        if symbols.count("%") > symbols.count("$"):
+            continue
         # Whitespace-normalize before keyword matching -- real bug, confirmed
         # on AAPL's actual 2004-02-10 10-Q (2026-08-01): its real 43-row
         # income statement renders "Cost of  sales" (embedded double space,

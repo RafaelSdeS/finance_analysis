@@ -88,13 +88,26 @@ def parse_fds(text: str) -> list[dict]:
 
 
 def _to_number(s: str) -> float:
+    # Parenthesized negative -- real bug, confirmed on TCX's actual
+    # 1998-09-30 10-Q (2026-08-01): <OTHER-SE>(2,424,212) (standard accounting
+    # notation for a real negative -- the company's genuine financial
+    # distress), silently unparseable here while the analogous case is
+    # already handled in selected_financial_data.py's _parse_value. Returning
+    # NaN for a real negative, rather than the negative itself, is bad enough
+    # on its own (lost data), but compounds badly in extract_line_items's
+    # equity = nan_to_num(COMMON) + nan_to_num(OTHER-SE): a missing COMPONENT
+    # masquerades as a genuine value of 0 instead of propagating NaN, turning
+    # a real -$2.4M equity into a false exact $0.00.
     s = (s or "").replace(",", "").strip()
     if not s or s.startswith("<"):
         return np.nan
+    neg = s.startswith("(") and s.endswith(")")
+    s = s.strip("()")
     try:
-        return float(s)
+        val = float(s)
     except ValueError:
         return np.nan
+    return -val if neg else val
 
 
 _QUARTERLY_PERIOD_TYPES = {"3-MOS": 3, "6-MOS": 6, "9-MOS": 9}

@@ -187,6 +187,46 @@ All 48 fast tests pass.
       share, tier priority) — all 8 existing `build_company_fundamentals` tests needed a new
       `tenq.build_cik_history` mock added (new call site in the function under test).
 
+**`_FLOORS` re-measured against real data, 2026-08-01** — a 24-CIK stratified random
+sample (12 with 10-Ks filed 1995–2000, 12 with 10-Qs filed 2001–2006, `random.seed(42)`,
+deliberately including small/micro-caps: KOSS, BUKS, MRSH, ODC, NSYS, AWRE, PEBK), run
+through the real (post Phase 1–4) pipeline to scratch space, never touching production data.
+90% of resulting rows landed at `period_months==3`. 9 floor events across 5 of 24 CIKs (21%) —
+traced every one to its exact pre-floor value. **Verdict: no false positives, thresholds are
+fine as-is.** Every floored value was either an exact `0.00` (genuine parsing/data gap) or,
+for ODC, a suspiciously round tiny equity figure ($1,300–$9,800 against $114–148M total
+assets) — correctly rejected in every case. Two real bugs found and **fixed at the root**:
+
+1. **`fds.py::_to_number` didn't handle parenthesized negatives** (`"(2,424,212)"`, standard
+   accounting notation) — silently returned NaN for a real negative value. Confirmed on TCX's
+   actual 1998-09-30 10-Q: `<OTHER-SE>(2,424,212)`, a genuine -$2.4M (real financial
+   distress). Compounded in `extract_line_items`'s `equity = nan_to_num(COMMON) +
+   nan_to_num(OTHER-SE)`: a missing/NaN component masqueraded as a real `0`, turning a real
+   -$2.4M equity into a false exact $0.00 that then correctly tripped the floor — right catch,
+   wrong root cause. Fixed to mirror `selected_financial_data.py`'s `_parse_value`, which
+   already handled this.
+2. **`tenq.py::find_statement_table` couldn't distinguish a real dollar statement from a
+   common-size (percentage-of-revenue) MD&A table** — both have the identical period-block
+   header shape and match the same first-column keywords. Confirmed on NSYS's real
+   2003-08-14 10-Q: a "Results of Operations as a Percentage of Net Sales" table won the
+   scoring tie and got picked, extracting `net_revenue=100` (its Net Sales row is, by
+   definition, ~100%) instead of the real ~$14.5M figure. Fixed by rejecting any candidate
+   table where `%`-placeholder cells outnumber `$`-placeholder cells (confirmed selective:
+   NSYS's fake table scored 0 `$` vs 8+ `%`; AAPL's real statement scores `$`-dominant even
+   with a legitimate "gross margin %" sub-row mixed in). **Known residual gap, not fixed**:
+   this specific NSYS filing's REAL dollar statement (table 3, genuinely $14,486,982) has no
+   "Three/Six Months Ended" label at all — bare dates only — so `parse_period_header` finds
+   zero blocks for it and the quarter now yields no data instead of wrong data. Strictly safer
+   (matches this codebase's NaN-over-guess convention throughout), but a real, unquantified
+   coverage cost for tables that omit the length label. A dates-only fallback (default to
+   3-MOS when no label is found) was considered but not implemented — flagged as a possible
+   follow-up, not attempted this session.
+
+Both fixes verified against the real triggering data and covered by new regression tests
+(`test_to_number_parses_parenthesized_negatives`,
+`test_extract_line_items_equity_survives_a_parenthesized_negative_component`,
+`test_find_statement_table_rejects_a_percentage_of_sales_table`). All 48 fast tests pass.
+
 **Deliberately NOT done this session — needs separate explicit go-ahead:**
 - [ ] Re-measure `_FLOORS` against real quarterly-magnitude data before touching thresholds
       (quarterly figures are ~4x smaller than the annual ones `_FLOORS` was tuned against).
