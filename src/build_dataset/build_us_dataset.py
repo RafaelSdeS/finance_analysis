@@ -287,6 +287,75 @@ def build_universe_gate(prices, min_rows=MIN_PRICE_ROWS, min_median_close=MIN_ME
     return tickers
 
 
+class _MergeBatcher:
+    """Callable batch_fn for compute_features_chunked (build_ml_dataset.py),
+    PLUS an explicit release() to drop its captured prices/fundamentals/
+    company_info/dividends references once Pass 1 is done with it.
+
+    A plain closure + `del batch_fn` inside compute_features_chunked is NOT
+    enough: main() keeps its OWN reference to this same object bound in its
+    frame for the entire (synchronous, nested) compute_features_chunked
+    call -- a caller's frame doesn't go away just because the callee deletes
+    its own copy of a reference, so refcounting alone never reaches 0 there
+    (confirmed via a minimal repro before landing this). release() instead
+    MUTATES this instance's own attributes to None -- visible through every
+    reference to it, main()'s included -- which is what actually frees the
+    tables before Pass 2/3, which never call batch_fn again. main() must
+    ALSO drop its own separate `prices`/`fundamentals`/`company_info` names
+    for this to work (mutating THIS object's attributes doesn't touch a
+    caller's own separate variable pointing at the same DataFrame).
+    """
+
+    def __init__(self, prices, fundamentals, company_info, dividends):
+        self.prices = prices
+        self.fundamentals = fundamentals
+        self.company_info = company_info
+        self.dividends = dividends
+
+    def __call__(self, batch_tickers):
+        bt = set(batch_tickers)
+        p = self.prices[self.prices["ticker"].isin(bt)]
+        f = self.fundamentals[self.fundamentals["ticker"].isin(bt)]
+        d = self.dividends[self.dividends["ticker"].isin(bt)]
+
+        merged = merge_prices_and_fundamentals(p, f)
+        merged = merge_company_info_us(merged, self.company_info)
+        merged = merge_macro_us(merged)
+        merged = merge_dividends(merged, d)
+        return merged
+
+    def release(self):
+        self.prices = self.fundamentals = self.company_info = self.dividends = None
+
+
+def make_merge_batch_fn(prices, fundamentals, company_info, dividends):
+    """Returns a _MergeBatcher (see its docstring for release()) that does
+    the 4 merges (prices+fundamentals, company_info, macro, dividends)
+    scoped to just one ticker-batch at a time, instead of once over the
+    full universe.
+
+    Why: merge_prices_and_fundamentals's OUTPUT -- the daily panel with every
+    fundamentals column forward-filled onto it -- is ~1,000 B/row at US
+    fundamentals' width; at the full ~15.4M-row universe that alone is
+    ~15GB, before company_info/macro/dividends are even joined. Measured
+    directly: an 800/3,134-ticker slice already peaked at 5.9GB RSS through
+    this merge (docs/US_DATASET_BUILD_PLAN.md §8.0.1) -- extrapolating
+    linearly to the full universe lands past this machine's available RAM,
+    which is exactly what OOM-killed the real run. None of the 4 merges are
+    cross-sectional (unlike compute_cross_sectional_features/Pass 2, which
+    genuinely needs the whole universe at once) -- each operates strictly
+    per-ticker or via join, so scoping them to a batch changes nothing about
+    correctness, only how much is resident at once.
+
+    `prices`/`fundamentals`/`company_info`/`dividends` are the already-loaded
+    (narrow) raw tables -- kept resident for Pass 1 only (measured ~5.5GB for
+    prices+fundamentals alone; release() drops them before Pass 2/3), which
+    is what makes this safe: only the wide MERGED product is ever bounded to
+    one batch.
+    """
+    return _MergeBatcher(prices, fundamentals, company_info, dividends)
+
+
 def build_universe_gate_from_files(dir, min_rows=MIN_PRICE_ROWS, min_median_close=MIN_MEDIAN_CLOSE,
                                     min_median_dollar_volume=MIN_MEDIAN_DOLLAR_VOLUME):
     """Same gate as build_universe_gate, computed from a per-file, column-
@@ -357,16 +426,36 @@ def main():
     company_info = pd.read_parquet(US_COMPANY_INFO_PATH)
     dividends = load_dividends(dir=US_DIVIDENDS_DIR)
 
-    dataset = merge_prices_and_fundamentals(prices, fundamentals)
-    del prices, fundamentals
-    dataset = merge_company_info_us(dataset, company_info)
-    del company_info
-    dataset = merge_macro_us(dataset)
-    dataset = merge_dividends(dataset, dividends)
+    # Merge per-batch (inside compute_features_chunked's existing Pass-1 loop)
+    # instead of once over the full universe -- see make_merge_batch_fn's
+    # docstring for why the full-universe merge OOMs at US scale even though
+    # none of the 4 merges are cross-sectional. Only needed for Pass 1 (the
+    # merge itself); Pass 2/3 never touch batch_fn again.
+    batch_fn = make_merge_batch_fn(prices, fundamentals, company_info, dividends)
+    tickers = sorted(prices["ticker"].unique())
 
-    compute_features_chunked(dataset, dividends, benchmark, US_OUTPUT_PATH,
-                              valuation_fn=compute_valuation_daily_us)
-    del dataset
+    # Drop OUR OWN references to prices/fundamentals/company_info now.
+    # compute_features_chunked is called synchronously below, so main()'s own
+    # locals stay bound for the ENTIRE call (all 3 passes) regardless of what
+    # happens inside it -- if we kept prices/fundamentals/company_info
+    # (~3GB+) referenced here too, they'd sit resident through Pass 2/3 as
+    # well, which don't need them at all. This alone isn't sufficient though:
+    # batch_fn (a _MergeBatcher instance, make_merge_batch_fn) ALSO holds its
+    # own references to the same tables, and batch_fn itself stays bound in
+    # THIS frame for the whole call too -- see _MergeBatcher.release()'s
+    # docstring for why compute_features_chunked calling `.release()` on it
+    # after Pass 1 (mutating the instance in place) is what actually drops
+    # the last reference, not a plain `del`. Both halves are required
+    # together. This exact leak was a real 3rd OOM in this build
+    # (docs/US_DATASET_BUILD_PLAN.md §8.0.2 follow-up): batch_fn/tickers
+    # fixed Pass 1, but the tables it captured kept living through Pass 2/3
+    # too, on top of the fix in §8.3.
+    del prices, fundamentals, company_info
+
+    compute_features_chunked(None, dividends, benchmark, US_OUTPUT_PATH,
+                              valuation_fn=compute_valuation_daily_us,
+                              tickers=tickers, batch_fn=batch_fn)
+    del dividends
 
     print()
     print("=" * 80)

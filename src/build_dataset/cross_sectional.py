@@ -130,16 +130,28 @@ def compute_cross_sectional_features(df, benchmark):
     # --- ROLLING BETA VS MARKET ---
 
     # Same BOVA11 series as above, now rolled per-ticker over TIME (not a
-    # same-date snapshot) -- needs one groupby("ticker") pass, same shape as
-    # compute_price_features.
-    result = []
+    # same-date snapshot) -- needs one groupby("ticker") pass.
+    #
+    # Accumulate only the narrow (cov/var-derived) per-ticker beta Series,
+    # not a full-width copy of `g` -- this loop runs on the WHOLE universe at
+    # once (unlike compute_price_features's identically-shaped per-ticker
+    # loop, which only ever sees one ~150-ticker Pass-1 batch). Appending
+    # full `g` slices (every column, ~24+ by this point) into a list and
+    # pd.concat-ing them at the end held a full SECOND copy of the
+    # full-universe frame alongside the original `df` -- the same
+    # "accumulate everything then concat" shape that OOM-killed
+    # merge_prices_and_fundamentals at US scale (docs/US_DATASET_BUILD_PLAN.md
+    # §8.0.1) before that got fixed; this was the untouched sibling. Assigning
+    # the concatenated single-column Series back via `df["beta_1y"] = ...`
+    # aligns by (preserved, unique) row index -- verified byte-identical to
+    # the old full-frame-accumulation output, just without the second copy.
+    beta_parts = []
     for ticker, g in df.groupby("ticker", sort=False):
         g = g.sort_values("trade_date")
         cov = g["log_return"].rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).cov(g["_mkt_log_return"])
         var = g["_mkt_log_return"].rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).var()
-        g["beta_1y"] = cov / var
-        result.append(g)
-    df = pd.concat(result, ignore_index=True)
+        beta_parts.append(cov / var)
+    df["beta_1y"] = pd.concat(beta_parts)
     df = df.drop(columns=["_mkt_log_return", "_mkt_return_1m", "_mkt_return_3m", "_mkt_return_12m"])
 
     print(f"Cross-sectional features computed for {len(df)} rows")

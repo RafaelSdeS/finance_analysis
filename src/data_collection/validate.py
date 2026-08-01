@@ -127,6 +127,10 @@ def validate_us_fundamentals(df: pd.DataFrame) -> ValidationResult:
         r.warn(f"{(df['total_assets'] < 0).sum()} row(s) with negative total_assets (accounting-impossible)")
     if "shares_outstanding" in df.columns and (df["shares_outstanding"] < 0).any():
         r.warn(f"{(df['shares_outstanding'] < 0).sum()} row(s) with negative shares_outstanding")
+    if "shares_outstanding_rejected_outlier" in df.columns and df["shares_outstanding_rejected_outlier"].any():
+        n = int(df["shares_outstanding_rejected_outlier"].sum())
+        r.warn(f"{n} row(s) had an implausible shares_outstanding value rejected "
+               f"(companyfacts._reject_sequential_outliers) -- now NaN, not a guessed value")
     if "end" in df.columns and df["end"].duplicated().any():
         r.warn(f"{df['end'].duplicated().sum()} duplicate 'end' period(s)")
     return r

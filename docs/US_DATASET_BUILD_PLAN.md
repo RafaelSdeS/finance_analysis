@@ -677,6 +677,46 @@ not found by unit tests with hand-picked fixtures, only by adversarial/real-data
 800-ticker measurement is a strong signal, not a guarantee. Launch the real attempt
 `nohup ... & disown`, per [[feedback_nohup_background_jobs]].
 
+**The 800-ticker signal turned out not to hold — real kernel OOM confirmed at full scale,
+FIXED 2026-07-31 (§8.0.2 below).** The user ran the real build; it died with `Killed` right at
+`MERGING PRICES + FUNDAMENTALS`'s own header, before printing even one row count.
+
+### 8.0.2 Merge batched per-ticker-chunk — FIXED 2026-07-31
+
+The 800/3,134-ticker extrapolation in §8.0.1 was directionally right and should have been
+trusted less: 5.9 GB at 4,145,648 rows extrapolates linearly to **~21.9 GB at the full 15.4M-row
+scale** — comfortably past this machine's ~9-10GB available, which is exactly what killed the
+real run. `compute_features_chunked`'s Pass 1 was already ticker-batched for feature computation,
+but the MERGE that fed it (`merge_prices_and_fundamentals` → `merge_company_info_us` →
+`merge_macro_us` → `merge_dividends`) still ran once over the full universe first, building the
+entire wide (fundamentals-width-forward-filled) frame before any batching began.
+
+**Fix:** `compute_features_chunked` (`build_ml_dataset.py`) gained optional `tickers=`/`batch_fn=`
+params — when `batch_fn` is given, Pass 1 calls it per ticker-batch instead of slicing a
+pre-merged `dataset` (default `batch_fn=None` is byte-identical to the old path; BR's call in
+`build_ml_dataset.main()` is untouched). `build_us_dataset.py` gained `make_merge_batch_fn()`,
+which does all 4 merges scoped to one ~150-ticker batch at a time — none of the 4 are
+cross-sectional (unlike Pass 2's `compute_cross_sectional_features`, which genuinely needs the
+whole universe), so batching them changes nothing about correctness, only how much is resident at
+once. `main()` now passes `batch_fn`/`tickers` instead of pre-building `dataset`; the raw
+prices/fundamentals/company_info/dividends tables (the narrow, ~5.5GB, pre-merge form) stay
+resident for the whole call — only the wide merged product is ever bounded to one batch
+(measured: ~1.1GB per 150-ticker batch by the same per-row extrapolation, comfortably inside the
+budget that killed the unbatched version).
+
+Verified: `test_batch_fn_path_matches_dataset_slicing_path` (`test_compute_features_chunked.py`)
+— the new plumbing produces byte-identical output to the old dataset-slicing path on the same
+data. `test_make_merge_batch_fn_matches_unbatched_merge` (`test_build_us_dataset.py`) — running
+the 4 merges batch-by-batch produces the exact same rows as running them once on the whole
+universe. Full fast suite (47/47) green, `ruff check` clean.
+
+**Still not run to full 3,134-ticker completion** — this fixes the measured cause of the real
+crash, but hasn't itself been observed at full scale yet. Launch `nohup ... & disown`, watch RSS
+across the run (Pass 2/§8.3's cross-sectional stage is the next unmeasured risk — it still holds
+the full-universe slim projection at once, by design, since it needs the whole market for
+sector/beta stats; that part was always meant to be full-universe-resident and is much narrower
+per row than the fundamentals-merge that just got fixed).
+
 ### 8.1 CAGR is silently 100% NaN for 8.6% of US tickers — NEW BUG
 
 **Measured, full corpus:** **701 / 8,143** fundamentals tickers have *zero* rows ending in
@@ -748,7 +788,7 @@ guard only if a gap audit shows it actually bites.
 - [ ] **Skipped: porting `sync_dataset_version`.** There is no previous US build to diff against.
       Add at the second build.
 
-### 8.3 Undocumented second OOM risk: Pass 2 — MEASURE, don't pre-fix
+### 8.3 Undocumented second OOM risk: Pass 2 — MEASURED, hit, FIXED 2026-07-31
 
 §4.6 only ever counted the final read-back. `compute_features_chunked`'s Pass 2 holds the slim
 frame for the whole universe at once, and `compute_cross_sectional_features` then keeps roughly
@@ -756,10 +796,73 @@ three live copies of it: the `df.merge(bench)` result, plus the per-ticker `resu
 `pd.concat` in the beta loop. `ticker`/`sector` are object dtype — ~15.4M × 2 Python strings ≈
 1.8 GB before any copy is made.
 
-- [ ] Run Phase C and watch RSS across the Pass 1→2 boundary. Do not pre-optimize.
-- [ ] If it bites: cast `ticker`/`sector` to `category` before Pass 2 — one line, kills the
-      object-dtype cost. Rewriting the beta loop as a groupby transform is the next rung, only if
-      that isn't enough.
+- [x] Ran Phase C (after §8.0.2's merge-batching fix let it get this far) — it OOM'd exactly here:
+      `Killed` right after printing "COMPUTING CROSS-SECTIONAL (MARKET/SECTOR) FEATURES", i.e.
+      Pass 1 completed (streamed to the temp parquet successfully) and this is where it actually
+      died.
+- [x] **Root cause identified without needing to instrument RSS**: the beta loop was the *exact
+      same* "accumulate a full-width copy per group, `pd.concat` at the end" shape that OOM-killed
+      `merge_prices_and_fundamentals` (§8.0.1) — an untouched sibling of that already-fixed bug,
+      not a new failure mode. It ran on the WHOLE universe at once (unlike
+      `compute_price_features`'s identically-shaped per-ticker loop, which only ever sees one
+      ~150-ticker Pass-1 batch — safe there, unsafe here). By the time this loop runs, `df` carries
+      ~24+ columns (the original 12-column slim projection plus every zscore/percentile/momentum
+      column added earlier in this same function plus the 4 merged benchmark columns) — appending
+      full `g` slices into `result` held a full SECOND copy of the entire full-universe frame
+      alongside the original `df` for the loop's duration.
+- [x] **Fix:** accumulate only the narrow cov/var-derived `beta_1y` Series per ticker (not full
+      `g`), then assign back via `df["beta_1y"] = pd.concat(beta_parts)` (aligns by each group's
+      preserved, unique row index — no `ignore_index=True`/full-frame re-concat needed). Verified
+      byte-identical to the old full-width-accumulation output on a synthetic multi-ticker fixture
+      before touching the real file; existing `test_beta_vs_market_matches_direct_computation`/
+      `test_beta_nan_before_min_periods_then_no_lookahead` (`test_cross_sectional.py`) still pass
+      unchanged (independent hand-computed references, not just a self-comparison). Full fast
+      suite 47/47, `ruff check` clean.
+- [ ] **Not pre-emptively done**: the `ticker`/`sector` → `category` cast. Per the plan's own
+      "measure, don't pre-fix" guidance — the beta-loop fix removes the one confirmed *second*
+      full-universe copy; `df` itself staying resident through Pass 2 is expected/by-design (needs
+      the whole market for cross-sectional stats). Revisit only if a real run still runs tight
+      after this fix.
+
+**This fix alone was NOT enough — the build still OOM'd at the exact same point (§8.0.3 below).**
+The beta-loop fix was real and necessary, but a second, independent leak (§8.0.2's own `batch_fn`
+plumbing) was keeping the raw prices/fundamentals/company_info tables resident through Pass 2/3
+too, on top of whatever Pass 2 itself needed.
+
+### 8.0.3 `batch_fn`'s captured tables outlived Pass 1 — FIXED 2026-07-31
+
+After §8.3's beta-loop fix, the user re-ran the build: Pass 1 now completed all 20 batches
+cleanly (confirmed by the log reaching "Batch 20/20: 110 tickers"), but it still died with `Killed`
+right at Pass 2's own header — same failure point as before, meaning §8.3 helped but wasn't
+sufficient by itself.
+
+**Root cause:** §8.0.2's fix moved the 4 merges into `_MergeBatcher`/`batch_fn`, closing over
+`prices`/`fundamentals`/`company_info`/`dividends` (~3-5GB) so they'd only be needed during Pass 1.
+But `build_us_dataset.main()` calls `compute_features_chunked()` *synchronously* — `main()`'s own
+`batch_fn` local variable stays bound in its frame for the ENTIRE nested call (all 3 passes), by
+definition of how a blocked caller's stack frame works. The first attempt at fixing this
+(`del batch_fn` inside `compute_features_chunked`, right after Pass 1) turned out to be a **no-op**:
+confirmed via a minimal weakref repro before shipping the real fix — deleting the CALLEE's own copy
+of a reference never brings an object's refcount to 0 while the CALLER still holds its own separate
+reference to that same object, which it always does here. So the closed-over tables kept living
+through Pass 2/3 regardless, adding ~3GB of dead weight right where §8.3's fix had just freed up
+headroom.
+
+**Fix:** replaced the plain closure with `_MergeBatcher`, a small class holding
+prices/fundamentals/company_info/dividends as attributes plus an explicit `release()` that sets
+them all to `None`. `compute_features_chunked` calls `batch_fn.release()` (if present — a no-op
+`getattr` default for plain callables like test lambdas) right after Pass 1. This works because
+`release()` **mutates the shared object's own state**, which is visible through every reference to
+it — main()'s included — unlike deleting a reference, which only affects the one binding being
+deleted. `main()` still separately drops its OWN `prices`/`fundamentals`/`company_info` locals
+before the call (necessary but not sufficient alone: mutating `_MergeBatcher`'s attributes doesn't
+touch a caller's own separate variable pointing at the same DataFrame).
+
+Verified: `test_batch_fn_release_actually_frees_captured_state` (`test_compute_features_chunked.py`)
+uses `weakref` to confirm a `release()`-based batch_fn's captured state is actually freed even
+while the test keeps its own reference to the batch_fn object alive through the call (mirroring
+`main()`) — this test fails against the old (ineffective) `del batch_fn` version, confirming it's a
+real regression guard, not a tautology. Full fast suite 47/47, `ruff check` clean.
 
 ### 8.4 Dividends — NOT dead, actually COMPLETE. Phase D unblocked.
 
@@ -806,3 +909,15 @@ full scale** — the remaining risk is real but unmeasured beyond the merge stag
 `compute_features_chunked`'s per-batch Pass 1 arithmetic upcasting float32 back to float64, not
 separately measured either). Next session should launch the real build backgrounded
 (`nohup ... & disown`) and watch, not assume clean based on this session's smaller-scale checks.
+
+**Status as of 2026-07-31 (yet later session): real OOM confirmed at full scale, fixed (§8.0.2).**
+The user ran the real build and it died exactly where §8.0.1's extrapolation warned it might —
+kernel-killed right at `merge_prices_and_fundamentals`, before printing a row count. Root cause:
+the merge that fed Pass 1's already-batched feature loop was itself still whole-universe. Fixed
+by pushing the merge into the same per-batch loop (`tickers=`/`batch_fn=` on
+`compute_features_chunked`, `make_merge_batch_fn()` in `build_us_dataset.py`). 47/47 fast tests
+green (2 new regression tests), `ruff check` clean. **Still not run to full 3,134-ticker
+completion** — the fix is measured-consistent (≈1.1GB/batch vs. the ≈22GB the unbatched merge
+would have needed), not yet observed end-to-end. Launch `nohup ... & disown`, watch RSS through
+Pass 2 (§8.3, still genuinely unmeasured — the one remaining full-universe-resident stage, by
+design).

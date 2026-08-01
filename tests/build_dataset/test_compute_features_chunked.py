@@ -154,6 +154,88 @@ def test_chunked_matches_unchunked_cross_sectional(tmp_path) -> None:
         )
 
 
+def test_batch_fn_path_matches_dataset_slicing_path(tmp_path) -> None:
+    """Regression guard for the `tickers`/`batch_fn` params added to fix the
+    real US-scale OOM (docs/US_DATASET_BUILD_PLAN.md §8.0.1 follow-up):
+    build_us_dataset.py now merges per-batch via `batch_fn` instead of
+    slicing a pre-merged `dataset`. The two code paths must produce
+    byte-identical output on the same data -- `batch_fn` here is a trivial
+    dataset-slicer (same logic Pass 1 used before this change), so any
+    divergence would mean the new plumbing itself (not the merge it wraps)
+    broke something."""
+    dataset, dividends = _chunked_pipeline_fixture()
+    benchmark = _synthetic_benchmark(dataset["trade_date"].unique())
+
+    old_path = tmp_path / "old.parquet"
+    compute_features_chunked(dataset.copy(), dividends, benchmark, old_path, chunk_size=2)
+
+    new_path = tmp_path / "new.parquet"
+    tickers = list(dataset["ticker"].unique())
+    compute_features_chunked(
+        None, dividends, benchmark, new_path, chunk_size=2,
+        tickers=tickers, batch_fn=lambda bt: dataset[dataset["ticker"].isin(bt)].copy(),
+    )
+
+    old = pd.read_parquet(old_path).set_index(["ticker", "trade_date"]).sort_index()
+    new = pd.read_parquet(new_path).set_index(["ticker", "trade_date"]).sort_index()
+    pd.testing.assert_frame_equal(old, new)
+
+
+def test_batch_fn_release_actually_frees_captured_state(tmp_path) -> None:
+    """Regression guard for a subtle reference-lifetime bug found building
+    the fix for a real 3rd US-scale OOM (docs/US_DATASET_BUILD_PLAN.md
+    §8.0.2 follow-up): a plain `del batch_fn` inside compute_features_chunked
+    does NOT free anything batch_fn captured, because whatever CALLED this
+    function (e.g. build_us_dataset.main()) keeps its OWN reference to the
+    same batch_fn object bound in its frame for this entire synchronous
+    call -- confirmed via a minimal repro before landing the fix. Only a
+    batch_fn that MUTATES its own state via release() (build_us_dataset's
+    _MergeBatcher) actually gets freed, regardless of how many outer scopes
+    still hold a reference to the batch_fn object itself. This test
+    deliberately keeps its own `releasable` reference alive through the call
+    (mirroring what main() does) -- if compute_features_chunked stopped
+    calling release(), or someone "simplified" it back to `del batch_fn`,
+    this would catch it."""
+    import weakref
+
+    dataset, dividends = _chunked_pipeline_fixture()
+    benchmark = _synthetic_benchmark(dataset["trade_date"].unique())
+    out_path = tmp_path / "out.parquet"
+
+    class Releasable:
+        def __init__(self, dataset, captured):
+            self._dataset = dataset
+            self._captured = captured  # stands in for prices/fundamentals/company_info
+
+        def __call__(self, batch_tickers):
+            return self._dataset[self._dataset["ticker"].isin(batch_tickers)].copy()
+
+        def release(self):
+            self._dataset = None
+            self._captured = None
+
+    captured = pd.DataFrame({"x": range(10)})  # a unique object, referenced nowhere else
+    ref = weakref.ref(captured)
+    releasable = Releasable(dataset, captured)
+    del captured  # this test's own direct reference gone; releasable._captured still holds it
+
+    tickers = list(dataset["ticker"].unique())
+    # `releasable` stays bound HERE for the whole call below, exactly like
+    # build_us_dataset.main()'s own batch_fn variable -- that's the entire
+    # point of the test.
+    compute_features_chunked(
+        None, dividends, benchmark, out_path, chunk_size=2,
+        tickers=tickers, batch_fn=releasable,
+    )
+
+    assert ref() is None, (
+        "batch_fn.release() should have freed its captured state before/during "
+        "Pass 2 -- compute_features_chunked may have stopped calling release(), "
+        "or reverted to a plain `del batch_fn` (which a live caller-side "
+        "reference always defeats)"
+    )
+
+
 def test_chunked_pipeline_stays_within_coarse_memory_and_time_ceiling(tmp_path) -> None:
     """Tripwire, not a precise benchmark. Memory is an explicit, recurring
     design concern throughout this pipeline (chunk_size exists specifically

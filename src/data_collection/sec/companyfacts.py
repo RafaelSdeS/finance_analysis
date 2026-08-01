@@ -103,6 +103,17 @@ CONCEPT_MAP = {
 # of being allowed to anchor a cluster.
 _ATTACHED_ITEMS = {"shares_outstanding"}
 
+# Concepts whose SEC XBRL "units" key is genuinely "shares", not "USD" -- the
+# two concepts CONCEPT_MAP maps to shares_outstanding today. _facts_to_frame
+# restricts these to exactly that unit key (see its docstring): a structural
+# guard against ever admitting a fact mistakenly tagged under a different
+# unit. Deliberately NOT extended to "USD only" for the other (dollar-
+# denominated) concepts -- whether every ifrs-full foreign filer's dollar
+# facts are uniformly tagged "USD" is unverified, and the current "any unit
+# key" behavior for those is unchanged/working; scoping this to the one
+# concept class where the expected unit is unambiguous and confirmed.
+_SHARES_UNIT_CONCEPTS = {"CommonStockSharesOutstanding", "EntityCommonStockSharesOutstanding"}
+
 
 def fetch_companyfacts(cik: int) -> dict | None:
     resp = http.get(COMPANYFACTS_URL.format(cik=cik))
@@ -118,11 +129,25 @@ def _facts_to_frame(facts: dict, concept: str) -> pd.DataFrame:
     report under IFRS, tagged under a separate top-level taxonomy key that earlier
     versions of this function never looked at at all (confirmed 2026-07-28: HSBC/
     RIO/TECK/SAN each have 350-450 populated ifrs-full concepts, silently ignored).
+
+    For a shares-denominated concept (_SHARES_UNIT_CONCEPTS), only the "shares"
+    units key is accepted -- this used to iterate `units.values()` unconditionally,
+    admitting a fact under ANY unit key with no check at all. Real bug, confirmed
+    2026-07-31: at least 27 real US tickers' shares_outstanding is inflated by
+    ~800x-1,000,000x for isolated filings (e.g. BTI's FY2019 reads 2.46 quadrillion
+    instead of ~2.46 billion) -- this alone doesn't prove a wrong-unit-key origin
+    for those specific rows (root cause of the bad SEC-side value stays genuinely
+    uncertain), but it closes a real, previously-unvalidated gap either way, and
+    is paired with _reject_sequential_outliers below as a second, independent
+    layer of defense.
     """
     rows = []
+    expected_units = {"shares"} if concept in _SHARES_UNIT_CONCEPTS else None
     for taxonomy in ("us-gaap", "ifrs-full", "dei"):
         units = facts.get("facts", {}).get(taxonomy, {}).get(concept, {}).get("units", {})
-        for unit_facts in units.values():
+        for unit, unit_facts in units.items():
+            if expected_units is not None and unit not in expected_units:
+                continue
             for fact in unit_facts:
                 rows.append({**fact, "_taxonomy": taxonomy})
     if not rows:
@@ -292,6 +317,100 @@ def _resolve_item(facts: dict, concepts: list[str], annual: bool = False) -> pd.
                      .reset_index(drop=True))
 
 
+# Real stock splits/reverse-splits essentially never exceed ~10-20x in a single
+# event; every real shares_outstanding scale-corruption case measured in this
+# dataset (2026-07-31, 27 real tickers incl. BTI/YUM/LTM/PCG/WRB/CNA/...) was
+# ~800x or larger -- wide safety margin on both sides of a genuine split.
+_MAX_PLAUSIBLE_RATIO = 20.0
+
+
+def _reject_sequential_outliers(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """NaN out any `col` value that doesn't belong to the ticker's own dominant
+    order of magnitude, walking outward (both directions) from a seed picked
+    from the MAJORITY cluster -- never blindly the chronologically-first
+    value. Adds a boolean f"{col}_rejected_outlier" flag column -- a rejected
+    value becomes NaN, never a guessed/reconstructed number (this repo's own
+    convention, see loaders.load_dividends's implausible value_per_share
+    drop-and-log).
+
+    Real bug this guards against, confirmed 2026-07-31: at least 27 real US
+    tickers have one or more SEC XBRL shares_outstanding facts inflated by
+    ~800x-1,000,000x relative to that same ticker's own other filings (e.g.
+    BTI's FY2019 reads 2.46 quadrillion instead of ~2.46 billion), corrupting
+    market_cap and every ratio derived from it downstream.
+
+    A single forward-only pass comparing each value only to the LAST ACCEPTED
+    one (not merely the previous raw value -- one ticker, LTM, has been wrong
+    for 4 CONSECUTIVE fiscal years, so a rejected value must never become the
+    new baseline) turned out to have its own real failure mode, found the hard
+    way on a live recollection: CCI and TFC's OWN FIRST-EVER XBRL-era values
+    (2008-2009, when this tier begins) are themselves the corrupted ones. A
+    naive forward walk anchors on that first (bad) value and then rejects
+    every one of the ~67 genuinely correct quarters that follow it, because
+    each looks "implausible" relative to the wrong baseline -- turning a
+    2-row bug into a 67-row one. Fixed by seeding the walk from the ticker's
+    MAJORITY magnitude cluster (values grouped by rounded log10) instead of
+    index 0, then walking forward from the seed AND separately backward from
+    the seed (two independent last-accepted trackers) -- correctly flags an
+    isolated bad quarter surrounded by good ones (BTI/YUM-shaped), a
+    persistent bad run following good history (LTM-shaped, walking forward
+    from a seed in the good cluster), AND a persistent bad run at the START of
+    history followed by good data (CCI/TFC-shaped, walking backward from a
+    seed in the good cluster now correctly flags the early bad values instead
+    of the good majority).
+
+    Generic over `col` rather than hardcoded to shares_outstanding: applies to
+    every current/future member of _ATTACHED_ITEMS uniformly (see its caller),
+    not just today's one member. Deliberately NOT applied to flow/dollar
+    concepts (net_income, equity, total_assets, ...) -- those legitimately
+    have far higher period-over-period volatility for smaller/cyclical/growth
+    companies and would need a fundamentally different plausibility model
+    (relative to a slower-moving anchor, not a fixed ratio threshold); a
+    follow-up opportunity, not attempted here.
+
+    Known, accepted limitation: an exact tie in cluster SIZE (e.g. LTM's real
+    4-good/4-bad split) has no principled winner from magnitude alone -- the
+    tiebreak (earliest-occurring cluster wins) is deterministic but not
+    guaranteed semantically correct. Rare; not otherwise observed across the
+    27 real cases this was built against. A single ticker with only ONE ever
+    value has no basis to judge plausibility either way and is kept as-is.
+    """
+    df = df.reset_index(drop=True)
+    vals = df[col]
+    rejected = pd.Series(False, index=df.index)
+    rejected[vals.notna() & (vals <= 0)] = True
+
+    valid_idx = vals[vals.notna() & (vals > 0)].index
+    if len(valid_idx) > 1:
+        buckets = np.log10(vals[valid_idx]).round().astype(int)
+        counts = buckets.value_counts()
+        candidates = counts[counts == counts.max()].index
+        # tie-break: the candidate cluster whose earliest member is
+        # chronologically first (buckets' index is already chronological --
+        # df was end-sorted and reset to a plain RangeIndex before this point)
+        majority_bucket = min(candidates, key=lambda b: (buckets == b).idxmax())
+        majority_idx = list(buckets[buckets == majority_bucket].index)
+        seed = majority_idx[0]
+        seed_pos = list(valid_idx).index(seed)
+
+        def _walk(order):
+            last_good = vals[seed]
+            for i in order:
+                val = vals[i]
+                ratio = val / last_good
+                if ratio > _MAX_PLAUSIBLE_RATIO or ratio < 1 / _MAX_PLAUSIBLE_RATIO:
+                    rejected.at[i] = True
+                else:
+                    last_good = val
+
+        _walk(valid_idx[seed_pos + 1:])    # forward from the seed
+        _walk(valid_idx[:seed_pos][::-1])  # backward from the seed
+
+    df[f"{col}_rejected_outlier"] = rejected
+    df.loc[rejected, col] = np.nan
+    return df
+
+
 _CLUSTER_TOL_DAYS = 10  # real quarters are ~90 days apart -- 9x margin below that
 
 
@@ -370,9 +489,11 @@ def extract_line_items(facts: dict) -> pd.DataFrame:
     # Attached items (shares_outstanding): nearest-match onto the real period
     # grid rather than joined on exact/clustered end -- their own `end` is a
     # different kind of date entirely (see _ATTACHED_ITEMS), not a competing
-    # fiscal quarter.
+    # fiscal quarter. Outlier-reject BEFORE the nearest-match attach, on the
+    # item's own true chronological sequence (see _reject_sequential_outliers).
     for item, df in attached_items.items():
         df = df.sort_values("end")
+        df = _reject_sequential_outliers(df, item)
         out = pd.merge_asof(out.sort_values("end"), df, on="end",
                              direction="nearest", tolerance=pd.Timedelta(days=45))
 

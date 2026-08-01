@@ -59,6 +59,17 @@ def _facts(concept_facts: dict, taxonomy="us-gaap", unit="USD"):
     return {"facts": {taxonomy: {c: {"units": {unit: facts}} for c, facts in concept_facts.items()}}}
 
 
+def _merge_facts(*facts_dicts):
+    """Merge multiple _facts()-shaped dicts (e.g. different taxonomies/units in
+    one fixture -- needed once shares_outstanding concepts genuinely require
+    unit="shares" while other concepts in the same test still want unit="USD")."""
+    merged = {"facts": {}}
+    for fd in facts_dicts:
+        for taxonomy, concepts in fd["facts"].items():
+            merged["facts"].setdefault(taxonomy, {}).update(concepts)
+    return merged
+
+
 def test_as_first_reported_takes_earliest_filing():
     # Mirrors the real AAPL FY2008 case (values match exactly), restated a year later.
     # Quarterly (~90-day) duration -- as_first_reported now also applies _quarterly_only,
@@ -189,10 +200,15 @@ def test_shares_outstanding_does_not_fragment_periods():
     # on Coca-Cola, where it floats ~3 weeks from the real quarter end. Treating it
     # as a period-anchor (the original bug) created a spurious extra row every
     # quarter; it must instead attach to the nearest real quarter via nearest-match.
-    facts = _facts({
-        "NetIncomeLoss": [_fact("2009-04-04", "2009-07-03", 2_037_000_000, "2009-07-30")],
-        "EntityCommonStockSharesOutstanding": [_fact(None, "2009-07-24", 2_313_000_000, "2009-07-30")],
-    })
+    # unit="shares" (not the _facts() default "USD") -- confirmed against the real
+    # live SEC API (AAPL, 2026-07-31) that shares_outstanding concepts are always
+    # tagged under "shares"; _facts_to_frame now only accepts that unit for these
+    # two concepts (see test_facts_to_frame_rejects_wrong_unit_key_for_shares_concepts).
+    facts = _merge_facts(
+        _facts({"NetIncomeLoss": [_fact("2009-04-04", "2009-07-03", 2_037_000_000, "2009-07-30")]}),
+        _facts({"EntityCommonStockSharesOutstanding":
+                [_fact(None, "2009-07-24", 2_313_000_000, "2009-07-30")]}, unit="shares"),
+    )
     li = companyfacts.extract_line_items(facts)
     assert len(li) == 1, (
         f"shares_outstanding's cover-page date (21 days from the real quarter end) "
@@ -201,6 +217,127 @@ def test_shares_outstanding_does_not_fragment_periods():
     assert row["net_income"] == 2_037_000_000.0
     assert row["shares_outstanding"] == 2_313_000_000.0
     print("OK: shares_outstanding attaches via nearest-match instead of fragmenting periods")
+
+
+def test_facts_to_frame_rejects_wrong_unit_key_for_shares_concepts():
+    # Real bug: _facts_to_frame used to iterate ANY unit key with no check at
+    # all -- a shares_outstanding fact mistakenly tagged under a non-"shares"
+    # unit (here "USD", the _facts() default) would be silently admitted as if
+    # it were a real share count.
+    facts = _facts({"CommonStockSharesOutstanding": [
+        _fact(None, "2020-12-31", 999_000_000_000, "2021-02-01"),
+    ]}, unit="USD")
+    df = companyfacts._facts_to_frame(facts, "CommonStockSharesOutstanding")
+    assert df.empty, (
+        f"a shares_outstanding fact tagged under a non-'shares' unit key must be dropped, got {len(df)} rows")
+    print("OK: _facts_to_frame rejects a shares-concept fact tagged under the wrong unit key")
+
+
+def test_reject_sequential_outliers_flags_isolated_bad_quarter():
+    # Real bug, confirmed 2026-07-31: BTI's real shares_outstanding is
+    # ~2.456 BILLION every fiscal year except FY2019, which reads
+    # 2,456,520,738,000,000 -- ~1,000,000x too big, surrounded by otherwise-
+    # normal values on both sides.
+    df = pd.DataFrame({
+        "end": pd.to_datetime(["2018-12-31", "2019-12-31", "2020-12-31", "2021-12-31"]),
+        "shares_outstanding": [2_456_415_884, 2_456_520_738_000_000, 2_456_591_597, 2_456_617_788],
+    })
+    out = companyfacts._reject_sequential_outliers(df, "shares_outstanding")
+    assert out["shares_outstanding_rejected_outlier"].tolist() == [False, True, False, False], (
+        "only the isolated 1,000,000x-inflated quarter must be rejected")
+    assert pd.isna(out.loc[1, "shares_outstanding"]), "a rejected value must become NaN, not a guessed number"
+    assert out.loc[0, "shares_outstanding"] == 2_456_415_884, "surrounding normal values must be left untouched"
+    print("OK: _reject_sequential_outliers flags an isolated bad quarter, leaves neighbors alone")
+
+
+def test_reject_sequential_outliers_does_not_anchor_on_a_bad_first_value():
+    # Real regression, found the hard way on a live recollection (2026-08-01):
+    # CCI's and TFC's own FIRST-EVER XBRL-era shares_outstanding values
+    # (2008-2009, when this tier begins) are themselves the corrupted ones --
+    # confirmed on CCI: 288,464,431,000 (2008-12-31) and 290,792,627,000
+    # (2009-06-30), then ~67 genuinely correct ~2.9e8-scale quarters follow.
+    # A naive forward-only walk anchors on the bad first value and rejects
+    # every good quarter that follows it (confirmed: turned CCI's real 2-row
+    # bug into a 67-row wipeout on the actual recollected data). The seed must
+    # come from the MAJORITY magnitude cluster (here, the 5 good quarters),
+    # not index 0 -- walking backward from that seed then correctly flags the
+    # 2 early bad values instead.
+    df = pd.DataFrame({
+        "end": pd.to_datetime(["2008-12-31", "2009-06-30", "2009-09-30", "2009-12-31",
+                                "2010-03-31", "2010-06-30", "2010-09-30"]),
+        "shares_outstanding": [288_464_431_000, 290_792_627_000,
+                                289_000_000, 289_500_000, 290_100_000, 290_800_000, 291_200_000],
+    })
+    out = companyfacts._reject_sequential_outliers(df, "shares_outstanding")
+    assert out["shares_outstanding_rejected_outlier"].tolist() == [
+        True, True, False, False, False, False, False
+    ], "the 2 bad FIRST-EVER values must be rejected, not the 5 good quarters that follow them"
+    assert out.loc[:1, "shares_outstanding"].isna().all(), "both early bad values must become NaN"
+    assert out.loc[2:, "shares_outstanding"].notna().all(), "all 5 genuinely good quarters must survive untouched"
+    print("OK: _reject_sequential_outliers seeds on the majority cluster, "
+          "not blindly the chronologically-first value")
+
+
+def test_reject_sequential_outliers_does_not_reanchor_on_a_persistent_bad_run():
+    # Real bug this guards against: LTM's shares_outstanding has been wrong for
+    # 4 CONSECUTIVE fiscal years (2022-2025, ~1,000,000x too big), not just one
+    # isolated quarter. A guard that compares only to the immediately PRECEDING
+    # raw value would catch the first bad transition (2021->2022) but then treat
+    # 2023/2024/2025 as "consistent" with 2022's already-bad value and silently
+    # accept them. This must instead keep comparing against the last GOOD
+    # (2021) value throughout, rejecting every one of the 4 bad years.
+    df = pd.DataFrame({
+        "end": pd.to_datetime(["2018-12-31", "2019-12-31", "2020-12-31", "2021-12-31",
+                                "2022-12-31", "2023-12-31", "2024-12-31", "2025-12-31"]),
+        "shares_outstanding": [606_407_693, 606_407_693, 606_407_693, 606_407_693,
+                                605_231_854_725, 604_437_877_587, 604_437_877_587, 574_215_983_709],
+    })
+    out = companyfacts._reject_sequential_outliers(df, "shares_outstanding")
+    assert out["shares_outstanding_rejected_outlier"].tolist() == [
+        False, False, False, False, True, True, True, True
+    ], "all 4 persistently-bad years must be rejected, not just the first bad transition"
+    assert out.loc[4:, "shares_outstanding"].isna().all(), "every rejected year must become NaN"
+    assert out.loc[:3, "shares_outstanding"].notna().all(), "the 4 genuinely good years must survive untouched"
+    print("OK: _reject_sequential_outliers never re-anchors on a rejected value -- "
+          "a multi-year persistent bad run stays rejected throughout, not just its first transition")
+
+
+def test_reject_sequential_outliers_accepts_a_plausible_large_jump():
+    # A real stock split can legitimately multiply shares_outstanding by a large
+    # factor in one period (e.g. a 10-for-1 split) -- must NOT be rejected as an
+    # outlier. _MAX_PLAUSIBLE_RATIO (20x) is set well above real-world split
+    # ratios and well below every one of the 27 real corruption cases (800x+).
+    df = pd.DataFrame({
+        "end": pd.to_datetime(["2019-12-31", "2020-12-31", "2021-12-31"]),
+        "shares_outstanding": [100_000_000, 1_000_000_000, 1_010_000_000],  # a genuine 10-for-1 split
+    })
+    out = companyfacts._reject_sequential_outliers(df, "shares_outstanding")
+    assert not out["shares_outstanding_rejected_outlier"].any(), (
+        "a plausible 10x jump (well within a real stock split's range) must not be rejected")
+    print("OK: _reject_sequential_outliers does not false-positive on a plausible large jump (e.g. a real split)")
+
+
+def test_extract_line_items_rejects_outlier_shares_outstanding_end_to_end():
+    # Wiring check: the outlier guard must actually run inside extract_line_items
+    # (via the attached-items loop), not just exist as a standalone helper.
+    facts = _merge_facts(
+        _facts({"Assets": [
+            _fact(None, "2018-12-31", 100.0, "2019-02-01"),
+            _fact(None, "2019-12-31", 105.0, "2020-02-01"),
+        ]}),
+        _facts({"CommonStockSharesOutstanding": [
+            _fact(None, "2018-12-31", 2_456_415_884, "2019-02-01"),
+            _fact(None, "2019-12-31", 2_456_520_738_000_000, "2020-02-01"),  # ~1,000,000x too big
+        ]}, unit="shares"),
+    )
+    li = companyfacts.extract_line_items(facts)
+    assert len(li) == 2
+    row_2019 = li[li["end"] == pd.Timestamp("2019-12-31")].iloc[0]
+    assert pd.isna(row_2019["shares_outstanding"]), "the inflated 2019 value must be rejected end-to-end"
+    assert bool(row_2019["shares_outstanding_rejected_outlier"]) is True
+    row_2018 = li[li["end"] == pd.Timestamp("2018-12-31")].iloc[0]
+    assert row_2018["shares_outstanding"] == 2_456_415_884, "the genuine 2018 value must survive untouched"
+    print("OK: extract_line_items rejects an implausible shares_outstanding value end-to-end")
 
 
 def test_extract_line_items_picks_up_ifrs_full_taxonomy():
@@ -316,6 +453,12 @@ if __name__ == "__main__":
     test_extract_line_items_conservative_available_date()
     test_extract_line_items_clusters_nearby_period_ends()
     test_shares_outstanding_does_not_fragment_periods()
+    test_facts_to_frame_rejects_wrong_unit_key_for_shares_concepts()
+    test_reject_sequential_outliers_flags_isolated_bad_quarter()
+    test_reject_sequential_outliers_does_not_anchor_on_a_bad_first_value()
+    test_reject_sequential_outliers_does_not_reanchor_on_a_persistent_bad_run()
+    test_reject_sequential_outliers_accepts_a_plausible_large_jump()
+    test_extract_line_items_rejects_outlier_shares_outstanding_end_to_end()
     test_extract_line_items_picks_up_ifrs_full_taxonomy()
     test_derive_q4_fills_missing_fiscal_year_end()
     test_derive_q4_skips_when_quarters_incomplete()

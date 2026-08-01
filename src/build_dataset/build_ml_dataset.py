@@ -75,7 +75,7 @@ BENCHMARK_TICKER = "BOVA11"
 # =============================================================================
 
 def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_size=150,
-                              valuation_fn=recompute_valuation_daily):
+                              valuation_fn=recompute_valuation_daily, tickers=None, batch_fn=None):
     """Three-pass, memory-bounded feature computation.
 
     `valuation_fn`: the daily valuation-ratio step run in Pass 1, defaulting
@@ -85,6 +85,20 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     price-anchored ratio to rescale in the first place (measured 0% raw
     coverage on market_cap/pl/pvp/etc., docs/US_DATASET_BUILD_PLAN.md §4.4),
     so that function computes them fresh from the daily close instead.
+
+    `tickers`/`batch_fn`: when `batch_fn` is given, Pass 1 calls
+    `batch_fn(batch_tickers)` to produce each batch instead of slicing a
+    pre-merged `dataset` (which can then be None). This exists because
+    merge_prices_and_fundamentals's own output -- the daily panel with every
+    fundamentals column forward-filled onto it -- is the actual OOM point at
+    US scale (measured ~5.9GB RSS for 800/3,134 tickers, extrapolating past
+    available RAM at full scale; the per-ticker-batch feature loop below was
+    already memory-bounded, the merge that fed it wasn't). Doing the merge
+    itself per-batch means the wide frame is never built for more than one
+    chunk_size-ticker batch at a time. `tickers` supplies the batch list
+    directly in this mode (no merged `dataset` to derive it from). Default
+    (`batch_fn=None`) is byte-identical to the original in-memory path --
+    BR's build_ml_dataset.py call is unaffected.
 
     A fully unchunked pass OOM'd in practice — the dataset's dense-numeric
     size looks like ~1.3-2GB, but clean_dataset's inf->NaN replace() makes a
@@ -118,7 +132,8 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     """
     tmp_path = output_path.with_suffix(".tmp.parquet")
 
-    tickers = dataset["ticker"].unique()
+    if tickers is None:
+        tickers = dataset["ticker"].unique()
     batches = [tickers[i:i + chunk_size] for i in range(0, len(tickers), chunk_size)]
 
     print()
@@ -130,7 +145,10 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     writer = None
     try:
         for batch_idx, batch_tickers in enumerate(batches, 1):
-            batch = dataset[dataset["ticker"].isin(batch_tickers)].copy()
+            if batch_fn is not None:
+                batch = batch_fn(batch_tickers)
+            else:
+                batch = dataset[dataset["ticker"].isin(batch_tickers)].copy()
             print(f"Batch {batch_idx}/{len(batches)}: {len(batch_tickers)} tickers, {len(batch)} rows")
 
             batch = compute_price_features(batch)
@@ -154,6 +172,25 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     finally:
         if writer is not None:
             writer.close()
+
+    # Release batch_fn's captured state now, not just at function exit --
+    # Pass 2/3 never call it again. NOTE: a plain `del batch_fn` here does
+    # NOT free anything it closed over -- whatever called this function
+    # (build_us_dataset.main()) keeps its OWN reference to the same batch_fn
+    # object bound for this entire synchronous nested call (a caller's frame
+    # persists for the full duration of a call it's blocked on), so deleting
+    # only OUR copy of that reference never brings its refcount to 0
+    # (confirmed via a minimal repro before landing this). release() instead
+    # MUTATES the object's own attributes -- visible through every reference
+    # to it, caller included -- which is what actually drops the raw
+    # prices/fundamentals/company_info tables before Pass 2's full-universe
+    # frame is built. Without this they stayed resident through Pass 2/3 too
+    # (which don't need them at all) -- a real 3rd OOM in the US build
+    # (docs/US_DATASET_BUILD_PLAN.md §8.0.2 follow-up) on top of the one §8.3
+    # already fixed in Pass 2 itself. A plain callable (no `release`, e.g. a
+    # test's bare lambda) is a no-op here.
+    if batch_fn is not None:
+        getattr(batch_fn, "release", lambda: None)()
 
     print()
     print("=" * 80)

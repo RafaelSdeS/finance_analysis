@@ -421,3 +421,140 @@ and more) was marked "not investigated at all yet." Investigated and fixed.
   not the ex27 bug this section fixes. OXY shows `shares_outstanding`=-891,624,558
   for `end`=2016-03-31 in the xbrl tier — a different subsystem again, genuinely
   new, not root-caused.
+
+## 2026-07-31: xbrl-tier `shares_outstanding` inflated ~800x–1,000,000x for isolated
+## filings — FOUND (real, full-scale US Stage 2 build) + FIXED
+
+- [x] **21. `companyfacts.py`'s xbrl-tier `shares_outstanding` silently accepted a
+  fact under ANY unit key, and had no cross-period plausibility check at all —
+  FIXED 2026-07-31.** Not found by an audit pass — found in the real, first
+  full-scale `us_ml_dataset.parquet` build (2,960 tickers / 15.4M rows), via a
+  `market_cap` std (4.98e14) wildly out of line with its own p99 (3.53e11).
+  Traced to raw `shares_outstanding`: confirmed on **at least 27 real tickers**
+  (AA, AEP, BTI, CB, CBRE, CBT, CCI, CCL, CG, CNA, CNI, CNNE, CNX, DCH, EOG, HII,
+  HL, IVR, MAR, MSCI, PCG, TEX, TFC, UPWK, WRB, YUM, plus BCH/BSAC — see below)
+  — one or more isolated quarterly filings inflated by ~800x to ~1,000,000x
+  relative to that SAME ticker's own other filings. E.g. BTI's `shares_outstanding`
+  is ~2.456 billion every fiscal year except FY2019 (filed 2020-03-26), which
+  reads 2,456,520,738,000,000 (~2.46 quadrillion). Corrupts `market_cap` and
+  every ratio derived from it (`pl`, `pvp`, `p_sr`, `p_assets`, `p_ebit`,
+  `ev_ebit`, `book_to_market`, `earnings_yield`, `peg_ratio`,
+  `pvp_to_roe_ratio`, their `*_zhist_5y` variants) for every daily row where
+  the bad filing is the "current" one via `merge_asof` — and risks distorting
+  `pl_zscore_sector`/`pvp_zscore_sector` for OTHER, unaffected tickers in the
+  same sector on the same date too (a single absurd outlier inflates the
+  sector's std for that date). One ticker (**LTM**) is the worst case: not an
+  isolated quarter — wrong for every filing from 2022-12-31 through the most
+  recent 2025-12-31 (3+ consecutive years), never self-correcting.
+  **Root cause investigated, not fully resolved**: SEC's raw XBRL fact JSON
+  carries no `decimals`/`scale` field (unlike EX-27's declared `<MULTIPLIER>`,
+  bug #20 above — not directly reusable, XBRL has no equivalent), so `val` is
+  contractually supposed to already be final-scale; whether the bad values
+  originate from genuine filer-side XBRL tagging errors or from picking up an
+  atypical filing's context (S-1/424B/10-K/A, `form` is captured but was never
+  filtered on) remains genuinely uncertain. Two independent, defensive fixes
+  landed instead of chasing the exact upstream cause:
+  1. `_facts_to_frame` now only accepts a fact under the unit key actually
+     expected for shares-denominated concepts (`"shares"` — verified against
+     the real live SEC API, not assumed) instead of iterating any unit key
+     with no check at all. Scoped to `_SHARES_UNIT_CONCEPTS`
+     (`CommonStockSharesOutstanding`/`EntityCommonStockSharesOutstanding`)
+     only — deliberately NOT extended to enforce `"USD"` for every other
+     concept, since whether ifrs-full foreign filers' dollar facts are
+     uniformly tagged `"USD"` is unverified and their current "any unit key"
+     behavior is unchanged/working.
+  2. New `_reject_sequential_outliers(df, col)`: walks a resolved per-period
+     series chronologically and NaNs out any value whose ratio to the LAST
+     ACCEPTED value (never a rejected one) exceeds 20x either direction, or
+     that's non-positive — with a companion `{col}_rejected_outlier` boolean
+     flag (never a guessed/reconstructed value, this repo's own "flag, don't
+     fabricate" convention, same as bug #20 above and `loaders.load_dividends`'s
+     implausible-`value_per_share` drop). Comparing only against the
+     immediately PRECEDING raw value would not have been enough — LTM's 4
+     consecutive bad years would only have caught the first transition, then
+     treated each subsequent bad year as "consistent" with the previous
+     (already bad) one; never re-anchoring on a rejected value fixes this.
+     20x is well above any real stock split (rarely exceeds ~10-20x) and well
+     below every one of the 27 measured corruption ratios (800x+). Generic
+     over `_ATTACHED_ITEMS` (today: just `shares_outstanding`), not hardcoded
+     — applies automatically to any future member of that set.
+  Wired into `extract_line_items`'s attached-items loop, right before the
+  nearest-match attach onto the real period grid. `validate.py`'s
+  `validate_us_fundamentals` now also warns (not blocks) when a row has a
+  rejected value, for collection-log visibility.
+  **Deliberately out of scope**: applying the same sequential-outlier guard to
+  flow/dollar concepts (`net_income`, `equity`, `total_assets`, `net_revenue`,
+  ...) — those legitimately have far higher period-over-period volatility for
+  smaller/cyclical/growth companies and would need a fundamentally different
+  plausibility model (relative to a slower-moving anchor, not a fixed ratio
+  threshold); a follow-up opportunity, not attempted here. The same
+  "resolve a candidate concept, take `val` verbatim, no validation" extraction
+  path is structurally shared by all 13 `CONCEPT_MAP` items, so the same bug
+  CLASS is plausible for other concepts too — not confirmed/measured for any
+  of them.
+  **BCH/BSAC (Chilean bank ADRs) are a separate, unresolved, lower-confidence
+  flag, NOT fixed by the guard above**: the exact same `shares_outstanding`
+  value repeats verbatim across up to 5 consecutive fiscal years (e.g. BCH:
+  101,017,081,114 for 2018/2020/2021/2022/2023/2024, with 2019 reading exactly
+  0). Not a magnitude bug — Chilean banks genuinely have huge nominal local
+  share counts — so `_reject_sequential_outliers` correctly does NOT flag this
+  (values aren't wildly different, just suspiciously identical). Could be
+  legitimate (a static float, genuinely unchanged) or a stale-value collection
+  bug; `fundamentals.py`'s tier-combiner has no `ffill`/caching touching this
+  column (ruled out as the cause there). Left uninvestigated — flagged here so
+  it isn't rediscovered as a mystery, not bundled into this fix.
+  **Regression tests**: `tests/data_collection/test_sec_companyfacts.py` — unit-key
+  rejection, isolated-bad-quarter rejection (BTI-shaped), persistent-multi-year
+  rejection without re-anchoring (LTM-shaped, the one that would catch a
+  regression to "compare only to the immediately preceding raw value"), a
+  plausible-large-jump NOT being rejected (a real-split-shaped fixture), and an
+  end-to-end wiring check via `extract_line_items`. Existing
+  `test_shares_outstanding_does_not_fragment_periods` updated to use
+  `unit="shares"` (its old default `unit="USD"` fixture would now be rejected
+  by fix #1 above — this was itself confirmation the fix works). Full fast
+  suite green, `ruff check` clean.
+  **Not yet done: recollection.** No raw XBRL JSON is cached anywhere in this
+  pipeline (`fetch_companyfacts` re-fetches from SEC live every run) — fixing
+  the code does NOT retroactively fix `data/raw/us/fundamentals/*.parquet`.
+  Every affected ticker needs a live re-fetch, then `us_ml_dataset.parquet`
+  needs a full Stage 2 rebuild. See the commands at the end of this session's
+  summary / project memory.
+
+- [x] **21b. `_reject_sequential_outliers`'s forward-only walk had its own real
+  bug (a naive fix for #21 above would have shipped this) — FOUND (live
+  recollection, 2026-08-01) + FIXED same day.** The user ran the targeted
+  recollection for the 26 confirmed tickers + BCH/BSAC. Two of them (**CCI**,
+  **TFC**) came back with 67/81 and 68/85 rows rejected respectively — not the
+  1-3 rows expected, ~80% of their ENTIRE history. Root cause: CCI's and TFC's
+  own FIRST-EVER XBRL-era `shares_outstanding` values (2008-12-31/2009-06-30,
+  when this tier begins for them) are themselves the corrupted ones (confirmed
+  on the real recollected data: CCI reads 288,464,431,000 / 290,792,627,000 for
+  those two dates, then ~67 genuinely correct ~2.9e8-scale quarters follow). A
+  forward-only walk anchors its `last_good` on that first (bad) value and then
+  rejects every good quarter that follows — the exact "known, accepted
+  limitation" #21's implementation had already named and documented, just more
+  consequential in practice than estimated (a 2-row bug became a 67/68-row
+  wipeout, real data loss on two large, real companies' entire modern
+  history — Crown Castle and Truist Financial).
+  **Fix:** `_reject_sequential_outliers` no longer walks strictly forward from
+  index 0. It first clusters all valid values by rounded `log10` magnitude,
+  picks the MAJORITY cluster as the seed (ties broken by whichever cluster's
+  earliest member is chronologically first — LTM's real 4-good/4-bad tie,
+  verified to still resolve correctly, unchanged behavior), then walks forward
+  from the seed AND separately backward from the seed (two independent
+  last-accepted trackers). This correctly handles all three real shapes now
+  confirmed in this dataset: an isolated bad quarter surrounded by good ones
+  (BTI/YUM), a persistent bad run following good history (LTM, forward walk
+  from a seed in the good cluster), and a persistent bad run AT THE START of
+  history followed by good data (CCI/TFC, backward walk from a seed in the
+  good cluster now correctly flags the early bad values instead of the good
+  majority).
+  **Regression test**: `test_reject_sequential_outliers_does_not_anchor_on_a_bad_first_value`
+  (CCI-shaped fixture, using the real measured values) — fails against the
+  original forward-only implementation, confirming it's a genuine regression
+  guard. All prior tests (including the LTM tie case) still pass unchanged.
+  Full fast suite green, `ruff check` clean.
+  **Recollection must be re-run**: the data currently on disk for the 28
+  targeted tickers reflects the BUGGY first pass (CCI/TFC's ~67/68 good rows
+  wrongly NaN'd) — re-running the same targeted recollection command
+  (idempotent full overwrite, cheap, seconds) with the fixed code corrects it.

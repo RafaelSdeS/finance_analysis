@@ -312,5 +312,60 @@ def test_fill_cagr_columns_anchor_month_none_fixes_non_december_fye():
     assert np.allclose(fixed["cagr_earnings_5y_final"].iloc[20:], 5.0, atol=0.5)
 
 
+# =============================================================================
+# PER-BATCH MERGE (OOM fix -- docs/US_DATASET_BUILD_PLAN.md §8.0.1 follow-up)
+# =============================================================================
+
+def test_make_merge_batch_fn_matches_unbatched_merge(tmp_path, monkeypatch) -> None:
+    """make_merge_batch_fn scopes the 4 merges (prices+fundamentals,
+    company_info, macro, dividends) to one ticker-batch at a time instead of
+    the whole universe, to avoid ever holding the full wide merged frame in
+    memory. Running it batch-by-batch must produce the exact same rows as
+    calling the 4 merges once on the whole universe -- none of them are
+    cross-sectional, so scoping to a batch must be a pure memory optimization,
+    never a behavior change."""
+    monkeypatch.setattr(us, "US_MACRO_DIR", tmp_path)
+    dates = pd.bdate_range("2024-01-01", periods=60)
+    pd.DataFrame({"reference_date": dates, "risk_free_3m": [5.0] * 60}).to_parquet(
+        tmp_path / "risk_free_3m.parquet"
+    )
+    pd.DataFrame({"reference_date": dates[:1], "cpi_sa": [300.0]}).to_parquet(
+        tmp_path / "cpi_sa.parquet"
+    )
+
+    tickers = ["AAA", "BBB", "CCC"]
+    prices = pd.concat([
+        pd.DataFrame({"ticker": t, "trade_date": dates, "close": 10.0 + i}) for i, t in enumerate(tickers)
+    ], ignore_index=True)
+    fundamentals = pd.DataFrame({
+        "ticker": tickers,
+        "reference_date": [dates[0]] * 3,
+        "fundamentals_available_date": [dates[0]] * 3,
+        "net_income": [1.0, 2.0, 3.0],
+    })
+    company_info = pd.DataFrame({
+        "ticker": tickers, "cik": ["1", "2", "3"], "sic": [3571, 6021, 2086],
+        "sic_description": ["a", "b", "c"],
+    })
+    dividends = pd.DataFrame({
+        "ticker": ["AAA"], "ex_date": [dates[5]], "value_per_share": [0.1],
+    })
+
+    from src.build_dataset.merge import merge_dividends, merge_prices_and_fundamentals
+
+    unbatched = merge_prices_and_fundamentals(prices, fundamentals)
+    unbatched = us.merge_company_info_us(unbatched, company_info)
+    unbatched = us.merge_macro_us(unbatched)
+    unbatched = merge_dividends(unbatched, dividends)
+
+    batch_fn = us.make_merge_batch_fn(prices, fundamentals, company_info, dividends)
+    batched = pd.concat([batch_fn(["AAA", "BBB"]), batch_fn(["CCC"])], ignore_index=True)
+
+    key = ["ticker", "trade_date"]
+    unbatched = unbatched.set_index(key).sort_index()[sorted(unbatched.columns.difference(key))]
+    batched = batched.set_index(key).sort_index()[sorted(batched.columns.difference(key))]
+    pd.testing.assert_frame_equal(unbatched, batched)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
