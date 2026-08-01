@@ -299,6 +299,25 @@ def test_validate_us_fundamentals_warns_on_identity_violations():
     print("OK: validate_us_fundamentals flags unit-invariant identity violations")
 
 
+def test_validate_us_fundamentals_warns_on_period_schema_issues():
+    # docs/US_QUARTERLY_BACKFILL_PLAN.md's period_months/flows_defined schema
+    # -- warn-only visibility, same policy as every other check in this gate.
+    bad = pd.DataFrame({
+        "end": pd.to_datetime(["2020-03-31", "2020-12-31", "2021-03-31"]),
+        "period_months": pd.array([3, 12, None], dtype="Int8"),   # mixes 3 & 12, one missing
+        "net_revenue": [100.0, -50.0, 90.0],                       # one negative
+        "flows_defined": pd.array([1, 1, 0], dtype="int8"),        # one unsafe reconstruction
+    })
+    r = validate.validate_us_fundamentals(bad)
+    assert r.passed, "row-level anomalies must warn, not block the write"
+    joined = " ".join(r.warnings)
+    assert "missing period_months" in joined
+    assert "mixes quarterly and annual periods" in joined
+    assert "negative net_revenue" in joined
+    assert "flows_defined=0" in joined
+    print("OK: validate_us_fundamentals flags period_months/net_revenue/flows_defined issues")
+
+
 def test_collect_fundamentals_us_logs_validation_warnings():
     # Confirms the gate is actually wired into the write path, not just
     # defined and unused.
@@ -379,5 +398,6 @@ if __name__ == "__main__":
     test_implausibly_tiny_fundamental_is_rejected_not_left_in()
     test_validate_us_fundamentals_warns_on_impossible_values()
     test_validate_us_fundamentals_warns_on_identity_violations()
+    test_validate_us_fundamentals_warns_on_period_schema_issues()
     test_collect_fundamentals_us_logs_validation_warnings()
     test_skip_existing_resumes_past_already_collected_tickers()

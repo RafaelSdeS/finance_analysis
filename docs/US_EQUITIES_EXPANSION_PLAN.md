@@ -1,5 +1,15 @@
 # US Equities Expansion — Full Plan
 
+**Superseded in part (2026-08-01):** this doc's Phase 7 framing — "Item 6 chaining is the
+ceiling for 2001–2006, annual only" — turned out to be a scoping choice, not a hard SEC
+limit. `docs/US_QUARTERLY_BACKFILL_PLAN.md` extends true quarterly resolution back to 1995
+(EX-27 exhibits already carry `3-MOS`/`6-MOS`/`9-MOS` `PERIOD-TYPE`, nearly free) and to
+2001–2006 (10-Q HTML statements parse the same way Item 6 tables do). It also fixes a
+pre-existing schema defect this doc's tiering table doesn't mention: nothing in the output
+distinguishes quarterly flow magnitudes (xbrl) from annual ones (ex27/item6) in the same
+columns. Read that doc for the current state of pre-2007 fundamentals; treat §2.0, §2.1,
+and §3.4 below as historical context for *why* the annual-only version was built first.
+
 **Status (2026-07-28, updated):** Phases 1, 2, 3, 4, 5, 7 all have working, real-data-verified
 code (`sec/{http,universe,crosswalk,companyfacts,fds,item6,fundamentals}.py`, `fred_collectors.py`,
 US price collection via `yf_collectors.py`). A first full-universe attempt (all ~10,432

@@ -427,6 +427,13 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.DataFrame(rows)
     df["cik"] = cik
+    # item6 is annual by construction (Item 6 "Selected Financial Data" is a
+    # 10-K-only disclosure, no quarterly equivalent) -- constant, never derived.
+    # See docs/US_QUARTERLY_BACKFILL_PLAN.md for the period_months/flows_*
+    # convention shared across all 4 fundamentals tiers.
+    df["period_months"] = pd.array([12] * len(df), dtype="Int8")
+    df["flows_derived"] = pd.Series(0, index=df.index, dtype="int8")
+    df["flows_defined"] = pd.Series(1, index=df.index, dtype="int8")
     return (df.sort_values("fundamentals_available_date")
               .drop_duplicates(subset="fiscal_year", keep="first")
               .sort_values("fiscal_year")

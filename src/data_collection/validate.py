@@ -150,6 +150,33 @@ def validate_us_fundamentals(df: pd.DataFrame) -> ValidationResult:
         _identity_warn(df["cash"] > df["total_assets"], "cash > total_assets")
     if {"current_assets", "total_assets"} <= set(cols):
         _identity_warn(df["current_assets"] > df["total_assets"], "current_assets > total_assets")
+
+    # period_months/flows_derived/flows_defined visibility -- see
+    # docs/US_QUARTERLY_BACKFILL_PLAN.md. Warn-only: a missing/odd value here
+    # is informative (e.g. an old build predating this schema, or a fiscal
+    # year item6 couldn't derive a Q4 for), never a reason to block the write.
+    if "period_months" in cols:
+        bad = ~df["period_months"].isin([3, 6, 9, 12]) & df["period_months"].notna()
+        if bad.any():
+            r.warn(f"{int(bad.sum())} row(s) with a period_months value outside {{3,6,9,12}}")
+        n_missing = df["period_months"].isna().sum()
+        if n_missing:
+            r.warn(f"{int(n_missing)} row(s) missing period_months")
+        mixed = set(df["period_months"].dropna().unique())
+        if {3, 12} <= mixed:
+            n3 = int((df["period_months"] == 3).sum())
+            n12 = int((df["period_months"] == 12).sum())
+            r.warn(f"mixes quarterly and annual periods in the same file "
+                   f"({n3} row(s) at period_months=3, {n12} at =12)")
+    if "net_revenue" in cols:
+        neg = df["net_revenue"] < 0
+        if neg.any():
+            r.warn(f"{int(neg.sum())} row(s) with negative net_revenue")
+    if "flows_defined" in cols:
+        n_undefined = int((df["flows_defined"] == 0).sum())
+        if n_undefined:
+            r.warn(f"{n_undefined} row(s) with flows_defined=0 "
+                   f"(YTD reconstruction was unsafe -- flows NaN'd, not guessed)")
     return r
 
 

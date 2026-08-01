@@ -275,7 +275,8 @@ def _derive_q4(quarterly: pd.DataFrame, annual: pd.DataFrame) -> pd.DataFrame:
         if len(nested) != 3:
             continue
         rows.append({"start": nested["end"].max(), "end": fy["end"],
-                     "val": fy["val"] - nested["val"].sum(), "filed": fy["filed"]})
+                     "val": fy["val"] - nested["val"].sum(), "filed": fy["filed"],
+                     "_derived": True})
     if not rows:
         return quarterly
     derived = pd.DataFrame(rows)
@@ -288,6 +289,96 @@ def _derive_q4(quarterly: pd.DataFrame, annual: pd.DataFrame) -> pd.DataFrame:
 # shares_outstanding -- are as-of-a-date snapshots, not additive across
 # quarters, so deriving a "Q4" for them the same way would be meaningless.
 _FLOW_ITEMS = {"net_revenue", "net_income", "ebit", "gross_profit_reported", "cashflow_ops", "capex"}
+
+_FYE_TOLERANCE_DAYS = 20  # 52/53-week retail calendars can drift the FYE anchor by ~1-2 weeks
+
+
+def ytd_to_discrete(df: pd.DataFrame, flow_cols: list[str] | None = None) -> pd.DataFrame:
+    """Cumulative year-to-date flow figures (EX-27's 3/6/9/12-MOS exhibits, or a
+    10-Q's YTD-only cash-flow statement) -> discrete ~3-month figures, via
+    consecutive differencing within a fiscal year. Shared by the ex27 and tenq
+    tiers -- see docs/US_QUARTERLY_BACKFILL_PLAN.md.
+
+    Requires `df` to carry `period_months` (3/6/9/12) and `end`, one row per
+    period. Instant (balance-sheet) columns in `flow_cols` are never present by
+    construction (caller passes only its own flow-item names) and everything
+    else in `df` passes through untouched.
+
+    Never guesses: a period whose reconstruction isn't safe gets its flow
+    columns NaN'd and `flows_defined=0`, mirroring this repo's existing
+    informative-NaN convention (features.py's cagr_earnings_defined, merge.py's
+    has_dividends) rather than shipping a possibly-wrong number. Differences
+    are always taken against the RAW YTD row two periods back, never against an
+    already-differenced value -- one missing link costs only the quarters that
+    touch it (e.g. a missing Q1: Q2 is unrecoverable, but Q3 = raw9mo-raw6mo
+    and Q4 = raw12mo-raw9mo both still reconstruct fine).
+    """
+    if df.empty:
+        return df
+    if "period_months" not in df.columns:
+        raise ValueError("ytd_to_discrete requires a period_months column")
+    flow_cols = ([c for c in _FLOW_ITEMS if c in df.columns] if flow_cols is None
+                 else [c for c in flow_cols if c in df.columns])
+
+    df = df.sort_values("end").reset_index(drop=True)
+    months = df["period_months"]
+    end_dt = pd.to_datetime(df["end"])
+    implied_start = pd.Series(
+        [e - pd.DateOffset(months=int(m)) if pd.notna(m) else pd.NaT for e, m in zip(end_dt, months)],
+        index=df.index)
+
+    # Fiscal-year grouping, robust to an FYE change mid-history: reset on the
+    # normal 3->6->9->12->3 cycle rollover, OR when this row's implied start
+    # has drifted too far from the group's own anchor (a same-direction but
+    # differently-anchored YTD sequence a plain "months resets" check can't see).
+    group = np.zeros(len(df), dtype=int)
+    gid, group_start = 0, implied_start.iloc[0]
+    for i in range(1, len(df)):
+        m, prev_m, s = months.iloc[i], months.iloc[i - 1], implied_start.iloc[i]
+        reset = pd.isna(m) or pd.isna(prev_m) or m <= prev_m
+        drift = pd.isna(s) or pd.isna(group_start) or abs((s - group_start).days) > _FYE_TOLERANCE_DAYS
+        if reset or drift:
+            gid += 1
+            group_start = s
+        group[i] = gid
+
+    flows_defined = pd.Series(1, index=df.index, dtype="int8")
+    flows_derived = pd.Series(0, index=df.index, dtype="int8")
+    out_flows = df[flow_cols].copy()
+
+    for _, idx in pd.Series(group, index=df.index).groupby(group).groups.items():
+        idx = list(idx)
+        first = idx[0]
+        if months.loc[first] != 3:
+            out_flows.loc[first, :] = np.nan
+            flows_defined.loc[first] = 0
+        prev_idx = first
+        for cur in idx[1:]:
+            step = months.loc[cur] - months.loc[prev_idx]
+            ok = (not pd.isna(step)) and step == 3
+            if ok:
+                diff = df.loc[cur, flow_cols] - df.loc[prev_idx, flow_cols]
+                # Negative YTD-over-YTD revenue is the direct signature of a
+                # restatement-basis mismatch (this quarter's YTD figure rests
+                # on a different restated basis than the prior filing's) --
+                # NaN rather than ship a wrong number. net_income is NOT
+                # sign-checked: a genuine loss quarter must survive.
+                if "net_revenue" in flow_cols and pd.notna(diff.get("net_revenue")) and diff["net_revenue"] < 0:
+                    ok = False
+            if ok:
+                out_flows.loc[cur, :] = diff.values
+                flows_derived.loc[cur] = 1
+            else:
+                out_flows.loc[cur, :] = np.nan
+                flows_defined.loc[cur] = 0
+            prev_idx = cur  # always the RAW row, never the just-computed discrete value
+
+    result = df.drop(columns=flow_cols).copy()
+    result[flow_cols] = out_flows
+    result["flows_defined"] = flows_defined
+    result["flows_derived"] = flows_derived
+    result["period_months"] = pd.array([3] * len(result), dtype="Int8")
+    return result.sort_values("end").reset_index(drop=True)
 
 
 def _resolve_item(facts: dict, concepts: list[str], annual: bool = False) -> pd.DataFrame:
@@ -443,6 +534,27 @@ def cluster_period_ends(dates) -> dict:
     return {d: c[len(c) // 2] for c in clusters for d in c}
 
 
+_LEGAL_PERIOD_MONTHS = np.array([3, 6, 9, 12])
+
+
+def _period_months(start: pd.Series, end: pd.Series) -> pd.Series:
+    """Period length in months implied by (end - start), snapped to the nearest
+    SEC-legal length (3/6/9/12) rather than a blind round() -- real quarters vary
+    +-10 days from 91 (52/53-week retail calendars), which a plain round() can
+    misclassify at the edges of _quarterly_only's 60-100 day admission window.
+    Distinguishes quarterly flow magnitudes from annual ones in the same
+    columns; see docs/US_QUARTERLY_BACKFILL_PLAN.md."""
+    idx = start.index if hasattr(start, "index") else end.index
+    months = (pd.to_datetime(end, errors="coerce") - pd.to_datetime(start, errors="coerce")).dt.days / 30.44
+    result = pd.Series(pd.NA, index=idx, dtype="Int8")
+    valid = months.notna()
+    if valid.any():
+        m = months[valid].to_numpy()
+        snap = np.abs(m[:, None] - _LEGAL_PERIOD_MONTHS[None, :]).argmin(axis=1)
+        result.loc[valid] = _LEGAL_PERIOD_MONTHS[snap]
+    return result
+
+
 def extract_line_items(facts: dict) -> pd.DataFrame:
     """One row per fiscal quarter (period-end dates clustered via
     cluster_period_ends, not merged on exact equality), every CONCEPT_MAP line
@@ -460,9 +572,23 @@ def extract_line_items(facts: dict) -> pd.DataFrame:
         df = _resolve_item(facts, concepts)
         if item in _FLOW_ITEMS and not df.empty:
             df = _derive_q4(df, _resolve_item(facts, concepts, annual=True))
-        if not df.empty:
-            resolved[item] = df.rename(columns={"val": item, "filed": f"{item}_filed"})[
-                ["end", item, f"{item}_filed"]]
+        if df.empty:
+            continue
+        df = df.rename(columns={"val": item, "filed": f"{item}_filed"})
+        keep = ["end", item, f"{item}_filed"]
+        if item in _FLOW_ITEMS:
+            # Per-item period length + derived-flag, carried through the merge
+            # below and collapsed to one row-level period_months/flows_derived
+            # pair afterward -- see docs/US_QUARTERLY_BACKFILL_PLAN.md.
+            start = df["start"] if "start" in df.columns else pd.Series(pd.NaT, index=df.index)
+            df[f"{item}_period_months"] = _period_months(start, df["end"])
+            # NaN-safe equality (not fillna+astype, which pandas warns is a
+            # deprecated silent downcast on this mixed object-dtype column):
+            # NaN == True evaluates False, exactly the "not derived" default wanted.
+            df[f"{item}_derived"] = (df["_derived"] == True) if "_derived" in df.columns \
+                else pd.Series(False, index=df.index)  # noqa: E712
+            keep += [f"{item}_period_months", f"{item}_derived"]
+        resolved[item] = df[keep]
     if not resolved:
         return pd.DataFrame()
 
@@ -485,6 +611,23 @@ def extract_line_items(facts: dict) -> pd.DataFrame:
         df = df.drop_duplicates(subset="end", keep="first")
         out = df if out is None else out.merge(df, on="end", how="outer")
     out = out.sort_values("end").reset_index(drop=True)
+
+    # Row-level period_months (median across flow items agreeing on this
+    # cluster's period -- a single mistagged item shouldn't swing the whole
+    # row) + flows_derived (true if ANY flow item on this row came from
+    # _derive_q4's subtraction, not a directly filed fact). xbrl never NaNs a
+    # flow for being "unsafe to reconstruct" (_derive_q4 only fires when
+    # exactly 3 quarters nest safely) -- so flows_defined is always 1 here;
+    # it earns its keep on the ex27/tenq tiers, which do attempt and can
+    # reject risky reconstructions (see companyfacts.ytd_to_discrete).
+    pm_cols = [c for c in out.columns if c.endswith("_period_months")]
+    derived_cols = [c for c in out.columns if c.endswith("_derived")]
+    out["period_months"] = (out[pm_cols].median(axis=1, skipna=True).round().astype("Int8")
+                             if pm_cols else pd.Series(pd.NA, index=out.index, dtype="Int8"))
+    out["flows_derived"] = (out[derived_cols].any(axis=1).astype("int8")
+                             if derived_cols else pd.Series(0, index=out.index, dtype="int8"))
+    out["flows_defined"] = pd.Series(1, index=out.index, dtype="int8")
+    out = out.drop(columns=pm_cols + derived_cols)
 
     # Attached items (shares_outstanding): nearest-match onto the real period
     # grid rather than joined on exact/clustered end -- their own `end` is a

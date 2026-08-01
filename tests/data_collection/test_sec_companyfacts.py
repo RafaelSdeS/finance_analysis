@@ -439,7 +439,108 @@ def test_extract_line_items_derives_q4_and_clusters_with_instant_concepts():
     q4 = li[li["end"] == pd.Timestamp("2020-12-31")].iloc[0]
     assert q4["net_income"] == 130.0, "Q4 net_income must be derived, not left NaN"
     assert q4["total_assets"] == 1200.0, "derived Q4 row must still carry the real instant-concept value"
+    assert q4["period_months"] == 3, "derived Q4 describes a discrete ~3-month period"
+    assert q4["flows_derived"] == 1, "Q4 came from FY-(Q1+Q2+Q3), must be flagged derived"
+    q1 = li[li["end"] == pd.Timestamp("2020-03-31")].iloc[0]
+    assert q1["period_months"] == 3 and q1["flows_derived"] == 0, \
+        "a directly-filed quarterly fact is not derived"
     print("OK: extract_line_items derives Q4 for flow items and clusters it with instant concepts")
+
+
+def test_period_months_ifrs_full_is_annual_not_hardcoded_quarterly():
+    # ifrs-full rows live in the "quarterly" tier (_quarterly_only exempts them,
+    # since foreign private issuers never file quarterly) but are genuinely
+    # 12-month periods -- period_months must be DERIVED from (end-start), not
+    # assumed 3 just because the row survived _quarterly_only's filter.
+    facts = _facts({
+        "Revenue": [_fact("2023-01-01", "2023-12-31", 50_000_000_000.0, "2024-02-15")],
+        "ProfitLoss": [_fact("2023-01-01", "2023-12-31", 5_000_000_000.0, "2024-02-15")],
+        "Assets": [_fact(None, "2023-12-31", 300_000_000_000.0, "2024-02-15")],
+    }, taxonomy="ifrs-full")
+    li = companyfacts.extract_line_items(facts)
+    assert li.iloc[0]["period_months"] == 12, \
+        f"ifrs-full full-year fact must read period_months=12, got {li.iloc[0]['period_months']}"
+    print("OK: period_months derives 12 for an ifrs-full annual fact, not a hardcoded 3")
+
+
+def test_ytd_to_discrete_reconciles_to_real_filing():
+    # Real EX-27 tags, CIK 1000366 FY1999 (fetched live from EDGAR 2026-08-01):
+    # 3-MOS/6-MOS/9-MOS/YEAR net_revenue = 121701/275712/428558/576997,
+    # net_income = 9212/18369/36739/32563, total_assets (instant, must NOT be
+    # differenced) = 1061164/1131387/850394/971809.
+    df = pd.DataFrame({
+        "end": pd.to_datetime(["1999-03-31", "1999-06-30", "1999-09-30", "1999-12-31"]),
+        "period_months": pd.array([3, 6, 9, 12], dtype="Int8"),
+        "net_revenue": [121701.0, 275712.0, 428558.0, 576997.0],
+        "net_income": [9212.0, 18369.0, 36739.0, 32563.0],
+        "total_assets": [1061164.0, 1131387.0, 850394.0, 971809.0],
+    })
+    out = companyfacts.ytd_to_discrete(df, flow_cols=["net_revenue", "net_income"])
+    rev = out["net_revenue"].tolist()
+    ni = out["net_income"].tolist()
+    assert rev[0] == 121701.0 and ni[0] == 9212.0, "Q1 is the printed figure, untouched"
+    assert rev[1] == 154011.0 and ni[1] == 9157.0, "Q2 = 6mo - 3mo"
+    assert rev[2] == 152846.0 and ni[2] == 18370.0, "Q3 = 9mo - 6mo"
+    assert rev[3] == 148439.0, "Q4 revenue = 12mo - 9mo"
+    assert ni[3] == -4176.0, "Q4 net income is a real loss quarter, invisible in the annual row"
+    assert sum(rev) == 576997.0, "the 4 discrete quarters must sum back to the real FY total"
+    assert out["total_assets"].tolist() == [1061164.0, 1131387.0, 850394.0, 971809.0], \
+        "instant column must pass through completely untouched, never differenced"
+    assert out["flows_derived"].tolist() == [0, 1, 1, 1]
+    assert (out["period_months"] == 3).all()
+    print("OK: ytd_to_discrete reconciles CIK 1000366 FY1999 incl. the real Q4 loss quarter")
+
+
+def test_ytd_to_discrete_missing_quarter_nans_instead_of_guessing():
+    # No Q1 filing at all -- first row is 6-MOS. Q2 is unrecoverable (no 3mo
+    # anchor to subtract from) and must be NaN'd, but Q3 (9-6) and Q4 (12-9)
+    # still reconstruct fine off their own raw YTD pair.
+    df = pd.DataFrame({
+        "end": pd.to_datetime(["2000-06-30", "2000-09-30", "2000-12-31"]),
+        "period_months": pd.array([6, 9, 12], dtype="Int8"),
+        "net_revenue": [200.0, 300.0, 500.0],
+    })
+    out = companyfacts.ytd_to_discrete(df, flow_cols=["net_revenue"])
+    rev = out["net_revenue"].tolist()
+    assert pd.isna(rev[0]), "6-MOS can't be a discrete Q1, must be NaN'd"
+    assert out["flows_defined"].iloc[0] == 0
+    assert rev[1] == 100.0, "Q3 = 9mo(300) - 6mo(200), reconstructs off raw YTD"
+    assert rev[2] == 200.0, "Q4 = 12mo(500) - 9mo(300), reconstructs off raw YTD"
+    assert out["flows_defined"].iloc[1] == 1 and out["flows_defined"].iloc[2] == 1
+    print("OK: ytd_to_discrete NaNs only the unrecoverable quarter, not the whole chain")
+
+
+def test_ytd_to_discrete_starts_new_group_on_fye_change():
+    # A fiscal-year-end change mid-history: 1999's 3/6/9/12-MOS chain, then a
+    # SHORT transition-period 3-MOS that does NOT anchor back to the same
+    # Jan-1 start (e.g. a switch to a June fiscal year) -- must start a new
+    # group rather than treat the new period as "Q1 of the old cycle" and
+    # difference across the boundary.
+    df = pd.DataFrame({
+        "end": pd.to_datetime(["1999-03-31", "1999-06-30", "1999-09-30", "1999-12-31", "2000-09-30"]),
+        "period_months": pd.array([3, 6, 9, 12, 3], dtype="Int8"),
+        "net_revenue": [100.0, 210.0, 330.0, 460.0, 90.0],
+    })
+    out = companyfacts.ytd_to_discrete(df, flow_cols=["net_revenue"])
+    last = out.iloc[-1]
+    assert last["net_revenue"] == 90.0, "new FYE group's first row is a printed figure, not differenced"
+    assert last["flows_derived"] == 0
+    print("OK: ytd_to_discrete starts a fresh group on an FYE change rather than differencing across it")
+
+
+def test_ytd_to_discrete_rejects_negative_differenced_revenue():
+    # A restated-down YTD figure minus an un-restated prior YTD produces a
+    # negative "discrete quarter" -- the direct signature of a restatement-
+    # basis mismatch. Must NaN, never ship a negative revenue.
+    df = pd.DataFrame({
+        "end": pd.to_datetime(["2001-03-31", "2001-06-30"]),
+        "period_months": pd.array([3, 6], dtype="Int8"),
+        "net_revenue": [100.0, 90.0],  # 6mo < 3mo: impossible on a consistent basis
+    })
+    out = companyfacts.ytd_to_discrete(df, flow_cols=["net_revenue"])
+    assert pd.isna(out["net_revenue"].iloc[1]), "negative differenced revenue must be NaN'd, not shipped as -10"
+    assert out["flows_defined"].iloc[1] == 0
+    print("OK: ytd_to_discrete rejects a negative differenced net_revenue as a restatement-basis mismatch")
 
 
 if __name__ == "__main__":
@@ -463,3 +564,8 @@ if __name__ == "__main__":
     test_derive_q4_fills_missing_fiscal_year_end()
     test_derive_q4_skips_when_quarters_incomplete()
     test_extract_line_items_derives_q4_and_clusters_with_instant_concepts()
+    test_period_months_ifrs_full_is_annual_not_hardcoded_quarterly()
+    test_ytd_to_discrete_reconciles_to_real_filing()
+    test_ytd_to_discrete_missing_quarter_nans_instead_of_guessing()
+    test_ytd_to_discrete_starts_new_group_on_fye_change()
+    test_ytd_to_discrete_rejects_negative_differenced_revenue()

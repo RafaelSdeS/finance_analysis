@@ -247,6 +247,13 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         df = df[~missing_period]
     if df.empty:
         return pd.DataFrame()
+    # Annual only as of this phase (extract_line_items still requires
+    # PERIOD-TYPE==YEAR) -- constant, never derived. Phase 2
+    # (docs/US_QUARTERLY_BACKFILL_PLAN.md) widens this to real quarterly
+    # PERIOD-TYPEs and replaces these with genuine per-row values.
+    df["period_months"] = pd.array([12] * len(df), dtype="Int8")
+    df["flows_derived"] = pd.Series(0, index=df.index, dtype="int8")
+    df["flows_defined"] = pd.Series(1, index=df.index, dtype="int8")
     # as-first-reported: whichever filing disclosed a given fiscal period EARLIEST
     # wins, whether that's the period's own original filing or a later filing's
     # bundled comparative exhibit reporting it first for some other reason.
