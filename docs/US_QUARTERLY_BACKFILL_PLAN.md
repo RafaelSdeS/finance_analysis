@@ -132,19 +132,39 @@ fetch→parse→multiplier-fill→dedup→differencing→ratio-recompute pipelin
 **Q4 NI = −4,176** and Q4's `net_margin` computed on the discrete (not annual YTD) figures.
 All 47 fast tests pass.
 
-### Phase 3 — HTML 10-Q, 2001–2006
-- [ ] Dry run ~50 filings first, measuring hit rate and prior-year agreement.
-- [ ] New `sec/tenq.py`, house `build_cik_history(cik, filings)` signature. New file
+### Phase 3 — HTML 10-Q, 2001–2006 — ✅ DONE 2026-08-01 (scope: income statement only)
+- [x] New `sec/tenq.py`, house `build_cik_history(cik, filings)` signature. New file
       justified: Item 6's locator is a single year-header row; a 10-Q uses a two-row
       period header mapping to column ranges — incompatible table models.
-- [ ] Reuse `_parse_value`, `_row_values`, `_normalize_label`, `_row_text`,
-      `detect_unit_multiplier` etc. from `selected_financial_data.py`. **Own `ROW_ALIASES`.**
-- [ ] Prefer the printed 3-month column; only 6/9-month items go through `ytd_to_discrete`.
-      Restatement-basis risk here is confined to `cashflow_ops`/`capex` in Q2–Q3.
-- [ ] `_TIER_PRIORITY = {"xbrl":0, "ex27":1, "tenq":2, "item6":3}`.
-- [ ] Tests in `tests/data_collection/test_sec_tenq.py`.
+- [x] Reuse `_row_values`, `_normalize_label`, `_row_text`, `detect_unit_multiplier`,
+      `_UNITS_RE` from `selected_financial_data.py`. **Own `ROW_ALIASES`** (income-statement
+      labels only: `net_revenue`, `net_income`, `cost_of_revenue`).
+- [x] **Scope reduced from the original plan**: cash-flow statement (`cashflow_ops`/`capex`)
+      NOT implemented this pass — real added complexity (a second table-location problem +
+      per-column period-length reconciliation against income-statement rows, since income
+      items are already-discrete but cash-flow items are still YTD) not yet verified against
+      live data. Flagged in `tenq.py`'s module docstring so it isn't mistaken for existing
+      coverage. Income-statement items need **no differencing at all** in this era — every
+      sampled filing prints the discrete 3-month figure directly, confirmed live — so
+      `ytd_to_discrete` isn't called by this tier.
+- [x] `_TIER_PRIORITY` addition deferred to Phase 4 (needs `xbrl`/`ex27`/`item6` reconciled
+      together with `tenq` in one place).
+- [x] Tests in `tests/data_collection/test_sec_tenq.py` (7 new), registered in
+      `tests/run_all.py`'s FAST list (was missing — new test files aren't auto-discovered).
 
-**Verify:** AAPL Q3 FY2004 `net_sales == 2014`.
+**Two real bugs found via live-data testing, fixed at their root in
+`selected_financial_data.py` (shared with Item 6, which inherits the fixes for free):**
+1. `_normalize_label` didn't collapse internal whitespace — AAPL's real "Cost of  sales"
+   (embedded double space, an HTML-entity artifact) failed every alias match.
+2. `_row_values`'s paren-merge only handled a 2-cell split (`['(25', ')']`). AAPL's real
+   "Net income (loss)" row renders its prior-year loss as a **3-cell** split
+   (`['(8', '(8', ')']` — the negative value colspan-duplicated same as every other figure,
+   THEN its closing paren alone) — silently parsed as a $8M profit instead of an $8M loss.
+
+**Verify:** ✅ AAPL Q1 FY2004 (fetched live, CIK 320193, accession 0001104659-04-003080)
+reconciles exactly end-to-end: `net_sales=$2,006M/$1,472M` (current/prior), `cost_of_sales=
+$1,470M/$1,066M`, `net_income=$63M/-$8M` (the real prior-year loss, correctly negative).
+All 48 fast tests pass.
 
 ### Phase 4 — Q4 for 2001–2006, validation, full rebuild
 - [ ] `fundamentals._derive_annual_q4(quarters, annual)`, guards incl. derived Q4 revenue

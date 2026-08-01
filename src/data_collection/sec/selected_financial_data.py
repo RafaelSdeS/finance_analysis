@@ -135,7 +135,14 @@ def _row_text(series: pd.Series) -> str:
 
 
 def _normalize_label(s: str) -> str:
-    return _APOSTROPHE.sub("'", str(s)).strip().lower()
+    # Whitespace-collapsed -- real bug, confirmed on AAPL's actual
+    # 2004-02-10 10-Q (2026-08-01, tenq.py Phase 3): "Cost of  sales" renders
+    # with an embedded double space (an HTML-entity artifact), which failed
+    # every alias match against the clean single-space "cost of sales" alias
+    # -- a real income-statement line item silently unmapped. Purely
+    # normalizing (never removes distinguishing content), safe for every
+    # existing caller/test.
+    return re.sub(r"\s+", " ", _APOSTROPHE.sub("'", str(s))).strip().lower()
 
 
 def _year_header_row(df: pd.DataFrame) -> list[str]:
@@ -282,13 +289,26 @@ def _row_values(row: pd.Series, n_years: int) -> list[float | None]:
     i = 0
     while i < len(raw_cells):
         cell = raw_cells[i]
-        if (cell.startswith("(") and not cell.endswith(")")
-                and i + 1 < len(raw_cells) and raw_cells[i + 1].startswith(")")):
-            merged_cells.append(cell + raw_cells[i + 1])
-            i += 2
-        else:
-            merged_cells.append(cell)
-            i += 1
+        if cell.startswith("(") and not cell.endswith(")"):
+            if i + 1 < len(raw_cells) and raw_cells[i + 1].startswith(")"):
+                merged_cells.append(cell + raw_cells[i + 1])
+                i += 2
+                continue
+            # A colspan-duplicated open-paren cell, closing paren in a THIRD
+            # separate cell -- real bug, confirmed on AAPL's actual
+            # 2004-02-10 10-Q (2026-08-01, tenq.py Phase 3): "Net income
+            # (loss)" renders as ['(8', '(8', ')'] (the negative value
+            # duplicated by colspan exactly like every other figure in the
+            # row, THEN its closing paren alone) -- not the simpler 2-cell
+            # ['(25', ')'] split already handled above. Without this, "(8"
+            # parsed as a positive 8, turning a real net LOSS into a profit.
+            if (i + 2 < len(raw_cells) and raw_cells[i + 1] == cell
+                    and raw_cells[i + 2].startswith(")")):
+                merged_cells.append(cell + raw_cells[i + 2])
+                i += 3
+                continue
+        merged_cells.append(cell)
+        i += 1
 
     tokens: list[tuple[str, float]] = []
     for cell in merged_cells:
