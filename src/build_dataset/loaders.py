@@ -24,7 +24,7 @@ FUNDAMENTALS_NULL_COLS = [
 # larger) daily panel -- docs/US_DATASET_BUILD_PLAN.md §8.0.
 FUNDAMENTALS_PROVENANCE_COLS = {
     "item6_filename", "item6_form", "fds_filename", "fds_form",
-    "fds_article", "fds_multiplier_explicit",
+    "fds_article", "fds_multiplier_explicit", "tenq_filename", "tenq_form",
 }
 
 

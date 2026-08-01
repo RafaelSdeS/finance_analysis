@@ -166,13 +166,39 @@ reconciles exactly end-to-end: `net_sales=$2,006M/$1,472M` (current/prior), `cos
 $1,470M/$1,066M`, `net_income=$63M/-$8M` (the real prior-year loss, correctly negative).
 All 48 fast tests pass.
 
-### Phase 4 — Q4 for 2001–2006, validation, full rebuild
-- [ ] `fundamentals._derive_annual_q4(quarters, annual)`, guards incl. derived Q4 revenue
-      ∈ [0, 0.60 × FY revenue]. Any guard failing → no Q4, annual row kept.
-- [ ] Consume the item6 row explicitly (don't rely on 10-day cluster dedup).
-- [ ] `validate_us_fundamentals` warn-only additions.
-- [ ] Re-measure `_FLOORS` before touching thresholds (quarterly figures ~4x smaller).
-- [ ] Full rebuild of all 8,143 ticker files — **separate explicit go-ahead**, not automatic.
+### Phase 4 — Q4 for 2001–2006, tier priority, validation — ✅ DONE 2026-08-01 (code only)
+- [x] `fundamentals._derive_annual_q4(quarters, annual)`: guards — exactly 3 quarters nest
+      in `(fy_end-370d, fy_end-20d]`, spaced 60–120d, Q3 within 60–120d of FY end, derived
+      Q4 revenue ∈ `[0, 0.60 × FY revenue]`. Any guard failing → no Q4, annual row untouched.
+- [x] Item6 row **consumed explicitly** (removed from `annual`, not left for the 10-day
+      `cluster_period_ends` dedup to resolve) — its `end` is only a Dec-31-ish guess, so a
+      >10-day miss could have silently shipped both the 12mo and 3mo row for one real period.
+- [x] Derived row keeps every non-flow item6 column as-is (`total_assets`, `equity`,
+      `eps_basic`, `item6_form/filename`...) and inherits `fundamentals_tier="item6"` (most of
+      its data still comes from there) — ratios recomputed on the adjusted flows.
+- [x] `_TIER_PRIORITY = {"xbrl":0, "ex27":1, "tenq":2, "item6":3}` wired into
+      `build_company_fundamentals`; a real bug caught by testing: the naive `quarters[
+      "fundamentals_tier"]="tenq"` blanket assignment had to move BEFORE calling
+      `_derive_annual_q4`, else it would clobber the derived rows' intended `"item6"` tag.
+- [x] `validate_us_fundamentals` additions already landed in Phase 1 (period_months presence/
+      validity/mixing, negative net_revenue, flows_defined=0 counts) — nothing further needed.
+- [x] `loaders.py`'s `FUNDAMENTALS_PROVENANCE_COLS` extended with `tenq_filename`/`tenq_form`.
+- [x] Tests in `test_sec_fundamentals.py` (4 new: Q4 derivation success/incomplete/rejected-
+      share, tier priority) — all 8 existing `build_company_fundamentals` tests needed a new
+      `tenq.build_cik_history` mock added (new call site in the function under test).
+
+**Deliberately NOT done this session — needs separate explicit go-ahead:**
+- [ ] Re-measure `_FLOORS` against real quarterly-magnitude data before touching thresholds
+      (quarterly figures are ~4x smaller than the annual ones `_FLOORS` was tuned against).
+- [ ] Full rebuild of all 8,143 ticker files (`python -m src.data_collection.sec.fundamentals`
+      / `run_us_full_scale.py fundamentals`, ~1.8h wall-clock at the 10 req/s SEC floor for the
+      ~3,300 affected CIKs) — this is a live external-facing collection run overwriting real
+      collected data, out of scope for an unattended code session per this repo's working rules.
+
+**Verify (code-level, no live run):** ✅ all 48 fast tests pass; whole-repo `ruff check` clean;
+`_derive_annual_q4` reconciles the CIK-1000366-shaped fixture exactly (Q4 revenue=FY−ΣQ,
+ratios recomputed, non-flow columns pass through); tier priority confirmed end-to-end through
+`build_company_fundamentals` on a synthetic tenq/item6 overlap.
 
 ## Known limits (state, don't fix)
 

@@ -15,18 +15,96 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
+from ..yf_collectors import compute_ratios
 from .. import config, validate
-from . import companyfacts, crosswalk, fds, selected_financial_data, universe
+from . import companyfacts, crosswalk, fds, selected_financial_data, tenq, universe
 
 log = logging.getLogger("sec")
 
-# XBRL preferred over EX-27/Item 6 on any overlapping fiscal period (richer,
-# more reliable -- see plan §2.0); EX-27 preferred over Item 6 (quarterly,
-# fuller line-item set, vs. Item 6's annual-only, narrower set). In practice
-# the tiers shouldn't overlap (EX-27 usably ends 2000, Item 6 covers
-# 2001-2006, XBRL starts ~2006-2007), but resolve deterministically rather
-# than leave a silent duplicate `end` if one does.
-_TIER_PRIORITY = {"xbrl": 0, "ex27": 1, "item6": 2}
+# XBRL preferred over EX-27/tenq/Item 6 on any overlapping fiscal period
+# (richer, more reliable -- see plan §2.0); EX-27 above tenq (structured
+# tag-value data beats HTML table scraping, and they only overlap in early
+# 2001); tenq above item6 (real quarterly resolution, vs. item6's annual-only,
+# most parse-fragile tier in this pipeline). In practice the tiers shouldn't
+# overlap much (EX-27 usably ends 2000, tenq covers 2001-2006, item6 covers
+# the same 2001-2006 window as a fallback, XBRL starts ~2006-2007), but
+# resolve deterministically rather than leave a silent duplicate `end` if one does.
+_TIER_PRIORITY = {"xbrl": 0, "ex27": 1, "tenq": 2, "item6": 3}
+
+
+def _derive_annual_q4(quarters: pd.DataFrame, annual: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Q4 = item6's annual FY total - sum(tenq's Q1+Q2+Q3), for fiscal years
+    where tenq covers exactly 3 real quarters that plausibly nest inside
+    item6's FY window (docs/US_QUARTERLY_BACKFILL_PLAN.md Phase 4). Returns
+    (quarters + derived Q4 rows, annual rows NOT consumed) -- a consumed
+    annual row is REMOVED here, not left for the general tier-priority dedup
+    to resolve later: item6's `end` is only a Dec-31-ish guess (see the
+    non-calendar-FYE correction above), so relying on cluster_period_ends's
+    10-day tolerance to catch the collision could silently ship BOTH the
+    annual (12mo) and derived (3mo) row for the same real period if the
+    guess misses by more than that -- the exact schema defect this project
+    exists to fix, reintroduced at the fix site.
+
+    Guards, all -> no Q4 derived, the annual row is left untouched (never
+    fabricate): exactly 3 quarters must nest in (fy_end-370d, fy_end-20d];
+    consecutive quarter spacing 60-120 days; Q3 within 60-120 days of the FY
+    end; and the derived Q4's revenue must be a plausible share of the FY
+    total (0-60%) -- the one genuinely INDEPENDENT check available here
+    (Q1+Q2+Q3+Q4==FY is circular once Q4 is *defined* as the residual), and
+    it catches a unit-multiplier mismatch between the item6 table and tenq's
+    table, a wrong fiscal-year match, or a mid-year restatement, all at once,
+    with no per-company tuning -- the same shape of check as fundamentals.py's
+    own _FLOORS, just relative instead of absolute.
+
+    The derived row keeps EVERY OTHER item6 column as-is (total_assets,
+    equity, eps_basic, dividends_per_share, item6_form/filename...) -- those
+    describe the exact same real date (fy_end) whether the flow columns are
+    annual or Q4-only, same convention as companyfacts._derive_q4's own
+    instant-columns-pass-through design.
+    """
+    if quarters.empty or annual.empty:
+        return quarters, annual
+    quarters = quarters.sort_values("end").reset_index(drop=True)
+    flow_cols = [c for c in ("net_revenue", "net_income", "cost_of_revenue")
+                 if c in annual.columns and c in quarters.columns]
+    derived_rows, consumed_idx = [], []
+    for idx, fy in annual.iterrows():
+        fy_end = fy["end"]
+        window = quarters[(quarters["end"] > fy_end - pd.Timedelta(days=370))
+                           & (quarters["end"] <= fy_end - pd.Timedelta(days=20))].sort_values("end")
+        if len(window) != 3:
+            continue
+        gaps = window["end"].diff().dt.days.dropna()
+        if not gaps.between(60, 120).all():
+            continue
+        if not (60 <= (fy_end - window["end"].iloc[-1]).days <= 120):
+            continue
+        fy_revenue, q_revenue_sum = fy.get("net_revenue"), window["net_revenue"].sum()
+        if pd.isna(fy_revenue) or pd.isna(q_revenue_sum):
+            continue
+        derived_revenue = fy_revenue - q_revenue_sum
+        if not (0 <= derived_revenue <= 0.60 * fy_revenue):
+            continue
+
+        row = fy.to_dict()
+        for c in flow_cols:
+            fy_val, q_sum = row.get(c), window[c].sum()
+            row[c] = (fy_val - q_sum) if pd.notna(fy_val) and pd.notna(q_sum) else float("nan")
+        row["period_months"] = 3
+        row["flows_derived"] = 1
+        row["flows_defined"] = 1
+        derived_rows.append(row)
+        consumed_idx.append(idx)
+
+    if not derived_rows:
+        return quarters, annual
+    derived = pd.DataFrame(derived_rows)
+    ratios = derived.apply(lambda r: compute_ratios(r.to_dict(), unit_scale=1), axis=1, result_type="expand")
+    derived[ratios.columns] = ratios
+    quarters = (pd.concat([quarters, derived], ignore_index=True, sort=False)
+                  .sort_values("end").reset_index(drop=True))
+    annual = annual.drop(index=consumed_idx).reset_index(drop=True)
+    return quarters, annual
 
 # A handful of CIKs are genuine corporate spinoffs/split-offs/post-bankruptcy
 # successors whose SEC companyfacts XBRL data includes PRE-SEPARATION
@@ -119,6 +197,10 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         ex27["fundamentals_tier"] = "ex27"
         frames.append(ex27)
 
+    quarters = tenq.build_cik_history(cik, filings)
+    if not quarters.empty:
+        quarters["fundamentals_tier"] = "tenq"
+
     gap = selected_financial_data.build_cik_history(cik, filings)
     if not gap.empty:
         gap["end"] = pd.to_datetime(gap["fiscal_year"].astype(str) + "-12-31")
@@ -163,6 +245,16 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
                 gap.loc[still_bad, "end"] = (gap.loc[still_bad, "fundamentals_available_date"]
                                               - pd.offsets.QuarterEnd(n=1, startingMonth=3))
         gap["fundamentals_tier"] = "item6"
+
+    # tenq/item6 tags must already be set above -- _derive_annual_q4's
+    # derived Q4 rows inherit the item6 row's own fundamentals_tier ("item6",
+    # since most of the derived row's columns still come from it), and must
+    # not be clobbered by a blanket post-hoc tag assignment on `quarters`.
+    if not quarters.empty and not gap.empty:
+        quarters, gap = _derive_annual_q4(quarters, gap)
+    if not quarters.empty:
+        frames.append(quarters)
+    if not gap.empty:
         frames.append(gap)
 
     if not frames:

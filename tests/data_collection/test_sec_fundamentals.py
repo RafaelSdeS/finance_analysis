@@ -77,6 +77,7 @@ def test_non_calendar_fiscal_year_end_does_not_precede_filing():
     })
     with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=None), \
          mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
          mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=fake_item6):
         df = fundamentals.build_company_fundamentals(8670, pd.DataFrame())
 
@@ -102,6 +103,7 @@ def test_non_calendar_fiscal_year_end_fixes_every_row_not_just_the_flagged_one()
     })
     with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=None), \
          mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
          mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=fake_item6):
         df = fundamentals.build_company_fundamentals(8670, pd.DataFrame())
 
@@ -127,6 +129,7 @@ def test_short_filing_lag_does_not_round_derived_end_past_filing_date():
     })
     with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=None), \
          mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
          mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=fake_item6):
         df = fundamentals.build_company_fundamentals(1108524, pd.DataFrame())
 
@@ -160,6 +163,7 @@ def test_tier_boundary_near_duplicate_end_dates_are_deduped():
          mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_row), \
          mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
          mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
          mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=item6_row):
         df = fundamentals.build_company_fundamentals(320193, pd.DataFrame())
 
@@ -186,6 +190,7 @@ def test_source_data_anomaly_is_dropped_not_left_in():
          mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_rows), \
          mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
          mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
          mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=pd.DataFrame()):
         df = fundamentals.build_company_fundamentals(104169, pd.DataFrame())
 
@@ -209,6 +214,7 @@ def test_predecessor_entity_rows_are_dropped():
          mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_rows), \
          mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
          mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
          mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=pd.DataFrame()):
         df = fundamentals.build_company_fundamentals(1675149, pd.DataFrame())
 
@@ -219,6 +225,7 @@ def test_predecessor_entity_rows_are_dropped():
          mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_rows), \
          mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
          mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
          mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=pd.DataFrame()):
         df_other = fundamentals.build_company_fundamentals(999999999, pd.DataFrame())
     assert len(df_other) == 2, "a CIK not in PREDECESSOR_CUTOFFS must be completely unaffected"
@@ -242,6 +249,7 @@ def test_implausibly_tiny_fundamental_is_rejected_not_left_in():
          mock.patch.object(fundamentals.companyfacts, "extract_line_items", return_value=xbrl_rows), \
          mock.patch.object(fundamentals.companyfacts, "compute_us_ratios", side_effect=lambda df: df), \
          mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
          mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=pd.DataFrame()):
         df = fundamentals.build_company_fundamentals(36104, pd.DataFrame())
 
@@ -252,6 +260,106 @@ def test_implausibly_tiny_fundamental_is_rejected_not_left_in():
     assert tiny["net_income"] == 50_000_000.0, "other columns on the same row are untouched"
     assert good["total_assets"] == 6_498_352_128.0, "a plausible value on another row must survive"
     print("OK: an implausibly tiny total_assets is NaN'd, the row's other columns and other rows are untouched")
+
+
+def _q4_fixture():
+    """3 tenq quarters + 1 item6 FY row, real-shaped dates/gaps, that should
+    cleanly derive a Q4."""
+    quarters = pd.DataFrame({
+        "end": pd.to_datetime(["1999-03-31", "1999-06-30", "1999-09-30"]),
+        "net_revenue": [100.0, 110.0, 120.0],
+        "net_income": [10.0, 11.0, 12.0],
+        "period_months": pd.array([3, 3, 3], dtype="Int8"),
+        "flows_derived": pd.array([0, 0, 0], dtype="int8"),
+        "flows_defined": pd.array([1, 1, 1], dtype="int8"),
+        "fundamentals_available_date": pd.to_datetime(["1999-05-01", "1999-08-01", "1999-11-01"]),
+        "cik": [1, 1, 1],
+        "fundamentals_tier": ["tenq", "tenq", "tenq"],
+    })
+    annual = pd.DataFrame({
+        "end": pd.to_datetime(["1999-12-31"]),
+        "net_revenue": [460.0],
+        "net_income": [50.0],
+        "total_assets": [900.0],
+        "fiscal_year": [1999],
+        "period_months": pd.array([12], dtype="Int8"),
+        "flows_derived": pd.array([0], dtype="int8"),
+        "flows_defined": pd.array([1], dtype="int8"),
+        "fundamentals_available_date": pd.to_datetime(["2000-03-01"]),
+        "cik": [1],
+        "fundamentals_tier": ["item6"],
+    })
+    return quarters, annual
+
+
+def test_derive_annual_q4_consumes_the_item6_row():
+    quarters, annual = _q4_fixture()
+    q, a = fundamentals._derive_annual_q4(quarters, annual)
+    assert a.empty, "the consumed annual row must be REMOVED, not left for cluster dedup to resolve later"
+    assert len(q) == 4
+    q4 = q[q["end"] == pd.Timestamp("1999-12-31")].iloc[0]
+    assert q4["net_revenue"] == 130.0, "Q4 revenue = FY(460) - sum(Q1..Q3)(330)"
+    assert q4["net_income"] == 17.0, "Q4 net income = FY(50) - sum(Q1..Q3)(33)"
+    assert q4["period_months"] == 3
+    assert q4["flows_derived"] == 1
+    assert q4["total_assets"] == 900.0, "non-flow item6 columns pass through untouched on the derived row"
+    assert q4["fundamentals_tier"] == "item6", (
+        "the derived row is mostly item6 data (just Q4-sliced flows) -- inherits item6's provenance tag, "
+        "not tenq's, so it still yields to a genuine xbrl/ex27/tenq row on the rare overlap")
+    assert "net_margin" in q4.index and pd.notna(q4["net_margin"]), "ratios must be recomputed on the derived flows"
+    print("OK: _derive_annual_q4 derives Q4, consumes the annual row, recomputes ratios")
+
+
+def test_derive_annual_q4_keeps_annual_row_when_quarters_incomplete():
+    quarters, annual = _q4_fixture()
+    quarters = quarters.iloc[:2]  # only Q1, Q2 -- missing Q3
+    q, a = fundamentals._derive_annual_q4(quarters, annual)
+    assert len(a) == 1, "annual row must be kept untouched, never fabricate a Q4 from incomplete quarters"
+    assert len(q) == 2, "no Q4 derived"
+    print("OK: _derive_annual_q4 leaves the annual row alone when tenq quarters are incomplete")
+
+
+def test_derive_annual_q4_rejected_when_share_of_fy_implausible():
+    quarters, annual = _q4_fixture()
+    # Quarters that already sum ABOVE the FY total -- e.g. a unit-multiplier
+    # mismatch between item6's table and tenq's table. Derived residual would
+    # be negative; must be rejected, not shipped as a negative "revenue".
+    quarters["net_revenue"] = [200.0, 210.0, 220.0]
+    q, a = fundamentals._derive_annual_q4(quarters, annual)
+    assert len(a) == 1, "an implausible derived share must reject the whole derivation, annual row kept"
+    assert len(q) == 3, "no Q4 row added"
+    print("OK: _derive_annual_q4 rejects a derived Q4 whose share of the FY total is implausible")
+
+
+def test_tier_priority_prefers_tenq_over_item6():
+    # A single tenq quarter (not 3 -- Q4 derivation doesn't fire) landing
+    # within cluster_period_ends's 10-day tolerance of item6's naive Dec-31
+    # guess for the SAME real period -- tests the new _TIER_PRIORITY ordering
+    # (tenq above item6), not the Q4-derivation path.
+    tenq_row = pd.DataFrame({
+        "end": pd.to_datetime(["2003-12-27"]),
+        "net_revenue": [500_000_000.0],
+        "period_months": pd.array([3], dtype="Int8"),
+        "flows_derived": pd.array([0], dtype="int8"),
+        "flows_defined": pd.array([1], dtype="int8"),
+        "fundamentals_available_date": pd.to_datetime(["2004-02-10"]),
+        "cik": [1],
+    })
+    item6_row = pd.DataFrame({
+        "fiscal_year": [2003],
+        "net_revenue": [499_000_000.0],
+        "fundamentals_available_date": pd.to_datetime(["2004-03-01"]),
+        "cik": [1],
+    })
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=None), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=tenq_row), \
+         mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=item6_row):
+        df = fundamentals.build_company_fundamentals(1, pd.DataFrame())
+    assert len(df) == 1, "the near-duplicate period must collapse to one row"
+    assert df.iloc[0]["fundamentals_tier"] == "tenq", "tenq (real quarterly) must outrank item6 (annual guess)"
+    assert df.iloc[0]["net_revenue"] == 500_000_000.0
+    print("OK: tier priority prefers tenq over item6 on an overlapping period")
 
 
 def test_validate_us_fundamentals_warns_on_impossible_values():
@@ -396,6 +504,10 @@ if __name__ == "__main__":
     test_source_data_anomaly_is_dropped_not_left_in()
     test_predecessor_entity_rows_are_dropped()
     test_implausibly_tiny_fundamental_is_rejected_not_left_in()
+    test_derive_annual_q4_consumes_the_item6_row()
+    test_derive_annual_q4_keeps_annual_row_when_quarters_incomplete()
+    test_derive_annual_q4_rejected_when_share_of_fy_implausible()
+    test_tier_priority_prefers_tenq_over_item6()
     test_validate_us_fundamentals_warns_on_impossible_values()
     test_validate_us_fundamentals_warns_on_identity_violations()
     test_validate_us_fundamentals_warns_on_period_schema_issues()
