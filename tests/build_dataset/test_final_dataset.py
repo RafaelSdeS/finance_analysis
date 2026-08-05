@@ -25,8 +25,8 @@ from src.build_dataset.repair import MIN_DETECTABLE_JUMP, JUMP_MATCH_TOL, EVENT_
 from test_utils import print_header, print_check, print_section_start, print_section_end, print_separator, numeric_columns  # noqa: E402
 
 DEFAULT_FILE = ROOT / "data/processed/ml_dataset.parquet"
-CORPORATE_EVENTS_FILE = ROOT / "data/raw/corporate_events/corporate_events.parquet"
-FUNDAMENTALS_DIR = ROOT / "data/raw/fundamentals"
+CORPORATE_EVENTS_FILE = ROOT / "data/raw/br/corporate_events/corporate_events.parquet"
+FUNDAMENTALS_DIR = ROOT / "data/raw/br/fundamentals"
 
 
 def check_stale_prices(df, price_col="close", run_len=5, date_col="date"):

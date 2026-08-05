@@ -14,10 +14,10 @@ Two stages: collect → build dataset.
 
 ```bash
 # Backfill (one-time historical via BolsAI, 2000–present); resumes from checkpoints, idempotent
-python -m src.data_collection.pipeline --mode full_scale
+python -m src.data_collection.br.pipeline --mode full_scale
 
 # Quarterly incremental refresh (free yfinance, no key)
-python -m src.data_collection.pipeline --mode update
+python -m src.data_collection.br.pipeline --mode update
 ```
 
 ### Stage 2: Build ML Dataset
@@ -37,7 +37,7 @@ cp .env.example .env          # then add BOLSAI_API_KEY=sk_...  (backfill only; 
 
 ## Current Data
 
-**Raw (git-tracked):** ~293 tickers + benchmark BOVA11, one parquet per ticker in `data/raw/`.
+**Raw (git-tracked):** ~293 tickers + benchmark BOVA11, one parquet per ticker in `data/raw/br/`.
 **Macro:** SELIC, CDI, IPCA daily rates from BCB SGS.
 **Data currency:** Prices/macro current to 2026-06-30; fundamentals to 2026-03-31. Refreshed via yfinance quarterly incremental updates.
 

@@ -16,13 +16,14 @@ Sources:
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from time import sleep
 
 import httpx
 import pandas as pd
 
-from . import checkpoint, client, config, validate
+from .. import checkpoint, client, config, validate
+from ..storage import _chunk_dates, _merge_save
 
 log = logging.getLogger(__name__)
 
@@ -34,63 +35,6 @@ PRICE_RENAME = {
     "adjusted_close": "adj_close",
     "adjusted_volume": "volume_adjusted",
 }
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-
-def _chunk_dates(start: str, end: str, years: int):
-    """Yield (start, end) ISO windows of <= `years` each, to stay under API caps.
-
-    Uses pd.DateOffset (not raw datetime(s.year+years, s.month, s.day)) to
-    step forward: a plain datetime() construction raises ValueError whenever
-    `s` is Feb 29 and `s.year + years` isn't a leap year -- which, for
-    years=10, is EVERY time (adding 10 always shifts year%4 by 2). Reachable
-    in practice via collect_macro's incremental path: BCB's daily selic/cdi
-    series can have a checkpoint last_date of Feb 28 in a leap year, making
-    the next start date Feb 29. DateOffset clamps to Feb 28 on a non-leap
-    target year instead of raising.
-    """
-    s = datetime.strptime(start, "%Y-%m-%d")
-    e = datetime.strptime(end, "%Y-%m-%d")
-    while s <= e:
-        chunk_end = min(pd.Timestamp(s) + pd.DateOffset(years=years), pd.Timestamp(e))
-        yield s.strftime("%Y-%m-%d"), chunk_end.strftime("%Y-%m-%d")
-        s = chunk_end.to_pydatetime() + timedelta(days=1)
-
-
-def _merge_save(df_new, path, date_col, validator, ticker_label=""):
-    """Append to existing parquet, dedup on date_col, validate, write. Idempotent.
-
-    Validates only the newly-fetched batch, not the full merged history: a row
-    already accepted onto disk in a previous run must not block ingestion of new,
-    valid rows forever (e.g. a known vendor data glitch from years ago).
-    """
-    df_new = df_new.copy()
-    df_new[date_col] = pd.to_datetime(df_new[date_col])
-    dedup_cols = ["ticker", date_col] if "ticker" in df_new.columns else [date_col]
-    df_new = df_new.drop_duplicates(subset=dedup_cols, keep="last")
-
-    vr = validator(df_new)
-    if not vr.passed:
-        log.error("%s validation FAILED: %s", ticker_label, vr.errors)
-        return None
-    for w in vr.warnings:
-        log.warning("%s: %s", ticker_label, w)
-
-    if path.exists():
-        df_old = pd.read_parquet(path)
-        df_old[date_col] = pd.to_datetime(df_old[date_col])
-        df = pd.concat([df_old, df_new], ignore_index=True)
-    else:
-        df = df_new
-    df = (df.drop_duplicates(subset=dedup_cols, keep="last")
-            .sort_values(date_col)
-            .reset_index(drop=True))
-    path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(path, index=False)
-    return df
 
 
 # ---------------------------------------------------------------------------
@@ -350,7 +294,7 @@ def collect_company_info(tickers: list[str], mode: str):
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
     cp = checkpoint.load("company_info", mode)
     done = set(cp.get("done", []))
-    path = config.COMPANY_DIR / "company_info.parquet"
+    path = config.COMPANY_INFO_PATH
     # Also skip tickers already in the parquet file (checkpoint-resilient)
     if path.exists():
         existing = set(pd.read_parquet(path)["ticker"].dropna().unique())
@@ -455,7 +399,7 @@ def collect_corporate_events(mode: str):
     offset param, so pagination = one call per calendar year."""
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
     cp = checkpoint.load("corporate_events", mode)
-    path = config.CORP_EVENTS_DIR / "corporate_events.parquet"
+    path = config.CORP_EVENTS_PATH
     try:
         start_year = cp.get("last_year", int(config.START_DATE[:4]) - 1) + 1
         end_year = datetime.now().year

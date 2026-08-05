@@ -6,10 +6,10 @@ dir change (prototype↔production parity). Stages run in dependency order;
 each collector is resumable via its checkpoint.
 
 Usage (from project root):
-    python -m src.data_collection.pipeline --mode prototype
-    python -m src.data_collection.pipeline --mode full_scale
-    python -m src.data_collection.pipeline --mode full_scale --dry-run
-    python -m src.data_collection.pipeline --mode prototype --tickers PETR4 VALE3
+    python -m src.data_collection.br.pipeline --mode prototype
+    python -m src.data_collection.br.pipeline --mode full_scale
+    python -m src.data_collection.br.pipeline --mode full_scale --dry-run
+    python -m src.data_collection.br.pipeline --mode prototype --tickers PETR4 VALE3
 """
 
 import argparse
@@ -19,7 +19,8 @@ from datetime import datetime
 
 import pandas as pd
 
-from . import collectors, config, yf_collectors
+from . import collectors
+from .. import config, yf_collectors
 
 
 def _collect(name: str, tickers: list[str], mode: str):
@@ -58,7 +59,7 @@ def _collect(name: str, tickers: list[str], mode: str):
 
 def _tickers_with_company_info() -> list[str]:
     """Return tickers that matched BolsAI company info (exist on the platform)."""
-    path = config.COMPANY_DIR / "company_info.parquet"
+    path = config.COMPANY_INFO_PATH
     if not path.exists():
         return []
     return sorted(pd.read_parquet(path)["ticker"].dropna().unique().tolist())
@@ -66,7 +67,7 @@ def _tickers_with_company_info() -> list[str]:
 
 def _active_tickers() -> list[str]:
     """Return only tickers with status='ATIVO' (exclude delisted/suspended)."""
-    path = config.COMPANY_DIR / "company_info.parquet"
+    path = config.COMPANY_INFO_PATH
     if not path.exists():
         return []
     df = pd.read_parquet(path)

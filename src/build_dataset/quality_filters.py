@@ -311,7 +311,7 @@ def attach_filing_dates(fundamentals, company_info):
 
     if not FILING_DATES_PATH.exists():
         print("filing_dates.parquet missing — statutory deadlines only "
-              "(run: python -m src.data_collection.cvm_statements --step filing_dates)")
+              "(run: python -m src.data_collection.br.cvm_statements --step filing_dates)")
         fundamentals["fundamentals_available_date"] = (
             _statutory_available_date(fundamentals["reference_date"])
         )

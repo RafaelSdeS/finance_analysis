@@ -2,8 +2,8 @@
 stats.py — post-collection data audit.
 
 Usage:
-    python -m src.data_collection.stats
-    python -m src.data_collection.stats --mode full_scale
+    python -m src.data_collection.br.stats
+    python -m src.data_collection.br.stats --mode full_scale
 """
 
 import argparse
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from . import config
+from .. import config
 
 STALE_DAYS = 7
 

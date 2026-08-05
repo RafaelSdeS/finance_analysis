@@ -21,7 +21,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data_collection import config, pipeline
+from src.data_collection import config
+from src.data_collection.br import pipeline
 
 
 def test_dispatches_to_bolsai_when_configured(monkeypatch) -> None:

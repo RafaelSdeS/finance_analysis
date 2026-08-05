@@ -21,7 +21,7 @@ by applying yfinance's own (adj_close/close) ratio to BolsAI's own raw OHLC
 repair_unadjusted_splits(), just sourcing the correction ratio from an
 independent vendor instead of corporate_events.parquet.
 
-Fixes BOTH data/raw/prices/MRFG3.parquet and MBRF3.parquet: BolsAI's raw
+Fixes BOTH data/raw/br/prices/MRFG3.parquet and MBRF3.parquet: BolsAI's raw
 store has two independently-collected files with the identical bug (same
 2007-06-29..2026-07-10 span, same broken values) -- MRFG3.parquet from the
 original pre-rename ticker, MBRF3.parquet from a later full-history
@@ -40,7 +40,7 @@ features.py) and is left as an accepted, documented vendor limitation for
 tickers outside this audit's top-50 scope; applying this same swap blindly
 dataset-wide has not been validated and is not attempted here.
 
-Run from project root: python -m src.data_collection.fix_mrfg3_adj_close
+Run from project root: python -m src.data_collection.one_off.fix_mrfg3_adj_close
 """
 
 import logging
@@ -48,7 +48,7 @@ import logging
 import pandas as pd
 import yfinance as yf
 
-from . import config
+from .. import config
 
 log = logging.getLogger(__name__)
 

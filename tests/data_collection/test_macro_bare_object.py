@@ -17,7 +17,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data_collection import collectors, config
+from src.data_collection import config
+from src.data_collection.br import collectors
 
 
 def test_bare_object_response():

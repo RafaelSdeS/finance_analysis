@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data_collection.collectors import _chunk_dates
+from src.data_collection.storage import _chunk_dates
 
 
 def test_chunk_dates_handles_leap_day_start():

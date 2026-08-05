@@ -14,8 +14,8 @@ import logging
 
 import pandas as pd
 
-from . import checkpoint, client, config, validate
-from .collectors import _merge_save
+from .. import checkpoint, client, config, validate
+from ..storage import _merge_save
 
 log = logging.getLogger(__name__)
 

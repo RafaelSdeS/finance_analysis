@@ -20,7 +20,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.data_collection import validate
-from src.data_collection.collectors import _merge_save
+from src.data_collection.storage import _merge_save
 
 
 def _row(date, price=10.0):

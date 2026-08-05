@@ -20,7 +20,7 @@ _FCA_COLS = ["ticker", "cnpj", "corporate_name", "end_trading", "year"]
 
 def build_crosswalk() -> pd.DataFrame:
     """ticker -> cnpj, cvm_code, corporate_name, end_trading. Latest FCA wins per ticker.
-    Per-year FCA rows cached to data/raw/cvm/fca_{year}.parquet; only the current
+    Per-year FCA rows cached to data/raw/br/cvm/fca_{year}.parquet; only the current
     year is re-downloaded on rerun (new filings arrive all year)."""
     config.CVM_DIR.mkdir(parents=True, exist_ok=True)
     current = date.today().year
@@ -65,7 +65,7 @@ def build_crosswalk() -> pd.DataFrame:
     else:
         df["cvm_code"] = None
         log.warning("filing_dates.parquet missing — cvm_code left null "
-                    "(run: python -m src.data_collection.cvm_statements --step filing_dates)")
+                    "(run: python -m src.data_collection.br.cvm_statements --step filing_dates)")
 
     df["end_trading"] = pd.to_datetime(df["end_trading"], errors="coerce")
     df.to_parquet(CROSSWALK_PATH, index=False)

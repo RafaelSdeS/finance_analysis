@@ -53,7 +53,7 @@ def synthesize_company_info() -> None:
         "status": merged["status"],
     })
 
-    path = config.COMPANY_DIR / "company_info.parquet"
+    path = config.COMPANY_INFO_PATH
     existing = pd.read_parquet(path) if path.exists() else pd.DataFrame(columns=rows.columns)
     out = (pd.concat([existing, rows], ignore_index=True)
              .drop_duplicates("ticker", keep="first"))  # existing (BolsAI ATIVO) wins

@@ -14,7 +14,7 @@ from src.build_dataset.paths import US_OUTPUT_PATH
 
 TOP_N = 100
 project_root = Path(__file__).resolve().parents[2]
-sample_path = project_root / "data/processed/us_ml_dataset_top100.parquet"
+sample_path = US_OUTPUT_PATH.parent / "us_ml_dataset_top100.parquet"
 
 print("Ranking tickers by total traded_amount (columnar read, low memory)...")
 vol_table = pq.read_table(US_OUTPUT_PATH, columns=["ticker", "traded_amount"])

@@ -38,16 +38,16 @@ flowchart TD
         BOLSAI["BolsAI REST<br/>OHLCV + adj_*, fundamentals, dividends,<br/>company_info, corporate_events"]
         YF["yfinance<br/>--mode update refresh<br/>(prices: full yf-era refetch, fundamentals ~4-6q, dividends)"]
         CVM["CVM open data<br/>ITR/DFP registers → DT_RECEB filing dates"]
-        BCB -->|collect_macro| RAWM["data/raw/macro/{selic,cdi,ipca}.parquet"]
-        BOLSAI -->|collectors.py| RAWP["data/raw/prices/*.parquet"]
-        BOLSAI --> RAWF["data/raw/fundamentals/*.parquet"]
-        BOLSAI --> RAWD["data/raw/dividends/*.parquet"]
-        BOLSAI --> RAWC["data/raw/company_info/*.parquet"]
-        BOLSAI --> RAWE["data/raw/corporate_events/corporate_events.parquet"]
+        BCB -->|collect_macro| RAWM["data/raw/br/macro/{selic,cdi,ipca}.parquet"]
+        BOLSAI -->|collectors.py| RAWP["data/raw/br/prices/*.parquet"]
+        BOLSAI --> RAWF["data/raw/br/fundamentals/*.parquet"]
+        BOLSAI --> RAWD["data/raw/br/dividends/*.parquet"]
+        BOLSAI --> RAWC["data/raw/br/company_info/*.parquet"]
+        BOLSAI --> RAWE["data/raw/br/corporate_events/corporate_events.parquet"]
         YF -->|yf_collectors.py, _merge_save append+dedup| RAWP
         YF --> RAWF
         YF --> RAWD
-        CVM -->|cvm/filing_dates.py| RAWFD["data/raw/filing_dates/filing_dates.parquet"]
+        CVM -->|cvm/filing_dates.py| RAWFD["data/raw/br/filing_dates/filing_dates.parquet"]
     end
 
     subgraph Stage2["Stage 2 — Build (src/build_dataset/build_ml_dataset.py main())"]

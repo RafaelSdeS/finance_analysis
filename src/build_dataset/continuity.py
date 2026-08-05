@@ -22,7 +22,7 @@ ADJ_RECONCILE_TOL = 0.10
 def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
     """Splice renamed/merged tickers into their surviving series.
 
-    Event types (data/raw/reference/ticker_continuity.json, hand-maintained):
+    Event types (data/raw/br/reference/ticker_continuity.json, hand-maintained):
       rename: same legal entity under a new ticker — splice prices AND
               fundamentals (history is genuinely continuous).
       merger: the old ticker's entity ceased to exist — splice prices only

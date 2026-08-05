@@ -121,14 +121,17 @@ YF_RATE_LIMIT_SLEEP = 0.5
 
 # --- Paths ---
 RAW_DIR = PROJECT / "data/raw"
-PRICES_DIR = RAW_DIR / "prices"
-FUND_DIR = RAW_DIR / "fundamentals"
-MACRO_DIR = RAW_DIR / "macro"
-COMPANY_DIR = RAW_DIR / "company_info"
-DIVIDENDS_DIR = RAW_DIR / "dividends"
-CORP_EVENTS_DIR = RAW_DIR / "corporate_events"
-CVM_DIR = RAW_DIR / "cvm"           # CVM open-data caches (crosswalk, statements, shares)
-US_RAW_DIR = RAW_DIR / "us"         # US-market raw data root (prices/fundamentals/macro)
+BR_RAW_DIR = RAW_DIR / "br"         # BR-market raw data root (prices/fundamentals/macro/...)
+PRICES_DIR = BR_RAW_DIR / "prices"
+FUND_DIR = BR_RAW_DIR / "fundamentals"
+MACRO_DIR = BR_RAW_DIR / "macro"
+COMPANY_DIR = BR_RAW_DIR / "company_info"
+COMPANY_INFO_PATH = COMPANY_DIR / "company_info.parquet"
+DIVIDENDS_DIR = BR_RAW_DIR / "dividends"
+CORP_EVENTS_DIR = BR_RAW_DIR / "corporate_events"
+CORP_EVENTS_PATH = CORP_EVENTS_DIR / "corporate_events.parquet"
+CVM_DIR = BR_RAW_DIR / "cvm"           # CVM open-data caches (crosswalk, statements, shares)
+US_RAW_DIR = RAW_DIR / "us"         # US-market raw data root (prices/fundamentals/macro) -- unchanged, not git-tracked
 US_MACRO_DIR = US_RAW_DIR / "macro"
 US_PRICES_DIR = US_RAW_DIR / "prices"
 US_SEC_DIR = US_RAW_DIR / "sec"      # EDGAR full-index cache, universe roster, CIK<->ticker crosswalk

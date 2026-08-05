@@ -7,7 +7,7 @@ import logging
 
 import pandas as pd
 
-from .. import collectors, config, validate
+from .. import config, storage, validate
 from .crosswalk import CROSSWALK_PATH
 from .shares import SHARES_PATH
 from .statements import load_statements
@@ -130,9 +130,9 @@ def build_fundamentals(tickers: list[str] | None = None) -> None:
 
         df = compute_ratios(q, row["corporate_name"])
         df["ticker"] = ticker
-        saved = collectors._merge_save(df, out, "reference_date",
-                                       validate.validate_fundamentals,
-                                       f"cvm_fundamentals/{ticker}")
+        saved = storage._merge_save(df, out, "reference_date",
+                                     validate.validate_fundamentals,
+                                     f"cvm_fundamentals/{ticker}")
         if saved is not None:
             written += 1
             log.info("fundamentals %s: %d quarters (CVM)", ticker, len(saved))

@@ -308,7 +308,7 @@ def main():
         description="Calculate and validate CAGR values from fundamentals."
     )
     parser.add_argument("--ticker", default="PETR4", help="Ticker symbol")
-    parser.add_argument("--fund-dir", default="../data/raw/fundamentals",
+    parser.add_argument("--fund-dir", default="../data/raw/br/fundamentals",
                         help="Fundamentals data directory")
     parser.add_argument("--output", help="Output report file (optional)")
     args = parser.parse_args()

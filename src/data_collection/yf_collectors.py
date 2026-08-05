@@ -20,7 +20,7 @@ import pandas as pd
 import yfinance as yf
 
 from . import checkpoint, config, validate
-from .collectors import _merge_save
+from .storage import _merge_save
 
 log = logging.getLogger(__name__)
 
@@ -510,7 +510,7 @@ def _flat_run_fraction(close: pd.Series, min_run: int = 10) -> float:
     with zero transformation applied on our side. A dense row count alone
     is NOT evidence of real trading; this catches what a row-count check
     misses. 24 of the first 40 candidate tickers hit this before the guard
-    below existed and had to be reverted from data/raw/prices/ by hand.
+    below existed and had to be reverted from data/raw/br/prices/ by hand.
     """
     if len(close) == 0:
         return 0.0

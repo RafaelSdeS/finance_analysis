@@ -2,7 +2,7 @@
 Test 1a (delisted price backfill): candidate-list filter + delisting-date anchors.
 
 The candidate filter is pure code and always runs. The anchor checks need the
-delisted parquets on disk (python -m src.data_collection.collect_delisted) and
+delisted parquets on disk (python -m src.data_collection.br.collect_delisted) and
 SKIP gracefully until then — they are the regression net that catches the API
 silently returning stale/extended data for a dead ticker.
 
@@ -19,8 +19,8 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.data_collection import collect_delisted, collectors  # noqa: E402
-from src.data_collection.collect_delisted import candidate_tickers  # noqa: E402
+from src.data_collection.br import collect_delisted, collectors  # noqa: E402
+from src.data_collection.br.collect_delisted import candidate_tickers  # noqa: E402
 
 # Known true last-trade dates, verified live against /stocks/{t}/history 2026-07-11.
 # These are point-in-time facts, not derived from code -- if a vendor later
@@ -52,7 +52,7 @@ def test_candidate_filter():
 def test_delisting_anchors():
     all_ok, skipped = True, 0
     for ticker, expected in DELISTING_ANCHORS.items():
-        path = ROOT / f"data/raw/prices/{ticker}.parquet"
+        path = ROOT / f"data/raw/br/prices/{ticker}.parquet"
         if not path.exists():
             print(f"SKIP  {ticker}: not collected yet (run collect_delisted)")
             skipped += 1

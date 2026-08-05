@@ -13,15 +13,16 @@ HGLG11); only names confirmed as CVM-registered companies by the FCA crosswalk
 suffix-11 names are skipped entirely.
 
 Usage (from project root):
-    python -m src.data_collection.collect_delisted --dry-run
-    python -m src.data_collection.collect_delisted
-    python -m src.data_collection.collect_delisted --tickers SMLS3 LAME4 HGTX3
+    python -m src.data_collection.br.collect_delisted --dry-run
+    python -m src.data_collection.br.collect_delisted
+    python -m src.data_collection.br.collect_delisted --tickers SMLS3 LAME4 HGTX3
 """
 
 import argparse
 import re
 
-from . import collectors, config
+from . import collectors
+from .. import config
 
 _STOCK = re.compile(r"^[A-Z0-9]{4}[3-8]$")  # same filter as get_all_tickers
 _UNIT = re.compile(r"^[A-Z]{4}11$")         # units (SULA11); funds excluded via crosswalk

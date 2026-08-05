@@ -18,7 +18,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data_collection import config, fred_collectors
+from src.data_collection import config
+from src.data_collection.us import fred_collectors
 
 
 FAKE_CSV = "observation_date,FEDFUNDS\n1954-07-01,0.80\n1954-08-01,.\n1954-09-01,1.07\n"

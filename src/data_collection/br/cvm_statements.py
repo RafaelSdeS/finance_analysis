@@ -8,7 +8,7 @@ filer's raw statements back to 2010, delisted included. This module rebuilds
 fundamentals in the same per-ticker parquet schema collect_fundamentals()
 writes, so Stage 2 (load_fundamentals glob-and-concat) needs zero changes.
 
-Steps (all CVM sources free & keyless; caches under data/raw/cvm/), each in
+Steps (all CVM sources free & keyless; caches under data/raw/br/cvm/), each in
 its own module under cvm/:
   crosswalk     FCA valor_mobiliario: ticker -> cnpj (verified 3/3 on
                 SMLS3/LAME4/HGTX3), cvm_code joined from filing_dates.parquet
@@ -24,21 +24,21 @@ its own module under cvm/:
                 company_info.parquet with status=CANCELADA
 
 Usage (from project root):
-    python -m src.data_collection.cvm_statements                  # all steps
-    python -m src.data_collection.cvm_statements --step crosswalk
-    python -m src.data_collection.cvm_statements --step filing_dates
-    python -m src.data_collection.cvm_statements --step fundamentals --tickers SMLS3
+    python -m src.data_collection.br.cvm_statements                  # all steps
+    python -m src.data_collection.br.cvm_statements --step crosswalk
+    python -m src.data_collection.br.cvm_statements --step filing_dates
+    python -m src.data_collection.br.cvm_statements --step fundamentals --tickers SMLS3
 """
 
 import argparse
 import logging
 
-from .cvm.company_info import synthesize_company_info
-from .cvm.crosswalk import build_crosswalk
-from .cvm.filing_dates import collect_filing_dates
-from .cvm.ratios import build_fundamentals
-from .cvm.shares import collect_shares
-from .cvm.statements import collect_statements
+from ..cvm.company_info import synthesize_company_info
+from ..cvm.crosswalk import build_crosswalk
+from ..cvm.filing_dates import collect_filing_dates
+from ..cvm.ratios import build_fundamentals
+from ..cvm.shares import collect_shares
+from ..cvm.statements import collect_statements
 
 log = logging.getLogger("cvm_statements")
 

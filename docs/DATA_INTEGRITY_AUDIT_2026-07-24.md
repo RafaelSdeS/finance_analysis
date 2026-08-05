@@ -2,7 +2,7 @@
 
 Scope: `data/processed/ml_dataset.parquet` (1,319,349 rows · 515 tickers · 167 cols,
 `dataset_v1`, git `9ea26f1`) + the Stage-2 build code that produced it. Verified against
-the actual built dataset and `data/raw/`, not just the CLAUDE.md caveats.
+the actual built dataset and `data/raw/br/`, not just the CLAUDE.md caveats.
 
 Legend: 🔴 Critical · 🟠 Medium · 🟡 Low · ✅ Passed
 
@@ -128,7 +128,7 @@ interior NaN holes and break the prefix-NaN invariant (`test_final_dataset::T_pr
   hypothesis (degenerate market-variance window) was wrong: the extreme dates (e.g. `CGRA3`
   2019-08-13, beta=−9.72) have a completely normal variance denominator (0.000188, 41st percentile
   of its own distribution) — the outlier comes entirely from `CGRA3`'s own fabricated ±100%+
-  "returns" on specific dates. Tracing those dates back to `data/raw/prices/CGRA3.parquet` found
+  "returns" on specific dates. Tracing those dates back to `data/raw/br/prices/CGRA3.parquet` found
   the real cause: raw `close` **alternates between two price bases** (~R$105 vs ~R$24, ~4.4×
   apart) — 1,517 single-day `|log-return|>35%` jumps out of 4,319 rows (35%), 721 of them
   round-trip oscillations spanning nearly the entire 2002–2024 history. This is the *exact* failure

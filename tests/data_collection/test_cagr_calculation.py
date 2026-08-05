@@ -31,7 +31,7 @@ from test_utils import print_header  # noqa: E402
 
 from cagr_handler import fill_cagr_columns, get_cagr_statistics
 
-FUND_DIR = "data/raw/fundamentals"
+FUND_DIR = "data/raw/br/fundamentals"
 
 
 # =============================================================================

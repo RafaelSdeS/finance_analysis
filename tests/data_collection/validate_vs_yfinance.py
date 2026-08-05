@@ -23,8 +23,8 @@ from test_utils import print_header  # noqa: E402
 
 TICKERS   = ["PETR4", "VALE3", "WEGE3"]
 PROJECT   = Path(__file__).resolve().parents[2]
-PRICE_DIR = PROJECT / "data/raw/prices"
-FUND_DIR  = PROJECT / "data/raw/fundamentals"
+PRICE_DIR = PROJECT / "data/raw/br/prices"
+FUND_DIR  = PROJECT / "data/raw/br/fundamentals"
 TOLERANCE_PCT = 25  # vendor differences; single outliers on split/dividend boundaries OK (mean diff <<1%)
 
 

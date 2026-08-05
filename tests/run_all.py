@@ -42,6 +42,7 @@ FAST = [
     "tests/build_dataset/test_loaders.py",
     "tests/build_dataset/test_manifest.py",
     "tests/build_dataset/test_build_us_dataset.py",
+    "tests/build_dataset/test_no_hardcoded_data_paths.py",
     "tests/portfolio/test_labels.py",
     "tests/portfolio/test_backtest.py",
     "tests/portfolio/test_metrics.py",
@@ -74,7 +75,7 @@ FAST = [
     "tests/data_collection/test_chunk_dates_leap_year.py",
 ]
 
-# Needs data/raw/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
+# Needs data/raw/br/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
 DATA = [
     "tests/build_dataset/test_final_dataset.py",
     "tests/build_dataset/test_top_traded_quality.py",

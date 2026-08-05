@@ -1,6 +1,6 @@
 """
 backfill_known_gaps.py — one-off historical backfill for confirmed BolsAI
-vendor data gaps in data/raw/prices/.
+vendor data gaps in data/raw/br/prices/.
 
 Background: the anomaly-report investigation (2026-07-14, see
 ANOMALY_INVESTIGATION.md) found 44 ATIVO-status tickers with a >400-day void
@@ -10,7 +10,7 @@ row count as proof of real trading — WRONG: a full first run of this script
 found yfinance itself pads holes in its own coverage with a carried-forward
 stale price for many of these tickers, producing a dense, correctly-dated
 row count that's actually 90%+ a single repeated close. 24 tickers were
-silently corrupted this way and had to be reverted from data/raw/prices/ by
+silently corrupted this way and had to be reverted from data/raw/br/prices/ by
 hand; 2 more (EUCA4, NUTR3) were ~50% contaminated and reverted out of an
 abundance of caution. backfill_price_gap() now has a flat-run guard
 (_flat_run_fraction in yf_collectors.py) that rejects any fetch matching
@@ -25,12 +25,12 @@ gap). Dates are NOT tight bounds — backfill_price_gap() only ever writes
 dates that are genuinely absent from the existing file (see its docstring
 in yf_collectors.py), so padding here is harmless.
 
-Run from project root: python -m src.data_collection.backfill_known_gaps
+Run from project root: python -m src.data_collection.one_off.backfill_known_gaps
 """
 
 import logging
 
-from .yf_collectors import backfill_price_gap
+from ..yf_collectors import backfill_price_gap
 
 log = logging.getLogger(__name__)
 

@@ -4,7 +4,7 @@ inspect_all_data.py
 
 Scans all folders inside:
 
-data/raw/
+data/raw/br/
 
 and displays:
 - available parquet files
@@ -15,10 +15,10 @@ and displays:
 
 Folders scanned:
 ----------------
-data/raw/prices/
-data/raw/fundamentals/
-data/raw/financials/
-data/raw/macro/
+data/raw/br/prices/
+data/raw/br/fundamentals/
+data/raw/br/financials/
+data/raw/br/macro/
 
 Usage
 -----
@@ -40,7 +40,7 @@ import pandas as pd
 # CONFIG
 # =============================================================================
 
-RAW_DIR = Path("../data/raw")
+RAW_DIR = Path("../data/raw/br")
 
 FOLDERS = [
     "prices",

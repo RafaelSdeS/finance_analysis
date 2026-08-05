@@ -31,9 +31,9 @@ the same short window (hours). Never use it to resume a --mode update run
 spanning weeks/months -- that's exactly the staleness bug the full re-fetch
 design fixed.
 
-Usage: python -m src.data_collection.run_us_full_scale [prices|dividends|fundamentals|universe|company_info]
+Usage: python -m src.data_collection.us.run_us_full_scale [prices|dividends|fundamentals|universe|company_info]
        (no argument runs all five, in order)
-       RESUME=1 python -m src.data_collection.run_us_full_scale prices fundamentals
+       RESUME=1 python -m src.data_collection.us.run_us_full_scale prices fundamentals
 """
 
 import logging
@@ -42,9 +42,9 @@ import sys
 
 import pandas as pd
 
-from . import config
-from .sec import company_info, crosswalk, fundamentals, universe
-from .yf_collectors import collect_dividends_yf, collect_prices_yf
+from .. import config
+from ..sec import company_info, crosswalk, fundamentals, universe
+from ..yf_collectors import collect_dividends_yf, collect_prices_yf
 
 log = logging.getLogger(__name__)
 MODE = "us_full_scale_v2"

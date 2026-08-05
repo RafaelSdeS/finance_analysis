@@ -6,7 +6,7 @@ forgotten.
 
 - [ ] **Accrual anomaly (Sloan 1996), balance-sheet version.** Low-accrual stocks tend to
       outperform high-accrual ones (earnings backed by cash vs. non-cash accruals). Computable
-      from data already in `data/raw/fundamentals/*.parquet` — no new sourcing needed:
+      from data already in `data/raw/br/fundamentals/*.parquet` — no new sourcing needed:
       `accruals = (ΔCA - Δcash) - (ΔCL) - D&A`, scaled by average `total_assets`, using
       `current_assets`, `current_liabilities`, `cash`, `total_assets`, and `ebitda - ebit` as a
       D&A proxy. Caveat: US evidence is strong, Brazilian-market evidence is weaker/mixed (thinner
@@ -23,7 +23,7 @@ forgotten.
 
 - [ ] **Piotroski F-score.** 9-point quality composite (profitability, leverage/liquidity change,
       operating efficiency), entirely computable from fields already in
-      `data/raw/fundamentals/*.parquet` (`roe`, margins, `current_ratio`, `debt_equity`,
+      `data/raw/br/fundamentals/*.parquet` (`roe`, margins, `current_ratio`, `debt_equity`,
       `asset_turnover`, deltas quarter-over-quarter). No new sourcing.
 
 - [ ] **News/social sentiment — parked, not cheap.** Would need a real text pipeline (scraping +

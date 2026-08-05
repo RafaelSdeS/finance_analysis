@@ -33,7 +33,7 @@ BLUE_CHIPS = [
 
 MIN_PRICE_ROWS = 1000  # ~4 years of trading days; these tickers have decades
 
-RAW = ROOT / "data" / "raw"
+RAW = ROOT / "data" / "raw" / "br"
 
 
 def main():

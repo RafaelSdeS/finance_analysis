@@ -482,7 +482,7 @@ scoped to 1995-2000 as its reliable core.
 - [x] Series: `FEDFUNDS`, `DGS2`/`DGS10`/`DGS30`, `CPIAUCSL`+`CPIAUCNS`, `PPIACO`, `UNRATE`,
       `GDPC1`, `INDPRO`, `T10Y2Y`, `VIXCLS`, `DTWEXBGS`, `M2SL`.
 - [x] Written to `data/raw/us/macro/{series}.parquet`, one file per series — same layout as
-      `data/raw/macro/`.
+      `data/raw/br/macro/`.
 - [x] Frequency + unit documented in `config.py` next to `FRED_SERIES`, same convention as
       `BCB_SERIES`.
 

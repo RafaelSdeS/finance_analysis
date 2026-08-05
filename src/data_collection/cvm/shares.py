@@ -16,7 +16,7 @@ _FRE_COLS = ["cnpj", "effective_date", "shares"]
 
 def collect_shares() -> pd.DataFrame:
     """Per-cnpj timeline of total shares: (cnpj, effective_date, shares).
-    Per-year FRE rows cached to data/raw/cvm/fre_{year}.parquet (zips are ~10 MB
+    Per-year FRE rows cached to data/raw/br/cvm/fre_{year}.parquet (zips are ~10 MB
     each); only the current year is re-downloaded on rerun."""
     config.CVM_DIR.mkdir(parents=True, exist_ok=True)
     current = date.today().year

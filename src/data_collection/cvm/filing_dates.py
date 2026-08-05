@@ -12,11 +12,11 @@ true release date (measured Q1-2025: median lag 44 days, but 8.6% of companies
 file late, up to 443 days — a fixed statutory buffer can't cover those).
 
 Output:
-    data/raw/filing_dates/filing_dates.parquet
+    data/raw/br/filing_dates/filing_dates.parquet
         cnpj (digits only), cvm_code, reference_date, received_date, report_type
 
 Run once, then re-run quarterly (only missing/current years are downloaded):
-    python -m src.data_collection.cvm_statements --step filing_dates
+    python -m src.data_collection.br.cvm_statements --step filing_dates
 """
 
 from datetime import date
@@ -26,7 +26,7 @@ import pandas as pd
 from .. import config
 from . import http
 
-OUTPUT_PATH = config.RAW_DIR / "filing_dates/filing_dates.parquet"
+OUTPUT_PATH = config.BR_RAW_DIR / "filing_dates/filing_dates.parquet"
 
 
 def _fetch_year(report_type: str, year: int) -> pd.DataFrame | None:
