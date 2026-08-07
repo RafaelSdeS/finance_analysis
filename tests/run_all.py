@@ -85,6 +85,7 @@ DATA = [
     "tests/data_collection/validate_vs_yfinance.py",
     "tests/data_collection/test_collect_delisted.py",
     "tests/data_collection/test_us_data_quality.py",
+    "tests/data_collection/validate_us_vs_vendor.py",
     "tests/data_collection/test_cvm_statements.py",
     "tests/portfolio/test_universe.py",
     "tests/portfolio/test_features.py",
@@ -96,7 +97,10 @@ DATA = [
 # adjustments shouldn't fail CI for reasons unrelated to code correctness --
 # still runs and its result is printed normally, it just doesn't flip the
 # overall exit code.
-NON_BLOCKING = {"tests/data_collection/validate_vs_yfinance.py"}
+NON_BLOCKING = {
+    "tests/data_collection/validate_vs_yfinance.py",
+    "tests/data_collection/validate_us_vs_vendor.py",
+}
 
 # --- color -------------------------------------------------------------
 

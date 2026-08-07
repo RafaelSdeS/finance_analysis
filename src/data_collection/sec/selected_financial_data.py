@@ -51,7 +51,16 @@ _APOSTROPHE = re.compile("’")
 # table's caption units even when every other row is -- confirmed on Intel's
 # real table above: "0.79"/"0.77" EPS sit next to "35127"/"4369" net
 # revenue/income under the same "(In Millions...)" caption.
-_UNITS_RE = re.compile(r"in\s+(thousands|millions|billions)\b", re.I)
+# "in millions" is not the only real caption phrasing -- real bug, confirmed
+# on XOM's actual 2002 10-K (2026-08-06): its table's own caption literally
+# reads "(millions of dollars, except per share amounts)" -- no "in" at all,
+# so the old "in\s+(...)"-only pattern found nothing anywhere (table, Item 6
+# heading, AND whole document), silently falling through to a wrong
+# whole-document guess despite the real caption sitting right in the table's
+# own cells the whole time (XOM's real ~$144.5B 1999 total assets stored as
+# $144.5M). Matches either "in millions" or "millions of dollars" -- the two
+# phrasings actually seen across real filings so far.
+_UNITS_RE = re.compile(r"in\s+(thousands|millions|billions)\b|\b(thousands|millions|billions)\s+of\s+dollars\b", re.I)
 _UNIT_MULTIPLIER = {"thousands": 1e3, "millions": 1e6, "billions": 1e9}
 _PER_SHARE_ITEMS = {"eps_basic", "eps_diluted", "dividends_per_share"}
 
@@ -62,6 +71,32 @@ _PER_SHARE_ITEMS = {"eps_basic", "eps_diluted", "dividends_per_share"}
 # dollar figure by shape alone. See _row_values for why this only strips
 # marker-shaped tokens when the row's raw token count exceeds n_years.
 _FOOTNOTE_RE = re.compile(r"^\(\d{1,2}\)$")
+
+# A pure alignment artifact ($ sign, blank, pandas' NaN-as-string) -- never a
+# real year-column slot, safe to drop outright.
+def _is_spacer(cell: str) -> bool:
+    s = cell.strip()
+    if not s or s in ("$", "nan", "NaN"):
+        return True
+    return not s.strip("()").replace(",", "").replace("$", "").strip()
+
+
+# A genuine "not reported this year" marker -- dash/N-A-shaped -- as opposed
+# to arbitrary non-numeric TEXT that isn't a real data slot at all. Narrow
+# allowlist, not "anything that isn't a spacer": real bug, confirmed on AME's
+# actual 2003 10-K (2026-08-06), found immediately after first trying the
+# broader "any non-spacer cell is a real slot" rule -- its "Net sales" row
+# label repeats a SECOND time as the row's very next cell (an HTML colspan
+# artifact), and under the broad rule that duplicate label text got kept as
+# a placeholder slot, shifting every real year's value one position off
+# (2003 -> None, 2002 -> the real 2003 value, ... 1999's real value dropped
+# off the end entirely). A dash/N-A cell is unambiguous; free-text isn't --
+# so only the former counts as a real slot. See _row_values.
+_PLACEHOLDER_RE = re.compile(r"^(-{1,3}|–|—|n\.?/?a\.?|nm|n\.m\.)$", re.I)
+
+
+def _is_placeholder(cell: str) -> bool:
+    return bool(_PLACEHOLDER_RE.match(cell.strip().strip("()")))
 
 
 def detect_unit_multiplier(text: str, prefer_first: bool = False) -> float:
@@ -88,7 +123,7 @@ def detect_unit_multiplier(text: str, prefer_first: bool = False) -> float:
     disambiguating Item 6's caption among many unrelated mentions elsewhere
     in the document is a genuinely fuzzier problem.
     """
-    hits = [m.group(1).lower() for m in _UNITS_RE.finditer(text)]
+    hits = [(m.group(1) or m.group(2)).lower() for m in _UNITS_RE.finditer(text)]
     if not hits:
         return 1.0
     if prefer_first:
@@ -132,6 +167,28 @@ ROW_ALIASES = {
 
 def _row_text(series: pd.Series) -> str:
     return " ".join(str(x) for x in series.tolist())
+
+
+def _is_caption_only_row(row: pd.Series) -> bool:
+    """A genuine table-WIDE caption row carries no real FINANCIAL data of its
+    own -- either the caption occupies the label cell itself with every other
+    cell blank (ZION's real shape -- which, in a compact table, can double as
+    the year-header row itself, e.g. column 2 = "2004", hence the year-shape
+    exemption below), or the label is empty and the caption text merely
+    repeats across otherwise non-numeric cells (AME's real shape). A row that
+    has ACTUAL dollar/share data alongside a units-sounding label (TXN's
+    share count, FHI's "MANAGED AND ADMINISTERED ASSETS...(in millions)" row)
+    is reporting a real line item with its own LOCAL caption, not the
+    table's governing one -- see build_cik_history's caption detection for
+    the real filings this distinguishes. A bare 4-digit year-shaped number is
+    exempted (not treated as disqualifying "real data") since it's never a
+    financial figure and coincides with the year-header row in fixtures/
+    filings that combine caption and year header into one line."""
+    for c in row.iloc[1:]:
+        v = _parse_value(str(c))
+        if v is not None and not (v.is_integer() and 1900 <= v <= 2099):
+            return False
+    return True
 
 
 def _normalize_label(s: str) -> str:
@@ -225,6 +282,63 @@ def find_selected_financial_data_table(tables: list[pd.DataFrame]) -> pd.DataFra
     return best
 
 
+# A real "Item 6. Selected Financial Data" section heading -- allows arbitrary
+# HTML noise both between "Item" and "6" AND between "6" and "Selected
+# Financial Data" (real filings interleave <A NAME=...></A> anchors and
+# &nbsp; runs in both gaps), but requires the actual caption phrase nearby,
+# not just any "Item 6" mention (a table of contents entry, or "Item 601 of
+# Regulation S-K", would false-match a bare \bitem\s*6\b alone).
+#
+# The first gap must NOT be restricted to \s* (real whitespace only) -- real
+# bug, confirmed on KMB's actual 10-K (2026-08-06): its TABLE OF CONTENTS
+# entry writes "Item 6." with a genuine space (matched fine), but the REAL
+# body heading writes "ITEM&nbsp;6." -- the literal 6-character HTML entity
+# "&nbsp;", not whitespace at all under \s. \s*-only matched the TOC line
+# instead of the real heading, landing this function on a page-number blob
+# with no caption anywhere near it, silently falling through to the
+# whole-document scan (KMB's real ~$14.3B net sales stored as $14.3M).
+_ITEM6_HEADING_RE = re.compile(r"item.{0,20}?6\b.{0,200}?selected\s+financial\s+data", re.I | re.S)
+
+
+def _item6_heading_text(text: str, window: int = 2000) -> str:
+    """Text between a real Item 6 heading and the next <TABLE> tag (or `window`
+    chars, whichever comes first) -- the units caption paragraph almost always
+    sits in exactly this gap, physically between the heading and the table
+    itself. Empty string if no heading found.
+
+    Real bug, confirmed on ATR's actual 2002 10-K (2026-08-06): "ITEM 6.
+    SELECTED FINANCIAL DATA ... In millions of dollars" sits right before the
+    table, outside the table's own cells (build_cik_history's table_text check
+    correctly falls through), but the OLD whole-document fallback
+    (detect_unit_multiplier(resp.text)) picked "thousands" instead -- this
+    combined submission bundles several OTHER financial statements captioned
+    in thousands, outnumbering Item 6's own single "millions" mention 9-to-1
+    under the mode-based whole-document scan. A much narrower target than the
+    whole filing: anchored on the one heading Reg S-K actually requires,
+    checked BEFORE falling all the way back to the frequency-mode scan.
+
+    Prefers whichever match's own window states a units caption, over just
+    the FIRST match -- real bug, confirmed on KMB's actual 10-K (2026-08-06):
+    a 10-K's table of contents virtually always ALSO spells out "Item 6.
+    Selected Financial Data" (with a page number, no caption, immediately
+    after) before the real section heading appears later in the body. Taking
+    only the first match landed on the TOC line every time, never the real
+    heading below it. Falls back to the first match's window when NONE of
+    them state a caption (the heading is still a useful, narrower anchor than
+    the whole document even without one -- callers still gate on _UNITS_RE
+    before trusting it).
+    """
+    matches = list(_ITEM6_HEADING_RE.finditer(text))
+    if not matches:
+        return ""
+    windows = []
+    for m in matches:
+        tail = text[m.end():m.end() + window]
+        table_start = re.search(r"<table", tail, re.I)
+        windows.append(tail[:table_start.start()] if table_start else tail)
+    return next((w for w in windows if _UNITS_RE.search(w)), windows[0])
+
+
 def _find_year_columns(df: pd.DataFrame) -> list[str]:
     """Years found in the header row, in left-to-right column order -- see
     _year_header_row for why this must be a single row, not flattened."""
@@ -275,6 +389,24 @@ def _row_values(row: pd.Series, n_years: int) -> list[float | None]:
     equal-value pairs first (only once the row is already known to have too
     many tokens, same conservative trigger as the footnote check) recovers
     the true per-year values before the footnote marker is even considered.
+
+    A genuine "-"/"N/A"-style placeholder cell (a real but unparseable data
+    slot, distinct from a "$"/blank alignment spacer -- see _is_spacer) MUST
+    still occupy its position as a None, not be dropped outright -- the
+    over-count guards above only handle a row with too MANY tokens; nothing
+    previously handled too FEW. Dropping a genuine placeholder shrinks the
+    token count below n_years, and the unconditional `+ [None] * ...` padding
+    at the tail then appends the missing slot(s) at the END regardless of
+    where the gap actually was -- silently shifting every later year's real
+    value one position early, the same corruption class as the already-fixed
+    footnote-marker and colspan bugs above, just from under- instead of
+    over-counting. Hypothesized from validate_us_vs_vendor.py's tier-seam
+    check (GAP/AUSI net_revenue reading implausibly small across a short
+    contiguous run of years, both cross-vendor and against directly adjacent
+    tiers of the SAME company) -- direct EDGAR access to confirm the exact
+    real row was unavailable in this environment, so this is reasoned from
+    the code's own established failure pattern, not a byte-for-byte
+    real-filing fixture like the cases above.
     """
     # A parenthesized negative split across two adjacent HTML cells -- real
     # bug, confirmed on AAPL's actual 2005 10-K (2026-07-30): the "Net income
@@ -310,16 +442,23 @@ def _row_values(row: pd.Series, n_years: int) -> list[float | None]:
         merged_cells.append(cell)
         i += 1
 
-    tokens: list[tuple[str, float]] = []
+    tokens: list[tuple[str, float | None]] = []
     for cell in merged_cells:
+        if _is_spacer(cell):
+            continue
         v = _parse_value(cell)
         if v is not None:
             tokens.append((cell, v))
+        elif _is_placeholder(cell):
+            tokens.append((cell, None))
+        # else: arbitrary non-numeric text (e.g. a duplicated label fragment
+        # bleeding in from an HTML colspan) -- not a real slot, dropped.
     if len(tokens) > n_years:
-        deduped: list[tuple[str, float]] = []
+        deduped: list[tuple[str, float | None]] = []
         i = 0
         while i < len(tokens):
-            if i + 1 < len(tokens) and tokens[i][1] == tokens[i + 1][1]:
+            if (i + 1 < len(tokens) and tokens[i][1] is not None
+                    and tokens[i][1] == tokens[i + 1][1]):
                 deduped.append(tokens[i])
                 i += 2
             else:
@@ -418,23 +557,55 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         # only when the winning table doesn't state its own units at all (a
         # caption living in a preceding paragraph, outside the parsed table).
         #
-        # A share-count row's OWN local caption (e.g. "...shares outstanding,
-        # in thousands") must not be read as the table's governing caption --
-        # real bug, confirmed on TXN's actual 2006 10-K (2026-07-30): that
-        # table states no dollar-figure caption in its own cells at all (its
-        # real "(in millions)" caption lives in a preceding paragraph outside
-        # the parsed table), so its ONLY units mention is the shares row's
-        # local "in thousands" -- which the code below then wrongly applied
-        # to net_revenue/net_income too, understating both 1000x. Excluding
-        # any row whose label mentions "shares" from caption detection (never
-        # from value extraction -- that's extract_years' own per_share_items
-        # exemption, untouched here) empties table_text's unit mentions for a
-        # table like this, correctly falling through to the whole-document
-        # scan instead.
-        caption_rows = table[~table.apply(lambda r: "shares" in _row_text(r).lower(), axis=1)]
+        # A row with its OWN real numeric data (a share-count row, or any other
+        # line item) must not have its LOCAL caption read as the table's
+        # governing one -- real bug, confirmed on TXN's actual 2006 10-K
+        # (2026-07-30): that table states no dollar-figure caption in its own
+        # cells at all (its real "(in millions)" caption lives in a preceding
+        # paragraph outside the parsed table), so its ONLY units mention is a
+        # share-count row's local "...shares outstanding, in thousands" --
+        # which the code below then wrongly applied to net_revenue/net_income
+        # too, understating both 1000x.
+        #
+        # Generalized past "shares" specifically -- real bug, confirmed on
+        # FHI's actual 2001 10-K (2026-08-06): its real "Total revenue"/"Total
+        # assets" figures are (thousands)-scale, but a DIFFERENT, unrelated
+        # line item -- "MANAGED AND ADMINISTERED ASSETS AT PERIOD END (in
+        # millions)" (an asset-manager-specific metric, not the company's own
+        # balance sheet) -- states its OWN "(in millions)" caption inline with
+        # its label, and (having no "shares" keyword) sailed straight past the
+        # old shares-only filter, understating the real dollar fields 1000x.
+        # The actual distinguishing trait of a genuine table-WIDE caption row
+        # isn't its label text at all: it's that the row carries NO real
+        # numeric data of its own (confirmed across every real caption row
+        # seen so far -- ZION's fixture below, where the caption occupies the
+        # label cell itself with every other cell blank; AME's, where the
+        # label is empty and the caption text merely repeats across otherwise
+        # non-numeric cells). A row that has REAL data alongside a units
+        # phrase -- TXN's share count, FHI's AUM figures -- is reporting an
+        # actual line item with its own LOCAL caption, not the table's
+        # governing one, regardless of what that phrase says. See
+        # _is_caption_only_row.
+        #
+        # Before falling all the way back to the whole document, try the text
+        # right after the real "Item 6" heading (see _item6_heading_text) --
+        # real bug, confirmed on ATR's actual 2002 10-K (2026-08-06): its
+        # caption ("In millions of dollars") lives in exactly that gap, but
+        # the whole-document mode-based scan below picked "thousands" instead,
+        # outnumbered 9-to-1 by OTHER tables' captions in the same combined
+        # submission -- a wrong pick, not an absent one, so table_text's own
+        # empty check can't catch it. Narrowing to the heading-anchored window
+        # first resolves it correctly without touching the whole-document
+        # fallback still needed when no Item 6 heading is found at all.
+        caption_rows = table[table.apply(_is_caption_only_row, axis=1)]
         table_text = " ".join(str(c) for c in caption_rows.to_numpy().flatten())
-        unit_multiplier = (detect_unit_multiplier(table_text, prefer_first=True) if _UNITS_RE.search(table_text)
-                            else detect_unit_multiplier(resp.text))
+        heading_text = _item6_heading_text(resp.text)
+        if _UNITS_RE.search(table_text):
+            unit_multiplier = detect_unit_multiplier(table_text, prefer_first=True)
+        elif _UNITS_RE.search(heading_text):
+            unit_multiplier = detect_unit_multiplier(heading_text, prefer_first=True)
+        else:
+            unit_multiplier = detect_unit_multiplier(resp.text)
         for year_str, items in extract_years(table, unit_multiplier).items():
             year = int(year_str)
             if not (_FISCAL_YEAR_MIN <= year <= _FISCAL_YEAR_MAX):

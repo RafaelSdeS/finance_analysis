@@ -220,23 +220,151 @@ def _fill_missing_multipliers(df: pd.DataFrame) -> pd.DataFrame:
     the tag) are left as-is -- fds_multiplier_explicit stays False so this remains
     visible/auditable rather than silently indistinguishable from a confirmed "no
     scaling" declaration.
+
+    The "one company, one scale" premise above is NOT always true, though --
+    confirmed via cross-vendor validation (tests/data_collection/validate_us_vs_vendor.py,
+    check_tier_seams) on GAP (CIK 39911) and GIS (CIK 40704): only 1-2 of ~20
+    exhibits ever declare <MULTIPLIER> explicitly, and blindly force-applying
+    that single borrowed value to every other exhibit produced rows 1000x/1e6x
+    off from their OWN neighbors on both sides -- some undeclared exhibits'
+    raw tag values were evidently already reported near full-dollar scale,
+    others genuinely needed the borrowed factor, interleaved within the same
+    CIK's history. A borrowed rescale is now only accepted when it lands the
+    exhibit's total_assets closer, in log-scale, to this CIK's own explicit-
+    tier median than leaving it unscaled would -- otherwise the exhibit is
+    left unscaled and unmarked explicit, same conservative fallback as a CIK
+    with no sibling to borrow from at all (below). Uses the CIK-wide median
+    rather than the nearest single sibling in time -- simpler, and one
+    mis-scaled explicit exhibit skews a median far less than it would a
+    nearest-neighbor pick.
     """
-    explicit = df[df["fds_multiplier_explicit"]]
+    if "total_assets" not in df.columns:
+        return df  # nothing to judge plausibility against -- don't guess
+    explicit = df[df["fds_multiplier_explicit"] & df["total_assets"].notna()]
     if explicit.empty:
         return df
     canonical = explicit["fds_multiplier"].mode().iloc[0]
+    reference = explicit["total_assets"].abs().median()
     missing = ~df["fds_multiplier_explicit"] & (df["fds_multiplier"] != canonical)
     if not missing.any():
         return df
     df = df.copy()
-    factor = canonical / df.loc[missing, "fds_multiplier"]
+    sub = df.index[missing]
+    factor = canonical / df.loc[sub, "fds_multiplier"]
+    scaled_assets = (df.loc[sub, "total_assets"] * factor).abs()
+    current_assets = df.loc[sub, "total_assets"].abs()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        scaled_dist = np.log10(scaled_assets / reference).abs()
+        current_dist = np.log10(current_assets / reference).abs()
+    accept = scaled_dist.index[scaled_dist < current_dist]  # NaN comparisons -> False, correctly excluded
+    if len(accept) == 0:
+        return df
+    factor = canonical / df.loc[accept, "fds_multiplier"]
     for col in _DOLLAR_FIELDS:
         if col in df.columns:
-            df.loc[missing, col] = df.loc[missing, col] * factor
-    df.loc[missing, "fds_multiplier"] = canonical
-    corrected = df.loc[missing]
+            df.loc[accept, col] = df.loc[accept, col] * factor
+    df.loc[accept, "fds_multiplier"] = canonical
+    corrected = df.loc[accept]
     ratios = corrected.apply(lambda r: compute_ratios(r.to_dict(), unit_scale=1), axis=1, result_type="expand")
-    df.loc[missing, ratios.columns] = ratios
+    df.loc[accept, ratios.columns] = ratios
+    return df
+
+
+# EX-27's own valid multiplier conventions -- the exact set seen in this
+# tier's real filings (WMT explicit at 1,000,000, SWK explicit at 1,000, see
+# extract_line_items's docstring; 1.0 covers a filing that genuinely needs no
+# scaling). Not an arbitrary guess space -- restricting to values the format
+# actually uses keeps this from accepting a coincidentally-close but wrong
+# power of 10.
+_VALID_MULTIPLIERS = (1.0, 1_000.0, 1_000_000.0)
+
+# A trusted reference this large is itself implausible for the small/mid-cap
+# universe that actually needs this cross-tier path (real EX-27 filers with
+# NO explicit multiplier anywhere -- if a company were XBRL-era-huge, it
+# would almost certainly have an ex27 sibling WITH an explicit tag, resolved
+# by _fill_missing_multipliers already). A per-row acceptance test alone
+# isn't enough of a guard: real bug, confirmed on AUSI (Aura Systems, CIK
+# 826253, 2026-08-06), whose trusted item6 reference itself reads $56
+# TRILLION total_assets (a still-unresolved item6 bug, unrelated to this
+# function) -- an ex27
+# candidate scaled by 1,000,000 landed "within 3x" of that reference purely
+# because BOTH sides were wrong by roughly the same magnitude, not because
+# either was actually correct. Rejecting the reference itself before it's
+# ever used as an anchor is a cheap, independent second guard against
+# exactly this coincidental-agreement failure mode.
+_TRUSTED_REFERENCE_CEILING = 2e11  # $200B; see docstring for why this bound
+
+
+def infer_multiplier_from_trusted_tiers(df: pd.DataFrame, trusted: pd.DataFrame,
+                                         max_gap_days: int = 730) -> pd.DataFrame:
+    """Second chance for ex27 rows _fill_missing_multipliers couldn't resolve at
+    all -- no explicit <MULTIPLIER> ANYWHERE in this CIK's own ex27 history, so
+    there is no same-tier sibling to borrow from in the first place. Confirmed
+    real (2026-08-06, via tests/data_collection/validate_us_vs_vendor.py's
+    tier-seam check) on AEO, ATNI, AUSI, FHI, and 13 others: every single
+    collected ex27 exhibit stays at the untouched default multiplier=1.0
+    forever under _fill_missing_multipliers alone, wrong for every one of
+    them -- confirmed on AEO by cross-referencing its own item6 tier's already-
+    correct FY1998 net_sales ($405,713K annual): AEO's raw ex27 Q3 1997
+    TOTAL-REVENUES tag (104902) is genuinely thousands-scale ($104,902,000,
+    ~26% of the annual figure, a plausible quarter), silently understated
+    1000x by the unresolved multiplier=1.0 default.
+
+    `trusted` is this CIK's OTHER tiers (item6/tenq/xbrl) combined -- each
+    individually more reliable than an ex27 exhibit with zero same-tier
+    signal to work with. For each unresolved row, finds the temporally
+    nearest trusted total_assets (within `max_gap_days`) and tries every
+    valid EX-27 multiplier, keeping whichever lands closest (log-scale) to
+    that reference -- same "does scaling actually help" acceptance test as
+    _fill_missing_multipliers above, just against a cross-tier reference
+    instead of a same-tier canonical (there IS no same-tier canonical for
+    these rows). Requires the match land within 3x, not just be the
+    least-bad candidate -- a real guard against a stale/unrelated trusted
+    row (including a still-imperfect item6 row -- see that tier's own known
+    residual error rate) misleading this into a confident wrong answer: an
+    ex27 candidate would need to coincidentally land within 3x of a WRONG
+    reference to be accepted, a narrow coincidence for the whole-decade
+    (10x/1000x) errors this is built to catch. Never touches an
+    already-resolved row (explicit multiplier, or one already fixed by
+    _fill_missing_multipliers above).
+    """
+    if "total_assets" not in df.columns or trusted.empty or "total_assets" not in trusted.columns:
+        return df
+    unresolved = ~df["fds_multiplier_explicit"] & (df["fds_multiplier"] == 1.0) & df["total_assets"].notna()
+    if not unresolved.any():
+        return df
+    ref = trusted[["end", "total_assets"]].dropna()
+    ref = ref[(ref["total_assets"] != 0) & (ref["total_assets"].abs() < _TRUSTED_REFERENCE_CEILING)]
+    if ref.empty:
+        return df
+
+    df = df.copy()
+    accepted = []
+    for i in df.index[unresolved]:
+        gap = (ref["end"] - df.at[i, "end"]).abs()
+        j = gap.idxmin()
+        if gap.loc[j] > pd.Timedelta(days=max_gap_days):
+            continue
+        target = abs(ref.at[j, "total_assets"])
+        raw = df.at[i, "total_assets"]
+        if pd.isna(raw) or raw == 0:
+            continue
+        with np.errstate(divide="ignore", invalid="ignore"):
+            best = min(_VALID_MULTIPLIERS, key=lambda f: abs(np.log10(abs(raw * f) / target)))
+            best_dist = abs(np.log10(abs(raw * best) / target))
+        if not (best_dist < np.log10(3)):
+            continue
+        df.at[i, "fds_multiplier"] = best
+        accepted.append(i)
+
+    if not accepted:
+        return df
+    for col in _DOLLAR_FIELDS:
+        if col in df.columns:
+            df.loc[accepted, col] = df.loc[accepted, col] * df.loc[accepted, "fds_multiplier"]
+    corrected = df.loc[accepted]
+    ratios = corrected.apply(lambda r: compute_ratios(r.to_dict(), unit_scale=1), axis=1, result_type="expand")
+    df.loc[accepted, ratios.columns] = ratios
     return df
 
 

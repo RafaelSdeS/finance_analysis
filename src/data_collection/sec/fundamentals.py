@@ -183,6 +183,7 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     `fundamentals_available_date` (never the period end -- plan §5.2)."""
     frames = []
 
+    xbrl = pd.DataFrame()
     facts = companyfacts.fetch_companyfacts(cik)
     if facts is not None:
         line_items = companyfacts.extract_line_items(facts)
@@ -195,7 +196,8 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     if not ex27.empty:
         ex27 = ex27.rename(columns={"fds_period_end": "end"})
         ex27["fundamentals_tier"] = "ex27"
-        frames.append(ex27)
+        # NOT appended to frames yet -- infer_multiplier_from_trusted_tiers
+        # below needs quarters/gap (tenq/item6) built first as a reference.
 
     quarters = tenq.build_cik_history(cik, filings)
     if not quarters.empty:
@@ -245,6 +247,16 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
                 gap.loc[still_bad, "end"] = (gap.loc[still_bad, "fundamentals_available_date"]
                                               - pd.offsets.QuarterEnd(n=1, startingMonth=3))
         gap["fundamentals_tier"] = "item6"
+
+    # ex27 rows with NO explicit <MULTIPLIER> anywhere in this CIK's own ex27
+    # history (fds._fill_missing_multipliers had no same-tier sibling to
+    # borrow from at all -- confirmed real on AEO/ATNI/AUSI/... 2026-08-06)
+    # get one more chance against the other, individually more reliable,
+    # tiers built above. See fds.infer_multiplier_from_trusted_tiers.
+    if not ex27.empty:
+        trusted = pd.concat([f for f in (xbrl, quarters, gap) if not f.empty], ignore_index=True, sort=False)
+        ex27 = fds.infer_multiplier_from_trusted_tiers(ex27, trusted)
+        frames.append(ex27)
 
     # tenq/item6 tags must already be set above -- _derive_annual_q4's
     # derived Q4 rows inherit the item6 row's own fundamentals_tier ("item6",

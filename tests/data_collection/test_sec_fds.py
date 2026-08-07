@@ -295,6 +295,101 @@ def test_missing_multiplier_left_flagged_when_no_sibling_available():
     print("OK: a missing multiplier with no sibling anywhere in the CIK's history stays honestly flagged, not guessed")
 
 
+def test_missing_multiplier_rejects_implausible_borrow():
+    # Real bug, found via cross-vendor validation (tests/data_collection/
+    # validate_us_vs_vendor.py, check_tier_seams) on GIS (CIK 40704, 2026-08-06):
+    # only 1 of ~19 exhibits declares <MULTIPLIER> explicitly (1,000,000, giving
+    # a plausible ~$3.3B total_assets); blindly borrowing that same factor onto
+    # EVERY other exhibit turned an already-correct ~$5.19B raw exhibit (its own
+    # tag values were evidently already near full-dollar scale, needing no
+    # further scaling at all) into a nonsense $5.19e15. The borrowed multiplier
+    # must only be accepted when it lands CLOSER (log-scale) to this CIK's own
+    # explicit-tier reference than leaving the exhibit unscaled would.
+    explicit_tags = {"ARTICLE": "5", "PERIOD-TYPE": "YEAR", "MULTIPLIER": "1,000,000",
+                      "TOTAL-ASSETS": "3300", "NET-INCOME": "100", "TOTAL-REVENUES": "5000",
+                      "CURRENT-ASSETS": "0", "CURRENT-LIABILITIES": "0", "CASH": "0", "BONDS": "0", "CGS": "0"}
+    explicit_row = {**fds.extract_line_items(explicit_tags), "fds_period_end": pd.Timestamp("1999-12-31")}
+
+    # This exhibit's raw TOTAL-ASSETS is already ~full-dollar scale (5.19B) --
+    # borrowing the 1,000,000 factor would blow it up to 5.19e15, wildly further
+    # from the ~3.3e9 reference than leaving it alone.
+    implausible_tags = {**explicit_tags, "TOTAL-ASSETS": "5190000000", "NET-INCOME": "150000000",
+                         "TOTAL-REVENUES": "6000000000"}
+    del implausible_tags["MULTIPLIER"]
+    implausible_row = {**fds.extract_line_items(implausible_tags), "fds_period_end": pd.Timestamp("2000-06-30")}
+
+    df = pd.DataFrame([explicit_row, implausible_row])
+    fixed = fds._fill_missing_multipliers(df)
+    kept = fixed[fixed["fds_period_end"] == pd.Timestamp("2000-06-30")].iloc[0]
+    assert kept["total_assets"] == 5_190_000_000.0, (
+        f"an already-plausible exhibit must NOT be force-rescaled by a borrowed multiplier, got {kept['total_assets']}")
+    assert kept["fds_multiplier_explicit"] == False  # noqa: E712 (real bool, not np.bool_)
+    print("OK: a borrowed multiplier is rejected when it would make the exhibit LESS plausible, not more")
+
+
+def test_infer_multiplier_from_trusted_tiers_resolves_real_aeo_shape():
+    # Real bug, confirmed end-to-end on AEO's (American Eagle Outfitters, CIK
+    # 919012) actual filing history (2026-08-06): NOT ONE of its ~16 ex27
+    # exhibits ever declares <MULTIPLIER> explicitly, so _fill_missing_multipliers
+    # (borrowing from a same-tier sibling) has zero signal to work with --
+    # every dollar field stays at the untouched default (multiplier=1.0)
+    # forever, understated 1000x. Confirmed by cross-referencing AEO's OWN
+    # item6 tier (already correct after today's other fixes): FY1998 net
+    # sales $405,713,000 annual: a raw ex27 TOTAL-REVENUES of 104902 for the
+    # Q3 1997 quarter is genuinely thousands-scale ($104,902,000, ~26% of the
+    # annual figure -- plausible for a retailer's pre-holiday quarter), not
+    # $104,902 as multiplier=1.0 leaves it.
+    ex27_tags = {"ARTICLE": "5", "PERIOD-TYPE": "3-MOS", "TOTAL-ASSETS": "134570",
+                 "NET-INCOME": "6276", "TOTAL-REVENUES": "104902",
+                 "CURRENT-ASSETS": "0", "CURRENT-LIABILITIES": "0", "CASH": "0", "BONDS": "0", "CGS": "0"}
+    ex27_row = {**fds.extract_line_items(ex27_tags), "end": pd.Timestamp("1997-11-01")}
+    assert ex27_row["fds_multiplier_explicit"] is False
+    assert ex27_row["total_assets"] == 134570.0, "before the fix: no sibling to borrow from, stays at raw scale"
+
+    df = pd.DataFrame([ex27_row])
+    # trusted = AEO's own real item6 FY1998 row (already correctly scaled)
+    trusted = pd.DataFrame([{"end": pd.Timestamp("1998-03-31"), "total_assets": 144_795_000.0}])
+    fixed = fds.infer_multiplier_from_trusted_tiers(df, trusted)
+    row = fixed.iloc[0]
+    assert row["total_assets"] == 134_570_000.0, (
+        f"must infer the x1,000 scale from the trusted item6 reference, got {row['total_assets']}")
+    assert row["net_revenue"] == 104_902_000.0
+    assert row["fds_multiplier"] == 1_000.0
+    print("OK: infer_multiplier_from_trusted_tiers resolves AEO's real never-explicit-anywhere shape")
+
+
+def test_infer_multiplier_from_trusted_tiers_rejects_no_close_candidate():
+    # None of the 3 valid EX-27 multipliers (1, 1,000, 1,000,000) land within
+    # 3x of a reference that doesn't correspond to any real scale of this
+    # row's raw digits -- must leave the row untouched (multiplier=1.0)
+    # rather than pick the "least bad" candidate anyway.
+    ex27_tags = {"ARTICLE": "5", "PERIOD-TYPE": "YEAR", "TOTAL-ASSETS": "500",
+                 "NET-INCOME": "10", "TOTAL-REVENUES": "100",
+                 "CURRENT-ASSETS": "0", "CURRENT-LIABILITIES": "0", "CASH": "0", "BONDS": "0", "CGS": "0"}
+    ex27_row = {**fds.extract_line_items(ex27_tags), "end": pd.Timestamp("1997-01-01")}
+    df = pd.DataFrame([ex27_row])
+    # 500 * {1, 1000, 1e6} = {500, 500000, 5e8} -- none within 3x of 42 (a
+    # reference matching none of them).
+    trusted = pd.DataFrame([{"end": pd.Timestamp("1997-01-15"), "total_assets": 42.0}])
+    fixed = fds.infer_multiplier_from_trusted_tiers(df, trusted)
+    assert fixed.iloc[0]["fds_multiplier"] == 1.0, "must not force a candidate that isn't actually plausible"
+    print("OK: infer_multiplier_from_trusted_tiers leaves a row untouched when no candidate is within 3x")
+
+
+def test_infer_multiplier_from_trusted_tiers_respects_max_gap_days():
+    # A trusted reference decades away from the ex27 row's own period must
+    # not be used as a scale anchor at all, plausible-looking match or not.
+    ex27_tags = {"ARTICLE": "5", "PERIOD-TYPE": "YEAR", "TOTAL-ASSETS": "134570",
+                 "NET-INCOME": "6276", "TOTAL-REVENUES": "104902",
+                 "CURRENT-ASSETS": "0", "CURRENT-LIABILITIES": "0", "CASH": "0", "BONDS": "0", "CGS": "0"}
+    ex27_row = {**fds.extract_line_items(ex27_tags), "end": pd.Timestamp("1997-11-01")}
+    df = pd.DataFrame([ex27_row])
+    trusted = pd.DataFrame([{"end": pd.Timestamp("2020-01-01"), "total_assets": 144_795_000.0}])
+    fixed = fds.infer_multiplier_from_trusted_tiers(df, trusted)
+    assert fixed.iloc[0]["fds_multiplier"] == 1.0, "a reference decades away must not be used, however plausible"
+    print("OK: infer_multiplier_from_trusted_tiers ignores a trusted reference outside max_gap_days")
+
+
 def test_build_cik_history_skips_post_ex27_era_filings():
     # Real efficiency bug, found scaling past a handful of companies (2026-07-28):
     # the original code fetched EVERY 10-K a CIK ever filed just to check for an
@@ -429,6 +524,10 @@ if __name__ == "__main__":
     test_extract_line_items_equity_survives_a_parenthesized_negative_component()
     test_missing_multiplier_borrows_from_sibling_exhibit()
     test_missing_multiplier_left_flagged_when_no_sibling_available()
+    test_missing_multiplier_rejects_implausible_borrow()
+    test_infer_multiplier_from_trusted_tiers_resolves_real_aeo_shape()
+    test_infer_multiplier_from_trusted_tiers_rejects_no_close_candidate()
+    test_infer_multiplier_from_trusted_tiers_respects_max_gap_days()
     test_build_cik_history_skips_post_ex27_era_filings()
     test_build_cik_history_drops_unparseable_period_end_instead_of_merging()
     test_measure_prevalence_handles_list_return_from_parse_fds()

@@ -165,6 +165,47 @@ def test_detect_unit_multiplier_prefer_first_breaks_ties_deterministically():
     print("OK: detect_unit_multiplier(prefer_first=True) breaks a unit-caption tie by first occurrence, not set order")
 
 
+def test_item6_heading_text_extracts_caption_gap():
+    # Mirrors the real structural gap on ATR's actual 2002 10-K (2026-08-06):
+    # the units caption sits between the "Item 6" heading and the table's own
+    # opening tag, HTML noise (anchors, &nbsp; runs) included.
+    text = ('some preamble <A NAME="tx1"></A>ITEM\n6.&nbsp;&nbsp;SELECTED FINANCIAL DATA '
+            'In millions of dollars, except per share data <table><tr>...')
+    got = sfd._item6_heading_text(text)
+    assert "In millions of dollars" in got
+    assert "<table" not in got.lower()
+    print("OK: _item6_heading_text extracts the caption gap between the heading and the table")
+
+
+def test_item6_heading_text_ignores_unrelated_item6_mentions():
+    # "Item 601" (a Regulation S-K exhibit cross-reference) and a bare table-
+    # of-contents "Item 6" entry must not false-match -- only the real
+    # "Item 6 ... Selected Financial Data" caption phrase should.
+    text = "See Item 601 of Regulation S-K. Elsewhere: Item 6.  Properties (unrelated)."
+    assert sfd._item6_heading_text(text) == ""
+    print("OK: _item6_heading_text ignores unrelated Item 6/601 mentions without the real caption phrase")
+
+
+def test_item6_heading_text_prefers_captioned_match_over_toc_entry():
+    # Real bug, confirmed on KMB's and XOM's actual 10-Ks (2026-08-06): a
+    # 10-K's table of contents virtually always ALSO spells out "Item 6.
+    # Selected Financial Data" (immediately followed by a page number, no
+    # caption) before the real section heading appears later in the body.
+    # Taking only the FIRST regex match landed on the TOC line every time --
+    # the real heading, with its actual caption, was always the SECOND match.
+    # Also covers KMB's specific variant: "ITEM&nbsp;6." (an HTML entity, not
+    # real whitespace, between "Item" and "6") in the real heading, vs "Item
+    # 6." (a genuine space) in the TOC line.
+    text = (
+        "Item 6.   Selected Financial Data   15   " # TOC entry: no caption, just a page number
+        + "later in the document... "
+        + "ITEM&nbsp;6.   SELECTED FINANCIAL DATA   In millions of dollars, except per share data <table>"
+    )
+    got = sfd._item6_heading_text(text)
+    assert "In millions of dollars" in got, f"must prefer the match whose window actually states a caption, got {got!r}"
+    print("OK: _item6_heading_text prefers a captioned match over an earlier table-of-contents entry")
+
+
 def test_build_cik_history_skips_filing_that_crashes_read_html():
     # Real bug, found retrying fundamentals collection at scale (2026-07-28):
     # pd.read_html raises more than ValueError on malformed real-world HTML.
@@ -317,6 +358,90 @@ def test_row_values_collapses_colspan_duplicated_cells_before_footnote_check():
     print("OK: _row_values collapses colspan-duplicated cell pairs before the footnote-marker check")
 
 
+def test_row_values_keeps_position_for_genuine_placeholder_cell():
+    # Hypothesized real bug (2026-08-06): a genuine "-" ("not reported this
+    # year") placeholder cell parses to None under _parse_value, same as a
+    # "$"/blank alignment spacer -- but unlike a spacer, it occupies a real
+    # year-column slot. Dropping it outright (old behavior) shrinks the token
+    # count below n_years, and the unconditional tail-padding then shifts
+    # every LATER year's real value one position early -- the same
+    # corruption class as the already-fixed footnote-marker/colspan bugs
+    # above, just triggered by under- instead of over-counting. Row shape
+    # mirrors the Intel-style "$", value pairing used elsewhere in this file;
+    # the middle year's value cell is a dash instead of a number.
+    row = pd.Series(["$", 100, "$", 200, "$", "-", "$", 300, "$", 400])
+    vals = sfd._row_values(row, 5)
+    assert vals == [100.0, 200.0, None, 300.0, 400.0], (
+        f"a genuine placeholder cell must keep its own position as None, not shift later years left, got {vals}")
+    print("OK: _row_values keeps a genuine placeholder cell's position instead of dropping it")
+
+
+def test_row_values_still_drops_pure_spacer_cells():
+    # The fix above must not regress the ORIGINAL reason non-numeric cells
+    # were dropped at all: "$" signs and blank spacer cells are pure
+    # alignment artifacts, never real year-column slots, and must still be
+    # skipped entirely (not turned into None placeholders).
+    row = pd.Series(["$", 100, "$", 200, "$", 300])
+    vals = sfd._row_values(row, 3)
+    assert vals == [100.0, 200.0, 300.0], f"pure spacer cells must still be dropped, not counted, got {vals}"
+    print("OK: _row_values still drops pure $/blank spacer cells")
+
+
+def test_row_values_drops_duplicated_label_text_not_a_placeholder():
+    # Real bug, confirmed on AME's (AMETEK) actual 2003 10-K (2026-08-06),
+    # found immediately after the placeholder fix above went in: the "Net
+    # sales" row's HTML label spans two columns via colspan, so it renders as
+    # TWO adjacent "Net sales" cells, not one -- the second one lands inside
+    # what _row_values treats as the data portion of the row. Under the
+    # placeholder fix's first (too-broad) version, this duplicate label text
+    # was wrongly kept as a real slot (it's not dash/N-A-shaped), shifting
+    # every year's real value one position off and dropping the last year's
+    # value entirely. Only a genuine dash/N-A marker should occupy a slot;
+    # arbitrary non-numeric text must still be dropped, same as before the
+    # placeholder fix existed at all.
+    row = pd.Series(["Net sales", None, "$", 1091.6, None, None, "$", 1040.5,
+                      None, None, "$", 1019.3, None, None, "$", 1024.7, None, None, "$", 924.8, None])
+    vals = sfd._row_values(row, 5)
+    assert vals == [1091.6, 1040.5, 1019.3, 1024.7, 924.8], (
+        f"a duplicated label fragment must be dropped like any other junk text, not kept as a slot, got {vals}")
+    print("OK: _row_values drops duplicated label text instead of treating it as a placeholder slot")
+
+
+def test_build_cik_history_reads_caption_row_that_mentions_shares_in_its_text():
+    # Real bug, confirmed on AME's actual 2003 10-K (2026-08-06): the table's
+    # OWN valid governing caption ("Dollars and shares in millions, except
+    # per share amounts") is itself a labelless row (empty first column) that
+    # happens to contain the word "shares" as part of describing what the
+    # caption covers -- not a share-count DATA row like the TXN case below.
+    # The old whole-row "shares" check threw this caption out along with the
+    # TXN-shaped rows it was meant to catch, silently falling through to the
+    # whole-document scan. Checking only the row's LABEL (first column) fixes
+    # this without reopening the TXN case (verified by the next test).
+    filings = pd.DataFrame({
+        "cik": [12],
+        "form_type": ["10-K"],
+        "date_filed": pd.to_datetime(["2004-03-01"]),
+        "filename": ["ame.txt"],
+    })
+    doc_text = "unrelated statement reported in thousands " * 9  # dominant, wrong, whole-doc caption
+    fake_resp = mock.Mock(text=doc_text)
+    table = pd.DataFrame({
+        0: [None, None, "Net sales", "Total assets"],
+        1: [None, "(Dollars and shares in millions, except per share amounts)", None, None],
+        2: ["2003", None, "1091.6", "1214.8"],
+    })
+    with mock.patch.object(sfd.http, "get", return_value=fake_resp), \
+         mock.patch.object(sfd.pd, "read_html", return_value=[table]), \
+         mock.patch.object(sfd, "find_selected_financial_data_table", return_value=table):
+        df = sfd.build_cik_history(12, filings)
+
+    assert len(df) == 1
+    assert df.iloc[0]["net_revenue"] == 1_091_600_000.0, (
+        "must use the table's own caption even though it mentions 'shares', not the whole document's, "
+        f"got {df.iloc[0]['net_revenue']}")
+    print("OK: build_cik_history reads a labelless caption row that mentions 'shares' as the table's own caption")
+
+
 def test_build_cik_history_uses_winning_tables_own_unit_caption():
     # Real bug, confirmed on ZION's actual 2005 10-K (2026-07-30): the winning
     # table's own caption said "(Amounts in millions)", but detect_unit_multiplier
@@ -388,11 +513,64 @@ def test_build_cik_history_ignores_shares_row_caption_falls_back_to_document():
     print("OK: build_cik_history ignores a shares-count row's local caption, falls back to the whole document")
 
 
+def test_build_cik_history_prefers_item6_heading_caption_over_whole_document():
+    # Real bug, confirmed on ATR's actual 2002 10-K (2026-08-06): the winning
+    # table states no dollar caption in its own cells (falls through, same as
+    # the TXN case above), but its REAL caption ("In millions of dollars")
+    # sits in the filing's prose right after the "ITEM 6. SELECTED FINANCIAL
+    # DATA" heading -- outside the table, but NOT the whole-document mode. The
+    # old whole-document fallback picked "thousands" instead, outnumbered
+    # 9-to-1 by OTHER tables' captions in the same combined submission (ATR's
+    # real total_assets stored as $714,700 instead of $714,700,000). The
+    # heading-anchored window must be tried BEFORE the frequency-mode
+    # whole-document scan.
+    filings = pd.DataFrame({
+        "cik": [11],
+        "form_type": ["10-K"],
+        "date_filed": pd.to_datetime(["2003-01-15"]),
+        "filename": ["atr.txt"],
+    })
+    doc_text = (
+        "unrelated statement reported in thousands " * 9
+        + "ITEM 6. SELECTED FINANCIAL DATA In millions of dollars, except per share data "
+        + "<table>ignored, table itself parsed separately below</table>"
+    )
+    fake_resp = mock.Mock(text=doc_text)
+    table = pd.DataFrame({
+        0: [None, "Total assets"],
+        1: [None, None],
+        2: ["1998", "714.7"],
+    })
+    with mock.patch.object(sfd.http, "get", return_value=fake_resp), \
+         mock.patch.object(sfd.pd, "read_html", return_value=[table]), \
+         mock.patch.object(sfd, "find_selected_financial_data_table", return_value=table):
+        df = sfd.build_cik_history(11, filings)
+
+    assert len(df) == 1
+    assert df.iloc[0]["total_assets"] == 714_700_000.0, (
+        "must use the Item 6 heading's own 'millions' caption, not the whole document's dominant 'thousands', "
+        f"got {df.iloc[0]['total_assets']}")
+    print("OK: build_cik_history prefers the Item 6 heading's own caption over the whole document's dominant one")
+
+
 def test_detect_unit_multiplier():
     assert sfd.detect_unit_multiplier("Some prose (In Millions, Except Per Share)") == 1_000_000.0
     assert sfd.detect_unit_multiplier("figures in thousands of dollars") == 1_000.0
     assert sfd.detect_unit_multiplier("no caption anywhere") == 1.0
     print("OK: detect_unit_multiplier reads the filing's units caption, defaults to 1.0 if absent")
+
+
+def test_detect_unit_multiplier_handles_of_dollars_phrasing_without_in():
+    # Real bug, confirmed on XOM's actual 2002 10-K (2026-08-06): its table's
+    # own caption reads "(millions of dollars, except per share amounts)" --
+    # no "in" anywhere -- so the old "in\s+(...)"-only pattern matched
+    # NOTHING in the table, the Item 6 heading, or the whole document,
+    # silently falling through to a wrong whole-document guess despite a
+    # perfectly good caption sitting in the table's own cells the whole time
+    # (XOM's real ~$144.5B 1999 total assets stored as $144.5M).
+    assert sfd.detect_unit_multiplier("(millions of dollars, except per share amounts)") == 1_000_000.0
+    assert sfd.detect_unit_multiplier("(thousands of dollars)") == 1_000.0
+    print("OK: detect_unit_multiplier matches 'X of dollars' phrasing, not just 'in X'")
 
 
 def test_build_cik_history_scales_and_computes_ratios():
@@ -466,13 +644,22 @@ if __name__ == "__main__":
     test_row_values_keeps_genuine_small_negative_when_already_aligned()
     test_row_values_merges_paren_split_across_cells()
     test_detect_unit_multiplier_prefer_first_breaks_ties_deterministically()
+    test_item6_heading_text_extracts_caption_gap()
+    test_item6_heading_text_ignores_unrelated_item6_mentions()
+    test_item6_heading_text_prefers_captioned_match_over_toc_entry()
     test_build_cik_history_skips_filing_that_crashes_read_html()
     test_extract_years_scales_dollar_rows_but_not_per_share()
     test_find_selected_financial_data_table_rejects_quarterly_and_embedded_digit_false_positives()
     test_find_selected_financial_data_table_prefers_more_years_over_keyword_count()
     test_row_values_collapses_colspan_duplicated_cells_before_footnote_check()
+    test_row_values_keeps_position_for_genuine_placeholder_cell()
+    test_row_values_still_drops_pure_spacer_cells()
+    test_row_values_drops_duplicated_label_text_not_a_placeholder()
+    test_build_cik_history_reads_caption_row_that_mentions_shares_in_its_text()
     test_build_cik_history_uses_winning_tables_own_unit_caption()
     test_build_cik_history_ignores_shares_row_caption_falls_back_to_document()
+    test_build_cik_history_prefers_item6_heading_caption_over_whole_document()
     test_detect_unit_multiplier()
+    test_detect_unit_multiplier_handles_of_dollars_phrasing_without_in()
     test_build_cik_history_scales_and_computes_ratios()
     test_build_cik_history_drops_implausible_fiscal_year()

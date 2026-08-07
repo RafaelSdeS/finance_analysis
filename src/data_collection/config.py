@@ -27,6 +27,9 @@ load_env()
 
 # --- Secrets ---
 BOLSAI_API_KEY = os.environ.get("BOLSAI_API_KEY")
+# Free tier (25 req/day), used only by tests/data_collection/validate_us_vs_vendor.py's
+# price cross-check -- unset means that section SKIPs, nothing else depends on it.
+ALPHAVANTAGE_API_KEY = os.environ.get("ALPHAVANTAGE_API_KEY")
 LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
 # SEC asks (not enforced, but good practice re throttling) for a descriptive UA
 # identifying the requester -- set a real contact in .env to be a good citizen.

@@ -15,6 +15,15 @@ index, not the reasoning):
                             not something to silently drift back to.)
   tests/data_collection/test_cvm_statements.py
     TOLERANCE = 0.15 (15%) -- CVM-derived vs BolsAI-derived equity, cross-source.
+  tests/data_collection/validate_us_vs_vendor.py
+    TOLERANCE_PCT = 25   -- ours (SEC xbrl tier) vs yfinance, fundamentals AND prices
+                            (Alpha Vantage). Matches BR's TOLERANCE_PCT above.
+    SEAM_RATIO_MAX = 5, SEAM_RATE_CEILING = 0.05 -- tier-seam continuity check
+                            (fundamentals_tier boundary jump); not cross-vendor,
+                            same category as test_collect_delisted.py's anchor
+                            tolerance below. Measured baseline 2026-08-05: 4.4%
+                            flagged -- real unit-scaling bugs in the ex27/tenq/
+                            item6 SEC parsers, see the script's own docstring.
   tests/build_dataset/test_final_dataset.py
     0.8 (80%) -- CAGR NaN "explained" coverage threshold (negative base year or
                  <20 quarters of history) before the coverage check counts as
