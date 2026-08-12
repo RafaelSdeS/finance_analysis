@@ -1,14 +1,15 @@
 # Finance Analysis: Brazilian-Equity Dataset Pipeline
 
-A data pipeline for Brazilian equities: collect raw prices/fundamentals/macro data, then build a
-single ML-ready parquet with derived features (technical, fundamental, macro), no lookahead bias.
-
-No model or agent is implemented yet — this repo currently covers data collection and dataset
-build only. Modeling work (RL agent, or otherwise) starts fresh from here.
+A data pipeline for Brazilian equities (+ a US-equity expansion in progress): collect raw
+prices/fundamentals/macro data, then build a single ML-ready parquet with derived features
+(technical, fundamental, macro), no lookahead bias. On top of that, `src/portfolio/` is an
+active, BR-only portfolio-construction research effort (LightGBM alpha forecaster + risk model
++ cost-aware optimizer, evaluated through a walk-forward backtest) — not a shipped strategy; see
+`CLAUDE.md` for its current, honest status.
 
 ## Pipeline
 
-Two stages: collect → build dataset.
+Three stages: collect → build dataset → (research) portfolio construction.
 
 ### Stage 1: Raw Data Collection
 
@@ -28,6 +29,14 @@ python -m src.build_dataset.build_ml_dataset
 ```
 Output: `data/processed/ml_dataset.parquet`
 
+### Stage 3: Portfolio Construction (active research, BR only)
+
+```bash
+python -m src.portfolio.run_baseline          # equal-weight + BOVA11 + 100%-CDI baselines
+python -m src.portfolio.run_full_backtest      # full alpha -> risk model -> optimizer pipeline
+```
+See `CLAUDE.md`'s Stage 3 section for the current research status before citing any number from a run.
+
 ## Setup
 
 ```bash
@@ -37,9 +46,10 @@ cp .env.example .env          # then add BOLSAI_API_KEY=sk_...  (backfill only; 
 
 ## Current Data
 
-**Raw (git-tracked):** ~293 tickers + benchmark BOVA11, one parquet per ticker in `data/raw/br/`.
+**BR, raw (git-tracked):** ~293 tickers + benchmark BOVA11, one parquet per ticker in `data/raw/br/`.
 **Macro:** SELIC, CDI, IPCA daily rates from BCB SGS.
 **Data currency:** Prices/macro current to 2026-06-30; fundamentals to 2026-03-31. Refreshed via yfinance quarterly incremental updates.
+**US, raw (gitignored, rebuildable):** `data/raw/us/` — prices (yfinance), fundamentals (SEC EDGAR), macro (FRED). Validated at a top-500-by-market-cap scope; full ~10,432-ticker scale-up in progress, see `CLAUDE.md`.
 
 ## Visualization
 

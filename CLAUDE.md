@@ -4,11 +4,12 @@ Guidance for Claude Code working in this repo.
 
 ## Overview
 
-**Project:** Brazilian-equity dataset pipeline for ML applications.
+**Project:** Brazilian-equity (+ US-equity, in progress) dataset pipeline for ML/portfolio applications.
 
-**Two stages** (all scripts run from project root):
-1. **Data Collection** — staged prototype→validation→full-scale pipeline (checkpointing, logging, validation).
-2. **Dataset Build** — merge raw data → derived features (technical, fundamental, macro) → clean → ML-ready parquet, no lookahead bias.
+**Three stages** (all scripts run from project root):
+1. **Data Collection** — staged prototype→validation→full-scale pipeline (checkpointing, logging, validation). BR (`src/data_collection/br/`) is mature; US (`src/data_collection/us/` + `sec/`) is an active expansion, see `docs/US_EQUITIES_EXPANSION_PLAN.md`.
+2. **Dataset Build** — merge raw data → derived features (technical, fundamental, macro) → clean → ML-ready parquet, no lookahead bias. BR is production; US (`build_us_dataset.py`) is validated at 500-ticker scale, full-universe scale-up in progress.
+3. **Portfolio Construction** (`src/portfolio/`, active research, BR only) — point-in-time universe → LightGBM alpha forecaster → Ledoit-Wolf risk model → cost-aware convex optimizer → contrarian cash overlay, evaluated via walk-forward backtest. Not a shipped strategy — current finding is the ML pipeline doesn't yet beat equal-weight net of cost.
 
 ## Setup
 
@@ -44,19 +45,34 @@ python tests/build_dataset/test_final_dataset.py        # schema, shape, lookahe
 
 # Fit the feature scaler (train-only, per split_config.json) — rerun after a rebuild
 python -m src.build_dataset.scale_features               # → data/processed/scalers/{feature_scaler.joblib,scaler_metadata.json}
+
+# US analogue (validated at 500-ticker scale; full-universe scale-up in progress, see Data on Disk below)
+python -m src.build_dataset.build_us_dataset             # → data/processed/us_ml_dataset.parquet
 ```
 
-### Stage 3+: Modeling (not yet started)
+### Stage 3: Portfolio Construction (`src/portfolio/`, active research)
 
-No model or agent implementation exists in this repo. Prior modeling work on this branch (a
-Stage 3 EIIE RL agent, a Stage 4 self-supervised conviction-model encoder, and an M-series →
-risk_mandate → H-series research lineage exploring alpha/portfolio policies) was deleted on
-2026-07-23 in a full reset — none of it produced a working, deployable result, and starting
-over from Stage 2's output was judged cleaner than carrying that design forward. It remains
-recoverable from git history (`git log` on `refactor` before that date) if ever needed for
-reference, but nothing about its design should be assumed or reused without deliberately
-re-reading it. Stage 2's output (`data/processed/ml_dataset.parquet` + the raw data in
-`data/raw/`) is the only carryover — it's untouched by this reset.
+Prereq: Stage 2 complete. BR only; not wired to the US dataset. Design docs: `docs/PORTFOLIO_ARCHITECTURE_PROPOSAL.md`
+(what), `docs/PORTFOLIO_IMPLEMENTATION_PLAN.md` (how it was built), `docs/PORTFOLIO_IMPROVEMENT_PLAN.md`
+(live research log — **read its "STOP" banner first**: pre-Phase-V sweep conclusions don't survive
+correction for the number of configs compared).
+
+```bash
+python -m src.portfolio.run_baseline              # equal-weight + BOVA11 + 100%-CDI baselines, ~2s
+python -m src.portfolio.run_alpha_diagnostic       # walk-forward LightGBM alpha only, rank-IC + naive alpha-sort, ~4min
+python -m src.portfolio.run_full_backtest          # full alpha→Sigma→optimizer pipeline vs. all baselines
+python -m src.portfolio.diagnose_contrarian        # contrarian overlay signal check (seconds, no training)
+python -m src.portfolio.reanalyze                  # re-score a saved run without retraining
+python -m src.portfolio.visualize_portfolio        # Plotly dashboard for a saved run
+python -m src.portfolio.plot_tree                  # render one LightGBM tree (needs system `dot`/graphviz)
+```
+
+**Current state** (per `PORTFOLIO_IMPROVEMENT_PLAN.md`, last recorded run 2026-07-26): alpha signal is
+real but weak (OOS rank-IC mean 0.056, positive on 65% of dates), but the full pipeline doesn't beat
+equal-weight net of cost, and widening the universe made it worse. Behaves like a crisis hedge that
+bleeds carry in calm markets. Honest, open research result — the project's own decision framework
+(Phase V) explicitly allows "ship equal-weight, keep this as a research project" as a valid outcome.
+Check that doc for the live status before citing any return/Sharpe number.
 
 ### Utilities
 
@@ -71,19 +87,17 @@ jupyter notebook src/visualizations/exploration.ipynb    # full dataset validati
 Plain Python scripts, no pytest. Unified test runner:
 
 ```bash
-# Fast group (pure-code unit tests, no data files needed — used by CI)
-python tests/run_all.py --group fast
-
-# Data group (needs git-tracked data/raw/* and built data/processed/ml_dataset.parquet)
-python tests/run_all.py --group data
-
-# All tests
+python tests/run_all.py --group fast   # pure-code unit tests, no data files needed — used by CI
+python tests/run_all.py --group data   # needs git-tracked data/raw/* + built ml_dataset.parquet
 python tests/run_all.py --group all
 ```
 
-**Test groups:**
-- **Fast:** `test_features.py`, `test_merge.py`, `test_cross_sectional.py`, `test_compute_features_chunked.py`, `test_split_config.py`, `test_dataset_versioning.py`, `test_scale_features.py`, `test_company_siblings.py`, `test_ticker_continuity.py`
-- **Data:** `test_final_dataset.py`, `test_top_traded_quality.py`, `test_universe_integrity.py`, `test_cagr_calculation.py`, `test_blue_chip_tickers.py`, `validate_vs_yfinance.py`, `test_collect_delisted.py`, `test_cvm_statements.py`
+The `FAST`/`DATA`/`NON_BLOCKING` lists in `tests/run_all.py` are the source of truth for exactly
+which script is in which group — don't hand-copy the roster here, it drifts. Shape: `FAST` covers
+`tests/build_dataset/`, `tests/portfolio/`, and `tests/data_collection/` unit tests (synthetic data,
+runs anywhere); `DATA` covers final-dataset/universe/vendor-cross-validation checks that need the
+real `data/raw/` + a built dataset; `NON_BLOCKING` is the subset of `DATA` that hits a live vendor
+and shouldn't fail CI on vendor flakiness.
 
 **Linting:**
 ```bash
@@ -92,9 +106,9 @@ ruff check .          # reports undefined names, unused imports/variables, bare-
 
 ## Branches
 
-- **main:** Stages 1–2 (data collection + dataset build). Latest stable.
+- **main:** Stages 1–2. Latest stable.
 - **build_dataset:** Stage 2 focus.
-- **refactor:** Stages 1–2 only, same as main, as of the 2026-07-23 reset (see Stage 3+ note above). Modeling work restarts here from zero.
+- **refactor:** Stages 1–2 restarted here after a 2026-07-23 reset wiped prior modeling work (a Stage 3 RL agent + Stage 4 encoder + M/H-series research lineage — none reached a working result; recoverable from git history before that date but not to be reused without re-reading it). Since then this branch has grown a **new**, unrelated Stage 3 (`src/portfolio/`, see above).
 - **ml_agent:** a separate, earlier PPO agent (masked 279-ticker universe); unrelated to this branch's reset.
 
 ## Architecture
@@ -121,113 +135,118 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 
 ### Key Modules
 
-**Stage 1 (Data Collection)** — `src/data_collection/`, market-namespaced since the
-2026-08-05 reorg (`docs/DATA_COLLECTION_REORGANIZATION_PLAN.md`): shared infra stays
-at the package root, BR-only and US-only orchestration/collectors moved into `br/`
-and `us/` (the already-market-specific `cvm/` and `sec/` subpackages didn't need to
-move — their names were unambiguous already), and disposable one-time incident-fix
-scripts live in `one_off/` (never imported by anything else):
+**Stage 1 (Data Collection)** — `src/data_collection/`, market-namespaced (`docs/DATA_COLLECTION_REORGANIZATION_PLAN.md`): shared infra at the package root, BR/US-only orchestration in `br/`/`us/`, `cvm/`+`sec/` unchanged (already unambiguous), one-time incident scripts in `one_off/` (never imported elsewhere):
 
 | Module | Purpose |
 |--------|---------|
-| `config.py` | Shared config (tickers, keys, paths, retries, `DATA_SOURCE` per-type source switch); `RAW_DIR` is the parent of both `BR_RAW_DIR` (`data/raw/br/`) and `US_RAW_DIR` (`data/raw/us/`) |
+| `config.py` | Shared config (tickers, keys, paths, retries, `DATA_SOURCE` per-type source switch); `RAW_DIR` parents `BR_RAW_DIR`/`US_RAW_DIR` |
 | `client.py` | BolsAI HTTP wrapper (retries, backoff): `make_client()`, `get_json()` |
 | `checkpoint.py` | Resume state (JSON per collector) |
 | `validate.py` | Quality gates (schemas, ranges, continuity) → `ValidationResult` |
-| `storage.py` | `_merge_save()` (idempotent append+dedup+validate+write) + `_chunk_dates()` — generic, used by every collector below; extracted out of `collectors.py` so BR-specific code isn't a dependency of US-specific code just to save a file |
-| `yf_collectors.py` | yfinance: `collect_{prices,fundamentals,dividends}_yf()`, parametrized by dir/suffix/floor — shared by BR's `--mode update` and US's full backfill, not market-specific itself |
+| `storage.py` | `_merge_save()` (idempotent append+dedup+validate+write) + `_chunk_dates()` — generic, used by every collector |
+| `yf_collectors.py` | yfinance: `collect_{prices,fundamentals,dividends}_yf()` — shared by BR's `--mode update` and US's full backfill |
 | `br/collectors.py` | BolsAI: `collect_{macro,prices,fundamentals,company_info,dividends,corporate_events,sectors}()` |
-| `br/pipeline.py` | BR orchestration CLI; `_collect()` dispatches to BolsAI/yfinance per `DATA_SOURCE` |
-| `br/collect_delisted.py` | Stage 1 price backfill for delisted/never-collected BR tickers |
-| `br/cvm_statements.py` + `cvm/` | CVM open-data collection (delisted fundamentals + real filing dates); thin `--step` CLI dispatching to `cvm/{http,crosswalk,statements,shares,ratios,company_info,filing_dates}.py`. `cvm/http.py` holds the one shared zip-download/retry implementation |
-| `br/stats.py` | Post-collection data audit (BR raw dirs only — no US equivalent yet) |
-| `us/fred_collectors.py` | FRED (US macro): `collect_macro_us()`, keyless `fredgraph.csv` — see `docs/US_EQUITIES_EXPANSION_PLAN.md` for the broader US-equities effort this is Phase 1 of |
-| `us/run_us_full_scale.py` | Driver for the US full-scale backfill (prices/dividends/fundamentals/universe/company_info) |
-| `sec/` | US fundamentals from SEC EDGAR (Phases 3-7 of the plan doc above), thin per-concern submodules: `http.py` (shared throttled-retry GET, every `sec/` module goes through it), `universe.py` (point-in-time filer roster from EDGAR `full-index`, survivorship-bias measurement), `crosswalk.py` (ticker↔CIK, incl. `CIK_OVERRIDES` for known shell-CIK mapping bugs), `companyfacts.py` (XBRL 2009+/IFRS tier), `fds.py` (EX-27 Financial Data Schedule tier, usably 1995-2000), `selected_financial_data.py` (SEC Item 6 "Selected Financial Data" chaining, fills the 2001-2006 gap; still referred to as "item6" elsewhere — column names, tier labels — this file just has the more legible name), `fundamentals.py` (combines all 3 tiers, point-in-time `fundamentals_available_date`). See the plan doc for the extensive real-bug log (lookahead-shaped derivation bugs, a whole-CIK-crashing HTML/HTTP parsing bug, shell-CIK ticker hijacking) found scaling this up — not duplicated here. |
-| `one_off/backfill_known_gaps.py`, `one_off/fix_mrfg3_adj_close.py` | One-time incident-fix scripts (confirmed BolsAI vendor data gaps/corruption for specific tickers) — not part of the regular pipeline, kept for reference/rerun-if-needed |
+| `br/pipeline.py` | BR orchestration CLI; dispatches to BolsAI/yfinance per `DATA_SOURCE` |
+| `br/collect_delisted.py` | Price backfill for delisted/never-collected BR tickers |
+| `br/cvm_statements.py` + `cvm/` | CVM open-data collection (delisted fundamentals + real filing dates); `--step` CLI over `cvm/{http,crosswalk,statements,shares,ratios,company_info,filing_dates}.py` |
+| `br/stats.py` | Post-collection data audit (BR only) |
+| `us/fred_collectors.py` | FRED (US macro), keyless `fredgraph.csv` |
+| `us/run_us_full_scale.py` | Driver for US full-scale backfill |
+| `sec/` | US fundamentals from SEC EDGAR: `http.py` (shared retry GET), `universe.py` (point-in-time filer roster), `crosswalk.py` (ticker↔CIK + `CIK_OVERRIDES`), `companyfacts.py` (XBRL 2009+/IFRS tier), `fds.py` (EX-27 tier, 1995–2000), `selected_financial_data.py` (Item 6, fills 2001–2006 gap), `fundamentals.py` (combines all 3 tiers, point-in-time `fundamentals_available_date`). Extensive bug log: `docs/US_EQUITIES_EXPANSION_PLAN.md`. |
+| `one_off/*` | One-time incident-fix scripts (confirmed BolsAI data gaps/corruption for specific tickers); not part of the regular pipeline |
 
-**Stage 2 (Dataset Build)** — `src/build_dataset/`, split by pipeline stage (each module below mirrors a section of the old monolithic `build_ml_dataset.py`):
+**Stage 2 (Dataset Build)** — `src/build_dataset/`, split by pipeline stage:
 
 | File | Purpose |
 |------|---------|
-| `build_ml_dataset.py` | Orchestration only: `main()` + the memory-bounded `compute_features_chunked()` (3-pass: per-ticker features → cross-sectional → clean+write) |
-| `paths.py` | Shared path constants (avoids circular imports across the split modules) |
+| `build_ml_dataset.py` | Orchestration: `main()` + memory-bounded `compute_features_chunked()` (3-pass: per-ticker features → cross-sectional → clean+write) |
+| `paths.py` | Shared path constants |
 | `loaders.py` | `load_prices()`, `load_fundamentals()`, `load_company_info()`, `load_dividends()`, `company_siblings()` |
 | `repair.py` | `repair_unadjusted_splits()` — rescales `adj_*` history where a split was left unadjusted |
 | `continuity.py` | `apply_ticker_continuity()` — splices renamed/merged tickers |
-| `quality_filters.py` | Coverage + filing-lag gates: `filter_tickers_with_no_fundamentals()`, `attach_filing_dates()`, `filter_excessive_filing_lag()` |
+| `quality_filters.py` | Coverage + filing-lag gates |
 | `merge.py` | The 4 `merge_*` functions (prices+fundamentals, company_info, macro, dividends) |
-| `features.py` | Per-ticker feature engineering: CAGR backfill, dividend yield, price technicals, fundamental ratios/trends, valuation re-anchoring, "advanced" contextual features, `compute_history_relative_features()` (per-ticker own-history z-scores, `*_zhist_5y`) |
-| `cross_sectional.py` | `compute_cross_sectional_features()` — sector/market-relative features; needs the full universe at once, unlike everything in `features.py` |
+| `features.py` | Per-ticker features: CAGR backfill, dividend yield, price technicals, fundamental ratios/trends, valuation re-anchoring, `compute_history_relative_features()` (`*_zhist_5y`) |
+| `cross_sectional.py` | `compute_cross_sectional_features()` — sector/market-relative, needs the full universe at once |
 | `clean.py` | `clean_dataset()` — final dedupe/inf-to-NaN pass |
 | `manifest.py` | `write_manifest()`, `compute_split_dates()`, `iter_fit_windows()`, `write_split_config()`, `sync_dataset_version()` |
 | `cagr_handler.py` | CAGR calc/fill (BolsAI first, backfill from earnings/revenue) |
-| `scale_features.py` | Fits `ColumnTransformer` (RobustScaler on ratio columns, passthrough elsewhere) train-only, per `split_config.json`; saves `feature_scaler.joblib` + `scaler_metadata.json` |
+| `scale_features.py` | Fits `ColumnTransformer` (RobustScaler on ratio cols) train-only, per `split_config.json` |
+| `build_us_dataset.py` | US analogue — reuses BR's price/dividend/cross-sectional/cleaning stages unchanged, adds only what's genuinely different (sector mapping, macro, daily valuation, liquidity gate), skips BR-only steps that don't apply (split/continuity repair, filing-lag gate). Rationale: `docs/US_DATASET_BUILD_PLAN.md`. |
+
+**Stage 3 (Portfolio Construction)** — `src/portfolio/`, BR only, active research. One file per concern, thin wrappers over Stage 2 output:
+
+| File | Purpose |
+|------|---------|
+| `universe.py` | Thin wrapper over Stage 2's `build_top50_universe.py` (point-in-time, no-lookahead, quarterly-rebalanced membership) |
+| `labels.py` | `forward_excess_return()` — forward H-day return over CDI, no-lookahead-by-construction |
+| `features.py` | The literal ~121-column keep-list, checked live against `manifest.LOOKAHEAD_TAINTED_COLS` |
+| `backtest.py` | `run_backtest()` — quarterly-rebalanced harness; weights drift with prices between rebalances (deliberate) |
+| `risk.py` | `shrinkage_cov()` (Ledoit-Wolf) + cash-row augmentation + PSD/conditioning checks — raw sample cov over 30–500 assets is numerically unusable at this scale |
+| `alpha.py` | Stage A: LightGBM regression on the forward-excess-return label, walk-forward retrain, purged + embargoed |
+| `optimizer.py` | Stage B: cost-aware convex program (`cvxpy`) — alpha vs. risk-aversion vs. one-way turnover cost, with a contrarian exposure cap |
+| `contrarian.py` | Layer 2 "cannons/violins" cash↔equity overlay — a 1-parameter economic rule, deliberately not a learned model (too few crisis episodes to fit one without overfitting) |
+| `pipeline.py` | Wires alpha + risk + optimizer into one `weights_fn` the backtest harness drives |
+| `metrics.py` | `full_report()` — annualized return, Sharpe, deflated Sharpe, max drawdown, turnover/holding-period, regime slices |
+| `artifacts.py` | Persists backtest runs to `artifacts/backtests/` for re-analysis without retraining; append-only `trials.csv` for an honest `n_trials` |
+| `run_baseline.py`, `run_alpha_diagnostic.py`, `run_full_backtest.py`, `diagnose_contrarian.py`, `reanalyze.py` | CLI drivers per research question — see Run Commands |
+| `visualize_portfolio.py`, `plot_tree.py` | Plotly dashboard for a saved run; graphviz render of one LightGBM tree |
 
 ## Critical Caveats
 
-- **CAGR backfill is ON:** `fill_missing_cagr()` (which calls `fill_cagr_columns()` per ticker) runs unconditionally in `build_ml_dataset.py`'s main pipeline → dataset has `cagr_{earnings,revenue}_5y_final` populated. Coverage is ~60% from BolsAI; the backfill recovers an additional ~7%.
-- **No lookahead (Stage 2) — ENFORCED:** `merge_asof(..., direction='backward')` on real CVM `fundamentals_available_date` (not fiscal period-end) — a price never sees a future fundamental. `volatility_*_percentile` use rolling-window rank, not global rank. Tests: `test_merge_honors_actual_filing_date`, `test_volatility_percentile_no_lookahead`. ✅ VERIFIED 2026-07-11.
-- **Real filing dates (July 2026):** Fundamentals visible via CVM's `DT_RECEB` (received date), not fiscal `reference_date`. 41,530 filings from 1,223 companies, 100% coverage of 293-ticker universe; 4,657 rows (0.7%) would have violated a fixed 45/90-day buffer. Sourced from free, keyless CVM open-data portal; integrated via `src/data_collection/cvm/filing_dates.py` (`python -m src.data_collection.br.cvm_statements --step filing_dates`).
-- **Known limitation — fundamentals *values* may be restated even though `fundamentals_available_date` is point-in-time (2026-07-23 audit, Issue 8):** `filing_dates.py` correctly takes the *earliest* CVM receipt (v1) as the availability date, but the fundamental *figures themselves* come from BolsAI's `/fundamentals/history`, which reflects whatever BolsAI's snapshot currently holds — almost certainly the latest restatement, not what was actually filed at v1. Where a company restated (common after auditor review of ITRs), a row dated at the original v1 filing date can carry corrected numbers nobody had access to at the time — an as-reported-vs-as-restated lookahead in fundamental factors, distinct from (and smaller than) the already-fixed filing-*date* lookahead above. **No fix with BolsAI alone** — CVM's own open-data ZIPs (`src/data_collection/cvm/statements.py`) contain every filing version and could source true as-first-reported v1 figures, but that's a larger sourcing project, not attempted here. Flagged so it isn't rediscovered as a bug; not yet quantified (no measurement of how many rows/how large a restatement gap this affects).
-- **Unadjusted splits REPAIRED:** 67 corporate events (count as of the 2026-07-24 rebuild; grows as more history/tickers are collected) in BolsAI's `adj_*` columns were never back-adjusted, causing fake returns up to −99.99%. `repair_unadjusted_splits()` detects and rescales all pre-event rows *and volumes*: a 1:4 split divides prices by 4 and multiplies `volume`/`volume_adjusted` by 4 (same economic activity, more shares). Rescaling is critical for `amihud_illiquidity` and `turnover_ratio` features. `hl_ratio` uses `adj_high/adj_low` (not raw scales). WDCN3 quarantined (unfixable data corruption). ✅ VERIFIED 2026-07-11.
-  - **Volume-scaling direction bug, FIXED 2026-07-24:** the "✅ Volume scaling VERIFIED 2026-07-15" claim above was wrong — the code was actually *dividing* `volume`/`volume_adjusted` by the split factor (same direction as price), which *compounds* the dollar-volume discontinuity instead of removing it (should multiply, per the same reasoning stated above). Latent since the volume-rescale feature was first added; never caught because no test asserted the *direction*, only that prices rescaled correctly. Fixed to `*= factor`; regression test now asserts the direction explicitly. Corrects `turnover_ratio`/`volume_ratio_20d` at every one of the 67 repaired events.
-  - **Split-matcher persistence guard — investigated, NOT implemented (2026-07-24, re-confirmed 2026-07-24):** the single-day jump/tolerance match can't distinguish a genuine permanent split from a coincidental large one-day market move landing inside a recorded event's matching window. Two PRE-emptive guard designs (reject a match before applying it) were built and tested against the real 67-event dataset; both produced false rejections (27, then 8 more) against genuinely recorded `corporate_events.parquet` entries (PATI4's ~annual small bonus-share splits, SBSP3's clustered restructuring sequence, etc.) — ordinary volatility on illiquid/small-ratio tickers swamps any threshold loose enough to admit them. A third, POST-hoc design (audit whether an already-applied repair's post-jump price level held, rather than blocking it upfront) was tried too, against all 67 real applied events: 14/67 (21%) flagged at a 50% deviation / 20-row-median threshold. Traced two concretely: PDGR3 2025-11-03 (dev=81x) is a genuine subsequent speculative price recovery unrelated to repair correctness; AZEV4 2005-06-13 (dev=653x) traded so infrequently in 2005 that "20 rows later" spans 6 calendar years (2005→2011) — an illiquidity artifact, not a bad repair. Same false-positive wall as the first two attempts, just in audit rather than blocking form. Zero actual misfires found in the current dataset across all three attempts. Reverted all three; revisit only if a future repair is found to have actually misfired.
-- **Ticker continuity & splicing (July 2026 fixes):** Renames/mergers/exchanges are spliced via `apply_ticker_continuity()` *after* `repair_unadjusted_splits()` (not before), so splits are repaired under each leg's original ticker name before being renamed onto the survivor. Splicing rules: (1) **rename** = same legal entity, splice prices + fundamentals, drop old ticker. (2) **merger** = exchange ratio, scale old-leg prices by ratio **and volume inversely by ratio** (keeps dollar volume = volume×price invariant across the splice, same rationale as split-repair volume scaling — otherwise `amihud_illiquidity` jumps by `ratio` right at the merger boundary), drop old-leg fundamentals. (3) **keep_separate** = parallel-trading acquirer (e.g., SulAmérica acquired by RDOR, which had its own IPO 2 years earlier), both legs stay as independent series; old treated as delisted. (4) **tender** = cash-out, no splice. Vendor aliases (ARZZ3→AZZA3, RRRP3→BRAV3, etc.) consolidated via `rename` entries where the new file contains full history under both names. Boundary-matching assumption (new ticker's first trade == splice point) is guarded: parallel-trading cases caught and rejected. Adj_close reconciliation factors (inherent basis mismatches between old/new vendor series) are validated [1/50, 50] sane range. Event rekeying: `repair.py` builds ticker-descendant chains from the map so splits recorded under old names (e.g., VVAR3) still match post-rename rows (BHIA3). ✅ All tests pass post-fix. ✅ TIMP3→TIMS3 factor sane (0.6963, not 6963).
-- **`adj_close` 2-decimal vendor precision floor (deep-history microcaps):** BolsAI stores `adj_close`/`adj_open`/`adj_high`/`adj_low` at 2-decimal precision. For a handful of tickers with a large cumulative split/dividend adjustment factor, the true adjusted price underflows that floor — it either rounds to exactly `0.00` (raw `close` stays a normal nonzero price; confirmed in `data/raw/br/prices/UNIP6.parquet`'s earliest ~33 rows, 2026-07-21) or gets pinned at a tiny nonzero constant across several consecutive days while the real price keeps moving. **Not fixable — flag or mask, never drop or reconstruct**: there's no way to recover the lost precision, and (per the caveat above) `adj_close` must not be rebuilt from `data/raw/br/dividends`. `build_dataset/features.py::compute_price_features()` already masks non-positive `adj_close` to NaN before `log()` and flags the pinned-nonzero case via `adj_close_precision_degraded` (0/1; exact-2dp-quantized AND `<0.05`, so a genuinely low-priced-but-full-precision ticker like TIMS3 isn't misflagged). Any OTHER consumer computing its own `log(adj_close)` off the raw dataset must apply the same non-positive mask.
-- **Returns ARE dividend-adjusted (total return), not price-only:** `log_return`/`return_{1m,3m,6m,12m}`/`excess_return`/`real_return` (`features.py`) are all derived from `adj_close`, and `adj_close` empirically bakes in dividend reinvestment, not just splits — confirmed by testing `adj_close/close` ratio drift against known dividends on split-free windows (e.g. BBAS3 post-split: predicted vs. observed ratio jumps matched to within ~0.04 pp per ex-dividend date). `div_yield_12m`/`div_count_12m` remain separately-tracked features on top of this, not double-counted into returns.
-  - **Known, undocumented-by-vendor limitation — BolsAI/yfinance dividend-adjustment methodology diverges:** confirmed by direct measurement (145 tickers, BolsAI-only rows, split-free windows): median 4.9pp divergence between BolsAI's observed `adj_close` ratio drift and what `data/raw/br/dividends` alone predicts, often 20pp+. BolsAI's adjustment consistently implies *more* cumulative discount than our dividends table explains — i.e. our dividends table is missing some distribution type BolsAI's adjustment already correctly captures (bonus shares/subscription rights suspected, unconfirmed). **Do not "fix" this by recomputing `adj_close` from `data/raw/br/dividends`** — that would systematically under-adjust and regress returns. `validate_vs_yfinance.py:7` already flags this by skipping `adj_close` cross-validation as "uninformative." No fix available with current data; flagged here so it isn't rediscovered as a bug.
-  - **Staleness across `--mode update` runs — FIXED:** yfinance's `auto_adjust=True` backward-adjusts a fetch window relative to "now" at fetch time. If each update only fetched rows after the last checkpoint (like every other collector), each quarterly batch would freeze at its own anchor and never get revisited — a dividend paid after one quarter's fetch would permanently fail to propagate into that quarter's already-stored `adj_close`, one small discontinuity per update, forever. `collect_prices_yf` (`yf_collectors.py`) now re-fetches its *entire* yfinance-sourced span every run via `_prices_fetch_start()` (anchored to the earliest yfinance row on disk, marked by `NaN num_trades`, not the latest), so the whole yfinance era stays internally consistent. Empirically verified this wasn't yet causing damage before the fix (max BolsAI→yfinance gap across 285 tickers was 1–3 days — this was the first `--mode update` run for all of them), but the fix prevents it from starting to matter after a few more quarterly cycles.
-  - **Mid-session fetch can poison a whole batch, FIXED 2026-07-28 (found during US-equities prototyping, docs/US_EQUITIES_EXPANSION_PLAN.md):** fetching yfinance data while the market is still open returns a live, still-forming "today" bar that can be internally inconsistent — open/close print immediately while high/low keep updating from a differently-lagged feed. Measured directly on XOM: `low` printed 15¢ *above* `open`. Because `_merge_save` validates and rejects the whole incoming batch on any row failure, that single bad row silently discarded thousands of otherwise-good historical rows for the ticker — not BR/US-specific, latent in the shared path since the full-span-refetch design above was added. Fixed via `_drop_incomplete_today()` in `yf_collectors.py`, which drops any row dated today before it reaches validation; safe because the next run's full-span refetch picks up the finalized close once the session ends.
-  - **Transient empty response silently recorded as "no coverage," FIXED 2026-07-28 (found scaling US price collection to ~10k tickers):** `_retry()` only retried on exceptions — a `t.history()` call that returns an empty DataFrame with no exception (a real, if rare, yfinance hiccup) looked identical to a genuinely delisted/uncovered ticker. Confirmed on QCOM: a decades-listed, fully active ticker with 8,714 rows of real history returned empty on first attempt during a large batch run, then succeeded immediately on manual retry. Fixed by adding `retry_on_empty` (opt-in — used only for price history, where an empty result this early is surprising; left off for callers like dividends where empty is often a legitimate answer).
-  - **`_repair_nonpositive_ohlc` renamed `_repair_bad_ohlc`, generalized, FIXED 2026-07-28 (found at the same US-scale run):** the repair only checked for non-positive Open/High/Low, not the OTHER validate_prices bracket check (Open/Close falling outside that day's own [Low, High], or High < Low). Confirmed on SHEL: 4 rows across its history had a positive but internally-inconsistent OHLC print (e.g. 2023-01-24 Open=51.26 vs that same day's Low=56.26, a >5-point gap) — same all-or-nothing `_merge_save` batch-rejection failure mode as the mid-session bug above, this time on ordinary historical data. Now repairs both violation classes the same way (collapse to Close).
-- **Valuation ratios re-anchored daily:** BolsAI computes `pl/pvp/market_cap/p_*/ev_*` at filing date; `recompute_valuation_daily()` rescales to current close (keeps `fundamentals_available_date` in output for any downstream consumer). Known ceiling: mid-quarter splits skew ratios until next filing (build warns).
-- **All feature engineering is in Stage 2**, not deferred downstream (technicals, fundamental ratios, macro-adjusted, CAGR backfill, split repair, volatility rolling rank).
-- **Per-ticker own-history z-scores (`*_zhist_5y`, July 2026):** `compute_history_relative_features()` (`features.py`) adds a causal rolling robust z-score — `(x - rolling_median) / rolling_IQR`, 5y window — for 11 fundamental ratios (`pl`, `pvp`, `roe`, `net_margin`, `ebitda_margin`, `debt_equity`, `net_debt_ebitda`, `earnings_yield`, `book_to_market`, `current_ratio`, `asset_turnover`) and 2 daily liquidity ratios (`amihud_illiquidity`, `turnover_ratio`). Answers "how unusual is this value for *this company*," distinct from the global `RobustScaler`'s cross-sectional level view (`scale_features.py`) and `cross_sectional.py`'s peer-relative view — see `docs/PER_TICKER_SCALING_PLAN.md`. Stateless (a plain trailing rolling stat, not a fitted transform): no train/test split to manage, valid unchanged under any evaluation methodology. Fundamentals are deduped to one row per `reference_date` before rolling (rolling the daily-forward-filled panel directly would be ~65x redundant), then mapped back onto every daily row of that quarter. Warm-up (< `FUND_ZHIST_MIN_QUARTERS`=8 quarters / `DAILY_ZHIST_MIN_DAYS`=252 days of history) is NaN, a leading prefix like every other rolling-window feature in this pipeline.
-- **Scaler fit boundary is injected, not hardcoded (`iter_fit_windows()`, July 2026):** `scale_features.py`'s `fit_scaler(dataset, window)` takes a `FitWindow` (`manifest.py`) resolved from the active `split_config.json` via `iter_fit_windows()` — the one seam between the evaluation methodology (today: a single fixed split) and scaler fitting. A future rolling/expanding/multi-fold split format only changes `iter_fit_windows()`; `fit_scaler_on_train_split()` remains as a back-compat wrapper reproducing today's single-window behavior exactly. `sync_dataset_version()` now also snapshots `data/processed/scalers/` into `dataset_v{N}/`.
-- **FIIs deferred:** stocks only (prices/fundamentals/dividends). FIIs are a separate asset class; add if scope expands to mixed-asset.
-- **BolsAI:** key in `.env`, loaded by `config.load_env()` (stdlib parser). Backfill only — paid ~€0.10/1K calls. Caps: prices `limit<=5000` (date-window paginated), fundamentals `limit<=88` (use 80).
-- **yfinance:** free incremental refresh. Prices/dividends full history to 2000; fundamentals only ~4–6 quarters (enough for quarterly refresh).
-- **BCB series:** selic=11 (daily), cdi=12, ipca=433 — **NOT 432** (that's the annual meta target).
-- **Benchmark:** BOVA11 (IBOV proxy ETF) collected automatically; prices only. **Now the true market series for `beta_1y`/`momentum_vs_market_*` (2026-07-24 fix):** these previously benchmarked against the equal-weighted mean return of whatever tickers happened to be in the collected panel that day — silently redefining "the market" as "the companies that survived to dataset-end," a benchmark-level survivorship bias distinct from the universe-selection-level one above. `build_ml_dataset.main()` now captures BOVA11's rows right after `apply_ticker_continuity()` (before the fundamentals-coverage filter drops it — an ETF has none by design), runs it through the same `compute_price_features()` as every other ticker, and threads the resulting return series into `compute_cross_sectional_features()` as a required `benchmark` argument. BOVA11 itself still never becomes a row in the output dataset (threaded through purely as an external reference series), so this changes only the *definition* of these two feature groups, not row/ticker counts or manifest shape. `momentum_vs_sector_*` is unaffected (still a real sector-peer comparison, no equivalent "benchmark" concept applies there).
-- **Cross-sectional exclude-self mean, NaN-dilution bug FIXED 2026-07-24:** `cross_sectional.py`'s `_exclude_self_mean()` (used for `momentum_vs_market_*` before the BOVA11 fix above, and still the pattern to know about even though those columns no longer use it) derived its denominator from `groupby(...).transform("size")` — a blanket row count that includes tickers whose value is still NaN (e.g. a ticker in `return_12m`'s warm-up year) — while the numerator's `sum` already (correctly) skips those NaNs. Counting peers the numerator had already dropped biased every excluded-self mean toward zero, worst on thin/young-universe dates. Fixed to derive both sum and count from the value column's own `groupby(...).transform("count")`.
-- **`days_since_fundamental` keyed to the wrong date, FIXED 2026-07-24:** measured `trade_date - reference_date` (the fiscal quarter-end the filing *describes*) instead of `trade_date - fundamentals_available_date` (when the market actually *saw* the filing) — understating true information age by the entire 45–90+ day filing lag, and inconsistent with `filing_lag_days`/`n_quarters_available` which already use the real availability date elsewhere in the same function.
-- **`payout_ratio`/`dividend_coverage_ratio` annualization bug, FIXED 2026-07-24:** both used `div_value_recent` (the single most-recent ex-date's nominal payment, from `merge_dividends`' asof merge) as if it were the whole year's dividend — correct only for an annual payer, understating payout / inflating coverage for anyone paying quarterly or more often, and stair-stepping discontinuously at every ex-date. `compute_dividend_features()` now also computes `div_value_12m` (a trailing-12m nominal sum of per-event dividends, same window/convention as `div_yield_12m`/`div_count_12m` — just the un-normalized currency amount), and both ratios use it instead. `div_value_recent` is unchanged and still a legitimate "size of the last payment" feature in its own right.
-- **Company info:** BolsAI-only (CVM metadata, rarely changes); refresh via `--mode full_scale` when new IPOs appear. Current dataset: 523 tickers total (373 ATIVO active + 85 CANCELADA delisted + 65 missing status); 4 quarantined (WDCN3 unadjusted splits unfixable, CAMB4 delisted 2019, LLIS3 delisted 2023, CCTY3 raw feed is not real trading data — mirrors CCRO3/Motiva's dead post-rename ticker across both BolsAI and yfinance).
-- **`status` is a current-day snapshot, not point-in-time — do not use as a raw training feature:** `merge_company_info()` joins company_info's *today's* status (ATIVO/CANCELADA) onto every historical row of a ticker; confirmed 100% constant per ticker across its full history in the built dataset (2026-07-14 audit, `test_universe_integrity.py` §3.5). A model conditioned on `status` at a 2012 row would be seeing 2026 knowledge of whether that company survived — a feature-level lookahead trap, distinct from (and in addition to) the universe-selection-level survivorship bias in `TOP50_UNIVERSE_VALIDATION.md`. Left in the dataset deliberately (downstream point-in-time universe construction needs it to identify delisted names) — the burden is on any consumer training a model to exclude it from the point-in-time feature set. `sector` is the same kind of static join but carries far less outcome information, so it's lower-risk as a feature.
-  - **Taint travels into derived columns too, FIXED 2026-07-24:** `manifest.LOOKAHEAD_TAINTED_COLS` used to list only `status`, but 6 `cross_sectional.py` columns are engineered directly from that same static, current-day `sector` join — `pl_zscore_sector`, `pvp_zscore_sector`, `roe_zscore_sector`, `debt_equity_zscore_sector`, `div_yield_sector_percentile`, `momentum_vs_sector_{1m,3m,12m}` — and carry the identical taint laundered into a numeric z-score/percentile/momentum figure that reads as clean. A consumer who dutifully dropped raw `status`/`sector` per the old list was still training on it through these. Now all 9 columns are recorded in `LOOKAHEAD_TAINTED_COLS`/the manifest's `lookahead_tainted_columns`. `momentum_vs_market_*` is *not* included here — it doesn't group by sector, but see the BOVA11-benchmark entry below for its own (different) survivorship concern, now fixed.
-- **Data quality filters (Stage 2, enforced automatically):**
-  - Filing lag filter: Drop fundamentals filed >180 days after quarter-end (0.9% of rows) — prevents lookahead from unreliable late filings
-  - Close-price lookup: Replace BolsAI's stale close_price with actual close from `fundamentals_available_date` — prevents false >50% valuation jumps
-  - Valuation re-anchoring: Rescale P/E, P/B, etc. to current close daily (not filing-date close) — keeps ratios current
-  - Split repair: Detect and rescale unrecorded splits (67 events as of 2026-07-24) — prevents fake negative returns up to −99.99%
-  - Sibling fill: Forward-fill missing company_info from same-CVM-company tickers (168,783 rows) — ensures all rows have sector/status metadata
-  - Quarantine list: WDCN3 (raw close oscillates 6x, no repair), CAMB4 (delisted 2019, stale fundamentals), LLIS3 (delisted 2023, stale fundamentals) — eliminates data quality outliers.
-- **NaN & extreme-value policy (implemented):**
-  - Data quality filters (Stage 2):
-    - Structural NaN (warm-up, pre-first-filing) trimmed by global start-date rule per universe.
-    - Informative NaN (CAGR undefined from negative earnings/insufficient history) flagged: `cagr_earnings_defined`, `cagr_revenue_defined` (0/1); also tracks `n_quarters_available` (cumulative filing count) explaining all window-based NaNs.
-    - Error NaN: prefix-shaped (no interior holes per ticker in merged fundamentals), detected via test `test_final_dataset.py::T_prefix_rule`. NaN-count regression vs previous build warned via `nan_regressions()` in `manifest.py` (logged but non-fatal, allows legitimate coverage changes).
-    - Extreme ratio (144 rows |pl| > 400,000 dataset-wide, 95 in-universe, top-50): kept intact — denominators near zero are valid distress signals. No filled or clipped in the dataset; scaler's fit is robust (median/IQR) but transform is linear, so raw 400k → ~26k after scaling (still extreme, intentionally preserved). Model training handles via loss functions / clipping in the env.
-  - Consumer-side (ml_agent env, not this repo): flags + neutral fills (e.g. fill CAGR NaN with 0), any NaN→0 transformation, hard `assert np.isfinite(obs).all()` before agent sees state, global start-date trim for the top-50 universe to drop pre-full-history rows.
-- **Checkpoints/logs** (not git-tracked): Stage 1 `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/collection-*.log`.
-- **Paths:** absolute via `Path(__file__).resolve().parents[N]`; always run from project root.
-- **FutureWarnings suppressed:** `pct_change(fill_method=None)` for YoY growth; dropped all-NA columns per-file before concat. `repair.py`'s `volume`/`volume_adjusted` columns are cast to `float64` up front (2026-07-24 fix) instead of left `int64` until the final rescale-loop cleanup — in-place `*=`/`/=` on a slice of an `int64` column with a non-integer factor is a deprecated silent per-slice upcast pandas warns will become a hard error in a future version; the final `.round().astype("int64")` still converts back after all rescaling is done.
+Gotchas that will bite again if not known. Historical forensics (how each was found/measured) live in
+git history and `docs/*AUDIT*.md`; this list is only the actionable "what's true now."
+
+**Lookahead / point-in-time integrity**
+- No lookahead (Stage 2), enforced: `merge_asof(..., direction='backward')` on real CVM `fundamentals_available_date` (`DT_RECEB`, not fiscal `reference_date`), not filing-date close. `volatility_*_percentile` uses rolling-window rank, not global. Tests: `test_merge_honors_actual_filing_date`, `test_volatility_percentile_no_lookahead`.
+- Known unfixed gap: fundamental *values* (not the availability date) may reflect the latest restatement rather than what was actually filed at v1 — BolsAI's `/fundamentals/history` doesn't preserve filing versions. No fix possible without sourcing from CVM's raw ZIPs directly; not yet quantified.
+- `status` (ATIVO/CANCELADA) is a current-day snapshot joined onto every historical row — a feature-level lookahead trap if used raw in training (constant per ticker across its whole history). `sector` is the same kind of static join, lower-risk. `manifest.LOOKAHEAD_TAINTED_COLS` also covers 6 `cross_sectional.py` columns derived from that same `sector` join (`*_zscore_sector`, `div_yield_sector_percentile`, `momentum_vs_sector_*`) — dropping raw `status`/`sector` alone is not enough.
+- `days_since_fundamental` is keyed to `fundamentals_available_date` (when the market actually saw the filing), not `reference_date` (the fiscal period it describes).
+
+**Splits, dividends & continuity**
+- Unadjusted splits are repaired: `repair_unadjusted_splits()` rescales pre-event `adj_*` prices AND volumes (multiply by the split factor, not divide) for events BolsAI's `adj_*` never back-adjusted. WDCN3 is quarantined (unfixable corruption). A pre-emptive/post-hoc "is this match a real split" persistence guard was investigated 3 separate times and rejected each time — every design produced false rejections against genuinely recorded events (illiquid tickers' ordinary volatility swamps any workable threshold); don't re-attempt without new evidence of an actual misfire.
+- Renames/mergers/exchanges are spliced via `apply_ticker_continuity()`, run *after* split repair (so each leg is repaired under its original name first). Rules: **rename** = same entity, splice + drop old; **merger** = scale old-leg price by exchange ratio and volume inversely (keeps dollar volume invariant), drop old fundamentals; **keep_separate** = parallel-trading acquirer, both legs stay independent; **tender** = cash-out, no splice.
+- `adj_close`/`adj_open`/`adj_high`/`adj_low` are 2-decimal precision in BolsAI; a few deep-history microcaps underflow that floor (rounds to `0.00` or pins at a tiny constant). Not fixable — never rebuild from `data/raw/br/dividends`. `compute_price_features()` masks non-positive `adj_close` before `log()` and flags `adj_close_precision_degraded`.
+- Returns are total-return (dividend-adjusted), not price-only — `adj_close` already bakes in reinvestment. Known unfixed divergence: BolsAI's adjustment implies more cumulative discount than `data/raw/br/dividends` alone explains (~5pp median, likely bonus shares/subscription rights) — do **not** recompute `adj_close` from the dividends table, that would under-adjust and regress returns. `validate_vs_yfinance.py` already skips `adj_close` cross-validation as uninformative for this reason.
+- yfinance collection edge cases fixed 2026-07-28: full-span refetch each `--mode update` run (so a late dividend still propagates into already-stored history); a live still-forming "today" bar is dropped before validation (`_drop_incomplete_today()`); an empty-but-no-exception response is retried instead of read as "no coverage" (`retry_on_empty`); OHLC bracket violations (not just non-positive values) are repaired (`_repair_bad_ohlc`).
+
+**Feature engineering**
+- All feature engineering lives in Stage 2, not deferred downstream.
+- CAGR backfill is on unconditionally (`fill_missing_cagr()`): ~60% coverage from BolsAI + ~7% backfilled from earnings/revenue.
+- Valuation ratios (P/E, P/B, etc.) are re-anchored to current close daily via `recompute_valuation_daily()`, not left at filing-date close. Known ceiling: mid-quarter splits skew ratios until the next filing.
+- `*_zhist_5y`: causal rolling robust z-score (median/IQR, 5y window) per ticker for 11 fundamental ratios + 2 daily liquidity ratios — "how unusual for *this company*," distinct from the cross-sectional `RobustScaler` and `cross_sectional.py`'s peer-relative view. Stateless, no train/test split needed. Warm-up (<8 quarters / <252 days) is NaN.
+- `iter_fit_windows()` (`manifest.py`) is the one seam between evaluation methodology and scaler fitting — a future rolling/multi-fold split format only changes this function.
+- `payout_ratio`/`dividend_coverage_ratio` use `div_value_12m` (trailing-12m sum), not the single most-recent payment — the latter under/overstates for anyone paying more than annually.
+- BOVA11 is the true market series for `beta_1y`/`momentum_vs_market_*` (not an equal-weighted mean of whatever tickers survived in the panel — that was a benchmark-level survivorship bias, now fixed). `momentum_vs_sector_*` uses a real sector-peer comparison, no equivalent concept applies.
+- `cross_sectional.py`'s excluded-self mean derives both numerator and denominator from the same value column's own NaN-aware count (previously double-counted NaN peers into the denominator, biasing thin/young-universe dates toward zero).
+
+**Data sources & limits**
+- BolsAI: key in `.env` via `config.load_env()` (stdlib parser, no dependency). Backfill only, paid ~€0.10/1K calls. Caps: prices `limit<=5000`, fundamentals `limit<=88` (use 80).
+- yfinance: free incremental refresh. Prices/dividends full history to 2000; fundamentals only ~4–6 quarters.
+- BCB series: `selic=11` (daily), `cdi=12`, `ipca=433` — **not 432** (that's the annual meta target, not the series).
+- FIIs deferred: stocks only. Add if scope expands to mixed-asset.
+- Company info: BolsAI-only (CVM metadata). Current: 523 tickers (373 ATIVO, 85 CANCELADA, 65 missing status); 4 quarantined — WDCN3 (unfixable splits), CAMB4/LLIS3 (delisted, stale fundamentals), CCTY3 (feed isn't real trading data).
+
+**Data quality filters & NaN policy (Stage 2, automatic)**
+- Filing lag filter drops fundamentals filed >180 days after quarter-end (~0.9% of rows).
+- Close-price lookup replaces BolsAI's stale `close_price` with the actual close as of `fundamentals_available_date` (prevents false >50% valuation jumps).
+- Sibling fill forward-fills missing `company_info` from same-CVM-company tickers.
+- NaN taxonomy: **structural** (warm-up/pre-first-filing) trimmed by a global start-date rule; **informative** (CAGR undefined) flagged via `cagr_{earnings,revenue}_defined` + `n_quarters_available`, never silently filled; **error** NaN must be prefix-shaped only (`test_final_dataset.py::T_prefix_rule`), regressions warned via `nan_regressions()`; **extreme ratios** (e.g. |pl| > 400,000 near-zero-denominator distress cases) are kept intact, not clipped — the scaler's fit is robust but its transform is linear, so extremes stay extreme on purpose.
+
+**Misc**
+- Checkpoints/logs (not git-tracked): `artifacts/checkpoints/{mode}/`, `artifacts/logs/collection/`.
+- Paths are always absolute via `Path(__file__).resolve().parents[N]`; run from project root.
+- `pct_change(fill_method=None)` used for YoY growth to suppress FutureWarnings; `repair.py`'s volume columns are cast to `float64` before in-place rescaling (avoids a deprecated silent int64 upcast), converted back to `int64` after.
 
 ## Data on Disk
 
-`data/raw/{br,us}/` are symmetric, market-namespaced raw trees (2026-08-05 reorg —
-BR used to sit flat at `data/raw/` with no market prefix; renamed to `br/` to match
-`us/`, see `docs/DATA_COLLECTION_REORGANIZATION_PLAN.md`). The one real asymmetry
-between them is git-tracking status, not layout: BR is git-tracked, US is gitignored
-(too large, and rebuildable from free vendors on demand).
+`data/raw/{br,us}/` are symmetric, market-namespaced raw trees. The one real asymmetry is
+git-tracking, not layout: BR is git-tracked, US is gitignored (too large, rebuildable on demand).
 
-- **Raw, BR (`data/raw/br/`, git-tracked):** full-scale universe, ~293 tickers + benchmark BOVA11, one parquet per ticker in `data/raw/br/{prices,fundamentals,dividends}/`. Prices/dividends current to 2026-06-30; fundamentals to 2026-03-31. Coverage isn't 100% uniform across types (e.g. a handful of tickers are missing a dividends file) — treat gaps as "not yet collected," not "confirmed zero," and re-run the relevant `collect_*` for that ticker to check. In the processed dataset this ambiguity is exposed directly: `has_dividends` (0/1, set in `merge_dividends()`) marks whether a ticker was ever collected at all, so `div_yield_12m == 0` can be told apart from "never collected" rather than silently reading as a confirmed zero.
-- `data/raw/br/macro/{selic,cdi,ipca}.parquet` (one file per series) and `data/raw/br/company_info/company_info.parquet` (per-ticker static attributes: sector, cnpj, status, etc.) are market-wide reference tables, not per-ticker files.
-- `data/raw/br/company_info/sectors.parquet` is a small aggregate `[sector name, ticker count]` table used to sanity-check how many companies fall in each sector — not a join key, not consumed by `build_ml_dataset.py`.
-- `data/raw/br/corporate_events/corporate_events.parquet` is a market-wide split/inplit audit log; `company_info/sectors.parquet` and `corporate_events.parquet` are collected during `full_scale`/`prototype` runs only — skipped in `--mode update` so the free/keyless yfinance refresh path never needs a BolsAI key.
-- **Processed:** `data/processed/ml_dataset.parquet` (created on first build), one row per ticker+date, plus `ml_dataset.manifest.json` (reproducibility snapshot) and `split_config.json` (walk-forward train/val/test date cutoffs — a filter, not materialized copies). Each build that actually changes output is also snapshotted immutably to `data/processed/dataset_v{N}/` (unchanged reruns don't bump `N`); cite `dataset_v{N}` when referencing exactly which build an experiment used. `data/processed/scalers/feature_scaler.joblib` + `scaler_metadata.json` are fit train-only (per `split_config.json`) via a separate, deliberate step (`scale_features.py`), not on every build. All of the above are gitignored and fully regenerable from `data/raw/`. `data/processed/README.md` is the one tracked exception (see its content for the full list) — it documents this ownership boundary; treat anything else that shows up in `data/processed/` (e.g. `ml_dataset_training.parquet`) as generated by pipelines outside this repo's `src/` (the `ml_agent` branch) and not something this repo can rebuild.
-- **Raw, US (`data/raw/us/`, gitignored):** `macro/` (FRED series), `prices/` (yfinance, one parquet per ticker), `fundamentals/` (combined xbrl/ex27/item6 tiers per ticker), `sec/` (crosswalk, filings index, universe roster — see `sec/` module row above). No `us_ml_dataset.parquet` yet — Stage-2-equivalent assembly is still Phase 6 of `docs/US_EQUITIES_EXPANSION_PLAN.md`, not started. Full history/rationale (including every bug found scaling this up) lives in that plan doc, not here.
+- **Raw, BR (`data/raw/br/`, git-tracked):** ~293 tickers + benchmark BOVA11, one parquet per ticker in `data/raw/br/{prices,fundamentals,dividends}/`. Prices/dividends current to 2026-06-30; fundamentals to 2026-03-31. Coverage isn't uniform (e.g. some tickers lack a dividends file) — treat gaps as "not yet collected," not "confirmed zero"; `has_dividends` (0/1) makes this explicit in the processed dataset.
+- `data/raw/br/macro/{selic,cdi,ipca}.parquet` and `data/raw/br/company_info/company_info.parquet` are market-wide reference tables, not per-ticker. `company_info/sectors.parquet` is a small sanity-check aggregate, not a join key. `corporate_events/corporate_events.parquet` is a split/inplit audit log — both collected only during `full_scale`/`prototype` runs (skipped in `--mode update` so the free yfinance path never needs a BolsAI key).
+- **Processed:** `data/processed/ml_dataset.parquet` + `ml_dataset.manifest.json` (reproducibility snapshot) + `split_config.json` (train/val/test cutoffs, a filter not a copy). Each build that changes output is snapshotted to `data/processed/dataset_v{N}/`; cite `dataset_v{N}` when referencing a specific build. `data/processed/scalers/` fit train-only via the separate `scale_features.py` step. All gitignored, regenerable from `data/raw/`, except the tracked `data/processed/README.md`.
+- **Raw, US (`data/raw/us/`, gitignored):** `macro/` (FRED), `prices/` (yfinance), `fundamentals/` (combined xbrl/ex27/item6 tiers), `sec/` (crosswalk, filings index, universe roster). `us_ml_dataset.parquet` has been built and validated at a scoped top-500-by-market-cap universe (Phase 6 of `docs/US_EQUITIES_EXPANSION_PLAN.md`); scaling the same code to the full ~10,432-ticker universe is Phase 6's current, in-progress step.
 
 ## Technology Stack
 
@@ -235,7 +254,8 @@ between them is git-tracking status, not layout: BR is git-tracked, US is gitign
 - **Data:** pandas, numpy, pyarrow.
 - **APIs:** BolsAI REST (`httpx`, backfill), BCB SGS (requests, macro), `yfinance` (incremental).
 - **Config:** stdlib `.env` parser (BolsAI key only).
-- **Preprocessing:** scikit-learn (`ColumnTransformer`/`RobustScaler` in `scale_features.py`), `joblib` (scaler serialization) — Stage 2 direct dependencies.
+- **Preprocessing:** scikit-learn (`ColumnTransformer`/`RobustScaler` in `scale_features.py`; `LedoitWolf` in Stage 3's `risk.py`), `joblib` (scaler serialization).
+- **Stage 3 (portfolio):** `lightgbm` (alpha forecaster), `cvxpy` (convex optimizer), `scipy.stats` (deflated Sharpe ratio), `graphviz` (`plot_tree.py`; needs the system `dot` binary too).
 - **Viz:** Plotly.
 - **No test framework:** standalone `python script.py`.
 
@@ -243,7 +263,7 @@ between them is git-tracking status, not layout: BR is git-tracked, US is gitign
 
 A persistent knowledge graph of this repo lives in `graphify-out/` (gitignored, regenerable). Built with the `graphify` skill (`/graphify`).
 
-- **Query it first** for architecture/"how does X work"/"what calls Y" questions instead of re-reading source: `graphify query "<question>"` (BFS), `graphify path "A" "B"`, `graphify explain "<node>"`. The graph already exists — use it before a fresh scan.
+- **Query it first** for architecture/"how does X work"/"what calls Y" questions instead of re-reading source: `graphify query "<question>"` (BFS), `graphify path "A" "B"`, `graphify explain "<node>"`.
 - **Outputs:** `graphify-out/graph.html` (interactive), `GRAPH_REPORT.md` (god nodes, communities, surprising links), `graph.json` (raw).
 - **Rebuild** after significant code/doc changes: `/graphify .` (full) or `/graphify . --update` (only new/changed files).
-- **Semantic extraction backend:** code is AST-extracted (no key). Docs/papers use Gemini when `GEMINI_API_KEY`/`GOOGLE_API_KEY` is set (OpenAI-compatible endpoint; needs `graphifyy[gemini]` → the `openai` package); otherwise falls back to host-agent subagents.
+- **Semantic extraction backend:** code is AST-extracted (no key). Docs/papers use Gemini when `GEMINI_API_KEY`/`GOOGLE_API_KEY` is set; otherwise falls back to host-agent subagents.
