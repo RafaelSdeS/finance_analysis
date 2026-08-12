@@ -177,6 +177,51 @@ PREDECESSOR_CUTOFFS = {
 }
 
 
+_FLOORS = {"total_assets": 1e5, "net_revenue": 1e4, "equity": 1e4}
+
+
+def _reject_implausible_floors(df: pd.DataFrame, cik: int) -> pd.DataFrame:
+    """Absolute-floor rejection: a company that cleared the universe gate
+    cannot genuinely have $20 of total assets. Confirmed 2026-08-01: CVBF's
+    2006/2007 item6 rows read total_assets 0.0/20.0 against a real ~$6.5B
+    (its very next xbrl-tier row); BPOP's item6 net_income reads as low as
+    740 against other years' ~$100M+ -- a per-filing unit-multiplier
+    ((in thousands)/(in millions)) misapplication, not a uniform tier
+    offset (see selected_financial_data.detect_unit_multiplier / fds.py's
+    MULTIPLIER handling -- both tiers DO implement scaling, just not always
+    correctly per-filing). NaN'd, never guessed (loaders.load_dividends'
+    convention) -- deliberately NOT companyfacts._reject_sequential_outliers
+    here: that seeds from a ticker's DOMINANT magnitude cluster, right for
+    shares_outstanding but wrong for a company that legitimately grew 100x
+    over 30 years of real filings. (ponytail: floors, not a parser fix --
+    the underlying item6 year-label misparse, some rows' `end` traces back
+    to a filing >10y later, see audit doc §3, is a separate, unattempted
+    project.)
+
+    Applied per-tier (xbrl/tenq/item6, right after each is built) as well as
+    on the final combined result -- real bug, confirmed 2026-08-12: applying
+    this ONLY at the very end used to let a known-implausible value (e.g.
+    CVBF's item6 total_assets=20.0) sit in `gap`/`quarters`/`xbrl` while they
+    were combined into `trusted`, the cross-tier reference
+    infer_multiplier_from_trusted_tiers anchors its ex27 multiplier inference
+    to -- a garbage reference could then validate a wrong multiplier as
+    'confirmed' purely by coincidence. The final pass stays too, since
+    _derive_annual_q4's subtraction can produce a fresh implausible value
+    (e.g. a near-zero derived Q4) that no per-tier pass could have caught
+    earlier.
+    """
+    for col, floor in _FLOORS.items():
+        if col not in df.columns:
+            continue
+        bad_scale = df[col].abs().between(0, floor, inclusive="left") & df[col].notna()
+        if bad_scale.any():
+            log.warning("fundamentals CIK %s: rejecting %d implausible %s value(s) "
+                        "(< %.0f, below any real public filer's floor) -- now NaN",
+                        cik, bad_scale.sum(), col, floor)
+            df.loc[bad_scale, col] = float("nan")
+    return df
+
+
 def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     """One CIK's combined fundamentals across all three built tiers, one row
     per fiscal period, each stamped with `fundamentals_tier` and a real
@@ -190,6 +235,7 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         if not line_items.empty:
             xbrl = companyfacts.compute_us_ratios(line_items)
             xbrl["fundamentals_tier"] = "xbrl"
+            xbrl = _reject_implausible_floors(xbrl, cik)
             frames.append(xbrl)
 
     ex27 = fds.build_cik_history(cik, filings)
@@ -202,6 +248,7 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     quarters = tenq.build_cik_history(cik, filings)
     if not quarters.empty:
         quarters["fundamentals_tier"] = "tenq"
+        quarters = _reject_implausible_floors(quarters, cik)
 
     gap = selected_financial_data.build_cik_history(cik, filings)
     if not gap.empty:
@@ -247,14 +294,27 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
                 gap.loc[still_bad, "end"] = (gap.loc[still_bad, "fundamentals_available_date"]
                                               - pd.offsets.QuarterEnd(n=1, startingMonth=3))
         gap["fundamentals_tier"] = "item6"
+        gap = _reject_implausible_floors(gap, cik)
 
     # ex27 rows with NO explicit <MULTIPLIER> anywhere in this CIK's own ex27
     # history (fds._fill_missing_multipliers had no same-tier sibling to
     # borrow from at all -- confirmed real on AEO/ATNI/AUSI/... 2026-08-06)
     # get one more chance against the other, individually more reliable,
-    # tiers built above. See fds.infer_multiplier_from_trusted_tiers.
+    # tiers built above. See fds.infer_multiplier_from_trusted_tiers. xbrl/
+    # quarters/gap are already floor-rejected above BEFORE they're combined
+    # into `trusted` -- real bug, confirmed 2026-08-12: doing that only at
+    # the very end (on the final `result`) let a known-implausible value
+    # (e.g. CVBF's item6 total_assets=20.0) sit in this reference and
+    # validate a wrong ex27 multiplier as 'confirmed' purely by coincidence.
     if not ex27.empty:
-        trusted = pd.concat([f for f in (xbrl, quarters, gap) if not f.empty], ignore_index=True, sort=False)
+        others = [f for f in (xbrl, quarters, gap) if not f.empty]
+        # Real bug, confirmed 2026-08-12: pd.concat([]) raises ValueError
+        # ("No objects to concatenate") whenever ex27 is a CIK's ONLY
+        # populated tier -- the caller's broad except then silently dropped
+        # that company's entire fundamentals output over a crash this
+        # function could avoid entirely (infer_multiplier_from_trusted_tiers
+        # already handles an empty `trusted` frame gracefully, a no-op).
+        trusted = pd.concat(others, ignore_index=True, sort=False) if others else pd.DataFrame()
         ex27 = fds.infer_multiplier_from_trusted_tiers(ex27, trusted)
         frames.append(ex27)
 
@@ -317,32 +377,12 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
                         cik, predecessor.sum(), cutoff, result.loc[predecessor, "end"].dt.date.tolist())
             result = result[~predecessor].reset_index(drop=True)
 
-    # Absolute-floor rejection: a company that cleared the universe gate
-    # cannot genuinely have $20 of total assets. Confirmed 2026-08-01: CVBF's
-    # 2006/2007 item6 rows read total_assets 0.0/20.0 against a real ~$6.5B
-    # (its very next xbrl-tier row); BPOP's item6 net_income reads as low as
-    # 740 against other years' ~$100M+ -- a per-filing unit-multiplier
-    # ((in thousands)/(in millions)) misapplication, not a uniform tier
-    # offset (see selected_financial_data.detect_unit_multiplier / fds.py's
-    # MULTIPLIER handling -- both tiers DO implement scaling, just not always
-    # correctly per-filing). NaN'd, never guessed (loaders.load_dividends'
-    # convention) -- deliberately NOT companyfacts._reject_sequential_outliers
-    # here: that seeds from a ticker's DOMINANT magnitude cluster, right for
-    # shares_outstanding but wrong for a company that legitimately grew 100x
-    # over 30 years of real filings.
-    # ponytail: floors, not a parser fix -- the underlying item6 year-label
-    # misparse (some rows' `end` traces back to a filing >10y later, see
-    # audit doc §3) is a separate, unattempted project.
-    _FLOORS = {"total_assets": 1e5, "net_revenue": 1e4, "equity": 1e4}
-    for col, floor in _FLOORS.items():
-        if col not in result.columns:
-            continue
-        bad_scale = result[col].abs().between(0, floor, inclusive="left") & result[col].notna()
-        if bad_scale.any():
-            log.warning("fundamentals CIK %s: rejecting %d implausible %s value(s) "
-                        "(< %.0f, below any real public filer's floor) -- now NaN",
-                        cik, bad_scale.sum(), col, floor)
-            result.loc[bad_scale, col] = float("nan")
+    # Last line of defense, not just a repeat of the per-tier passes above:
+    # _derive_annual_q4's subtraction can itself produce a fresh implausible
+    # value (e.g. a near-zero derived Q4) no earlier per-tier pass could have
+    # caught. See _reject_implausible_floors's own docstring for the
+    # CVBF/BPOP cases this guards against.
+    result = _reject_implausible_floors(result, cik)
 
     return result
 

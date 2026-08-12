@@ -44,7 +44,9 @@ import re
 import pandas as pd
 
 from . import http
-from .selected_financial_data import _normalize_label, _row_text, _row_values, _UNITS_RE, detect_unit_multiplier
+from .selected_financial_data import (
+    _is_caption_only_row, _normalize_label, _row_text, _row_values, _UNITS_RE, detect_unit_multiplier,
+)
 from ..yf_collectors import compute_ratios
 
 # Filings in this window can plausibly carry real 10-Q HTML statements --
@@ -192,10 +194,19 @@ def _table_unit_multiplier(table: pd.DataFrame, doc_text: str) -> float:
     """Winning table's own caption first, whole document only when the table
     states none of its own -- same rule and reasoning as
     selected_financial_data.detect_unit_multiplier's docstring (a table's own
-    caption can differ from the filing's dominant one), including excluding
-    any row mentioning "shares" from caption detection (a local per-share
-    caption must not be read as the table's governing one)."""
-    caption_rows = table[~table.apply(lambda r: "shares" in _row_text(r).lower(), axis=1)]
+    caption can differ from the filing's dominant one).
+
+    Caption-row detection reuses selected_financial_data._is_caption_only_row
+    (no year-header concept here, so its exemption stays off by default) --
+    NOT a blanket "shares" keyword filter. Real bug, confirmed 2026-08-12:
+    that module already replaced the same blanket filter for the identical
+    reason (see its build_cik_history docstring) -- it let a non-shares LOCAL
+    caption on an unrelated real data row slip through as if it were the
+    table's governing caption, AND wrongly excluded legitimate rows that
+    merely happened to mention the word "shares" without being a caption at
+    all. The real distinguishing trait is whether the row carries any real
+    numeric data of its own, not its label text."""
+    caption_rows = table[table.apply(_is_caption_only_row, axis=1)]
     table_text = " ".join(str(c) for c in caption_rows.to_numpy().flatten())
     if _UNITS_RE.search(table_text):
         return detect_unit_multiplier(table_text, prefer_first=True)

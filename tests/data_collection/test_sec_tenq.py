@@ -138,6 +138,51 @@ def test_current_quarter_items_picks_max_end_date():
     print("OK: _current_quarter_items picks the most recent (non-comparative) period by date, not position")
 
 
+def test_table_unit_multiplier_uses_caption_row_that_mentions_shares_not_a_blanket_filter():
+    # Real bug, confirmed 2026-08-12: the old blanket "shares" keyword filter
+    # excluded ANY row mentioning "shares" from caption detection, even the
+    # table's own genuine governing caption when it happens to mention
+    # "shares outstanding" -- same bug class selected_financial_data.py
+    # already fixed for Item 6 tables (see its build_cik_history docstring,
+    # AME's real 2003 10-K), never applied here. Old code would fall through
+    # to the whole document's dominant (wrong) caption instead of using the
+    # table's own real one.
+    doc_text = "elsewhere reported in thousands " * 9  # dominant, WRONG whole-doc caption
+    table = pd.DataFrame([
+        [None, None, "Three Months Ended", "Three Months Ended", None],
+        [None, None, "December 27, 2003", None, None],
+        ["(In millions, except per share and shares outstanding data)", None, None, None, None],
+        ["Net sales", None, "$", "2006", None],
+    ])
+    um = tenq._table_unit_multiplier(table, doc_text)
+    assert um == 1_000_000.0, (
+        f"must use the table's own caption even though it mentions 'shares', not the whole document's, got {um}")
+    print("OK: _table_unit_multiplier uses a caption row that mentions 'shares', not a blanket keyword filter")
+
+
+def test_table_unit_multiplier_excludes_a_real_non_shares_row_with_its_own_local_caption():
+    # The other half of the same fix: a row with REAL data of its own, plus a
+    # local caption unrelated to "shares" (so the old blanket filter
+    # wouldn't have caught it either), must still be excluded from the
+    # table's governing caption detection -- the real distinguishing trait is
+    # whether the row carries real data, not any specific keyword. Ordered so
+    # the wrong local caption is encountered FIRST in document order: the old
+    # filter (keeping every non-"shares" row) would have picked it via
+    # prefer_first; only excluding real-data rows outright gets this right.
+    doc_text = "elsewhere reported in thousands " * 9
+    table = pd.DataFrame([
+        [None, None, "Three Months Ended", "Three Months Ended", None],
+        [None, None, "December 27, 2003", None, None],
+        ["Headcount (in thousands)", None, "47", None, None],
+        ["(In millions)", None, None, None, None],
+        ["Net sales", None, "$", "2006", None],
+    ])
+    um = tenq._table_unit_multiplier(table, doc_text)
+    assert um == 1_000_000.0, (
+        f"a real data row's own local caption must not override the table's real governing caption, got {um}")
+    print("OK: _table_unit_multiplier ignores a real data row's own local caption")
+
+
 def test_build_cik_history_end_to_end():
     filings = pd.DataFrame({
         "cik": [320193],
@@ -213,6 +258,8 @@ if __name__ == "__main__":
     test_find_statement_table_prefers_the_real_statement_over_a_decoy_summary()
     test_find_statement_table_rejects_a_percentage_of_sales_table()
     test_current_quarter_items_picks_max_end_date()
+    test_table_unit_multiplier_uses_caption_row_that_mentions_shares_not_a_blanket_filter()
+    test_table_unit_multiplier_excludes_a_real_non_shares_row_with_its_own_local_caption()
     test_build_cik_history_end_to_end()
     test_build_cik_history_skips_a_filing_whose_html_crashes_pd_read_html()
     test_build_cik_history_as_first_reported_dedup()

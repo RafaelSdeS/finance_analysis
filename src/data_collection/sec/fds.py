@@ -208,6 +208,18 @@ EX27_ERA_END = "2002-12-31"  # one-year buffer past EX-27's 2001 elimination (pl
 _DOLLAR_FIELDS = [*ARTICLE_5_MAP.keys(), "equity"]
 
 
+def _rescale_dollar_fields_and_ratios(df: pd.DataFrame, idx, factor) -> None:
+    """Shared tail of both multiplier-fix passes below: rescale _DOLLAR_FIELDS
+    by `factor` for rows `idx`, then recompute ratios on the now-corrected
+    values. Mutates `df` in place."""
+    for col in _DOLLAR_FIELDS:
+        if col in df.columns:
+            df.loc[idx, col] = df.loc[idx, col] * factor
+    corrected = df.loc[idx]
+    ratios = corrected.apply(lambda r: compute_ratios(r.to_dict(), unit_scale=1), axis=1, result_type="expand")
+    df.loc[idx, ratios.columns] = ratios
+
+
 def _fill_missing_multipliers(df: pd.DataFrame) -> pd.DataFrame:
     """Borrow this CIK's own multiplier from a sibling exhibit for any row whose
     <MULTIPLIER> tag was absent (see extract_line_items's docstring on WMT's real
@@ -237,18 +249,47 @@ def _fill_missing_multipliers(df: pd.DataFrame) -> pd.DataFrame:
     rather than the nearest single sibling in time -- simpler, and one
     mis-scaled explicit exhibit skews a median far less than it would a
     nearest-neighbor pick.
+
+    `fds_multiplier_resolved` marks every row this function (or a real
+    explicit tag) has confidently settled -- real bug, confirmed 2026-08-12:
+    infer_multiplier_from_trusted_tiers downstream used to treat
+    `fds_multiplier == 1.0` as its own proxy for "still unresolved", but a
+    row can already sit at this CIK's own confirmed canonical scale without
+    ever being individually rescaled here (its raw value simply happened to
+    already match canonical, e.g. a company whose explicit filings genuinely
+    declare no scaling, canonical == 1.0, the same value every untouched
+    exhibit starts at by default) -- indistinguishable, under a bare value
+    check, from a row that was never touched at all. Any row landing on
+    canonical -- whether by an explicit tag, by already matching it, or by
+    this function's own accept-and-rescale below -- is marked resolved so it
+    can't be silently re-anchored to an unrelated cross-tier reference by
+    that second pass; a row that DOESN'T match canonical (missing but
+    rejected as implausible, see GAP/GIS above) correctly stays unresolved
+    and eligible for that second chance.
+
+    reference (the plausibility anchor) requires total_assets on the
+    explicit rows, but canonical (the scale itself) must not -- real bug,
+    confirmed 2026-08-12: requiring total_assets.notna() on BOTH shrank the
+    "explicit" set down to whichever minority of genuinely-explicit rows
+    happen to also have a clean TOTAL-ASSETS tag, so a malformed tag on most
+    of them silently derived canonical from an unrepresentative remainder.
     """
+    df = df.copy()
+    df["fds_multiplier_resolved"] = df["fds_multiplier_explicit"]
     if "total_assets" not in df.columns:
         return df  # nothing to judge plausibility against -- don't guess
-    explicit = df[df["fds_multiplier_explicit"] & df["total_assets"].notna()]
+    explicit = df[df["fds_multiplier_explicit"]]
     if explicit.empty:
         return df
     canonical = explicit["fds_multiplier"].mode().iloc[0]
-    reference = explicit["total_assets"].abs().median()
+    df["fds_multiplier_resolved"] |= (df["fds_multiplier"] == canonical)
+    reference_rows = explicit[explicit["total_assets"].notna()]
+    if reference_rows.empty:
+        return df
+    reference = reference_rows["total_assets"].abs().median()
     missing = ~df["fds_multiplier_explicit"] & (df["fds_multiplier"] != canonical)
     if not missing.any():
         return df
-    df = df.copy()
     sub = df.index[missing]
     factor = canonical / df.loc[sub, "fds_multiplier"]
     scaled_assets = (df.loc[sub, "total_assets"] * factor).abs()
@@ -259,14 +300,9 @@ def _fill_missing_multipliers(df: pd.DataFrame) -> pd.DataFrame:
     accept = scaled_dist.index[scaled_dist < current_dist]  # NaN comparisons -> False, correctly excluded
     if len(accept) == 0:
         return df
-    factor = canonical / df.loc[accept, "fds_multiplier"]
-    for col in _DOLLAR_FIELDS:
-        if col in df.columns:
-            df.loc[accept, col] = df.loc[accept, col] * factor
     df.loc[accept, "fds_multiplier"] = canonical
-    corrected = df.loc[accept]
-    ratios = corrected.apply(lambda r: compute_ratios(r.to_dict(), unit_scale=1), axis=1, result_type="expand")
-    df.loc[accept, ratios.columns] = ratios
+    df.loc[accept, "fds_multiplier_resolved"] = True
+    _rescale_dollar_fields_and_ratios(df, accept, factor.loc[accept])
     return df
 
 
@@ -313,58 +349,70 @@ def infer_multiplier_from_trusted_tiers(df: pd.DataFrame, trusted: pd.DataFrame,
     `trusted` is this CIK's OTHER tiers (item6/tenq/xbrl) combined -- each
     individually more reliable than an ex27 exhibit with zero same-tier
     signal to work with. For each unresolved row, finds the temporally
-    nearest trusted total_assets (within `max_gap_days`) and tries every
-    valid EX-27 multiplier, keeping whichever lands closest (log-scale) to
-    that reference -- same "does scaling actually help" acceptance test as
-    _fill_missing_multipliers above, just against a cross-tier reference
-    instead of a same-tier canonical (there IS no same-tier canonical for
-    these rows). Requires the match land within 3x, not just be the
-    least-bad candidate -- a real guard against a stale/unrelated trusted
-    row (including a still-imperfect item6 row -- see that tier's own known
-    residual error rate) misleading this into a confident wrong answer: an
-    ex27 candidate would need to coincidentally land within 3x of a WRONG
-    reference to be accepted, a narrow coincidence for the whole-decade
-    (10x/1000x) errors this is built to catch. Never touches an
-    already-resolved row (explicit multiplier, or one already fixed by
-    _fill_missing_multipliers above).
+    nearest trusted total_assets (within `max_gap_days`, via the same
+    pd.merge_asof(direction='nearest', tolerance=...) pattern already used
+    for this exact problem shape in companyfacts.extract_line_items -- an
+    earlier version of this reinvented it as a per-row Python loop) and
+    tries every valid EX-27 multiplier, keeping whichever lands closest
+    (log-scale) to that reference -- same "does scaling actually help"
+    acceptance test as _fill_missing_multipliers above, just against a
+    cross-tier reference instead of a same-tier canonical (there IS no
+    same-tier canonical for these rows). Requires the match land within 3x,
+    not just be the least-bad candidate -- a real guard against a stale/
+    unrelated trusted row (including a still-imperfect item6 row -- see that
+    tier's own known residual error rate) misleading this into a confident
+    wrong answer: an ex27 candidate would need to coincidentally land within
+    3x of a WRONG reference to be accepted, a narrow coincidence for the
+    whole-decade (10x/1000x) errors this is built to catch.
+
+    Never touches an already-resolved row -- tracked via
+    `fds_multiplier_resolved` (see _fill_missing_multipliers), NOT a check
+    of whether `fds_multiplier == 1.0`: real bug, confirmed 2026-08-12, a row
+    _fill_missing_multipliers already correctly settled onto a canonical
+    scale of 1.0 (a company whose explicit filings genuinely declare no
+    scaling) is indistinguishable, under the old value-based check, from a
+    row that was simply never touched -- silently re-anchoring an
+    already-correct row to an unrelated cross-tier reference instead of
+    leaving it alone.
     """
     if "total_assets" not in df.columns or trusted.empty or "total_assets" not in trusted.columns:
         return df
-    unresolved = ~df["fds_multiplier_explicit"] & (df["fds_multiplier"] == 1.0) & df["total_assets"].notna()
+    resolved = df["fds_multiplier_resolved"] if "fds_multiplier_resolved" in df.columns \
+        else df["fds_multiplier_explicit"]
+    unresolved = ~resolved & df["total_assets"].notna()
     if not unresolved.any():
         return df
     ref = trusted[["end", "total_assets"]].dropna()
     ref = ref[(ref["total_assets"] != 0) & (ref["total_assets"].abs() < _TRUSTED_REFERENCE_CEILING)]
     if ref.empty:
         return df
+    ref = ref.sort_values("end")
 
     df = df.copy()
+    left = (df.loc[unresolved, ["end", "total_assets"]]
+              .rename(columns={"total_assets": "raw_assets"})
+              .reset_index().rename(columns={"index": "row_id"})
+              .sort_values("end"))
+    matched = pd.merge_asof(left, ref, on="end", direction="nearest",
+                             tolerance=pd.Timedelta(days=max_gap_days))
+    matched = matched[matched["total_assets"].notna() & matched["raw_assets"].notna()
+                       & (matched["raw_assets"] != 0)]
+
     accepted = []
-    for i in df.index[unresolved]:
-        gap = (ref["end"] - df.at[i, "end"]).abs()
-        j = gap.idxmin()
-        if gap.loc[j] > pd.Timedelta(days=max_gap_days):
-            continue
-        target = abs(ref.at[j, "total_assets"])
-        raw = df.at[i, "total_assets"]
-        if pd.isna(raw) or raw == 0:
-            continue
+    for row in matched.itertuples(index=False):
+        raw, target = row.raw_assets, abs(row.total_assets)
         with np.errstate(divide="ignore", invalid="ignore"):
             best = min(_VALID_MULTIPLIERS, key=lambda f: abs(np.log10(abs(raw * f) / target)))
             best_dist = abs(np.log10(abs(raw * best) / target))
         if not (best_dist < np.log10(3)):
             continue
-        df.at[i, "fds_multiplier"] = best
-        accepted.append(i)
+        df.at[row.row_id, "fds_multiplier"] = best
+        accepted.append(row.row_id)
 
     if not accepted:
         return df
-    for col in _DOLLAR_FIELDS:
-        if col in df.columns:
-            df.loc[accepted, col] = df.loc[accepted, col] * df.loc[accepted, "fds_multiplier"]
-    corrected = df.loc[accepted]
-    ratios = corrected.apply(lambda r: compute_ratios(r.to_dict(), unit_scale=1), axis=1, result_type="expand")
-    df.loc[accepted, ratios.columns] = ratios
+    df.loc[accepted, "fds_multiplier_resolved"] = True
+    _rescale_dollar_fields_and_ratios(df, accepted, df.loc[accepted, "fds_multiplier"])
     return df
 
 

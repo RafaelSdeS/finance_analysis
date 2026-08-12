@@ -196,14 +196,45 @@ def test_item6_heading_text_prefers_captioned_match_over_toc_entry():
     # Also covers KMB's specific variant: "ITEM&nbsp;6." (an HTML entity, not
     # real whitespace, between "Item" and "6") in the real heading, vs "Item
     # 6." (a genuine space) in the TOC line.
+    #
+    # A "<table" sits right after the TOC entry (an unrelated table between
+    # the TOC and the real section, as real filings have) -- without it, the
+    # TOC match's own window runs uninterrupted all the way to the one
+    # "<table" at the very end (past the real heading's caption too), so it
+    # would ALSO contain "In millions of dollars" and the test would pass
+    # even with the "prefer a captioned match" fallback deleted entirely.
+    # Real bug, confirmed 2026-08-12: this test exercised no real logic.
     text = (
         "Item 6.   Selected Financial Data   15   " # TOC entry: no caption, just a page number
+        + "<table>unrelated table between the TOC and the real section</table>"
         + "later in the document... "
         + "ITEM&nbsp;6.   SELECTED FINANCIAL DATA   In millions of dollars, except per share data <table>"
     )
     got = sfd._item6_heading_text(text)
     assert "In millions of dollars" in got, f"must prefer the match whose window actually states a caption, got {got!r}"
     print("OK: _item6_heading_text prefers a captioned match over an earlier table-of-contents entry")
+
+
+def test_is_caption_only_row_requires_the_tables_own_real_years_not_any_1900_2099_int():
+    # Real bug, confirmed 2026-08-12: the old range-based exemption (any
+    # integer 1900-2099) misclassified a genuine "shares outstanding" data
+    # row as the table's caption row whenever its own share-count values
+    # happened to be integers in that range (a small, stable-share-count
+    # company) -- the exact TXN-style bug this file's docstring says was
+    # already fixed once. A bare number must only be exempted when it
+    # matches one of THIS TABLE'S OWN real detected years.
+    real_years = ["2003", "2004", "2005", "2006", "2007"]
+    shares_row = pd.Series(["Shares outstanding", 1950, 1980, 2010, 2005, 1995])
+    assert sfd._is_caption_only_row(shares_row, real_years) is False, (
+        "a real data row whose values coincidentally fall in 1900-2099 must not be misread as a caption row")
+    # The genuine merged caption+year-header row (ZION's shape) must still be exempted.
+    header_row = pd.Series(["(In Millions)", 2003, 2004, 2005, 2006, 2007])
+    assert sfd._is_caption_only_row(header_row, real_years) is True, (
+        "a row whose numbers ARE this table's own real years must still count as caption-only")
+    # No years supplied at all (tenq.py's reuse, no year-header concept) -- no exemption.
+    assert sfd._is_caption_only_row(header_row) is False, (
+        "with no years context, no bare number should be exempted from disqualifying as real data")
+    print("OK: _is_caption_only_row's year-shape exemption is anchored to the table's own real years")
 
 
 def test_build_cik_history_skips_filing_that_crashes_read_html():
@@ -647,6 +678,7 @@ if __name__ == "__main__":
     test_item6_heading_text_extracts_caption_gap()
     test_item6_heading_text_ignores_unrelated_item6_mentions()
     test_item6_heading_text_prefers_captioned_match_over_toc_entry()
+    test_is_caption_only_row_requires_the_tables_own_real_years_not_any_1900_2099_int()
     test_build_cik_history_skips_filing_that_crashes_read_html()
     test_extract_years_scales_dollar_rows_but_not_per_share()
     test_find_selected_financial_data_table_rejects_quarterly_and_embedded_digit_false_positives()

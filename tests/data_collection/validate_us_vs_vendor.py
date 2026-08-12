@@ -65,7 +65,11 @@ SEAM_MAX_GAP_DAYS = 400  # don't read a multi-year hole in coverage as a "seam"
 
 def validate_fundamentals(ticker) -> bool:
     """xbrl-tier only (yfinance's ~5-quarter window can't reach ex27/tenq/item6)."""
-    fund = pd.read_parquet(FUND_DIR / f"{ticker}.parquet")
+    path = FUND_DIR / f"{ticker}.parquet"
+    if not path.exists():
+        print("  Fundamentals: SKIP (no data collected for this ticker)")
+        return True
+    fund = pd.read_parquet(path)
     fund = fund[(fund["fundamentals_tier"] == "xbrl") & (fund["period_months"] == 3)]
     if fund.empty:
         print("  Fundamentals: N/A (no xbrl rows)")
@@ -106,7 +110,9 @@ def validate_fundamentals(ticker) -> bool:
 def _print_fund_rows(label, col, fund, yf_series) -> bool:
     """Compare our `end`-keyed column (raw USD) against a yfinance series (raw USD),
     fuzzy-matched within +/-10 days (our `end` is the true fiscal end, yfinance keys
-    on calendar quarter-ends)."""
+    on calendar quarter-ends). When more than one of our rows falls in that window,
+    picks the temporally NEAREST one, not whichever happens to be first in `fund`'s
+    current row order (real bug, confirmed 2026-08-12: unrelated to actual proximity)."""
     print(f"  {label}:")
     printed = False
     ok = True
@@ -115,7 +121,8 @@ def _print_fund_rows(label, col, fund, yf_series) -> bool:
         near = fund[(fund["end"] - dt).abs() <= pd.Timedelta(days=10)]
         if near.empty or yf_val == 0:
             continue
-        ours = near[col].values[0]
+        nearest_idx = (near["end"] - dt).abs().idxmin()
+        ours = near.loc[nearest_idx, col]
         if pd.isna(ours):
             continue
         pct = (ours - yf_val) / abs(yf_val) * 100
@@ -130,21 +137,34 @@ def _print_fund_rows(label, col, fund, yf_series) -> bool:
 
 def check_internal_consistency(ticker) -> bool:
     """Recompute derived columns by hand from raw columns, same row. Currency/scale-immune."""
-    fund = pd.read_parquet(FUND_DIR / f"{ticker}.parquet").sort_values("end")
+    path = FUND_DIR / f"{ticker}.parquet"
+    if not path.exists():
+        print("  Internal consistency: SKIP (no data collected for this ticker)")
+        return True
+    fund = pd.read_parquet(path).sort_values("end")
     r = fund.iloc[-1]
     ok = True
 
+    # r.get(...) not r[...] -- real bug, confirmed 2026-08-12: a company can
+    # legitimately lack one of these ~13 raw columns (e.g. no net_revenue
+    # concept ever reported, same gap check_tier_seams already accounts for
+    # when picking which columns to load), and a bare KeyError here used to
+    # crash this ticker's WHOLE validation instead of reporting that one
+    # check as N/A like every other missing-input case already does below.
+    def g(col):
+        return r.get(col, float("nan"))
+
     checks = [
-        ("lpa",            r["lpa"],            r["net_income"] / r["shares_outstanding"]),
-        ("vpa",            r["vpa"],            r["equity"] / r["shares_outstanding"]),
-        ("roe",            r["roe"],            r["net_income"] / r["equity"] * 100),
-        ("roa",            r["roa"],            r["net_income"] / r["total_assets"] * 100),
-        ("net_margin",     r["net_margin"],     r["net_income"] / r["net_revenue"] * 100),
-        ("ebitda_margin",  r["ebitda_margin"],  r["ebitda"] / r["net_revenue"] * 100),
-        ("net_debt",       r["net_debt"],       r["total_debt"] - r["cash"]),
-        ("debt_equity",    r["debt_equity"],    r["total_debt"] / r["equity"]),
-        ("current_ratio",  r["current_ratio"],  r["current_assets"] / r["current_liabilities"]),
-        ("asset_turnover", r["asset_turnover"], r["net_revenue"] / r["total_assets"]),
+        ("lpa",            g("lpa"),            g("net_income") / g("shares_outstanding")),
+        ("vpa",            g("vpa"),            g("equity") / g("shares_outstanding")),
+        ("roe",            g("roe"),            g("net_income") / g("equity") * 100),
+        ("roa",            g("roa"),            g("net_income") / g("total_assets") * 100),
+        ("net_margin",     g("net_margin"),     g("net_income") / g("net_revenue") * 100),
+        ("ebitda_margin",  g("ebitda_margin"),  g("ebitda") / g("net_revenue") * 100),
+        ("net_debt",       g("net_debt"),       g("total_debt") - g("cash")),
+        ("debt_equity",    g("debt_equity"),    g("total_debt") / g("equity")),
+        ("current_ratio",  g("current_ratio"),  g("current_assets") / g("current_liabilities")),
+        ("asset_turnover", g("asset_turnover"), g("net_revenue") / g("total_assets")),
     ]
 
     print(f"  Latest quarter: {r['end'].date()}")
@@ -152,7 +172,15 @@ def check_internal_consistency(ticker) -> bool:
         if pd.isna(ours) or pd.isna(calc):
             print(f"    {label:14s}: N/A (null input)")
             continue
-        pct = (calc - ours) / abs(ours) * 100 if ours != 0 else float("inf")
+        # ours == 0 alone used to force pct=inf unconditionally -- real bug,
+        # confirmed 2026-08-12: a legitimately debt-free company (total_debt
+        # == 0, so both `ours` and the recomputed `calc` are genuinely 0)
+        # was reported as a spurious FAIL. Only a real ours-vs-calc mismatch
+        # around a zero `ours` should count as infinite relative error.
+        if ours == 0:
+            pct = 0.0 if calc == 0 else float("inf")
+        else:
+            pct = (calc - ours) / abs(ours) * 100
         flag = "PASS" if abs(pct) < TOLERANCE_PCT else "FAIL"
         print(f"    {label:14s}: ours={ours:>14.2f}  recomputed={calc:>14.2f}  diff={pct:+6.1f}%  {flag}")
         if flag == "FAIL":
@@ -188,8 +216,18 @@ def check_tier_seams() -> bool:
             v = d[col].astype(float)
             if col == "net_revenue":
                 v = v / (d["period_months"].fillna(3) / 3.0)  # normalize flows to per-quarter
-            ratio = (v / v.shift()).abs()
-            flagged = is_seam & ratio.notna() & (ratio > 0) & np.isfinite(ratio) & (
+            # `ratio > 0` and `np.isfinite(ratio)` used to gate the flag check
+            # itself -- real bug, confirmed 2026-08-12: that silently EXCLUDED
+            # a collapse-to-zero (ratio == 0, still correctly < 1/SEAM_RATIO_MAX
+            # on its own) and a jump-from-zero (ratio == inf, still correctly
+            # > SEAM_RATIO_MAX on its own) from ever being flagged -- exactly
+            # the two most severe scaling failures this check exists to catch,
+            # while `seams` (the denominator) still counted them, understating
+            # the true flagged rate. Only genuine NaN (0/0, no real prior/
+            # current value to compare) should be excluded.
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = (v / v.shift()).abs()
+            flagged = is_seam & ratio.notna() & (
                 (ratio > SEAM_RATIO_MAX) | (ratio < 1 / SEAM_RATIO_MAX)
             )
             seams += int(is_seam.sum())
@@ -238,7 +276,11 @@ def validate_prices(ticker) -> bool:
         print("  Prices: SKIP (no ALPHAVANTAGE_API_KEY set)")
         return True
 
-    prices = pd.read_parquet(PRICE_DIR / f"{ticker}.parquet")
+    path = PRICE_DIR / f"{ticker}.parquet"
+    if not path.exists():
+        print("  Prices: SKIP (no data collected for this ticker)")
+        return True
+    prices = pd.read_parquet(path)
     av_close = _av_daily(ticker)
     if av_close is None:
         return True

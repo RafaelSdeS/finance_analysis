@@ -327,6 +327,67 @@ def test_missing_multiplier_rejects_implausible_borrow():
     print("OK: a borrowed multiplier is rejected when it would make the exhibit LESS plausible, not more")
 
 
+def test_fill_missing_multipliers_canonical_reference_ignores_malformed_total_assets():
+    # Real bug, confirmed 2026-08-12: the "explicit" reference set used to
+    # require BOTH fds_multiplier_explicit AND total_assets.notna() -- if most
+    # genuinely-explicit rows have a malformed TOTAL-ASSETS tag, canonical
+    # (the scale itself) got derived from whichever unrepresentative minority
+    # still had a clean total_assets, not from the true explicit population.
+    # Here, 2 of 3 explicit rows have a NaN total_assets but the correct
+    # 1,000,000 multiplier -- canonical must still resolve to 1,000,000, not
+    # get skewed or starved by the malformed majority.
+    explicit_clean = {"fds_multiplier_explicit": True, "fds_multiplier": 1_000_000.0,
+                       "total_assets": 5_000_000_000.0, "fds_period_end": pd.Timestamp("1996-12-31")}
+    explicit_malformed_1 = {"fds_multiplier_explicit": True, "fds_multiplier": 1_000_000.0,
+                             "total_assets": float("nan"), "fds_period_end": pd.Timestamp("1997-12-31")}
+    explicit_malformed_2 = {"fds_multiplier_explicit": True, "fds_multiplier": 1_000_000.0,
+                             "total_assets": float("nan"), "fds_period_end": pd.Timestamp("1998-12-31")}
+    missing_row = {"fds_multiplier_explicit": False, "fds_multiplier": 1.0,
+                   "total_assets": 5200.0, "fds_period_end": pd.Timestamp("1999-12-31")}
+    df = pd.DataFrame([explicit_clean, explicit_malformed_1, explicit_malformed_2, missing_row])
+    fixed = fds._fill_missing_multipliers(df)
+    borrowed = fixed[fixed["fds_period_end"] == pd.Timestamp("1999-12-31")].iloc[0]
+    assert borrowed["fds_multiplier"] == 1_000_000.0, (
+        f"canonical must resolve from all 3 explicit rows, not just the 1 with clean total_assets, "
+        f"got {borrowed['fds_multiplier']}")
+    assert borrowed["total_assets"] == 5_200_000_000.0
+    print("OK: _fill_missing_multipliers derives canonical from every explicit row, not just those with usable total_assets")
+
+
+def test_infer_multiplier_from_trusted_tiers_never_touches_a_row_already_resolved_to_canonical_one():
+    # Real bug, confirmed 2026-08-12: infer_multiplier_from_trusted_tiers used
+    # to treat `fds_multiplier == 1.0` as its own "still unresolved" proxy.
+    # A non-explicit exhibit whose raw value already sits at this CIK's own
+    # CONFIRMED canonical scale (here canonical == 1.0 -- a company whose
+    # explicit filings genuinely declare no scaling) never goes through
+    # _fill_missing_multipliers' accept-and-rescale path at all (it was never
+    # "missing" in the first place), yet it's just as resolved as one that
+    # did -- indistinguishable, under the old bare-value check, from AEO's
+    # shape (no explicit tag ANYWHERE, genuinely still unresolved). It must
+    # not be silently re-anchored to an unrelated cross-tier reference.
+    explicit_row = {"fds_multiplier_explicit": True, "fds_multiplier": 1.0,
+                     "total_assets": 500.0, "fds_period_end": pd.Timestamp("1996-12-31")}
+    already_matching_row = {"fds_multiplier_explicit": False, "fds_multiplier": 1.0,
+                             "total_assets": 480.0, "fds_period_end": pd.Timestamp("1997-12-31")}
+    df = pd.DataFrame([explicit_row, already_matching_row])
+    fixed = fds._fill_missing_multipliers(df)
+    resolved = fixed[fixed["fds_period_end"] == pd.Timestamp("1997-12-31")].iloc[0]
+    assert resolved["fds_multiplier"] == 1.0 and resolved["fds_multiplier_resolved"], (
+        "setup check: this row must already be marked resolved (matches this CIK's own canonical=1.0) "
+        "before the second pass runs")
+
+    # A wildly different trusted reference that, under the old bug, would
+    # have looked "unresolved" (fds_multiplier == 1.0) and gotten rescaled.
+    trusted = pd.DataFrame([{"end": pd.Timestamp("1997-12-25"), "total_assets": 480_000_000.0}])
+    twice_fixed = fds.infer_multiplier_from_trusted_tiers(fixed, trusted)
+    untouched = twice_fixed[twice_fixed["fds_period_end"] == pd.Timestamp("1997-12-31")].iloc[0]
+    assert untouched["fds_multiplier"] == 1.0, (
+        f"a row already resolved by _fill_missing_multipliers must never be re-anchored here, "
+        f"got {untouched['fds_multiplier']}")
+    assert untouched["total_assets"] == 480.0
+    print("OK: infer_multiplier_from_trusted_tiers never re-anchors a row already resolved to canonical multiplier=1.0")
+
+
 def test_infer_multiplier_from_trusted_tiers_resolves_real_aeo_shape():
     # Real bug, confirmed end-to-end on AEO's (American Eagle Outfitters, CIK
     # 919012) actual filing history (2026-08-06): NOT ONE of its ~16 ex27
@@ -525,6 +586,8 @@ if __name__ == "__main__":
     test_missing_multiplier_borrows_from_sibling_exhibit()
     test_missing_multiplier_left_flagged_when_no_sibling_available()
     test_missing_multiplier_rejects_implausible_borrow()
+    test_fill_missing_multipliers_canonical_reference_ignores_malformed_total_assets()
+    test_infer_multiplier_from_trusted_tiers_never_touches_a_row_already_resolved_to_canonical_one()
     test_infer_multiplier_from_trusted_tiers_resolves_real_aeo_shape()
     test_infer_multiplier_from_trusted_tiers_rejects_no_close_candidate()
     test_infer_multiplier_from_trusted_tiers_respects_max_gap_days()

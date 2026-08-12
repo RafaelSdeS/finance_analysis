@@ -199,6 +199,70 @@ def test_source_data_anomaly_is_dropped_not_left_in():
     print("OK: a source-data tagging anomaly (end > filed) is dropped, not left in the output")
 
 
+def test_build_company_fundamentals_does_not_crash_when_ex27_is_the_only_tier():
+    # Real bug, confirmed 2026-08-12: pd.concat([]) raises ValueError ("No
+    # objects to concatenate") whenever ex27 is a CIK's ONLY populated tier
+    # (xbrl/quarters/gap all empty) -- the caller's broad except then
+    # silently dropped that company's entire fundamentals output over a
+    # crash this function could avoid entirely.
+    fake_ex27 = pd.DataFrame([{
+        "fds_period_end": pd.Timestamp("1999-12-31"),
+        "fds_multiplier": 1_000_000.0,
+        "fds_multiplier_explicit": True,
+        "total_assets": 5_000_000_000.0,
+        "cik": 99,
+        "fundamentals_available_date": pd.Timestamp("2000-03-01"),
+    }])
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=None), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=fake_ex27), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=pd.DataFrame()):
+        df = fundamentals.build_company_fundamentals(99, pd.DataFrame())
+
+    assert len(df) == 1, "an ex27-only CIK must not crash and must still produce its one row"
+    assert df.iloc[0]["fundamentals_tier"] == "ex27"
+    print("OK: build_company_fundamentals doesn't crash when ex27 is a CIK's only populated tier")
+
+
+def test_trusted_reference_excludes_a_tier_value_the_floor_guard_would_reject():
+    # Real bug, confirmed 2026-08-12: the `trusted` frame anchoring
+    # infer_multiplier_from_trusted_tiers's cross-tier ex27 inference used to
+    # be built from raw xbrl/quarters/gap BEFORE those frames passed the
+    # _FLOORS implausible-value guard (previously applied only at the very
+    # end, on the final combined result) -- so a known-buggy item6 value
+    # (here total_assets=50,000, below the $100k floor no real filer clears)
+    # could validate a wrong ex27 multiplier as "confirmed" purely by
+    # coincidence. ex27's raw total_assets=50 * 1000 lands EXACTLY on that
+    # garbage reference (log-distance 0), the kind of suspiciously-perfect
+    # match the 3x tolerance is supposed to guard against -- except the
+    # reference itself was never trustworthy to begin with.
+    fake_ex27 = pd.DataFrame([{
+        "fds_period_end": pd.Timestamp("1998-06-30"),
+        "fds_multiplier": 1.0,
+        "fds_multiplier_explicit": False,
+        "total_assets": 50.0,
+        "cik": 77,
+        "fundamentals_available_date": pd.Timestamp("1998-08-15"),
+    }])
+    fake_item6 = pd.DataFrame({
+        "fiscal_year": [1998],
+        "fundamentals_available_date": pd.to_datetime(["1999-03-01"]),
+        "total_assets": [50_000.0],
+        "cik": [77],
+    })
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=None), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=fake_ex27), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=fake_item6):
+        df = fundamentals.build_company_fundamentals(77, pd.DataFrame())
+
+    ex27_row = df[df["fundamentals_tier"] == "ex27"].iloc[0]
+    assert ex27_row["fds_multiplier"] == 1.0, (
+        f"a floor-implausible item6 reference must never validate an ex27 multiplier, "
+        f"got fds_multiplier={ex27_row['fds_multiplier']}")
+    print("OK: the cross-tier reference excludes a value the floor guard would reject, before ex27 inference runs")
+
+
 def test_predecessor_entity_rows_are_dropped():
     # Real bug, found auditing a "751/1,848 tickers have a fundamentals gap"
     # symptom (2026-07-29): AA's CIK (1675149, Alcoa Corp, spun off from Alcoa
@@ -502,6 +566,8 @@ if __name__ == "__main__":
     test_short_filing_lag_does_not_round_derived_end_past_filing_date()
     test_tier_boundary_near_duplicate_end_dates_are_deduped()
     test_source_data_anomaly_is_dropped_not_left_in()
+    test_build_company_fundamentals_does_not_crash_when_ex27_is_the_only_tier()
+    test_trusted_reference_excludes_a_tier_value_the_floor_guard_would_reject()
     test_predecessor_entity_rows_are_dropped()
     test_implausibly_tiny_fundamental_is_rejected_not_left_in()
     test_derive_annual_q4_consumes_the_item6_row()

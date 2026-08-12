@@ -92,7 +92,13 @@ def _is_spacer(cell: str) -> bool:
 # (2003 -> None, 2002 -> the real 2003 value, ... 1999's real value dropped
 # off the end entirely). A dash/N-A cell is unambiguous; free-text isn't --
 # so only the former counts as a real slot. See _row_values.
-_PLACEHOLDER_RE = re.compile(r"^(-{1,3}|–|—|n\.?/?a\.?|nm|n\.m\.)$", re.I)
+#
+# Dash run is unbounded (`-+`/`–+`/`—+`), not capped at 3 -- real bug,
+# confirmed 2026-08-12: a 4+-dash convention (some filers use "----") fell
+# through the old `{1,3}` cap, parsed as neither a number nor a placeholder,
+# and got silently dropped -- the exact under-count/position-shift bug this
+# regex exists to prevent, just at a dash count nobody had tested yet.
+_PLACEHOLDER_RE = re.compile(r"^(-+|–+|—+|n\.?/?a\.?|nm|n\.m\.)$", re.I)
 
 
 def _is_placeholder(cell: str) -> bool:
@@ -169,7 +175,7 @@ def _row_text(series: pd.Series) -> str:
     return " ".join(str(x) for x in series.tolist())
 
 
-def _is_caption_only_row(row: pd.Series) -> bool:
+def _is_caption_only_row(row: pd.Series, years: tuple[str, ...] | list[str] = ()) -> bool:
     """A genuine table-WIDE caption row carries no real FINANCIAL data of its
     own -- either the caption occupies the label cell itself with every other
     cell blank (ZION's real shape -- which, in a compact table, can double as
@@ -180,13 +186,27 @@ def _is_caption_only_row(row: pd.Series) -> bool:
     share count, FHI's "MANAGED AND ADMINISTERED ASSETS...(in millions)" row)
     is reporting a real line item with its own LOCAL caption, not the
     table's governing one -- see build_cik_history's caption detection for
-    the real filings this distinguishes. A bare 4-digit year-shaped number is
-    exempted (not treated as disqualifying "real data") since it's never a
-    financial figure and coincides with the year-header row in fixtures/
-    filings that combine caption and year header into one line."""
+    the real filings this distinguishes.
+
+    A bare number is exempted from disqualifying "real data" only when it
+    equals one of `years` -- THIS TABLE'S OWN real detected year columns (see
+    _find_year_columns), not any 1900-2099-shaped integer. Real bug,
+    confirmed 2026-08-12: a blanket 1900-2099 range exemption misclassified a
+    genuine "shares outstanding" row as a table-wide caption row whenever its
+    own share-count values happened to be integers in that range (a small/
+    stable-share-count company) -- reintroducing the exact TXN-style bug this
+    module's docstring says was already fixed once, just via a different
+    coincidence. Anchoring to the table's own actual years still exempts the
+    genuine merged caption+year-header case (ZION's shape) since that row's
+    numbers ARE those years, while a coincidentally year-shaped but otherwise
+    unrelated data value no longer passes. `years` defaults to empty (no
+    exemption at all) for callers with no year-header concept of their own
+    (see tenq.py's reuse of this same function for its differently-shaped
+    tables)."""
+    year_ints = {int(y) for y in years}
     for c in row.iloc[1:]:
         v = _parse_value(str(c))
-        if v is not None and not (v.is_integer() and 1900 <= v <= 2099):
+        if v is not None and not (v.is_integer() and int(v) in year_ints):
             return False
     return True
 
@@ -597,7 +617,8 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         # empty check can't catch it. Narrowing to the heading-anchored window
         # first resolves it correctly without touching the whole-document
         # fallback still needed when no Item 6 heading is found at all.
-        caption_rows = table[table.apply(_is_caption_only_row, axis=1)]
+        table_years = _find_year_columns(table)
+        caption_rows = table[table.apply(lambda r: _is_caption_only_row(r, table_years), axis=1)]
         table_text = " ".join(str(c) for c in caption_rows.to_numpy().flatten())
         heading_text = _item6_heading_text(resp.text)
         if _UNITS_RE.search(table_text):
