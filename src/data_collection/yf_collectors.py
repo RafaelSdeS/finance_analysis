@@ -111,8 +111,17 @@ def _seed_last_date(cp: dict, ticker: str, path, col: str) -> str | None:
 TRUSTED_MIN_YF_ROWS = 10  # below this, a recorded yfinance span looks truncated, not genuine
 
 
-def _prices_fetch_start(cp: dict, ticker: str, path, floor: str | None = None) -> str:
+def _prices_fetch_start(cp: dict, ticker: str, path, floor: str | None = None, tail_only: bool = False) -> str:
     """Where to start the prices fetch from.
+
+    `tail_only` (default off): once the on-disk yfinance-era span is trusted
+    (>= TRUSTED_MIN_YF_ROWS), fetch only since the last stored row instead of
+    re-fetching the whole yfinance era every run. Used by the fast refresh
+    path for tickers with no new dividend/split since the last collection --
+    those are the only ones whose stored adj_close can't have gone stale (see
+    collect_prices_yf's `full_refetch`). The thin-file and no-file guards
+    below are untouched and still win: a truncated or missing file always
+    falls through to the deep floor regardless of `tail_only`.
 
     `floor` overrides config.START_DATE (BR's 2000-01-01 backfill floor) for the
     "no prior data at all" case — US collection passes an intentionally early
@@ -147,6 +156,9 @@ def _prices_fetch_start(cp: dict, ticker: str, path, floor: str | None = None) -
         yf_start = pd.read_parquet(path, columns=["trade_date", "num_trades"])
         yf_start = yf_start[yf_start["num_trades"].isna()]
         if len(yf_start) >= TRUSTED_MIN_YF_ROWS:
+            if tail_only:
+                last = yf_start["trade_date"].max()
+                return (last + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
             return str(yf_start["trade_date"].min().date())
         if len(yf_start):
             log.warning("prices %s: only %d yfinance row(s) on disk (below the %d-row trust "
@@ -290,7 +302,7 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = 
     exchange suffix) without touching the BR default for existing callers.
     """
     t = yf.Ticker(_yf_symbol(ticker, suffix))
-    raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False), f"prices/{ticker}",
+    raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False, actions=True), f"prices/{ticker}",
                  retry_on_empty=True)
     if raw.empty:
         return None
@@ -329,16 +341,17 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = 
     # Split-boundary fix: reverse-adjust any pre-split rows within THIS fetch
     # (which may re-span multiple quarters now, see _prices_fetch_start) back to
     # BolsAI's unadjusted convention. Always logged loudly so it can be spot-checked.
-    splits = t.splits
-    if len(splits):
-        affected = splits[splits.index >= pd.Timestamp(fetch_start, tz=splits.index.tz)]
-        if len(affected):
-            log.warning("prices %s: split(s) in fetch window %s — reverse-adjusting "
-                       "pre-split rows to BolsAI's unadjusted convention",
-                       ticker, dict(affected))
-            for split_date, ratio in affected.items():
-                mask = raw.index < split_date
-                raw.loc[mask, ["Open", "High", "Low", "Close"]] *= ratio
+    # Read from the actions=True column on `raw` rather than a separate t.splits
+    # call -- same window, one fewer yfinance request per ticker (2026-08-12).
+    splits = raw["Stock Splits"]
+    affected = splits[splits > 0]
+    if len(affected):
+        log.warning("prices %s: split(s) in fetch window %s — reverse-adjusting "
+                   "pre-split rows to BolsAI's unadjusted convention",
+                   ticker, affected.to_dict())
+        for split_date, ratio in affected.items():
+            mask = raw.index < split_date
+            raw.loc[mask, ["Open", "High", "Low", "Close"]] *= ratio
 
     close = raw["Close"]
     ratio = adj_close / close
@@ -404,8 +417,23 @@ MAX_CONSECUTIVE_FAILURES_RESUME = 300  # skip_existing=True gets a much looser b
 # entire remaining pool unnoticed.
 
 
+def _last_completed_trading_day() -> pd.Timestamp:
+    """Most recent weekday strictly before today. `_drop_incomplete_today` always
+    drops today's row, so the freshest a checkpoint can legitimately be is this
+    date -- used by collect_prices_yf's same-day skip to avoid a network round
+    trip for a ticker that's provably already current. A market holiday just
+    means one wasted-but-cheap fetch that returns nothing new; not worth a
+    market-calendar dependency to shave that off too.
+    """
+    d = pd.Timestamp.now().normalize() - pd.Timedelta(days=1)
+    while d.weekday() >= 5:  # Sat=5, Sun=6
+        d -= pd.Timedelta(days=1)
+    return d
+
+
 def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str | None = None,
-                       floor: str | None = None, skip_existing: bool = False, workers: int = 1):
+                       floor: str | None = None, skip_existing: bool = False, workers: int = 1,
+                       full_refetch: set[str] | None = None):
     """`price_dir`/`suffix`/`floor` default to the BR globals (config.PRICES_DIR /
     config.YF_SUFFIX / config.START_DATE). Pass price_dir=config.US_PRICES_DIR, suffix="",
     floor="1900-01-01" for the pure-yfinance US path — there is no BolsAI history to
@@ -443,19 +471,37 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
     worker's own connection/session seems stuck) without being diluted or falsely
     tripped by unrelated concurrent workers. With workers=1 this is exactly the
     original global counter (one thread, so "per-worker" and "global" coincide).
+
+    `full_refetch` (default None reproduces today's behavior exactly: every
+    ticker gets the full re-fetch _prices_fetch_start otherwise always does).
+    Pass a `set[str]` to fetch TAIL-ONLY (since the last stored row) for any
+    ticker NOT in the set, and full-span only for tickers IN it. Meant to be
+    fed the changed-ticker set collect_dividends_yf returns (dividends run
+    first in the fast refresh path) -- a ticker with no new dividend or split
+    can't have had its stored adj_close go stale, so re-fetching its whole
+    history is pure waste. Tail-only tickers whose checkpoint already covers
+    the last completed trading day are skipped outright (no request at all).
     """
     price_dir = price_dir or config.PRICES_DIR
     cp = checkpoint.load("yf_prices", mode)
     cp_lock = Lock()
     tl = threading.local()
+    last_trading_day = _last_completed_trading_day()
 
     def _one(ticker: str) -> None:
         if skip_existing and (price_dir / f"{ticker}.parquet").exists():
             return
+        tail_only = full_refetch is not None and ticker not in full_refetch
+        if tail_only:
+            last_date = cp.get(ticker, {}).get("last_date")
+            if last_date and pd.Timestamp(last_date) >= last_trading_day:
+                log.info("prices %s: checkpoint already covers the last completed "
+                          "trading day, skipping", ticker)
+                return
         ok = False
         try:
             path = price_dir / f"{ticker}.parquet"
-            fetch_start = _prices_fetch_start(cp, ticker, path, floor)
+            fetch_start = _prices_fetch_start(cp, ticker, path, floor, tail_only=tail_only)
             # Fetch from the BolsAI junction date itself (one row earlier than
             # fetch_start) when one exists, so _reconcile_yfinance_junction
             # has an anchor row to compute the reconciliation factor from.
@@ -653,9 +699,17 @@ def _shares_outstanding(bs: pd.DataFrame, path) -> pd.Series:
     return pd.Series(np.nan, index=bs.columns)
 
 
-def collect_fundamentals_yf(tickers: list[str], mode: str):
+def collect_fundamentals_yf(tickers: list[str], mode: str, workers: int = 1):
+    """`workers` (default 1, unchanged sequential behavior) runs multiple tickers
+    concurrently -- same ThreadPoolExecutor + cp_lock shape as collect_prices_yf
+    and collect_dividends_yf, for the same reason (checkpoint.save()'s lock only
+    protects its own file write, not a caller mutating the shared `cp` dict from
+    another thread mid-snapshot).
+    """
     cp = checkpoint.load("yf_fundamentals", mode)
-    for ticker in tickers:
+    cp_lock = Lock()
+
+    def _one(ticker: str) -> None:
         try:
             fund_path = config.FUND_DIR / f"{ticker}.parquet"
             price_path = config.PRICES_DIR / f"{ticker}.parquet"
@@ -665,7 +719,7 @@ def collect_fundamentals_yf(tickers: list[str], mode: str):
             bs = _retry(lambda: t.quarterly_balance_sheet, f"fundamentals/{ticker} balance")
             if qf.empty or bs.empty:
                 log.info("fundamentals %s: no data (delisted/no yfinance coverage?)", ticker)
-                continue
+                return
 
             dates = sorted(set(qf.columns) & set(bs.columns))
             last = _seed_last_date(cp, ticker, fund_path, "reference_date")
@@ -673,7 +727,7 @@ def collect_fundamentals_yf(tickers: list[str], mode: str):
                 dates = [d for d in dates if d > pd.Timestamp(last)]
             if not dates:
                 log.info("fundamentals %s: up to date", ticker)
-                continue
+                return
 
             shares = _shares_outstanding(bs, fund_path)
             prices = pd.read_parquet(price_path)[["trade_date", "close"]].sort_values("trade_date") \
@@ -726,13 +780,17 @@ def collect_fundamentals_yf(tickers: list[str], mode: str):
             saved = _merge_save(df, fund_path, "reference_date",
                                 validate.validate_fundamentals, f"fundamentals/{ticker}")
             if saved is not None:
-                cp[ticker] = {"last_quarter": str(saved["reference_date"].max().date()), "rows": len(saved)}
-                checkpoint.save("yf_fundamentals", mode, cp)
+                with cp_lock:
+                    cp[ticker] = {"last_quarter": str(saved["reference_date"].max().date()), "rows": len(saved)}
+                    checkpoint.save("yf_fundamentals", mode, cp)
                 log.info("fundamentals %s: %d quarters", ticker, len(saved))
         except Exception as e:
             log.warning("fundamentals %s: skipping after error: %s", ticker, e)
         finally:
             sleep(config.YF_RATE_LIMIT_SLEEP)
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(_one, tickers))
 
 
 # ---------------------------------------------------------------------------
@@ -740,8 +798,12 @@ def collect_fundamentals_yf(tickers: list[str], mode: str):
 # ---------------------------------------------------------------------------
 
 def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
-                          suffix: str | None = None, floor: str | None = None, workers: int = 4):
-    """`dividend_dir`/`suffix`/`floor` default to the BR globals (config.DIVIDENDS_DIR /
+                          suffix: str | None = None, floor: str | None = None,
+                          workers: int = 4) -> set[str]:
+    """Returns the set of tickers whose fetch window had a new dividend or split --
+    feed straight into collect_prices_yf's `full_refetch` (those are the only
+    tickers whose stored adj_close can actually be stale; everyone else needs
+    only a tail-only price fetch). `dividend_dir`/`suffix`/`floor` default to the BR globals (config.DIVIDENDS_DIR /
     config.YF_SUFFIX / config.START_DATE) -- mirrors collect_prices_yf's override pattern
     for the pure-yfinance US path (price_dir=config.US_DIVIDENDS_DIR, suffix="",
     floor="1900-01-01"). Verified back to 1994 against 5 real long-history payers
@@ -771,6 +833,7 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
     dividend_dir = dividend_dir or config.DIVIDENDS_DIR
     cp = checkpoint.load("yf_dividends", mode)
     cp_lock = Lock()
+    changed: set[str] = set()
 
     def _one(ticker: str) -> None:
         try:
@@ -781,13 +844,21 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
 
             t = yf.Ticker(_yf_symbol(ticker, suffix))
             hist = _retry(lambda: t.history(start=fetch_start, actions=True), f"dividends/{ticker}")
-            if hist.empty or "Dividends" not in hist.columns:
+            if hist.empty:
                 log.info("dividends %s: no new rows", ticker)
                 return
-            divs = hist[hist["Dividends"] > 0]["Dividends"]
+
+            # A split alone (no dividend) still staleifies stored adj_close --
+            # checked independently of the dividends-empty return below, or a
+            # split-only quarter would silently vanish from the changed set.
+            if "Stock Splits" in hist.columns and (hist["Stock Splits"] > 0).any():
+                changed.add(ticker)
+
+            divs = hist[hist["Dividends"] > 0]["Dividends"] if "Dividends" in hist.columns else pd.Series(dtype=float)
             if divs.empty:
-                log.info("dividends %s: no new rows", ticker)
+                log.info("dividends %s: no new dividend rows", ticker)
                 return
+            changed.add(ticker)
 
             df = pd.DataFrame({
                 "ex_date": divs.index.tz_localize(None),
@@ -811,6 +882,7 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(_one, tickers))
+    return changed
 
 
 # ---------------------------------------------------------------------------
@@ -974,11 +1046,11 @@ def _demo():
         def __init__(self, symbol):
             self.splits = pd.Series([], dtype=float)
 
-        def history(self, start, auto_adjust):
+        def history(self, start, auto_adjust, actions=False):
             if not auto_adjust:
                 return pd.DataFrame({"Open": [1.0, 2.0, 3.0], "High": [1.0, 2.0, 3.0],
                                       "Low": [1.0, 2.0, 3.0], "Close": [1.0, 2.0, 3.0],
-                                      "Volume": [100, 100, 100]}, index=_idx3)
+                                      "Volume": [100, 100, 100], "Stock Splits": [0.0, 0.0, 0.0]}, index=_idx3)
             return pd.DataFrame({"Close": [1.0, 3.0]}, index=_idx3[[0, 2]])  # middle date missing, like DEC
 
     with mock.patch.object(yf, "Ticker", _FakeTickerRowMismatch):
@@ -994,12 +1066,12 @@ def _demo():
         def __init__(self, symbol):
             self.splits = pd.Series([], dtype=float)
 
-        def history(self, start, auto_adjust):
+        def history(self, start, auto_adjust, actions=False):
             idx = _idx3[:2]
             if not auto_adjust:
                 return pd.DataFrame({"Open": [10.0, 10.0], "High": [10.0, 10.0],
                                       "Low": [10.0, 10.0], "Close": [10.0, 10.0],
-                                      "Volume": [100, 100]}, index=idx)
+                                      "Volume": [100, 100], "Stock Splits": [0.0, 0.0]}, index=idx)
             return pd.DataFrame({"Close": [10.0, -5.0]}, index=idx)  # impossible negative, like SAFE
 
     with mock.patch.object(yf, "Ticker", _FakeTickerNegativeAdjClose):
@@ -1021,7 +1093,7 @@ def _demo():
         def __init__(self, symbol):
             self.splits = pd.Series([], dtype=float)
 
-        def history(self, start, auto_adjust):
+        def history(self, start, auto_adjust, actions=False):
             idx = _idx3[:2]
             close = [1.5, 2.5] if auto_adjust else [1.5, 5e12]  # one row wildly implausible
             return pd.DataFrame({"Open": close, "High": close, "Low": close, "Close": close,
@@ -1032,6 +1104,31 @@ def _demo():
         out = _fetch_and_shape_prices("CORRUPT", "2020-01-01", suffix="")
     assert out is None, "a ticker with an implausible (multi-trillion) Close must be skipped entirely, not partially written"
     print("_fetch_and_shape_prices implausible-price guard: OK")
+
+    # Split-boundary fix now reads the Stock Splits column off the SAME
+    # actions=True history() call instead of a separate t.splits request
+    # (2026-08-12, dropped the extra request) -- pin that the reverse-adjust
+    # still fires correctly from that column.
+    class _FakeTickerSplit:
+        def __init__(self, symbol):
+            pass
+
+        def history(self, start, auto_adjust, actions=False):
+            if not auto_adjust:
+                return pd.DataFrame({"Open": [10.0, 10.0, 20.0], "High": [10.0, 10.0, 20.0],
+                                      "Low": [10.0, 10.0, 20.0], "Close": [10.0, 10.0, 20.0],
+                                      "Volume": [100, 100, 100],
+                                      "Stock Splits": [0.0, 2.0, 0.0]}, index=_idx3)  # 2:1 split on day 2
+            return pd.DataFrame({"Close": [10.0, 10.0, 20.0]}, index=_idx3)
+
+    with mock.patch.object(yf, "Ticker", _FakeTickerSplit):
+        out = _fetch_and_shape_prices("SPLIT", "2020-01-01", suffix="")
+    pre = out.loc[out["trade_date"] == "2020-01-01"].iloc[0]
+    assert pre["open"] == 20.0 and pre["close"] == 20.0, \
+        f"pre-split row must be reverse-adjusted by the 2:1 ratio read from Stock Splits, got {pre}"
+    post = out.loc[out["trade_date"] == "2020-01-02"].iloc[0]
+    assert post["close"] == 10.0, "split day itself and rows after it must be untouched"
+    print("_fetch_and_shape_prices split-boundary fix via Stock Splits column: OK")
 
     # _flat_run_fraction must flag yfinance's coverage-padding signature
     # (mostly one repeated value) and pass real, varying data through clean.

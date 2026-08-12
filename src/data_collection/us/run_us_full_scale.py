@@ -31,8 +31,10 @@ the same short window (hours). Never use it to resume a --mode update run
 spanning weeks/months -- that's exactly the staleness bug the full re-fetch
 design fixed.
 
-Usage: python -m src.data_collection.us.run_us_full_scale [prices|dividends|fundamentals|universe|company_info]
-       (no argument runs all five, in order)
+Usage: python -m src.data_collection.us.run_us_full_scale [prices|dividends|fundamentals|universe|macro|company_info]
+       (no argument runs all six, in order -- "macro" (FRED) was missing from
+       STEPS entirely until 2026-08-12, so no run through this driver ever
+       collected US macro data)
        RESUME=1 python -m src.data_collection.us.run_us_full_scale prices fundamentals
 """
 
@@ -45,6 +47,7 @@ import pandas as pd
 from .. import config
 from ..sec import company_info, crosswalk, fundamentals, universe
 from ..yf_collectors import collect_dividends_yf, collect_prices_yf
+from .fred_collectors import collect_macro_us
 
 log = logging.getLogger(__name__)
 MODE = "us_full_scale_v2"
@@ -59,6 +62,10 @@ def _all_tickers() -> list[str]:
 def run_universe():
     filings = universe.build_filings()
     universe.build_roster(filings)
+
+
+def run_macro():
+    collect_macro_us(MODE)
 
 
 def run_prices():
@@ -80,7 +87,7 @@ def run_company_info():
     company_info.collect_company_info(_all_tickers())
 
 
-STEPS = {"universe": run_universe, "prices": run_prices,
+STEPS = {"universe": run_universe, "macro": run_macro, "prices": run_prices,
          "dividends": run_dividends, "fundamentals": run_fundamentals,
          "company_info": run_company_info}
 
