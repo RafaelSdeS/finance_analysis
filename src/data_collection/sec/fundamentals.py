@@ -190,7 +190,7 @@ def _reject_implausible_floors(df: pd.DataFrame, cik: int) -> pd.DataFrame:
     offset (see selected_financial_data.detect_unit_multiplier / fds.py's
     MULTIPLIER handling -- both tiers DO implement scaling, just not always
     correctly per-filing). NaN'd, never guessed (loaders.load_dividends'
-    convention) -- deliberately NOT companyfacts._reject_sequential_outliers
+    convention) -- deliberately NOT companyfacts.reject_sequential_outliers
     here: that seeds from a ticker's DOMINANT magnitude cluster, right for
     shares_outstanding but wrong for a company that legitimately grew 100x
     over 30 years of real filings. (ponytail: floors, not a parser fix --
@@ -383,6 +383,18 @@ def build_company_fundamentals(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
     # caught. See _reject_implausible_floors's own docstring for the
     # CVBF/BPOP cases this guards against.
     result = _reject_implausible_floors(result, cik)
+
+    # shares_outstanding now arrives from up to 4 independent sources (xbrl's
+    # own dei/us-gaap tags, already outlier-checked in isolation by
+    # companyfacts.py's own attached-items pass, plus the 3 pre-2009 tiers'
+    # cover-page parses -- see cover_page.py). Re-run the same majority-
+    # cluster check across the FULL combined per-CIK series so a cover-page
+    # misparse from one tier gets judged against the company's whole real
+    # history, not just its own narrow slice.
+    if "shares_outstanding" in result.columns:
+        result = result.sort_values("end").reset_index(drop=True)
+        result = companyfacts.reject_sequential_outliers(result, "shares_outstanding")
+        result = result.sort_values("fundamentals_available_date").reset_index(drop=True)
 
     return result
 

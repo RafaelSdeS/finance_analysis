@@ -240,6 +240,72 @@ Both fixes verified against the real triggering data and covered by new regressi
 ratios recomputed, non-flow columns pass through); tier priority confirmed end-to-end through
 `build_company_fundamentals` on a synthetic tenq/item6 overlap.
 
+## Follow-up: `shares_outstanding` / valuation ratios, pre-2009 (found + built 2026-08-12)
+
+Cross-vendor validation found `pl` (P/E) and `earnings_yield_vs_selic` at exactly 0% populated
+for every year 1962–2008, jumping to 5.8%/22%/46%/62% in 2009–2012. Root cause: `shares_outstanding`
+is sourced ONLY from XBRL (`companyfacts.py`'s `CommonStockSharesOutstanding`/
+`EntityCommonStockSharesOutstanding`, 2009+) — none of the three pre-2009 tiers extract it (`fds.py`'s
+own header comment already flags EX-27 Article 5 as never carrying a shares-count tag at all; `item6`/
+`tenq` don't attempt it either). No market cap → no valuation ratio, even though `net_income`/`roe`
+already have 44–60% coverage there via ex27/item6.
+
+**Verified free (2026-08-12, live EDGAR fetches, AAPL CIK 320193 + XOM CIK 34088):** every 10-K/10-Q's
+cover page has always been required to state shares outstanding as of a recent date — a Reg S-K/
+Exchange Act rule that predates EDGAR itself, not a 2009-era XBRL convention. Confirmed present back
+to EDGAR's earliest electronic filings:
+- AAPL 10-K, filed 1994-12-13 (accession `0000320193-94-000016`): `"119,891,418 shares of Common
+  Stock Issued and Outstanding as of ..."`
+- XOM 10-K, filed 2002-03-27 (`0000930661-02-000889`): different template — `"Common Stock, without
+  par value (6,792,598,170 shares outstanding at February 28, 2002)"`, embedded in the securities-
+  registered table, not a standalone sentence.
+- XOM 10-Q, filed 2003-05-14 (`0000034088-03-000063`): a third, tabular template — `Class` /
+  `Outstanding as of March 31, 2003` header pair over `Common stock, without par value  6,679,396,802`.
+
+**Genuinely free, not just cheap:** `fds.py`, `selected_financial_data.py`, and `tenq.py` already fetch
+the FULL submission text (`https://www.sec.gov/Archives/{filename}`, the whole accession `.txt`, not
+just the EX-27/Item-6 exhibit) — the cover page is already sitting in `resp.text` for every filing
+these three tiers touch today. Zero new HTTP calls; this is a parsing-only addition.
+
+**Real caveat, not a rung on this ladder:** EDGAR electronic filing was phased in 1993–1996 (mandatory
+by 1996) — there is no free structured OR text source for shares outstanding before that, so this
+closes the gap to roughly 1994/1996–2008, not to 1962. The `1962–2008` framing in the validation
+finding conflates the price panel's floor (yfinance, §2 of the parent plan) with the fundamentals
+floor; they're different walls.
+
+**Real work, not a one-liner:** already 3 distinct cover-page templates seen across 2 companies —
+same "table/text location is the hard part, not the parse" shape as `selected_financial_data.py` and
+`tenq.py`. Would be a 4th small module (a shares-outstanding-only pass over the already-downloaded
+cover-page text, feeding `shares_outstanding` into `fundamentals.py`'s combiner the same way
+`companyfacts.py` does today), not a one-line regex.
+
+- [x] Build the cover-page `shares_outstanding` extractor and wire it into `fundamentals.py` — ✅ DONE
+      2026-08-12 (code only, not yet run at scale). New `sec/cover_page.py` (4 regex templates —
+      3 live-verified above, plus a common "As of [date], there were N shares... outstanding"
+      date-first boilerplate template not individually live-verified this session — tried in order,
+      first match in the first 40,000 chars wins; rejects an implausible share count or an as-of date
+      more than 270 days from the filing). Wired into all 3 pre-2009 tiers' `build_cik_history`:
+      `fds.py` attaches the same filing's cover-page value to every bundled EX-27 exhibit (a filing can
+      bundle current + restated comparatives, see `parse_fds`'s docstring — a known approximation,
+      as-first-reported dedup usually lets an older exhibit's own dedicated filing win instead);
+      `selected_financial_data.py` attaches it ONLY to the Item 6 table's current (max) fiscal year,
+      not all 5 years the table spans; `tenq.py` attaches it directly (one quarter per filing, no
+      ambiguity). `companyfacts._reject_sequential_outliers` promoted to a shared, non-underscore
+      `reject_sequential_outliers` (already existed for the xbrl tier's own shares_outstanding
+      outlier-rejection) — `fundamentals.py`'s combiner now re-runs it on the FULL combined per-CIK
+      `shares_outstanding` series (all 4 tiers together) right before returning, so a cover-page
+      misparse from any one tier is judged against the company's whole real history, not just that
+      tier's own narrow slice. No changes needed to Stage 2 (`build_us_dataset.py`'s
+      `compute_valuation_daily_us` already computes `market_cap`/`pl`/etc. straight from `shares_outstanding`
+      × the real daily close — confirmed the ONLY thing missing was the raw `shares_outstanding` column
+      itself). Tests: new `tests/data_collection/test_sec_cover_page.py` (8 pure-parsing tests against
+      the exact live-fetched fixture strings above, plus plausibility/date-lag/no-match rejection
+      cases) + one wiring-integration test added to each of `test_sec_fds.py`, `test_sec_selected_financial_data.py`,
+      `test_sec_tenq.py`, and a cross-tier outlier-rejection test in `test_sec_fundamentals.py`.
+      **Not done this pass, needs separate explicit go-ahead:** running the fast test suite to confirm
+      green, and a full fundamentals recollection run (`python -m src.data_collection.sec.fundamentals`)
+      to actually backfill `shares_outstanding` on disk for the ~3,300 CIKs this affects.
+
 ## Known limits (state, don't fix)
 
 - **Survivorship.** Tier-1 crosswalk is current tickers only; dead pre-2007 companies with

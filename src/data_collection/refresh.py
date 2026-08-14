@@ -1,13 +1,24 @@
 """refresh.py — one-command fast top-up for BR + US: macro, dividends, prices,
 fundamentals, tail-only by default.
 
-Sequencing is deliberate: dividends run BEFORE prices in each market, because
-the dividends pass reports which tickers had a new dividend or split
-(collect_dividends_yf's return value) -- those are the only tickers whose
-stored adj_close can actually be stale, so everyone else gets a cheap
-tail-only price fetch (collect_prices_yf's `full_refetch` param) instead of
-re-walking their entire history. `--full` forces the old full-span behavior
-for every ticker.
+Dividends and prices are now ONE pass, not two (2026-08-13): yfinance's
+actions=True response already carries the Dividends/Stock Splits columns
+alongside OHLCV, so collect_prices_yf(collect_dividends=True) extracts and
+writes dividends straight from the SAME fetch collect_prices_yf's own tail
+fetch makes for prices -- collect_dividends_yf's separate, dividends-only
+request is no longer needed for a ticker with nothing new. Two-pass shape
+per market: pass 1 is a tail-only fetch for EVERY ticker (full_refetch=set()),
+which also reports which tickers had a new dividend/split THIS window
+(collect_prices_yf's return value, the direct replacement for
+collect_dividends_yf's old return value); pass 2 forces a full-span
+re-fetch (price AND dividend history) for just that subset -- those are the
+only tickers whose stored adj_close can actually be stale. `--full` skips
+the two-pass split and does one full-span fetch for every ticker instead
+(still just one request per ticker, folding dividends in for free).
+
+`--only dividends` (dividends requested WITHOUT prices) is the one case with
+no price fetch to fold detection into -- falls back to the old standalone
+collect_dividends_yf call, kept only for that combination.
 
 Reuses the existing per-source collectors and their checkpoints as-is (BR
 mode "update", US mode "us_full_scale_v2") -- this module adds no new
@@ -36,7 +47,11 @@ from .yf_collectors import collect_dividends_yf, collect_fundamentals_yf, collec
 
 log = logging.getLogger("refresh")
 
-DEFAULT_WORKERS = 8
+# 8 triggered a real Yahoo 429 storm on US prices (2026-08-12): each thread paces
+# itself via YF_RATE_LIMIT_SLEEP independently, so the combined request rate scales
+# with workers. 4 matches collect_dividends_yf's own conservative default; pass
+# --workers explicitly for a larger backfill.
+DEFAULT_WORKERS = 4
 US_MODE = "us_full_scale_v2"  # reuse run_us_full_scale.py's checkpoints, not a fresh mode
 ALL_STAGES = ["macro", "dividends", "prices", "fundamentals"]
 
@@ -79,21 +94,46 @@ def _refresh_us_fundamentals(all_priced: list[str], workers: int) -> None:
                      {"last_run": datetime.now(timezone.utc).isoformat()})
 
 
+def _refresh_prices_and_dividends(tickers: list[str], mode: str, stages: set[str], full: bool,
+                                   workers: int, **price_kwargs) -> None:
+    """Shared BR/US orchestration for the folded prices+dividends pass (see
+    module docstring). `price_kwargs` forwards market-specific overrides
+    (price_dir/dividend_dir/suffix/floor) straight to collect_prices_yf.
+    """
+    if "prices" not in stages:
+        if "dividends" in stages:
+            # No price fetch to fold detection into -- the one case that still
+            # needs the old standalone collector.
+            log.info("--- dividends (%d tickers) ---", len(tickers))
+            dividend_dir = price_kwargs.get("dividend_dir")
+            suffix = price_kwargs.get("suffix")
+            floor = price_kwargs.get("floor")
+            collect_dividends_yf(tickers, mode, dividend_dir=dividend_dir, suffix=suffix,
+                                  floor=floor, workers=workers)
+        return
+
+    want_dividends = "dividends" in stages
+    log.info("--- prices%s (%d tickers) ---", " + dividends" if want_dividends else "", len(tickers))
+    if full:
+        collect_prices_yf(tickers, mode, workers=workers, collect_dividends=want_dividends,
+                           **price_kwargs)
+        return
+
+    changed = collect_prices_yf(tickers, mode, workers=workers, full_refetch=set(),
+                                 collect_dividends=want_dividends, **price_kwargs) or set()
+    if changed:
+        log.info("--- prices full re-fetch for %d changed ticker(s) ---", len(changed))
+        collect_prices_yf(sorted(changed), mode, workers=workers, full_refetch=changed,
+                           collect_dividends=want_dividends, **price_kwargs)
+
+
 def _refresh_br(stages: set[str], full: bool, workers: int) -> None:
     tickers = _active_tickers()
     if "macro" in stages:
         log.info("--- BR macro ---")
         br_collectors.collect_macro("update")
 
-    changed: set[str] = set()
-    if "dividends" in stages:
-        log.info("--- BR dividends (%d tickers) ---", len(tickers))
-        changed = collect_dividends_yf(tickers, "update", workers=workers)
-
-    if "prices" in stages:
-        log.info("--- BR prices (%d tickers) ---", len(tickers))
-        collect_prices_yf(tickers, "update", workers=workers,
-                           full_refetch=None if full else changed)
+    _refresh_prices_and_dividends(tickers, "update", stages, full, workers)
 
     if "fundamentals" in stages:
         log.info("--- BR fundamentals (%d tickers) ---", len(tickers))
@@ -106,17 +146,9 @@ def _refresh_us(stages: set[str], full: bool, workers: int) -> None:
         log.info("--- US macro ---")
         collect_macro_us(US_MODE)
 
-    changed: set[str] = set()
-    if "dividends" in stages:
-        log.info("--- US dividends (%d tickers) ---", len(tickers))
-        changed = collect_dividends_yf(tickers, US_MODE, dividend_dir=config.US_DIVIDENDS_DIR,
-                                        suffix="", floor="1900-01-01", workers=workers)
-
-    if "prices" in stages:
-        log.info("--- US prices (%d tickers) ---", len(tickers))
-        collect_prices_yf(tickers, US_MODE, price_dir=config.US_PRICES_DIR, suffix="",
-                           floor="1900-01-01", workers=workers,
-                           full_refetch=None if full else changed)
+    _refresh_prices_and_dividends(tickers, US_MODE, stages, full, workers,
+                                   price_dir=config.US_PRICES_DIR, dividend_dir=config.US_DIVIDENDS_DIR,
+                                   suffix="", floor="1900-01-01")
 
     if "fundamentals" in stages:
         log.info("--- US fundamentals (delta) ---")
@@ -127,7 +159,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--market", choices=["br", "us", "both"], default="both")
     p.add_argument("--only", nargs="+", choices=ALL_STAGES, default=ALL_STAGES,
-                    help="stages to run (order is always macro, dividends, prices, fundamentals)")
+                    help="stages to run (order is always macro, then prices+dividends folded "
+                         "into one pass, then fundamentals)")
     p.add_argument("--full", action="store_true",
                     help="full-span price re-fetch for every ticker, not just ones with a new "
                          "dividend/split since last run (slow; the old always-on behavior)")

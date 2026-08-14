@@ -242,12 +242,12 @@ def test_reject_sequential_outliers_flags_isolated_bad_quarter():
         "end": pd.to_datetime(["2018-12-31", "2019-12-31", "2020-12-31", "2021-12-31"]),
         "shares_outstanding": [2_456_415_884, 2_456_520_738_000_000, 2_456_591_597, 2_456_617_788],
     })
-    out = companyfacts._reject_sequential_outliers(df, "shares_outstanding")
+    out = companyfacts.reject_sequential_outliers(df, "shares_outstanding")
     assert out["shares_outstanding_rejected_outlier"].tolist() == [False, True, False, False], (
         "only the isolated 1,000,000x-inflated quarter must be rejected")
     assert pd.isna(out.loc[1, "shares_outstanding"]), "a rejected value must become NaN, not a guessed number"
     assert out.loc[0, "shares_outstanding"] == 2_456_415_884, "surrounding normal values must be left untouched"
-    print("OK: _reject_sequential_outliers flags an isolated bad quarter, leaves neighbors alone")
+    print("OK: reject_sequential_outliers flags an isolated bad quarter, leaves neighbors alone")
 
 
 def test_reject_sequential_outliers_does_not_anchor_on_a_bad_first_value():
@@ -268,13 +268,13 @@ def test_reject_sequential_outliers_does_not_anchor_on_a_bad_first_value():
         "shares_outstanding": [288_464_431_000, 290_792_627_000,
                                 289_000_000, 289_500_000, 290_100_000, 290_800_000, 291_200_000],
     })
-    out = companyfacts._reject_sequential_outliers(df, "shares_outstanding")
+    out = companyfacts.reject_sequential_outliers(df, "shares_outstanding")
     assert out["shares_outstanding_rejected_outlier"].tolist() == [
         True, True, False, False, False, False, False
     ], "the 2 bad FIRST-EVER values must be rejected, not the 5 good quarters that follow them"
     assert out.loc[:1, "shares_outstanding"].isna().all(), "both early bad values must become NaN"
     assert out.loc[2:, "shares_outstanding"].notna().all(), "all 5 genuinely good quarters must survive untouched"
-    print("OK: _reject_sequential_outliers seeds on the majority cluster, "
+    print("OK: reject_sequential_outliers seeds on the majority cluster, "
           "not blindly the chronologically-first value")
 
 
@@ -292,13 +292,13 @@ def test_reject_sequential_outliers_does_not_reanchor_on_a_persistent_bad_run():
         "shares_outstanding": [606_407_693, 606_407_693, 606_407_693, 606_407_693,
                                 605_231_854_725, 604_437_877_587, 604_437_877_587, 574_215_983_709],
     })
-    out = companyfacts._reject_sequential_outliers(df, "shares_outstanding")
+    out = companyfacts.reject_sequential_outliers(df, "shares_outstanding")
     assert out["shares_outstanding_rejected_outlier"].tolist() == [
         False, False, False, False, True, True, True, True
     ], "all 4 persistently-bad years must be rejected, not just the first bad transition"
     assert out.loc[4:, "shares_outstanding"].isna().all(), "every rejected year must become NaN"
     assert out.loc[:3, "shares_outstanding"].notna().all(), "the 4 genuinely good years must survive untouched"
-    print("OK: _reject_sequential_outliers never re-anchors on a rejected value -- "
+    print("OK: reject_sequential_outliers never re-anchors on a rejected value -- "
           "a multi-year persistent bad run stays rejected throughout, not just its first transition")
 
 
@@ -311,10 +311,10 @@ def test_reject_sequential_outliers_accepts_a_plausible_large_jump():
         "end": pd.to_datetime(["2019-12-31", "2020-12-31", "2021-12-31"]),
         "shares_outstanding": [100_000_000, 1_000_000_000, 1_010_000_000],  # a genuine 10-for-1 split
     })
-    out = companyfacts._reject_sequential_outliers(df, "shares_outstanding")
+    out = companyfacts.reject_sequential_outliers(df, "shares_outstanding")
     assert not out["shares_outstanding_rejected_outlier"].any(), (
         "a plausible 10x jump (well within a real stock split's range) must not be rejected")
-    print("OK: _reject_sequential_outliers does not false-positive on a plausible large jump (e.g. a real split)")
+    print("OK: reject_sequential_outliers does not false-positive on a plausible large jump (e.g. a real split)")
 
 
 def test_extract_line_items_rejects_outlier_shares_outstanding_end_to_end():

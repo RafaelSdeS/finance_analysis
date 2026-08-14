@@ -30,7 +30,7 @@ import re
 
 import pandas as pd
 
-from . import http
+from . import cover_page, http
 from ..yf_collectors import compute_ratios
 
 log = logging.getLogger("sec")
@@ -627,14 +627,29 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
             unit_multiplier = detect_unit_multiplier(heading_text, prefer_first=True)
         else:
             unit_multiplier = detect_unit_multiplier(resp.text)
-        for year_str, items in extract_years(table, unit_multiplier).items():
+        # One cover-page parse per filing. Item 6 tables span up to 5 fiscal
+        # years at once, but the cover page's "as of" date only genuinely
+        # describes the CURRENT (most recent) one -- attaching it to every
+        # year in the table would misattribute a recent share count to years
+        # up to 4 back. Older years get their own correct value once (if)
+        # THEIR OWN dedicated filing is chained in -- the whole point of
+        # chaining Item 6 tables across a company's history (module docstring).
+        shares_outstanding, shares_outstanding_asof = cover_page.extract_shares_outstanding(
+            resp.text, row.date_filed)
+        years_items = extract_years(table, unit_multiplier)
+        current_year = max((int(y) for y in years_items), default=None)
+        for year_str, items in years_items.items():
             year = int(year_str)
             if not (_FISCAL_YEAR_MIN <= year <= _FISCAL_YEAR_MAX):
                 continue
             ratios = compute_ratios(items, unit_scale=1)
-            rows.append({**items, **ratios, "fiscal_year": year,
-                         "fundamentals_available_date": row.date_filed,
-                         "item6_form": row.form_type, "item6_filename": row.filename})
+            row_dict = {**items, **ratios, "fiscal_year": year,
+                        "fundamentals_available_date": row.date_filed,
+                        "item6_form": row.form_type, "item6_filename": row.filename}
+            if year == current_year:
+                row_dict["shares_outstanding"] = shares_outstanding
+                row_dict["shares_outstanding_asof"] = shares_outstanding_asof
+            rows.append(row_dict)
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)

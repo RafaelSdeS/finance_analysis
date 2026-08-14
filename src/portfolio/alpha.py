@@ -59,24 +59,37 @@ def _label_close_dates(trade_dates: pd.Series, global_dates: pd.DatetimeIndex,
 
 
 def _purge_embargo_mask(df: pd.DataFrame, as_of: pd.Timestamp, horizon_td: int,
-                         embargo_days: int) -> pd.Series:
+                         embargo_days: int, close_dates: pd.Series | None = None) -> pd.Series:
     """Boolean mask: rows usable to train a model that predicts AT `as_of`
     -- their own label window must have fully closed at least `embargo_days`
-    before `as_of` (purge + embargo, Lopez de Prado; see module docstring)."""
-    global_dates = _global_trading_dates(df)
-    close_dates = _label_close_dates(df["trade_date"], global_dates, horizon_td)
+    before `as_of` (purge + embargo, Lopez de Prado; see module docstring).
+
+    `close_dates` (default None, computed internally): pass a precomputed
+    _label_close_dates(...) result to skip recomputing it here -- it depends
+    only on `df`/`horizon_td`, never on `as_of` (only `cutoff` does), so
+    walk_forward_predict computes it ONCE outside its retrain loop instead of
+    once per rebalance date (2026-08-13: ~65 dates in a typical run, each
+    previously re-doing a full unique+sort of the whole panel plus a
+    searchsorted over every row from scratch for an identical result)."""
+    if close_dates is None:
+        global_dates = _global_trading_dates(df)
+        close_dates = _label_close_dates(df["trade_date"], global_dates, horizon_td)
     cutoff = as_of - pd.Timedelta(days=embargo_days)
     return df["label"].notna() & close_dates.notna() & (close_dates <= cutoff)
 
 
 def fit(df: pd.DataFrame, as_of: pd.Timestamp, horizon_td: int,
         embargo_days: int = DEFAULT_EMBARGO_DAYS, min_train_rows: int = 500,
-        **lgb_params):
+        close_dates: pd.Series | None = None, **lgb_params):
     """Fit a LightGBM regressor on the purged+embargoed training window as of
     `as_of`. `df` needs ticker/trade_date/label (labels.forward_excess_return)
     plus every column features.feature_columns() lists. Returns the fitted
-    model, or None if there isn't yet `min_train_rows` of usable history."""
-    train_df = df.loc[_purge_embargo_mask(df, as_of, horizon_td, embargo_days)]
+    model, or None if there isn't yet `min_train_rows` of usable history.
+
+    `close_dates` (default None): see _purge_embargo_mask -- walk_forward_
+    predict passes its own precomputed result through here.
+    """
+    train_df = df.loc[_purge_embargo_mask(df, as_of, horizon_td, embargo_days, close_dates)]
     if len(train_df) < min_train_rows:
         return None
 
@@ -111,10 +124,15 @@ def walk_forward_predict(df: pd.DataFrame, rebalance_dates, horizon_td: int,
     """Retrain (expanding window) at each date in `rebalance_dates`, predict
     that date's cross-section. Silently skips any date without
     `min_train_rows` of usable training history yet (too early). Returns a
-    long DataFrame[date, ticker, alpha]."""
+    long DataFrame[date, ticker, alpha].
+
+    Computes _label_close_dates ONCE here rather than once per rebalance date
+    inside fit -- see _purge_embargo_mask's close_dates docstring."""
+    global_dates = _global_trading_dates(df)
+    close_dates = _label_close_dates(df["trade_date"], global_dates, horizon_td)
     rows = []
     for t in rebalance_dates:
-        model = fit(df, t, horizon_td, embargo_days, min_train_rows, **lgb_params)
+        model = fit(df, t, horizon_td, embargo_days, min_train_rows, close_dates=close_dates, **lgb_params)
         if model is None:
             print(f"  [{t.date()}] skipped -- not enough purged training history yet")
             continue

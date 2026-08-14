@@ -224,6 +224,36 @@ def test_build_company_fundamentals_does_not_crash_when_ex27_is_the_only_tier():
     print("OK: build_company_fundamentals doesn't crash when ex27 is a CIK's only populated tier")
 
 
+def test_shares_outstanding_outlier_rejected_across_combined_tiers():
+    # A cover-page misparse in one tier (e.g. ex27, see cover_page.py) must
+    # be judged against the CIK's WHOLE combined history, not just that
+    # tier's own narrow slice -- companyfacts.reject_sequential_outliers is
+    # re-run here on the full combined per-CIK series (see this function's
+    # own comment just above its return).
+    fake_ex27 = pd.DataFrame({
+        "fds_period_end": pd.to_datetime(["1996-12-31", "1997-12-31", "1998-12-31", "1999-12-31"]),
+        "fundamentals_available_date": pd.to_datetime(["1997-03-01", "1998-03-01", "1999-03-01", "2000-03-01"]),
+        "total_assets": [5.0e8, 5.2e8, 5.4e8, 5.6e8],
+        # 1998's cover-page misparse read ~1000x too many shares.
+        "shares_outstanding": [100_000_000.0, 105_000_000.0, 100_000_000_000.0, 110_000_000.0],
+        "fds_multiplier_explicit": [True, True, True, True],
+        "cik": [555, 555, 555, 555],
+    })
+    with mock.patch.object(fundamentals.companyfacts, "fetch_companyfacts", return_value=None), \
+         mock.patch.object(fundamentals.fds, "build_cik_history", return_value=fake_ex27), \
+         mock.patch.object(fundamentals.tenq, "build_cik_history", return_value=pd.DataFrame()), \
+         mock.patch.object(fundamentals.selected_financial_data, "build_cik_history", return_value=pd.DataFrame()):
+        df = fundamentals.build_company_fundamentals(555, pd.DataFrame())
+
+    assert len(df) == 4
+    by_year = df.set_index(df["end"].dt.year)
+    assert pd.isna(by_year.loc[1998, "shares_outstanding"]), (
+        "the 1000x-magnitude outlier must be rejected against the CIK's own combined history")
+    assert by_year.loc[1996, "shares_outstanding"] == 100_000_000.0, "good rows must survive untouched"
+    assert by_year.loc[1999, "shares_outstanding"] == 110_000_000.0
+    print("OK: build_company_fundamentals rejects a shares_outstanding outlier across the full combined per-CIK series")
+
+
 def test_trusted_reference_excludes_a_tier_value_the_floor_guard_would_reject():
     # Real bug, confirmed 2026-08-12: the `trusted` frame anchoring
     # infer_multiplier_from_trusted_tiers's cross-tier ex27 inference used to
@@ -567,6 +597,7 @@ if __name__ == "__main__":
     test_tier_boundary_near_duplicate_end_dates_are_deduped()
     test_source_data_anomaly_is_dropped_not_left_in()
     test_build_company_fundamentals_does_not_crash_when_ex27_is_the_only_tier()
+    test_shares_outstanding_outlier_rejected_across_combined_tiers()
     test_trusted_reference_excludes_a_tier_value_the_floor_guard_would_reject()
     test_predecessor_entity_rows_are_dropped()
     test_implausibly_tiny_fundamental_is_rejected_not_left_in()

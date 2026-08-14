@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.portfolio.alpha import (  # noqa: E402
-    MONOTONE_FEATURE, _label_close_dates, _purge_embargo_mask, fit, predict,
-    rank_ic, shrink_alpha, walk_forward_predict,
+    MONOTONE_FEATURE, _global_trading_dates, _label_close_dates, _purge_embargo_mask, fit,
+    predict, rank_ic, shrink_alpha, walk_forward_predict,
 )
 from src.portfolio.features import feature_columns  # noqa: E402
 from tests.test_utils import print_check, print_header, print_section_end  # noqa: E402
@@ -88,6 +88,32 @@ def test_purge_embargo_mask():
     print_check("no row whose label window closes after as_of is ever included",
                 bool(no_lookahead_ok))
     passed, failed = passed + no_lookahead_ok, failed + (not no_lookahead_ok)
+    return passed, failed
+
+
+def test_precomputed_close_dates_matches_recomputed_every_call():
+    """walk_forward_predict now computes _label_close_dates ONCE outside its
+    retrain loop and threads it through fit -> _purge_embargo_mask, instead
+    of _purge_embargo_mask recomputing it fresh at every rebalance date. Pure
+    perf hoist -- must produce a BYTE-IDENTICAL mask at several different
+    as_of values, not just a similar one."""
+    passed = failed = 0
+    dates = pd.bdate_range("2020-01-01", periods=300)
+    df = pd.DataFrame({"ticker": "AAA", "trade_date": dates, "label": 0.01})
+    horizon_td, embargo_days = 10, 5
+
+    global_dates = _global_trading_dates(df)
+    close_dates = _label_close_dates(df["trade_date"], global_dates, horizon_td)
+
+    all_match = True
+    for as_of in (dates[50], dates[150], dates[200], dates[290]):
+        recomputed = _purge_embargo_mask(df, as_of, horizon_td, embargo_days)
+        precomputed = _purge_embargo_mask(df, as_of, horizon_td, embargo_days, close_dates=close_dates)
+        if list(recomputed) != list(precomputed):
+            all_match = False
+    print_check("precomputed close_dates gives an identical mask to recomputing it fresh, "
+                "at every as_of tested", bool(all_match))
+    passed, failed = passed + all_match, failed + (not all_match)
     return passed, failed
 
 
@@ -202,11 +228,12 @@ def main():
     print_header("test_alpha")
     p1, f1 = test_label_close_dates()
     p2, f2 = test_purge_embargo_mask()
+    p7, f7 = test_precomputed_close_dates_matches_recomputed_every_call()
     p3, f3 = test_monotone_constraint()
     p4, f4 = test_predict_empty_date()
     p5, f5 = test_walk_forward_and_rank_ic()
     p6, f6 = test_shrink_alpha()
-    passed, failed = p1 + p2 + p3 + p4 + p5 + p6, f1 + f2 + f3 + f4 + f5 + f6
+    passed, failed = p1 + p2 + p3 + p4 + p5 + p6 + p7, f1 + f2 + f3 + f4 + f5 + f6 + f7
     print_section_end(passed, failed)
     return failed == 0
 

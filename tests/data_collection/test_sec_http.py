@@ -16,6 +16,7 @@ Usage: python tests/data_collection/test_sec_http.py
 """
 
 import sys
+import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -74,8 +75,62 @@ def test_retry_backs_off_before_each_attempt():
     print("OK: get() backs off exponentially before each retry, not just the per-request throttle")
 
 
+def test_archive_url_cached_on_disk_second_call_skips_network_and_throttle():
+    with tempfile.TemporaryDirectory() as tmp, \
+         mock.patch.object(http, "ARCHIVE_CACHE_DIR", Path(tmp)), \
+         mock.patch.object(http, "_throttle") as mock_throttle, \
+         mock.patch("requests.get", side_effect=[_resp(200, "the filing body")]) as mock_get:
+        url = "https://www.sec.gov/Archives/edgar/data/1234/0001.txt"
+        first = http.get(url)
+        assert first.text == "the filing body"
+        assert mock_get.call_count == 1 and mock_throttle.call_count == 1
+
+        second = http.get(url)  # must be served from disk, no network, no throttle
+        assert second.text == "the filing body", f"cache hit must return identical content, got {second.text!r}"
+        assert mock_get.call_count == 1, "a cache hit must not issue a second HTTP request"
+        assert mock_throttle.call_count == 1, "a cache hit must skip _throttle() entirely -- that's the actual speedup"
+    print("OK: an Archives URL is cached on disk; a second get() skips both the request and the throttle")
+
+
+def test_non_archive_url_never_cached():
+    # data.sec.gov/api/xbrl/companyfacts is mutable (restatements land there) and
+    # must never be served stale -- confirm a non-/Archives/ URL always re-fetches.
+    with tempfile.TemporaryDirectory() as tmp, \
+         mock.patch.object(http, "ARCHIVE_CACHE_DIR", Path(tmp)), \
+         mock.patch.object(http, "_throttle"), \
+         mock.patch("requests.get", side_effect=[_resp(200, "v1"), _resp(200, "v2")]) as mock_get:
+        url = "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json"
+        first = http.get(url)
+        second = http.get(url)
+        assert first.text == "v1" and second.text == "v2", \
+            "a non-Archives URL must re-fetch every call, never serve a cached value"
+        assert mock_get.call_count == 2
+    print("OK: a non-Archives URL (e.g. companyfacts) is never cached, always re-fetched live")
+
+
+def test_404_on_archive_url_is_not_cached():
+    # A 404 could be a genuine permanent miss OR the exhausted-retries branch of a
+    # transient network error -- caching it would risk permanently mislabeling a
+    # temporary SEC-side hiccup as "this document doesn't exist."
+    with tempfile.TemporaryDirectory() as tmp, \
+         mock.patch.object(http, "ARCHIVE_CACHE_DIR", Path(tmp)), \
+         mock.patch.object(http, "_throttle"), \
+         mock.patch("requests.get", side_effect=[_resp(404), _resp(200, "found on retry")]) as mock_get:
+        url = "https://www.sec.gov/Archives/edgar/data/9999/missing.txt"
+        first = http.get(url)
+        assert first is None
+        second = http.get(url)
+        assert second is not None and second.text == "found on retry", \
+            "a 404 must not be cached -- the next call must hit the network again"
+        assert mock_get.call_count == 2
+    print("OK: a 404 on an Archives URL is not cached, so a later real fetch isn't blocked by it")
+
+
 if __name__ == "__main__":
     test_transient_5xx_is_retried_not_raised()
     test_persistent_5xx_gives_up_after_retries()
     test_404_returns_none_without_retry()
     test_retry_backs_off_before_each_attempt()
+    test_archive_url_cached_on_disk_second_call_skips_network_and_throttle()
+    test_non_archive_url_never_cached()
+    test_404_on_archive_url_is_not_cached()

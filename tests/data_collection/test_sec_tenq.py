@@ -252,6 +252,26 @@ def test_build_cik_history_as_first_reported_dedup():
     print("OK: build_cik_history keeps the earliest filing per quarter (as-first-reported)")
 
 
+def test_build_cik_history_attaches_shares_outstanding_from_cover_page():
+    # Same resp.text this loop already fetches for unit-multiplier detection
+    # also carries the filing's cover page -- build_cik_history must parse it
+    # out and attach it to this filing's own current-quarter row.
+    filings = pd.DataFrame({
+        "cik": [320193],
+        "form_type": ["10-Q"],
+        "date_filed": pd.to_datetime(["2004-02-10"]),
+        "filename": ["a04-1622_110q.htm"],
+    })
+    fake_resp = mock.Mock(text="(In Millions)\n45,678,901 shares of Common Stock Issued and "
+                                "Outstanding as of\n          January 30, 2004.")
+    with mock.patch.object(tenq.http, "get", return_value=fake_resp), \
+         mock.patch.object(tenq.pd, "read_html", return_value=[_real_income_table()]):
+        df = tenq.build_cik_history(320193, filings)
+    assert df.iloc[0]["shares_outstanding"] == 45_678_901.0
+    assert df.iloc[0]["shares_outstanding_asof"] == pd.Timestamp("2004-01-30")
+    print("OK: build_cik_history attaches a cover-page shares_outstanding onto its own quarter row")
+
+
 if __name__ == "__main__":
     test_parse_period_header_detects_blocks_with_colspan_duplication()
     test_extract_statement_reconciles_real_aapl_figures()
@@ -263,3 +283,4 @@ if __name__ == "__main__":
     test_build_cik_history_end_to_end()
     test_build_cik_history_skips_a_filing_whose_html_crashes_pd_read_html()
     test_build_cik_history_as_first_reported_dedup()
+    test_build_cik_history_attaches_shares_outstanding_from_cover_page()

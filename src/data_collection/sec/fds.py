@@ -42,7 +42,7 @@ import re
 import numpy as np
 import pandas as pd
 
-from . import companyfacts, http
+from . import companyfacts, cover_page, http
 from ..yf_collectors import compute_ratios
 
 log = logging.getLogger("sec")
@@ -445,6 +445,14 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         text = fetch_filing_text(row.filename)
         if text is None:
             continue
+        # One cover-page parse per filing, attached to every exhibit this
+        # filing bundles (see parse_fds's docstring on multi-exhibit filings)
+        # -- a known approximation for an older bundled comparative exhibit,
+        # whose OWN filing (if separately collected) reported a different
+        # share count for its own point in time; as-first-reported dedup
+        # below usually lets that earlier filing's own value win anyway.
+        shares_outstanding, shares_outstanding_asof = cover_page.extract_shares_outstanding(
+            text, row.date_filed)
         for result in extract_and_compute(text):
             # "total_assets" is only present when extract_line_items actually
             # populated the exhibit (article==5 AND an accepted PERIOD-TYPE) --
@@ -453,7 +461,9 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
             if "total_assets" not in result:
                 continue
             rows.append({**result, "cik": cik, "fundamentals_available_date": row.date_filed,
-                         "fds_form": row.form_type, "fds_filename": row.filename})
+                         "fds_form": row.form_type, "fds_filename": row.filename,
+                         "shares_outstanding": shares_outstanding,
+                         "shares_outstanding_asof": shares_outstanding_asof})
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)

@@ -667,6 +667,37 @@ def test_build_cik_history_drops_implausible_fiscal_year():
     print("OK: build_cik_history drops implausible fiscal_year rows before they can reach fundamentals.py's cascade")
 
 
+def test_build_cik_history_attaches_shares_outstanding_only_to_current_year():
+    # Item 6 tables span up to 5 fiscal years at once, but the cover page's
+    # "as of" date only genuinely describes the CURRENT (most recent) one --
+    # attaching it to every year in the table would misattribute a recent
+    # share count to years up to 4 back (see build_cik_history's own comment).
+    filings = pd.DataFrame({
+        "cik": [1],
+        "form_type": ["10-K"],
+        "date_filed": pd.to_datetime(["2003-03-15"]),
+        "filename": ["cover.txt"],
+    })
+    cover_text = ("Common Stock, $.01 par value (123,456,789 shares of Common "
+                  "Stock Issued and Outstanding as of March 1, 2003)")
+    fake_resp = mock.Mock(text=cover_text)
+    table = pd.DataFrame({0: ["Net revenue"], 1: ["2002"], 2: ["100"]})
+    years = {"2002": {"net_revenue": 100.0}, "2001": {"net_revenue": 90.0}}
+
+    with mock.patch.object(sfd.http, "get", return_value=fake_resp), \
+         mock.patch.object(sfd.pd, "read_html", return_value=[table]), \
+         mock.patch.object(sfd, "find_selected_financial_data_table", return_value=table), \
+         mock.patch.object(sfd, "extract_years", return_value=years):
+        df = sfd.build_cik_history(1, filings)
+
+    row_2002 = df.set_index("fiscal_year").loc[2002]
+    row_2001 = df.set_index("fiscal_year").loc[2001]
+    assert row_2002["shares_outstanding"] == 123_456_789.0
+    assert pd.isna(row_2001["shares_outstanding"]), (
+        "an older year in the SAME table must not inherit the current year's cover-page share count")
+    print("OK: build_cik_history attaches the cover-page shares_outstanding only to the table's current year")
+
+
 if __name__ == "__main__":
     test_find_selected_financial_data_table_picks_best_scoring_candidate()
     test_extract_years_reconciles_real_intel_figures()
@@ -695,3 +726,4 @@ if __name__ == "__main__":
     test_detect_unit_multiplier_handles_of_dollars_phrasing_without_in()
     test_build_cik_history_scales_and_computes_ratios()
     test_build_cik_history_drops_implausible_fiscal_year()
+    test_build_cik_history_attaches_shares_outstanding_only_to_current_year()

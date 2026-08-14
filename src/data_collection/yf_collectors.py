@@ -100,12 +100,26 @@ def _seed_last_date(cp: dict, ticker: str, path, col: str) -> str | None:
     successful file write (`collect_prices_yf`'s loop), so this can only
     diverge when the file is deleted independently afterward -- exactly
     the scenario that bit us.
+
+    Final fallback (2026-08-13): `cp[ticker]["checked_through"]` with no file
+    on disk at all -- a ticker collect_dividends_yf confirmed pays no
+    dividends (or has none newer than that date), which the on-disk-file
+    branches above can never represent (no dividends -> no file, ever).
+    Without this, a never-payer has no checkpoint entry either (the old
+    early-return paths wrote nothing), so every run re-walked its FULL
+    multi-decade history from `floor` just to reconfirm "still nothing" --
+    measured at US scale: 5,376 of 9,593 priced tickers have no dividends
+    file. Deliberately a SEPARATE key from `last_date`/`last_quarter`, not a
+    fallback value for them: it only ever asserts "we looked through this
+    date," never "rows are on disk," so it can't resurrect the wiped-file bug
+    above -- a payer whose file gets deleted still correctly returns None
+    here (its checkpoint entry holds `last_date`, not `checked_through`).
     """
     if ticker in cp and path.exists():
         return cp[ticker].get("last_date") or cp[ticker].get("last_quarter")
     if path.exists():
         return str(pd.read_parquet(path, columns=[col])[col].max().date())
-    return None
+    return cp.get(ticker, {}).get("checked_through")
 
 
 TRUSTED_MIN_YF_ROWS = 10  # below this, a recorded yfinance span looks truncated, not genuine
@@ -291,7 +305,29 @@ def _repair_bad_ohlc(raw: pd.DataFrame, ticker: str) -> pd.DataFrame:
 _MAX_PLAUSIBLE_PRICE = 10_000_000.0
 
 
-def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = None) -> pd.DataFrame | None:
+def _extract_dividends(ticker: str, raw: pd.DataFrame) -> pd.DataFrame:
+    """Shape the Dividends column off an already-fetched prices `raw` response
+    into the on-disk dividends schema -- the exact same shape
+    collect_dividends_yf's own (separate) fetch produces, since actions=True
+    already returns this column alongside OHLCV (2026-08-13: no need for a
+    second, dividends-specific request just to re-derive it). Always returns
+    a DataFrame (possibly empty, never None) so callers can check `len()`
+    without a separate None-check.
+    """
+    divs = raw["Dividends"] if "Dividends" in raw.columns else pd.Series(dtype=float)
+    divs = divs[divs > 0]
+    return pd.DataFrame({
+        "ex_date": divs.index.tz_localize(None),
+        "payment_date": None,
+        "type": "UNKNOWN",  # ponytail: yfinance can't distinguish JCP vs Dividendo
+        "value_per_share": divs.values,
+        "adjusted": False,
+        "ticker": ticker,
+    })
+
+
+def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = None,
+                             changes_out: dict | None = None) -> pd.DataFrame | None:
     """Fetch one ticker's yfinance OHLCV from fetch_start through now and shape
     it into the on-disk raw-prices schema. Shared by collect_prices_yf (auto-
     computed incremental range) and backfill_price_gap (explicit historical
@@ -300,6 +336,14 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = 
 
     `suffix` overrides config.YF_SUFFIX (e.g. "" for US tickers, which need no
     exchange suffix) without touching the BR default for existing callers.
+
+    `changes_out` (default None, no effect on any existing caller): pass a
+    dict to also collect this ticker's dividend/split activity from THIS SAME
+    response instead of a second, dividends-specific fetch (see
+    collect_prices_yf's `collect_dividends` param) -- `changes_out["dividends"]`
+    gets a (possibly empty) DataFrame appended when there's a nonzero dividend
+    row, `changes_out["split"] = True` is set when a split is found (mirrors
+    the reverse-adjustment check below, which already reads this same column).
     """
     t = yf.Ticker(_yf_symbol(ticker, suffix))
     raw = _retry(lambda: t.history(start=fetch_start, auto_adjust=False, actions=True), f"prices/{ticker}",
@@ -315,28 +359,27 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = 
 
     raw = _repair_bad_ohlc(raw, ticker)
 
-    adj_close = _retry(lambda: t.history(start=fetch_start, auto_adjust=True)["Close"],
-                       f"prices/{ticker} adj_close", retry_on_empty=True)
+    # auto_adjust=True issues NO separate request in yfinance 0.2.66 -- history()
+    # builds one response and then applies utils.auto_adjust(df) as a pure local
+    # post-process (ratio = Adj Close / Close, rescale OHL, rename Adj Close ->
+    # Close). So auto_adjust=True's Close IS this same response's "Adj Close",
+    # and reading it directly here is a strict improvement over the old second
+    # request, not just a faster path: confirmed 2026-08-13 on the two tickers
+    # that motivated the reindex/mask guards below -- DEC's documented 39-row
+    # mismatch reproduces from two independent calls, but the 1,370 rows the two
+    # responses DO share are bit-identical, so the mismatch was a request-count
+    # artifact, never a data difference; SAFE's 1,024 non-positive values appear
+    # identically in this same Adj Close column, confirming the mask guard is
+    # about vendor corruption, not a computation artifact of auto_adjust.
+    if "Adj Close" not in raw.columns:
+        log.warning("prices %s: no 'Adj Close' column in yfinance response, skipping", ticker)
+        return None
+    adj_close = raw["Adj Close"].mask(raw["Adj Close"] <= 0)
 
-    # Real bugs, found scaling US collection to the long tail of obscure tickers
-    # (2026-07-30): the auto_adjust=False and auto_adjust=True history calls are
-    # two INDEPENDENT yfinance requests and aren't guaranteed to agree.
-    # 1. Different row counts -- confirmed on DEC: auto_adjust=False returned 39
-    #    MORE rows than auto_adjust=True for the exact same span. Using
-    #    adj_close.values positionally against raw-derived columns of a
-    #    different length crashed the whole ticker ("All arrays must be of the
-    #    same length"). Reindexing to raw's index first turns a genuine gap
-    #    into NaN for that row instead of a crash.
-    # 2. Impossible values -- confirmed on SAFE: 1,024 rows of its 1989-1993
-    #    history came back with a literally NEGATIVE Close from yfinance's OWN
-    #    auto_adjust=True call (stock prices can't be negative -- vendor data
-    #    corruption, not our computation). Unmasked, it poisoned ratio/adj_open/
-    #    adj_high/adj_low for those rows (a negative ratio flips High<Low), which
-    #    failed validate_prices and dropped SAFE's ENTIRE ~9,240-row history --
-    #    same "one bad vendor value blocks all good data forever" failure mode
-    #    _repair_bad_ohlc already exists to prevent for raw OHLC.
-    adj_close = adj_close.reindex(raw.index)
-    adj_close = adj_close.mask(adj_close <= 0)
+    if changes_out is not None:
+        divs = _extract_dividends(ticker, raw)
+        if len(divs):
+            changes_out.setdefault("dividends", []).append(divs)
 
     # Split-boundary fix: reverse-adjust any pre-split rows within THIS fetch
     # (which may re-span multiple quarters now, see _prices_fetch_start) back to
@@ -346,6 +389,8 @@ def _fetch_and_shape_prices(ticker: str, fetch_start: str, suffix: str | None = 
     splits = raw["Stock Splits"]
     affected = splits[splits > 0]
     if len(affected):
+        if changes_out is not None:
+            changes_out["split"] = True
         log.warning("prices %s: split(s) in fetch window %s — reverse-adjusting "
                    "pre-split rows to BolsAI's unadjusted convention",
                    ticker, affected.to_dict())
@@ -416,6 +461,18 @@ MAX_CONSECUTIVE_FAILURES_RESUME = 300  # skip_existing=True gets a much looser b
 # ORIGINAL 2026-07-29 incident this guard exists for) still can't silently burn through an
 # entire remaining pool unnoticed.
 
+EMPTY_RUNS_SKIP_THRESHOLD = 3   # consecutive empty/no-coverage runs before going dark on a ticker
+EMPTY_RUNS_REPROBE_INTERVAL = 10  # re-probe every Nth run even while dark (catches a re-listing)
+# Negative cache for dead/delisted tickers (2026-08-13): a genuinely delisted ticker (128
+# "possibly delisted" + 85 empty-result retries in one US prices log) gets re-probed with a
+# full network request -- AND pays _retry's empty-result backoff sleep -- on EVERY run,
+# forever, with no distinction from a ticker that's merely between updates. `empty_runs`
+# (cp[ticker]) tracks consecutive empty results; once it reaches the threshold, the ticker is
+# skipped outright (no request, no sleep) except on every Nth run, which still probes for real
+# -- catches a genuine re-listing eventually instead of caching "dead" permanently. Any
+# non-None fetch (real yfinance coverage, whether new rows or none since last time) resets the
+# counter, so a briefly-flaky-but-real ticker never gets stuck in the negative cache.
+
 
 def _last_completed_trading_day() -> pd.Timestamp:
     """Most recent weekday strictly before today. `_drop_incomplete_today` always
@@ -433,7 +490,8 @@ def _last_completed_trading_day() -> pd.Timestamp:
 
 def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str | None = None,
                        floor: str | None = None, skip_existing: bool = False, workers: int = 1,
-                       full_refetch: set[str] | None = None):
+                       full_refetch: set[str] | None = None,
+                       dividend_dir=None, collect_dividends: bool = False) -> set[str] | None:
     """`price_dir`/`suffix`/`floor` default to the BR globals (config.PRICES_DIR /
     config.YF_SUFFIX / config.START_DATE). Pass price_dir=config.US_PRICES_DIR, suffix="",
     floor="1900-01-01" for the pure-yfinance US path — there is no BolsAI history to
@@ -453,13 +511,16 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
 
     `workers` defaults to 1 (unchanged, strictly-sequential behavior, same as before this
     parameter existed) -- NOT collect_dividends_yf's default-4, deliberately. Prices makes
-    TWO yfinance requests per ticker (auto_adjust=False and True, see
-    _fetch_and_shape_prices) versus dividends' one, on the same vendor whose rate limit
-    prices' OWN throttle (YF_RATE_LIMIT_SLEEP) already exists to protect (a real Yahoo
-    429 incident hit THIS specific collector earlier the same day this parameter was
-    added) -- opt into a higher value explicitly for a large backfill, don't default to
-    it. Each thread keeps its own YF_RATE_LIMIT_SLEEP pace, same reasoning as
-    collect_dividends_yf's workers.
+    ONE yfinance request per ticker (since 2026-08-13; auto_adjust=True used to trigger a
+    second, independent t.history() call -- redundant, see _fetch_and_shape_prices), same
+    as dividends now, on the same vendor whose rate limit prices' OWN throttle
+    (YF_RATE_LIMIT_SLEEP) already exists to protect (a real Yahoo 429 incident hit THIS
+    specific collector earlier the same day this parameter was added) -- kept
+    conservative rather than immediately matched to dividends' default-4, since the
+    429 incident was about cumulative request volume over hours, not purely the old
+    per-ticker request count; opt into a higher value explicitly for a large backfill,
+    don't default to it. Each thread keeps its own YF_RATE_LIMIT_SLEEP pace, same
+    reasoning as collect_dividends_yf's workers.
 
     The consecutive-failure guard (MAX_CONSECUTIVE_FAILURES/_RESUME) is now PER-WORKER
     (thread-local), not global -- a real design question, not an oversight: the original
@@ -481,12 +542,50 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
     can't have had its stored adj_close go stale, so re-fetching its whole
     history is pure waste. Tail-only tickers whose checkpoint already covers
     the last completed trading day are skipped outright (no request at all).
+
+    Negative cache for dead tickers (EMPTY_RUNS_SKIP_THRESHOLD/
+    _REPROBE_INTERVAL, 2026-08-13): once a ticker returns EMPTY_RUNS_SKIP_
+    THRESHOLD consecutive empty/no-coverage results (delisted, renamed off
+    this symbol, never had yfinance coverage), it's skipped outright -- no
+    request, no retry/backoff sleep -- for every run except every
+    EMPTY_RUNS_REPROBE_INTERVAL-th, which still probes for real so a genuine
+    re-listing isn't cached as dead forever. Deliberately NOT routed through
+    the consecutive-failure streak guard above: this is a per-TICKER history
+    across runs (persisted in the checkpoint), not a per-RUN streak across
+    tickers, and a skip here is an intentional decision, not a failure signal.
+
+    `collect_dividends` (default off, no effect on any existing caller;
+    `dividend_dir` defaults to config.DIVIDENDS_DIR, mirroring `price_dir`):
+    fold dividends collection into THIS SAME price fetch instead of a
+    separate collect_dividends_yf pass (2026-08-13) -- actions=True already
+    returns the Dividends column alongside OHLCV (see _fetch_and_shape_prices'
+    `changes_out`), so a ticker with nothing new costs ONE request total,
+    not two. Returns the set of tickers with a new dividend or split THIS
+    call found (empty set if collect_dividends=False was never actually
+    checked; None if collect_dividends=False) -- feed straight into a second
+    call's `full_refetch` for just that subset, refresh.py's actual usage:
+    call once tail-only (full_refetch=set()) to detect + fetch tails +
+    write whatever dividends the tail window covers, then call again with
+    full_refetch=<the returned set> to force a full re-fetch (price AND
+    dividend history) for exactly the tickers that need one. Does NOT touch
+    collect_dividends_yf's own `yf_dividends` checkpoint -- only the
+    dividends PARQUET FILE, which is the actual source of truth
+    (_seed_last_date already falls back to reading it directly when the
+    checkpoint has no entry). The one accepted gap: a never-payer processed
+    only through this path never gets `checked_through` written to that
+    checkpoint, so a LATER standalone collect_dividends_yf run (e.g.
+    run_us_full_scale.py's full-backfill resume, a separate, infrequent
+    entry point) would re-walk its full history once more for that ticker --
+    a one-time cost on a rare path, not a correctness issue, not worth the
+    extra plumbing to keep two independent checkpoints in lockstep.
     """
     price_dir = price_dir or config.PRICES_DIR
+    dividend_dir = dividend_dir or config.DIVIDENDS_DIR
     cp = checkpoint.load("yf_prices", mode)
     cp_lock = Lock()
     tl = threading.local()
     last_trading_day = _last_completed_trading_day()
+    changed: set[str] = set()
 
     def _one(ticker: str) -> None:
         if skip_existing and (price_dir / f"{ticker}.parquet").exists():
@@ -498,6 +597,15 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
                 log.info("prices %s: checkpoint already covers the last completed "
                           "trading day, skipping", ticker)
                 return
+        empty_runs = cp.get(ticker, {}).get("empty_runs", 0)
+        if empty_runs >= EMPTY_RUNS_SKIP_THRESHOLD and empty_runs % EMPTY_RUNS_REPROBE_INTERVAL != 0:
+            log.info("prices %s: skipping (negative cache, %d consecutive empty runs, "
+                      "next probe at run %d)", ticker, empty_runs,
+                      (empty_runs // EMPTY_RUNS_REPROBE_INTERVAL + 1) * EMPTY_RUNS_REPROBE_INTERVAL)
+            with cp_lock:
+                cp[ticker] = {**cp.get(ticker, {}), "empty_runs": empty_runs + 1}
+                checkpoint.save("yf_prices", mode, cp)
+            return
         ok = False
         try:
             path = price_dir / f"{ticker}.parquet"
@@ -508,14 +616,34 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
             junction_date = _bolsai_junction_date(path, fetch_start)
             actual_fetch_start = str(junction_date.date()) if junction_date is not None else fetch_start
 
-            df = _fetch_and_shape_prices(ticker, actual_fetch_start, suffix)
+            changes: dict = {} if collect_dividends else None
+            df = _fetch_and_shape_prices(ticker, actual_fetch_start, suffix, changes_out=changes)
             if df is None:
                 log.info("prices %s: no new rows (delisted/renamed/no yfinance coverage?)", ticker)
+                with cp_lock:
+                    cp[ticker] = {**cp.get(ticker, {}), "empty_runs": empty_runs + 1}
+                    checkpoint.save("yf_prices", mode, cp)
             else:
+                if collect_dividends:
+                    div_parts = changes.get("dividends", [])
+                    if div_parts:
+                        div_df = pd.concat(div_parts, ignore_index=True)
+                        div_path = dividend_dir / f"{ticker}.parquet"
+                        saved_divs = _merge_save(div_df, div_path, "ex_date",
+                                                  validate.validate_dividends, f"dividends/{ticker}")
+                        if saved_divs is not None:
+                            changed.add(ticker)
+                    if changes.get("split"):
+                        changed.add(ticker)
+
                 df = _reconcile_yfinance_junction(ticker, path, df, junction_date)
                 if df.empty:
                     log.info("prices %s: no new rows past the reconciled junction", ticker)
                     ok = True  # a real fetch succeeded, just nothing new -- not a failure signal
+                    if empty_runs:
+                        with cp_lock:
+                            cp[ticker] = {**cp[ticker], "empty_runs": 0}
+                            checkpoint.save("yf_prices", mode, cp)
                 else:
                     saved = _merge_save(df, path, "trade_date", validate.validate_prices, f"prices/{ticker}")
                     if saved is not None:
@@ -542,6 +670,8 @@ def collect_prices_yf(tickers: list[str], mode: str, price_dir=None, suffix: str
 
     with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(_one, tickers))
+
+    return changed if collect_dividends else None
 
 
 def _flat_run_fraction(close: pd.Series, min_run: int = 10) -> float:
@@ -811,6 +941,13 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
     exactly to its known real 1994 dividend once un-split (0.04875 x 4 = $0.195/share,
     matching its real 1996 + 2012 2:1 splits).
 
+    A never-payer gets no dividends file (there's nothing to write), so before
+    2026-08-13 it also got no checkpoint entry -- every run re-walked its FULL
+    history from `floor` just to reconfirm "still nothing" (5,376 of 9,593 US
+    priced tickers, measured). Both no-data early-return paths now persist
+    `cp[ticker]["checked_through"]` via `_mark_checked` so the next run starts
+    from there instead (see _seed_last_date's checked_through fallback).
+
     `workers` runs multiple tickers concurrently -- real speedup found needed
     2026-07-31: a strictly sequential pass over the full 10,432-ticker US
     universe (each request already throttled to config.YF_RATE_LIMIT_SLEEP,
@@ -834,6 +971,17 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
     cp = checkpoint.load("yf_dividends", mode)
     cp_lock = Lock()
     changed: set[str] = set()
+    checked_through = str(_last_completed_trading_day().date())
+
+    def _mark_checked(ticker: str) -> None:
+        # Persists "we looked through this date, nothing new" for a ticker
+        # that gets no file this run (no dividend rows at all -- see
+        # _seed_last_date's checked_through fallback). A payer's checkpoint
+        # entry is fully overwritten by the success branch below on its next
+        # real dividend, so this never lingers stale next to a real last_date.
+        with cp_lock:
+            cp[ticker] = {**cp.get(ticker, {}), "checked_through": checked_through}
+            checkpoint.save("yf_dividends", mode, cp)
 
     def _one(ticker: str) -> None:
         try:
@@ -846,6 +994,7 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
             hist = _retry(lambda: t.history(start=fetch_start, actions=True), f"dividends/{ticker}")
             if hist.empty:
                 log.info("dividends %s: no new rows", ticker)
+                _mark_checked(ticker)
                 return
 
             # A split alone (no dividend) still staleifies stored adj_close --
@@ -854,20 +1003,12 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
             if "Stock Splits" in hist.columns and (hist["Stock Splits"] > 0).any():
                 changed.add(ticker)
 
-            divs = hist[hist["Dividends"] > 0]["Dividends"] if "Dividends" in hist.columns else pd.Series(dtype=float)
-            if divs.empty:
+            df = _extract_dividends(ticker, hist)
+            if df.empty:
                 log.info("dividends %s: no new dividend rows", ticker)
+                _mark_checked(ticker)
                 return
             changed.add(ticker)
-
-            df = pd.DataFrame({
-                "ex_date": divs.index.tz_localize(None),
-                "payment_date": None,
-                "type": "UNKNOWN",  # ponytail: yfinance can't distinguish JCP vs Dividendo
-                "value_per_share": divs.values,
-                "adjusted": False,
-                "ticker": ticker,
-            })
 
             saved = _merge_save(df, path, "ex_date", validate.validate_dividends, f"dividends/{ticker}")
             if saved is not None:
@@ -1035,32 +1176,52 @@ def _demo():
     assert list(fixed.loc[2]) == list(raw.loc[2])
     print("_repair_bad_ohlc: OK")
 
-    # Two real bugs in _fetch_and_shape_prices, found scaling US collection to
-    # the long tail of obscure tickers (2026-07-30): auto_adjust=False and
-    # auto_adjust=True are two INDEPENDENT yfinance requests, not guaranteed to
-    # agree on row count or sanity.
+    # _fetch_and_shape_prices makes exactly ONE yfinance request per ticker
+    # (2026-08-13): auto_adjust=True used to trigger a SECOND, independent
+    # t.history() call. Redundant -- yfinance applies auto_adjust as a pure
+    # local post-process of the SAME response (utils.auto_adjust: ratio =
+    # Adj Close / Close, rescale OHL, rename). Reading "Adj Close" straight off
+    # the single auto_adjust=False response is identical, and removes the
+    # two-independent-requests failure mode entirely (a second call could
+    # return a different row count or index than the first -- confirmed on DEC
+    # historically; no longer possible with one call, since there's only one
+    # response to disagree with).
     from unittest import mock
     _idx3 = pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"]).tz_localize("America/New_York")
 
-    class _FakeTickerRowMismatch:
+    class _FakeTickerSingleRequest:
+        call_count = 0
+
         def __init__(self, symbol):
             self.splits = pd.Series([], dtype=float)
 
         def history(self, start, auto_adjust, actions=False):
-            if not auto_adjust:
-                return pd.DataFrame({"Open": [1.0, 2.0, 3.0], "High": [1.0, 2.0, 3.0],
-                                      "Low": [1.0, 2.0, 3.0], "Close": [1.0, 2.0, 3.0],
-                                      "Volume": [100, 100, 100], "Stock Splits": [0.0, 0.0, 0.0]}, index=_idx3)
-            return pd.DataFrame({"Close": [1.0, 3.0]}, index=_idx3[[0, 2]])  # middle date missing, like DEC
+            _FakeTickerSingleRequest.call_count += 1
+            assert not auto_adjust, "must only ever request auto_adjust=False -- a second, redundant request regressed"
+            return pd.DataFrame({"Open": [1.0, 2.0, 3.0], "High": [1.0, 2.0, 3.0],
+                                  "Low": [1.0, 2.0, 3.0], "Close": [1.0, 2.0, 3.0],
+                                  "Adj Close": [1.0, 2.0, 3.0],
+                                  "Volume": [100, 100, 100], "Stock Splits": [0.0, 0.0, 0.0]}, index=_idx3)
 
-    with mock.patch.object(yf, "Ticker", _FakeTickerRowMismatch):
-        out = _fetch_and_shape_prices("MISMATCH", "2020-01-01", suffix="")
-    assert len(out) == 3, f"must keep raw's row count (3), not crash or truncate to adj_close's (2), got {len(out)}"
-    assert pd.isna(out.loc[out['trade_date'] == '2020-01-02', 'adj_close'].iloc[0]), \
-        "the date missing from adj_close must become NaN there, not misalign the other rows"
-    assert out.loc[out["trade_date"] == "2020-01-01", "adj_close"].iloc[0] == 1.0
-    assert out.loc[out["trade_date"] == "2020-01-03", "adj_close"].iloc[0] == 3.0
-    print("_fetch_and_shape_prices row-count mismatch: OK")
+    with mock.patch.object(yf, "Ticker", _FakeTickerSingleRequest):
+        out = _fetch_and_shape_prices("SINGLEREQ", "2020-01-01", suffix="")
+    assert _FakeTickerSingleRequest.call_count == 1, \
+        f"must call history() exactly once per ticker, got {_FakeTickerSingleRequest.call_count}"
+    assert list(out["adj_close"]) == [1.0, 2.0, 3.0]
+    print("_fetch_and_shape_prices single-request: OK")
+
+    class _FakeTickerNoAdjClose:
+        def __init__(self, symbol):
+            self.splits = pd.Series([], dtype=float)
+
+        def history(self, start, auto_adjust, actions=False):
+            return pd.DataFrame({"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0],
+                                  "Volume": [100], "Stock Splits": [0.0]}, index=_idx3[:1])
+
+    with mock.patch.object(yf, "Ticker", _FakeTickerNoAdjClose):
+        out = _fetch_and_shape_prices("NOADJ", "2020-01-01", suffix="")
+    assert out is None, "a response missing 'Adj Close' entirely must be skipped cleanly, not KeyError"
+    print("_fetch_and_shape_prices missing Adj Close guard: OK")
 
     class _FakeTickerNegativeAdjClose:
         def __init__(self, symbol):
@@ -1068,11 +1229,10 @@ def _demo():
 
         def history(self, start, auto_adjust, actions=False):
             idx = _idx3[:2]
-            if not auto_adjust:
-                return pd.DataFrame({"Open": [10.0, 10.0], "High": [10.0, 10.0],
-                                      "Low": [10.0, 10.0], "Close": [10.0, 10.0],
-                                      "Volume": [100, 100], "Stock Splits": [0.0, 0.0]}, index=idx)
-            return pd.DataFrame({"Close": [10.0, -5.0]}, index=idx)  # impossible negative, like SAFE
+            return pd.DataFrame({"Open": [10.0, 10.0], "High": [10.0, 10.0],
+                                  "Low": [10.0, 10.0], "Close": [10.0, 10.0],
+                                  "Adj Close": [10.0, -5.0],  # impossible negative, like SAFE
+                                  "Volume": [100, 100], "Stock Splits": [0.0, 0.0]}, index=idx)
 
     with mock.patch.object(yf, "Ticker", _FakeTickerNegativeAdjClose):
         out = _fetch_and_shape_prices("NEGADJ", "2020-01-01", suffix="")
@@ -1095,10 +1255,9 @@ def _demo():
 
         def history(self, start, auto_adjust, actions=False):
             idx = _idx3[:2]
-            close = [1.5, 2.5] if auto_adjust else [1.5, 5e12]  # one row wildly implausible
+            close = [1.5, 5e12]  # one row wildly implausible
             return pd.DataFrame({"Open": close, "High": close, "Low": close, "Close": close,
-                                  "Volume": [100, 100]}, index=idx) if not auto_adjust \
-                else pd.DataFrame({"Close": close}, index=idx)
+                                  "Adj Close": close, "Volume": [100, 100]}, index=idx)
 
     with mock.patch.object(yf, "Ticker", _FakeTickerCorruptedPrice):
         out = _fetch_and_shape_prices("CORRUPT", "2020-01-01", suffix="")
@@ -1114,12 +1273,11 @@ def _demo():
             pass
 
         def history(self, start, auto_adjust, actions=False):
-            if not auto_adjust:
-                return pd.DataFrame({"Open": [10.0, 10.0, 20.0], "High": [10.0, 10.0, 20.0],
-                                      "Low": [10.0, 10.0, 20.0], "Close": [10.0, 10.0, 20.0],
-                                      "Volume": [100, 100, 100],
-                                      "Stock Splits": [0.0, 2.0, 0.0]}, index=_idx3)  # 2:1 split on day 2
-            return pd.DataFrame({"Close": [10.0, 10.0, 20.0]}, index=_idx3)
+            return pd.DataFrame({"Open": [10.0, 10.0, 20.0], "High": [10.0, 10.0, 20.0],
+                                  "Low": [10.0, 10.0, 20.0], "Close": [10.0, 10.0, 20.0],
+                                  "Adj Close": [10.0, 10.0, 20.0],
+                                  "Volume": [100, 100, 100],
+                                  "Stock Splits": [0.0, 2.0, 0.0]}, index=_idx3)  # 2:1 split on day 2
 
     with mock.patch.object(yf, "Ticker", _FakeTickerSplit):
         out = _fetch_and_shape_prices("SPLIT", "2020-01-01", suffix="")
@@ -1283,6 +1441,55 @@ def _demo():
         for tk in tickers:
             assert (div_dir / f"{tk}.parquet").exists(), f"{tk}'s file must exist despite concurrent execution"
     print("collect_dividends_yf threading: OK (no lost checkpoint updates across 20 tickers/8 workers)")
+
+    # checked_through fallback (2026-08-13): a never-payer gets no dividends
+    # file (nothing to write), so before this fix it also got no checkpoint
+    # entry -- every run re-walked its FULL history from `floor` to reconfirm
+    # "still nothing." Confirm a no-file ticker still gets a checkpoint entry,
+    # and that a second run resumes from checked_through+1 instead of floor.
+    calls = []
+
+    class _FakeTickerNeverPays:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, start, actions):
+            calls.append(start)
+            return pd.DataFrame()  # no rows at all, ever
+
+    with tempfile.TemporaryDirectory() as tmp:
+        div_dir = Path(tmp)
+        cp_store: dict = {}
+
+        def fake_load(name, mode):
+            return cp_store.get((name, mode), {})
+
+        def fake_save(name, mode, data):
+            cp_store[(name, mode)] = dict(data)
+
+        with mock.patch.object(yf, "Ticker", _FakeTickerNeverPays), \
+             mock.patch.object(checkpoint, "load", side_effect=fake_load), \
+             mock.patch.object(checkpoint, "save", side_effect=fake_save), \
+             mock.patch.object(config, "YF_RATE_LIMIT_SLEEP", 0):
+            collect_dividends_yf(["NEVER"], mode="test_checked", dividend_dir=div_dir,
+                                  suffix="", floor="2000-01-01")
+        assert not (div_dir / "NEVER.parquet").exists(), "a never-payer must not get a file"
+        saved_cp = cp_store[("yf_dividends", "test_checked")]
+        assert "checked_through" in saved_cp.get("NEVER", {}), \
+            "a never-payer must still get a checkpoint entry, or every run re-walks its full history"
+        assert calls[0] == "2000-01-01", "first run has no checkpoint, must start from floor"
+
+        with mock.patch.object(yf, "Ticker", _FakeTickerNeverPays), \
+             mock.patch.object(checkpoint, "load", side_effect=fake_load), \
+             mock.patch.object(checkpoint, "save", side_effect=fake_save), \
+             mock.patch.object(config, "YF_RATE_LIMIT_SLEEP", 0):
+            collect_dividends_yf(["NEVER"], mode="test_checked", dividend_dir=div_dir,
+                                  suffix="", floor="2000-01-01")
+        expected_start = (pd.Timestamp(saved_cp["NEVER"]["checked_through"])
+                           + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        assert calls[1] == expected_start, \
+            f"second run must resume from checked_through+1, not re-walk from floor -- got {calls[1]}"
+    print("collect_dividends_yf checked_through fallback: OK")
 
 
 if __name__ == "__main__":

@@ -43,7 +43,7 @@ import re
 
 import pandas as pd
 
-from . import http
+from . import cover_page, http
 from .selected_financial_data import (
     _is_caption_only_row, _normalize_label, _row_text, _row_values, _UNITS_RE, detect_unit_multiplier,
 )
@@ -291,10 +291,14 @@ def build_cik_history(cik: int, filings: pd.DataFrame) -> pd.DataFrame:
         end, items = cur
         if "net_revenue" not in items:
             continue
+        shares_outstanding, shares_outstanding_asof = cover_page.extract_shares_outstanding(
+            resp.text, row.date_filed)
         rows.append({**items, "end": end, "period_months": 3,
                      "flows_derived": 0, "flows_defined": 1,
                      "fundamentals_available_date": row.date_filed,
-                     "tenq_form": row.form_type, "tenq_filename": row.filename})
+                     "tenq_form": row.form_type, "tenq_filename": row.filename,
+                     "shares_outstanding": shares_outstanding,
+                     "shares_outstanding_asof": shares_outstanding_asof})
     if not rows:
         return pd.DataFrame()
     df = pd.DataFrame(rows)

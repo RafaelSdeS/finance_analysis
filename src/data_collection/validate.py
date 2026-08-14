@@ -130,7 +130,7 @@ def validate_us_fundamentals(df: pd.DataFrame) -> ValidationResult:
     if "shares_outstanding_rejected_outlier" in df.columns and df["shares_outstanding_rejected_outlier"].any():
         n = int(df["shares_outstanding_rejected_outlier"].sum())
         r.warn(f"{n} row(s) had an implausible shares_outstanding value rejected "
-               f"(companyfacts._reject_sequential_outliers) -- now NaN, not a guessed value")
+               f"(companyfacts.reject_sequential_outliers) -- now NaN, not a guessed value")
     if "end" in df.columns and df["end"].duplicated().any():
         r.warn(f"{df['end'].duplicated().sum()} duplicate 'end' period(s)")
 

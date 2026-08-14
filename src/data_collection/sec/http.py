@@ -8,9 +8,11 @@ zips later) goes through this one function, mirroring cvm/http.py's role for
 CVM open-data.
 """
 
+import hashlib
 import logging
 import threading
 import time
+from pathlib import Path
 
 import requests
 
@@ -27,6 +29,34 @@ _last_request = 0.0
 _lock = threading.Lock()  # callers now run from a ThreadPoolExecutor (fundamentals.py) --
 # check-then-set on _last_request isn't atomic, so concurrent threads could both see
 # a stale gap and fire together, bursting past the 10 req/s cap this exists to enforce.
+
+# On-disk cache for immutable Archive documents (2026-08-13): a full fundamentals
+# rebuild is routine (every derivation fix must reach already-collected companies
+# too, per the module-level bug log elsewhere in sec/) and re-downloads identical,
+# never-changing documents every time -- a 1997 EX-27 exhibit cannot change. Scoped
+# to /Archives/ ONLY: a filed document is permanently immutable, unlike
+# data.sec.gov/api/xbrl/companyfacts (restatements land there), which must stay
+# live and is never cached. No expiry needed -- this isn't a size/staleness
+# tradeoff, Archives content genuinely never changes once filed.
+ARCHIVE_CACHE_DIR = config.US_SEC_DIR / "archive_cache"
+
+
+def _is_archive_url(url: str) -> bool:
+    return url.startswith("https://www.sec.gov/Archives/")
+
+
+def _cache_path(url: str) -> Path:
+    return ARCHIVE_CACHE_DIR / f"{hashlib.sha256(url.encode()).hexdigest()}.txt"
+
+
+class _CachedResponse:
+    """Minimal requests.Response stand-in for a cache hit -- every sec/ caller
+    only ever reads .text (confirmed: no caller touches .json()/.content/
+    .status_code outside this module), so that's all a cache hit needs to supply."""
+    __slots__ = ("text",)
+
+    def __init__(self, text: str):
+        self.text = text
 
 
 def _throttle():
@@ -51,7 +81,22 @@ def get(url: str) -> requests.Response | None:
     inside the try block so a bad status code gets the same retry-with-
     backoff treatment as a connection failure (HTTPError is itself a
     RequestException subclass).
+
+    Archive URLs are cached on-disk on a successful (200) response, keyed by a
+    hash of the URL -- see ARCHIVE_CACHE_DIR above. Deliberately NOT caching a
+    404: unlike a genuine "this document doesn't exist" being permanent, this
+    function's None return is also reachable after exhausting retries on a
+    transient network error, and conflating the two would risk caching a
+    temporary SEC-side hiccup as a permanent miss. A cache hit skips
+    _throttle() entirely -- that's the actual speedup, not just skipping the
+    download.
     """
+    cacheable = _is_archive_url(url)
+    if cacheable:
+        cache_path = _cache_path(url)
+        if cache_path.exists():
+            return _CachedResponse(cache_path.read_text(encoding="utf-8"))
+
     for attempt in range(RETRIES + 1):
         _throttle()
         try:
@@ -59,6 +104,9 @@ def get(url: str) -> requests.Response | None:
             if resp.status_code == 404:
                 return None
             resp.raise_for_status()
+            if cacheable:
+                cache_path.parent.mkdir(parents=True, exist_ok=True)
+                cache_path.write_text(resp.text, encoding="utf-8")
             return resp
         except requests.RequestException as e:
             if attempt == RETRIES:

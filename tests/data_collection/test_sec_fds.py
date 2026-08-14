@@ -571,6 +571,28 @@ def test_build_cik_history_produces_discrete_quarters_end_to_end():
     print("OK: build_cik_history end-to-end produces discrete quarters with ratios recomputed on them")
 
 
+def test_build_cik_history_attaches_shares_outstanding_from_cover_page():
+    # The full submission text fetch_filing_text returns already carries the
+    # filing's cover page ahead of the EX-27 exhibit (real EDGAR layout, see
+    # cover_page.py) -- build_cik_history must parse it out and attach it to
+    # this filing's own exhibit row(s), no separate fetch needed.
+    text = ("119,891,418 shares of Common Stock Issued and Outstanding as of\n"
+            "          March 1, 1997.\n"
+            "<TYPE>EX-27\n<ARTICLE>5\n<PERIOD-TYPE>YEAR\n"
+            "<FISCAL-YEAR-END>DEC-31-1996\n<TOTAL-ASSETS>100\n<NET-INCOME>10\n")
+    filings = pd.DataFrame({
+        "cik": [1], "form_type": ["10-K"],
+        "date_filed": pd.to_datetime(["1997-03-05"]),
+        "filename": ["cover.txt"],
+    })
+    with mock.patch.object(fds, "fetch_filing_text", lambda fn: text):
+        result = fds.build_cik_history(1, filings)
+    assert len(result) == 1
+    assert result.iloc[0]["shares_outstanding"] == 119_891_418.0
+    assert result.iloc[0]["shares_outstanding_asof"] == pd.Timestamp("1997-03-01")
+    print("OK: build_cik_history attaches a cover-page shares_outstanding onto its own exhibit row")
+
+
 if __name__ == "__main__":
     test_parse_fds_extracts_tags()
     test_parse_fds_empty_when_absent()
@@ -595,3 +617,4 @@ if __name__ == "__main__":
     test_build_cik_history_drops_unparseable_period_end_instead_of_merging()
     test_measure_prevalence_handles_list_return_from_parse_fds()
     test_build_cik_history_produces_discrete_quarters_end_to_end()
+    test_build_cik_history_attaches_shares_outstanding_from_cover_page()

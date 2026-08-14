@@ -138,7 +138,7 @@ def _facts_to_frame(facts: dict, concept: str) -> pd.DataFrame:
     instead of ~2.46 billion) -- this alone doesn't prove a wrong-unit-key origin
     for those specific rows (root cause of the bad SEC-side value stays genuinely
     uncertain), but it closes a real, previously-unvalidated gap either way, and
-    is paired with _reject_sequential_outliers below as a second, independent
+    is paired with reject_sequential_outliers below as a second, independent
     layer of defense.
     """
     rows = []
@@ -415,7 +415,7 @@ def _resolve_item(facts: dict, concepts: list[str], annual: bool = False) -> pd.
 _MAX_PLAUSIBLE_RATIO = 20.0
 
 
-def _reject_sequential_outliers(df: pd.DataFrame, col: str) -> pd.DataFrame:
+def reject_sequential_outliers(df: pd.DataFrame, col: str) -> pd.DataFrame:
     """NaN out any `col` value that doesn't belong to the ticker's own dominant
     order of magnitude, walking outward (both directions) from a seed picked
     from the MAJORITY cluster -- never blindly the chronologically-first
@@ -633,10 +633,10 @@ def extract_line_items(facts: dict) -> pd.DataFrame:
     # grid rather than joined on exact/clustered end -- their own `end` is a
     # different kind of date entirely (see _ATTACHED_ITEMS), not a competing
     # fiscal quarter. Outlier-reject BEFORE the nearest-match attach, on the
-    # item's own true chronological sequence (see _reject_sequential_outliers).
+    # item's own true chronological sequence (see reject_sequential_outliers).
     for item, df in attached_items.items():
         df = df.sort_values("end")
-        df = _reject_sequential_outliers(df, item)
+        df = reject_sequential_outliers(df, item)
         out = pd.merge_asof(out.sort_values("end"), df, on="end",
                              direction="nearest", tolerance=pd.Timedelta(days=45))
 
