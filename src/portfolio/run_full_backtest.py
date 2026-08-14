@@ -23,7 +23,7 @@ import argparse
 
 import pandas as pd
 
-from src.build_dataset.paths import MACRO_DIR, OUTPUT_PATH, PRICES_DIR
+from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR
 from src.portfolio import alpha, contrarian, universe
 from src.portfolio.backtest import buy_and_hold_curve, cdi_curve, equal_weight_fn, run_backtest
 from src.portfolio.features import feature_columns
@@ -77,10 +77,12 @@ def main(top_n: int = 50, horizon_td: int = 252, rebalance_freq: str = "Q",
 
     prices = df[["ticker", "trade_date", "adj_close"]]
     price_wide = prices.pivot(index="trade_date", columns="ticker", values="adj_close")  # NOT ffilled -- see pipeline.py
-    cdi = pd.read_parquet(OUTPUT_PATH, columns=["trade_date", "cdi"]).drop_duplicates().sort_values("trade_date")
+    # cdi/selic are already loaded columns (feature_columns()'s MACRO group) -- no need
+    # to re-open OUTPUT_PATH or the raw macro parquet for columns already sitting in df.
+    cdi = df[["trade_date", "cdi"]].drop_duplicates().sort_values("trade_date")
     cdi_daily = cdi.set_index("trade_date")["cdi"]  # excess-over-CDI Sharpe (plan Phase 0.1)
-    selic = pd.read_parquet(MACRO_DIR / "selic.parquet").rename(columns={"reference_date": "trade_date"})
-    selic_daily = selic.set_index("trade_date")["selic"]
+    selic_daily = (df[["trade_date", "selic"]].drop_duplicates().sort_values("trade_date")
+                   .set_index("trade_date")["selic"])
 
     print("\nRunning equal-weight baseline...")
     eq_curve, eq_log = run_backtest(prices, cdi, membership, equal_weight_fn)

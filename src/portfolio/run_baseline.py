@@ -12,7 +12,7 @@ import argparse
 
 import pandas as pd
 
-from src.build_dataset.paths import MACRO_DIR, OUTPUT_PATH, PRICES_DIR
+from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR
 from src.portfolio import universe
 from src.portfolio.backtest import buy_and_hold_curve, cdi_curve, equal_weight_fn, run_backtest
 from src.portfolio.metrics import full_report, print_report
@@ -22,7 +22,8 @@ _NO_REBALANCE_LOG = pd.DataFrame({"turnover": [0.0]})
 
 def main(top_n: int = 50):
     print("Loading dataset...")
-    df = pd.read_parquet(OUTPUT_PATH, columns=["ticker", "trade_date", "adj_close", "traded_amount", "cdi"])
+    df = pd.read_parquet(OUTPUT_PATH,
+                          columns=["ticker", "trade_date", "adj_close", "traded_amount", "cdi", "selic"])
     cdi = df[["trade_date", "cdi"]].drop_duplicates().sort_values("trade_date")
     prices = df[["ticker", "trade_date", "adj_close"]]
 
@@ -42,8 +43,10 @@ def main(top_n: int = 50):
     cdi_in_range = cdi[cdi["trade_date"].isin(eq_curve.index)]
     cdi_only_curve = cdi_curve(cdi_in_range)
 
-    selic = pd.read_parquet(MACRO_DIR / "selic.parquet").rename(columns={"reference_date": "trade_date"})
-    selic_daily = selic.set_index("trade_date")["selic"]
+    # selic is already a loaded column (feature_columns()'s MACRO group, same
+    # source the merged dataset's macro join uses) -- no need for a second file.
+    selic_daily = (df[["trade_date", "selic"]].drop_duplicates().sort_values("trade_date")
+                   .set_index("trade_date")["selic"])
 
     for name, curve, log in (
         ("Equal-weight (liquid universe)", eq_curve, eq_log),

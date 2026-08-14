@@ -120,8 +120,13 @@ def equity_exposure(df: pd.DataFrame, reb_dates: pd.DatetimeIndex,
     mu = roll.mean()
     sd = roll.std()
     z = (erp - mu) / sd.replace(0.0, np.nan)
-    exposure = (base + k * z).clip(floor, ceil).fillna(base)
-    return exposure.to_dict()
+    capped = (base + k * z).clip(floor, ceil)
+    fallback_frac = capped.isna().mean()
+    if fallback_frac > 0:
+        print(f"  equity_exposure: {fallback_frac:.0%} of {len(capped)} rebalance dates had no "
+              f"{col!r} history yet and fell back to base={base:.0%} -- a high fraction here means "
+              "the overlay was mostly a flat cash weight, not an active signal, over that span")
+    return capped.fillna(base).to_dict()
 
 
 if __name__ == "__main__":

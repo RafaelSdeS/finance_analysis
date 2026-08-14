@@ -117,7 +117,9 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6,
     alpha_fn = make_alpha_weighted_fn(preds_by_date, top_frac=top_frac, hold_frac=hold_frac)
 
     prices = df[["ticker", "trade_date", "adj_close"]]
-    cdi = pd.read_parquet(OUTPUT_PATH, columns=["trade_date", "cdi"]).drop_duplicates().sort_values("trade_date")
+    # cdi is already a loaded column (feature_columns()'s MACRO group) -- no need to
+    # re-open OUTPUT_PATH for a column already sitting in df.
+    cdi = df[["trade_date", "cdi"]].drop_duplicates().sort_values("trade_date")
 
     print("Running alpha-sort and equal-weight baseline...")
     alpha_curve, alpha_log = run_backtest(prices, cdi, membership, alpha_fn)
