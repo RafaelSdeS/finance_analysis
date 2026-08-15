@@ -30,6 +30,15 @@ Usage (from project root):
     python -m src.data_collection.refresh --only macro prices
     python -m src.data_collection.refresh --full              # force full-span prices
     python -m src.data_collection.refresh --workers 12
+
+    # Long runs: keep the machine awake (even unplugged) so a laptop suspend
+    # doesn't freeze the run for hours mid-flight -- systemd-inhibit is native,
+    # no wrapper script needed. Deliberate tradeoff: this blocks suspend on
+    # battery too, trading the "auto-suspend saves a dying battery" safety net
+    # for the run actually finishing; safe because every collector here is
+    # checkpoint-resumable per ticker, so a hard power-off just stops the run,
+    # it doesn't corrupt anything.
+    systemd-inhibit --what=sleep:idle python -m src.data_collection.refresh
 """
 
 import argparse
@@ -64,7 +73,7 @@ def _us_tickers() -> list[str]:
     return sorted(p.stem for p in config.US_PRICES_DIR.glob("*.parquet"))
 
 
-def _refresh_us_fundamentals(all_priced: list[str], workers: int) -> None:
+def _refresh_us_fundamentals(all_priced: list[str]) -> None:
     """Only companies with a new 10-K/10-Q filing since the last refresh --
     sec/universe.build_filings() is already incrementally cached per quarter
     (a rerun only re-fetches the current in-progress quarter), so this is
@@ -72,6 +81,13 @@ def _refresh_us_fundamentals(all_priced: list[str], workers: int) -> None:
     sec.fundamentals.collect_fundamentals_us's default "rebuild every
     currently-priced ticker", which exists for the different case of a
     derivation fix that must reach already-collected companies too.
+
+    Deliberately does NOT forward this module's own `--workers` (tuned for
+    Yahoo's throttle, see DEFAULT_WORKERS) into collect_fundamentals_us --
+    SEC's real limit is enforced globally by sec/http.py's throttle lock
+    regardless of thread count, so collect_fundamentals_us's own workers=8
+    default (tuned for that lock) shouldn't be silently downgraded to a
+    value picked for a different vendor's different throttle.
     """
     cp = checkpoint.load("us_fundamentals_delta", "refresh")
     since = cp.get("last_run")
@@ -88,7 +104,7 @@ def _refresh_us_fundamentals(all_priced: list[str], workers: int) -> None:
         log.info("fundamentals us: no new filings since %s", since.date())
         return
     log.info("fundamentals us: %d ticker(s) with filings since %s", len(delta), since.date())
-    sec_fundamentals.collect_fundamentals_us(delta, workers=workers)
+    sec_fundamentals.collect_fundamentals_us(delta)
 
     checkpoint.save("us_fundamentals_delta", "refresh",
                      {"last_run": datetime.now(timezone.utc).isoformat()})
@@ -152,7 +168,7 @@ def _refresh_us(stages: set[str], full: bool, workers: int) -> None:
 
     if "fundamentals" in stages:
         log.info("--- US fundamentals (delta) ---")
-        _refresh_us_fundamentals(tickers, workers)
+        _refresh_us_fundamentals(tickers)
 
 
 def main():

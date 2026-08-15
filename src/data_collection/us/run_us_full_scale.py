@@ -69,8 +69,12 @@ def run_macro():
 
 
 def run_prices():
+    # workers=4: same value refresh.py/collect_dividends_yf already default to for this
+    # exact vendor/endpoint (empirically safe; 8 triggered a real Yahoo 429 storm) --
+    # this call used to omit it entirely, silently falling back to workers=1.
     collect_prices_yf(_all_tickers(), mode=MODE, price_dir=config.US_PRICES_DIR,
-                       suffix="", floor="1900-01-01", skip_existing=os.environ.get("RESUME") == "1")
+                       suffix="", floor="1900-01-01", skip_existing=os.environ.get("RESUME") == "1",
+                       workers=4)
 
 
 def run_dividends():
