@@ -1,12 +1,16 @@
 """
 test_client_fail_fast.py
 =========================
-config.MAX_RETRIES=1 is a deliberate "fail fast" calibration, but client.py's
-retry loops used to sleep+log "retry in Xs" before raising even when no
-further attempt was going to be made -- wasted latency on every transient
-BolsAI/BCB error, contradicting both the log message and the module's own
-"retries with exponential backoff" docstring. Verifies get_json now only
-sleeps when another attempt genuinely remains.
+client.py's retry loops used to sleep+log "retry in Xs" before raising even
+when no further attempt was going to be made -- wasted latency on every
+transient BolsAI/BCB error, contradicting both the log message and the
+module's own "retries with exponential backoff" docstring. Verifies get_json
+only sleeps when another attempt genuinely remains.
+
+Both cases patch config.MAX_RETRIES locally on purpose: this tests the retry
+LOOP's behaviour at any setting, independent of the shipped default (raised
+1 -> 3 on 2026-08-15, since at 1 the backoff branch was unreachable and a
+single transient BolsAI error permanently skip-listed a real ticker).
 
 Usage:
     python tests/data_collection/test_client_fail_fast.py

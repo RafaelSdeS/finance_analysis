@@ -23,7 +23,8 @@ import httpx
 import pandas as pd
 
 from .. import checkpoint, client, config, validate
-from ..storage import _chunk_dates, _merge_save
+from ..storage import _chunk_dates, _merge_save, is_complete
+from ..yf_collectors import FUND_FULL_COLS
 
 log = logging.getLogger(__name__)
 
@@ -151,17 +152,19 @@ def collect_prices(tickers: list[str], mode: str):
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
     cp = checkpoint.load("prices", mode)
     # tickers the API has no data for (persistent 500s/404s on dead names, or
-    # empty history): recorded once, skipped on every rerun without burning the
-    # retry/backoff budget again. Delete "_skip" from the checkpoint to force retry.
-    skip = set(cp.get("_skip", []))
+    # empty history): skipped on rerun without burning the retry/backoff budget
+    # again, but re-probed every checkpoint.SKIP_REPROBE_INTERVAL-th run so a
+    # transient outage can't blacklist a live ticker forever.
+    skip = checkpoint.load_skip(cp)
 
     def _mark_skip(ticker):
         checkpoint.mark_skip("prices", mode, cp, skip, ticker)
 
     try:
         for ticker in tickers:
-            if ticker in skip:
+            if checkpoint.should_skip(skip, ticker):
                 log.info("prices %s: in skip list (no data on previous run)", ticker)
+                _mark_skip(ticker)  # advance the counter toward the next re-probe
                 continue
             try:
                 # collect_prices is a one-time backfill (see test_skip_existing.py):
@@ -173,7 +176,7 @@ def collect_prices(tickers: list[str], mode: str):
                 # reverted by hand, see backfill_known_gaps.py), and trusting a
                 # stale last_date there would silently truncate the rebuilt history.
                 path = config.PRICES_DIR / f"{ticker}.parquet"
-                if path.exists():
+                if is_complete(path, validate.PRICE_COLS):
                     log.info("prices %s: already collected, skipping", ticker)
                     continue
                 end = datetime.now().strftime("%Y-%m-%d")
@@ -195,6 +198,7 @@ def collect_prices(tickers: list[str], mode: str):
                 if saved is not None:
                     cp[ticker] = {"last_date": str(saved["trade_date"].max().date()), "rows": len(saved)}
                     checkpoint.save("prices", mode, cp)
+                    checkpoint.clear_skip("prices", mode, cp, skip, ticker)
                     log.info("prices %s: %d total rows", ticker, len(saved))
             except Exception as e:
                 log.warning("prices %s: skipping after error: %s", ticker, e)
@@ -212,21 +216,26 @@ def collect_prices(tickers: list[str], mode: str):
 def collect_fundamentals(tickers: list[str], mode: str):
     c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
     cp = checkpoint.load("fundamentals", mode)
-    # same negative cache as collect_prices: BolsAI 404s fundamentals for
-    # delisted/BDR names — remember and skip on rerun (delete "_skip" to force retry)
-    skip = set(cp.get("_skip", []))
+    # same negative cache (and same periodic re-probe) as collect_prices: BolsAI
+    # 404s fundamentals for delisted/BDR names.
+    skip = checkpoint.load_skip(cp)
 
     def _mark_skip(ticker):
         checkpoint.mark_skip("fundamentals", mode, cp, skip, ticker)
 
     try:
         for ticker in tickers:
-            if ticker in skip:
+            if checkpoint.should_skip(skip, ticker):
                 log.info("fundamentals %s: in skip list (no data on previous run)", ticker)
+                _mark_skip(ticker)  # advance the counter toward the next re-probe
                 continue
             try:
                 path = config.FUND_DIR / f"{ticker}.parquet"
-                if path.exists():
+                # FUND_FULL_COLS (the full on-disk fundamentals schema), NOT
+                # validate.FUND_COLS -- the latter is deliberately a 9-column
+                # required SUBSET for validation, so gating on it would miss
+                # exactly the drift this check exists to catch (see is_complete).
+                if is_complete(path, FUND_FULL_COLS):
                     log.info("fundamentals %s: already collected, skipping", ticker)
                     continue
                 d = client.get_json(c, f"/fundamentals/{ticker}/history", {"limit": config.FUND_LIMIT})
@@ -244,6 +253,7 @@ def collect_fundamentals(tickers: list[str], mode: str):
                 if saved is not None:
                     cp[ticker] = {"last_quarter": str(saved["reference_date"].max().date()), "rows": len(saved)}
                     checkpoint.save("fundamentals", mode, cp)
+                    checkpoint.clear_skip("fundamentals", mode, cp, skip, ticker)
                     log.info("fundamentals %s: %d quarters", ticker, len(saved))
             except Exception as e:
                 log.warning("fundamentals %s: skipping after error: %s", ticker, e)
@@ -358,7 +368,7 @@ def collect_dividends(tickers: list[str], mode: str):
         for ticker in tickers:
             try:
                 path = config.DIVIDENDS_DIR / f"{ticker}.parquet"
-                if path.exists():
+                if is_complete(path, validate.DIVIDEND_COLS):
                     log.info("dividends %s: already collected, skipping", ticker)
                     continue
                 d = client.get_json(c, f"/dividends/{ticker}", {"years": config.DIVIDENDS_YEARS})

@@ -35,13 +35,56 @@ def save(name: str, mode: str, data: dict) -> None:
         p.write_text(json.dumps(data, indent=2, default=str))
 
 
-def mark_skip(name: str, mode: str, cp: dict, skip: set, ticker: str) -> None:
-    """Add `ticker` to the collector's negative cache (`cp["_skip"]`) and persist.
+# Re-probe a skip-listed ticker every Nth run instead of excluding it forever.
+# Mirrors yf_collectors.EMPTY_RUNS_REPROBE_INTERVAL (same value, same semantics) --
+# the yfinance path already had this safety net; BolsAI's `_skip` did not, and
+# cleared only by hand-editing the checkpoint JSON. With MAX_RETRIES previously
+# at 1 (i.e. no retries at all), a single transient BolsAI 503/timeout was enough
+# to blacklist a live ticker permanently and silently.
+SKIP_REPROBE_INTERVAL = 10
 
-    Shared by collectors that record tickers with no data (persistent 404s/
-    500s) so a rerun doesn't burn the retry/backoff budget on them again.
-    Mutates `skip` and `cp` in place, matching the closures this replaces.
+
+def load_skip(cp: dict) -> dict:
+    """Normalize `cp["_skip"]` to {ticker: consecutive_failure_count}.
+
+    Accepts the legacy plain-list format still on disk (e.g. full_scale/prices.json's
+    63 entries): count is unknown for those, so they're seeded due for an immediate
+    re-probe rather than trusted as permanently dead.
     """
-    skip.add(ticker)
-    cp["_skip"] = sorted(skip)
+    raw = cp.get("_skip", [])
+    if isinstance(raw, list):
+        return {t: SKIP_REPROBE_INTERVAL for t in raw}
+    return dict(raw)
+
+
+def should_skip(skip: dict, ticker: str) -> bool:
+    """True if `ticker` is skip-listed AND this isn't its scheduled re-probe run."""
+    n = skip.get(ticker, 0)
+    return n > 0 and n % SKIP_REPROBE_INTERVAL != 0
+
+
+def mark_skip(name: str, mode: str, cp: dict, skip: dict, ticker: str) -> None:
+    """Record one more unsuccessful outcome for `ticker` and persist.
+
+    Called both when a fetch actually fails AND when a ticker is skipped without
+    being attempted -- the counter has to advance on skipped runs too, or a
+    ticker sitting on a multiple of SKIP_REPROBE_INTERVAL would re-probe on
+    every single run instead of every Nth. Same design as yf_collectors'
+    `empty_runs`, which increments on its skip path for exactly this reason.
+    Mutates `skip` and `cp` in place.
+    """
+    skip[ticker] = skip.get(ticker, 0) + 1
+    cp["_skip"] = dict(sorted(skip.items()))
     save(name, mode, cp)
+
+
+def clear_skip(name: str, mode: str, cp: dict, skip: dict, ticker: str) -> None:
+    """Drop `ticker` from the negative cache after a successful collection.
+
+    Essential, not tidiness: a re-probe that SUCCEEDS must reset the count, or
+    the ticker keeps its stale non-zero count and gets skipped again on the very
+    next run despite now having real data on disk.
+    """
+    if skip.pop(ticker, None) is not None:
+        cp["_skip"] = dict(sorted(skip.items()))
+        save(name, mode, cp)
