@@ -28,6 +28,9 @@ quality_filters, merge, features, cross_sectional, clean, manifest); this
 file only orchestrates the call order and the memory-bounded feature pass.
 """
 
+import ctypes
+import gc
+
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -191,6 +194,24 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     # test's bare lambda) is a no-op here.
     if batch_fn is not None:
         getattr(batch_fn, "release", lambda: None)()
+
+    # Pass 1 ran ~21 batches of alloc/free churn (each batch's own merge +
+    # feature frames). CPython's refcounting frees those objects immediately,
+    # but glibc malloc doesn't hand freed heap arenas back to the OS just
+    # because nothing references them anymore -- the process's RSS reflects
+    # the high-water mark, not live data. gc.collect() clears any reference
+    # cycles pandas/numpy left behind (the real memory, if any leaked);
+    # malloc_trim(0) then asks glibc to actually return freed-but-retained
+    # arenas to the OS before Pass 2 builds its own resident full-universe
+    # frame. Cheap (sub-second) and a no-op on non-glibc platforms (guarded).
+    # Confirmed real: a full US-scale run OOM-killed inside Pass 2 twice on
+    # 2026-08-16 (journalctl: anon-rss ~8.5-9.2GB, this machine's 15GB minus
+    # ~4GB in other resident apps) right at this Pass 1->2 boundary.
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except OSError:
+        pass
 
     print()
     print("=" * 80)

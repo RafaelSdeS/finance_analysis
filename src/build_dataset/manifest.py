@@ -61,7 +61,8 @@ COLUMN_UNITS = {
 # BUILD MANIFEST
 # =============================================================================
 
-def write_manifest(dataset=None, dropped_no_fundamentals=None, output_path=None, parquet_path=None):
+def write_manifest(dataset=None, dropped_no_fundamentals=None, output_path=None, parquet_path=None,
+                    survivorship_coverage=None):
     """Reproducibility record + per-column distribution snapshot, one per build.
 
     Written next to the parquet as ml_dataset.manifest.json. Comparing two
@@ -83,6 +84,14 @@ def write_manifest(dataset=None, dropped_no_fundamentals=None, output_path=None,
     itself the OOM (~20GB, docs/US_DATASET_BUILD_PLAN.md §8.2). `dataset` may
     be omitted when this is given. Default None preserves the original
     in-memory path exactly -- BR's existing call is unaffected.
+
+    survivorship_coverage: optional per-year DataFrame from
+    sec.universe.compute_coverage() (roster_ciks/priced_ciks/coverage),
+    recorded as records so the US survivorship gap is a queryable manifest
+    field instead of a decision that only lives in a doc (closes the open
+    checkbox in docs/US_COLLECTOR_FIX_PLAN.md §4). BR has no equivalent
+    point-in-time roster to divide by -- None here (the default) is recorded
+    as "not tracked", same convention as dropped_no_fundamentals.
     """
     # `output_path=None` (not `output_path=OUTPUT_PATH`) deliberately -- a
     # bound default is captured at import time, so a test monkeypatching
@@ -159,6 +168,9 @@ def write_manifest(dataset=None, dropped_no_fundamentals=None, output_path=None,
         "empty_columns": sorted(c for c, s in column_stats.items() if s["nan_pct"] >= 100.0),
         "column_units": {c: u for c, u in COLUMN_UNITS.items() if c in columns},
         "dropped_no_fundamentals": dropped_no_fundamentals if dropped_no_fundamentals is not None else "not tracked",
+        "survivorship_coverage": (
+            survivorship_coverage.to_dict("records") if survivorship_coverage is not None else "not tracked"
+        ),
         "column_stats": column_stats,
     }
     path = output_path.with_suffix(".manifest.json")

@@ -22,6 +22,7 @@ from src.data_collection.config import (
     US_COMPANY_INFO_PATH,
 )
 from src.data_collection.cvm.crosswalk import CROSSWALK_PATH as CVM_CROSSWALK_PATH
+from src.data_collection.cvm.delistings import OUTPUT_PATH as DELIST_EVENTS_PATH
 from src.data_collection.cvm.filing_dates import OUTPUT_PATH as FILING_DATES_PATH
 
 # Re-exported names below are imported, not used in this file -- this module's
@@ -29,7 +30,7 @@ from src.data_collection.cvm.filing_dates import OUTPUT_PATH as FILING_DATES_PAT
 __all__ = [
     "PRICES_DIR", "FUNDAMENTALS_DIR", "COMPANY_INFO_PATH", "MACRO_DIR",
     "DIVIDENDS_DIR", "CORPORATE_EVENTS_PATH", "CVM_CROSSWALK_PATH",
-    "FILING_DATES_PATH", "CONTINUITY_PATH",
+    "FILING_DATES_PATH", "CONTINUITY_PATH", "DELIST_EVENTS_PATH", "TERMINAL_EVENTS_PATH",
     "US_PRICES_DIR", "US_FUNDAMENTALS_DIR", "US_DIVIDENDS_DIR", "US_MACRO_DIR",
     "US_COMPANY_INFO_PATH",
     "OUTPUT_PATH", "SPLIT_CONFIG_PATH", "SCALER_DIR",
@@ -49,6 +50,10 @@ SPLIT_CONFIG_PATH = ROOT / "data/processed/split_config.json"
 SCALER_DIR = ROOT / "data/processed/scalers"
 TOP50_UNIVERSE_PATH = ROOT / "data/processed/ml_dataset_top50_universe.parquet"
 TOP50_MEMBERSHIP_PATH = ROOT / "data/processed/top50_universe_membership.parquet"
+
+# Realized payoff for tickers that die inside the built panel (terminal_events.py),
+# a separate deliberate step after build_ml_dataset.py -- same shape as scale_features.py.
+TERMINAL_EVENTS_PATH = ROOT / "data/processed/terminal_events.parquet"
 
 # US equities (docs/US_DATASET_BUILD_PLAN.md) -- separate raw tree, separate output.
 US_OUTPUT_PATH = ROOT / "data/processed/us_ml_dataset.parquet"

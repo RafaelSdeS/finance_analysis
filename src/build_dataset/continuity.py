@@ -29,8 +29,11 @@ def apply_ticker_continuity(prices, fundamentals, path=CONTINUITY_PATH):
               (shareholder-return continuity via the exchange ratio); its
               fundamentals are dropped, so pre-boundary rows show
               has_fundamentals=0 downstream like any early-history gap.
-      tender: cash-out, nothing to splice (terminal-event payoff handling is
-              a separate planned task — see DELISTED_UNIVERSE.md).
+      tender: cash-out, nothing to splice (no tender events are currently in
+              the map -- terminal-event payoffs for tickers that die
+              standalone, tender included, are handled downstream by
+              terminal_events.py off CVM's own cancellation registry, not by
+              continuity splicing).
 
     Events apply in date order so chains (VVAR3->VIIA3->BHIA3) resolve. The
     splice boundary is the NEW ticker's actual first trade date (ground

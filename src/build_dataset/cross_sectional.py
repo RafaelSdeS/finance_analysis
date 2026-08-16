@@ -113,18 +113,21 @@ def compute_cross_sectional_features(df, benchmark):
     df["momentum_vs_market_3m"] = df["return_3m"] - df["_mkt_return_3m"]
     df["momentum_vs_market_12m"] = df["return_12m"] - df["_mkt_return_12m"]
 
-    # Sector momentum: subtract sector mean (per date, sector) from each return
+    # Sector momentum: subtract sector mean (per date, sector) from each
+    # return. Reuses sector_grp (built once above) instead of rebuilding
+    # groupby(["trade_date", "sector"]) 3 more times -- at full US scale
+    # (~16M rows) that was 4 total group-key factorizations over the whole
+    # universe instead of 1, real transient-memory/CPU waste that was part
+    # of what pushed a real run into an OOM kill (confirmed via journalctl,
+    # 2026-08-16).
     df["momentum_vs_sector_1m"] = (
-        df["return_1m"]
-        - df.groupby(["trade_date", "sector"])["return_1m"].transform("mean")
+        df["return_1m"] - sector_grp["return_1m"].transform("mean")
     ).where(sector_size > 1)
     df["momentum_vs_sector_3m"] = (
-        df["return_3m"]
-        - df.groupby(["trade_date", "sector"])["return_3m"].transform("mean")
+        df["return_3m"] - sector_grp["return_3m"].transform("mean")
     ).where(sector_size > 1)
     df["momentum_vs_sector_12m"] = (
-        df["return_12m"]
-        - df.groupby(["trade_date", "sector"])["return_12m"].transform("mean")
+        df["return_12m"] - sector_grp["return_12m"].transform("mean")
     ).where(sector_size > 1)
 
     # --- ROLLING BETA VS MARKET ---

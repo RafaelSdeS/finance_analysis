@@ -24,6 +24,10 @@ import re
 import numpy as np
 import pandas as pd
 
+from src.data_collection.sec.crosswalk import CROSSWALK_PATH as SEC_CROSSWALK_PATH
+from src.data_collection.sec.universe import ROSTER_PATH as SEC_ROSTER_PATH
+from src.data_collection.sec.universe import compute_coverage
+
 from .build_ml_dataset import compute_features_chunked
 from .cross_sectional import BENCHMARK_COLS
 from .features import compute_fundamental_features, compute_price_features, fill_missing_cagr
@@ -498,12 +502,31 @@ def main():
     print("WRITING US MANIFEST & SPLIT CONFIG")
     print("=" * 80)
 
+    # The measured-not-just-acknowledged survivorship number (expansion plan
+    # §4.2): per-year, how much of the roster of companies actually filing a
+    # 10-K/10-Q that year is priced in THIS build. Skips gracefully if the
+    # roster/crosswalk haven't been collected -- this is a measurement, not a
+    # dependency of the build itself.
+    survivorship_coverage = None
+    if SEC_ROSTER_PATH.exists() and SEC_CROSSWALK_PATH.exists():
+        roster = pd.read_parquet(SEC_ROSTER_PATH)
+        crosswalk = pd.read_parquet(SEC_CROSSWALK_PATH)
+        survivorship_coverage = compute_coverage(roster, crosswalk, price_dir=US_PRICES_DIR)
+        print(f"Survivorship coverage: {len(survivorship_coverage)} years measured "
+              f"(median {survivorship_coverage['coverage'].median():.1%} of each year's "
+              f"actively-reporting roster is priced in this build -- lower bound, see "
+              f"sec.universe.compute_coverage's docstring)")
+    else:
+        print("Survivorship roster/crosswalk not on disk -- skipping coverage measurement "
+              "(python -m src.data_collection.sec.universe / sec.crosswalk.build_crosswalk_tier1)")
+
     # Stream from disk column-by-column instead of a dense pd.read_parquet:
     # at US scale (15.4M rows x ~190 cols) that read-back alone is ~20GB,
     # comfortably over this machine's available RAM (docs/US_DATASET_BUILD_PLAN.md
     # §8.2). write_split_config only ever needs trade_date.
     manifest = write_manifest(
         dropped_no_fundamentals=dropped_no_fundamentals,
+        survivorship_coverage=survivorship_coverage,
         output_path=US_OUTPUT_PATH,
         parquet_path=US_OUTPUT_PATH,
     )
