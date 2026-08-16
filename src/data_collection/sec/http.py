@@ -8,6 +8,7 @@ zips later) goes through this one function, mirroring cvm/http.py's role for
 CVM open-data.
 """
 
+import gzip
 import hashlib
 import logging
 import threading
@@ -46,7 +47,7 @@ def _is_archive_url(url: str) -> bool:
 
 
 def _cache_path(url: str) -> Path:
-    return ARCHIVE_CACHE_DIR / f"{hashlib.sha256(url.encode()).hexdigest()}.txt"
+    return ARCHIVE_CACHE_DIR / f"{hashlib.sha256(url.encode()).hexdigest()}.txt.gz"
 
 
 class _CachedResponse:
@@ -95,7 +96,8 @@ def get(url: str) -> requests.Response | None:
     if cacheable:
         cache_path = _cache_path(url)
         if cache_path.exists():
-            return _CachedResponse(cache_path.read_text(encoding="utf-8"))
+            with gzip.open(cache_path, "rt", encoding="utf-8") as f:
+                return _CachedResponse(f.read())
 
     for attempt in range(RETRIES + 1):
         _throttle()
@@ -106,7 +108,8 @@ def get(url: str) -> requests.Response | None:
             resp.raise_for_status()
             if cacheable:
                 cache_path.parent.mkdir(parents=True, exist_ok=True)
-                cache_path.write_text(resp.text, encoding="utf-8")
+                with gzip.open(cache_path, "wt", encoding="utf-8") as f:
+                    f.write(resp.text)
             return resp
         except requests.RequestException as e:
             if attempt == RETRIES:
