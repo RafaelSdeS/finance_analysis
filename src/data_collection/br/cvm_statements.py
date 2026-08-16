@@ -22,6 +22,11 @@ its own module under cvm/:
   company_info  CANCELADA registry rows (sector, cvm_code — ticker-less on
                 BolsAI) joined to tickers via the crosswalk, appended to
                 company_info.parquet with status=CANCELADA
+  delistings    cad_cia_aberta.csv (CVM's own cancellation reason/date),
+                joined to tickers via the crosswalk -> delist_events.parquet,
+                consumed by build_dataset/terminal_events.py to give a
+                delisted ticker's forward-return label a realized payoff
+                instead of an unexplained NaN
 
 Usage (from project root):
     python -m src.data_collection.br.cvm_statements                  # all steps
@@ -35,6 +40,7 @@ import logging
 
 from ..cvm.company_info import synthesize_company_info
 from ..cvm.crosswalk import build_crosswalk
+from ..cvm.delistings import build_delist_events
 from ..cvm.filing_dates import collect_filing_dates
 from ..cvm.ratios import build_fundamentals
 from ..cvm.shares import collect_shares
@@ -47,7 +53,7 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
     p = argparse.ArgumentParser(description="CVM open-data collection steps")
     p.add_argument("--step", choices=["crosswalk", "filing_dates", "statements", "shares",
-                                      "fundamentals", "company_info", "all"],
+                                      "fundamentals", "company_info", "delistings", "all"],
                    default="all")
     p.add_argument("--tickers", nargs="+", help="restrict build_fundamentals")
     args = p.parse_args()
@@ -62,6 +68,8 @@ def main():
         "fundamentals": lambda: build_fundamentals(
             [t.upper() for t in args.tickers] if args.tickers else None),
         "company_info": synthesize_company_info,
+        # after crosswalk: joins cad_cia_aberta.csv to tickers via CROSSWALK_PATH
+        "delistings": build_delist_events,
     }
     order = list(steps) if args.step == "all" else [args.step]
     for name in order:

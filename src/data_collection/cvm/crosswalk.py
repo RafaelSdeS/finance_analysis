@@ -21,7 +21,23 @@ _FCA_COLS = ["ticker", "cnpj", "corporate_name", "end_trading", "year"]
 def build_crosswalk() -> pd.DataFrame:
     """ticker -> cnpj, cvm_code, corporate_name, end_trading. Latest FCA wins per ticker.
     Per-year FCA rows cached to data/raw/br/cvm/fca_{year}.parquet; only the current
-    year is re-downloaded on rerun (new filings arrive all year)."""
+    year is re-downloaded on rerun (new filings arrive all year).
+
+    Two real limits, both verified live against CVM's own zips (2026-08-15), not
+    just this repo's cache:
+      1. Codigo_Negociacao (the trading code itself) is 100% blank in every FCA
+         filing 2010-2017 -- populated only from 2018 on. A company that delisted
+         before 2018 can never get a ticker from this source, regardless of
+         START_YEAR (http.py) or how many years are re-scanned.
+      2. FCA reports the code AS OF FILING, survivor-style, same failure mode as
+         SEC's company_tickers.json (see sec/universe.py's docstring): a ticker
+         that was renamed or delisted stops appearing in ANY subsequent year's
+         file. Confirmed on KROT3 -> COGN3 (2019 rename): KROT3 appears in zero
+         FCA years 2018-2026, only COGN3 does. This crosswalk cannot recover a
+         renamed/delisted ticker no matter which years are scanned -- see
+         build_dataset/terminal_events.find_rename_candidates() for the
+         registry-status-based recovery path instead.
+    """
     config.CVM_DIR.mkdir(parents=True, exist_ok=True)
     current = date.today().year
     frames = []
