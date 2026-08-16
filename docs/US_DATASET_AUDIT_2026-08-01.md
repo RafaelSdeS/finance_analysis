@@ -237,3 +237,20 @@ us-gaap concepts rather than genuinely absent data.
 3. **#5 staleness policy** — one-line `tolerance` or an explicit documented decision.
 4. **#6 drop dead columns** — trivial.
 5. **#4 share-class policy** and **#3 parser corruption** — need a design decision first.
+
+---
+
+## Pre-flight — Stage 1 from-scratch recollection (added 2026-08-14)
+
+Checked before running a full `run_us_full_scale.py` recollection, to confirm nothing
+gets silently dropped. Items already fixed are checked off; genuinely open ones aren't.
+
+- [x] `macro` step present in `STEPS` (was missing until 2026-08-12 in some checkouts) — confirm your checkout has it: `src/data_collection/us/run_us_full_scale.py:90-92`.
+- [x] Default `python -m src.data_collection.us.run_us_full_scale` with no args runs all steps in dict order (`universe, macro, prices, dividends, fundamentals, company_info`) — `fundamentals` reads its ticker list from `US_PRICES_DIR` (`run_us_full_scale.py:82`), so **prices must run before fundamentals**. Don't pass an explicit step list that reorders this.
+- [x] Do **not** set `RESUME=1` for this run — it's documented (`run_us_full_scale.py:20-33`) as safe only for resuming a killed first-time backfill within hours, not a deliberate from-scratch recollect. Plain run = full rebuild of every ticker.
+- [ ] **Universe scope is capped at currently-listed tickers.** `crosswalk.build_crosswalk_tier1()` docstring: *"CIK→ticker for every currently-listed company (survivors only)"* (`src/data_collection/sec/crosswalk.py:58`) — resolves ~5,414 of 43,366 historical filer CIKs (12.5%). A from-scratch run will reproduce the same ~2,960-ticker survivor-only universe, not recover delisted/renamed/acquired companies. This is a deliberately accepted decision (commit `0a64c02`, plan §4.3), not a bug — but "recollect everything" won't mean "recover full history" without tiers 2–4, which don't exist yet.
+- [ ] **Per-ticker failures are logged, not surfaced.** `fundamentals.py:434-444` skips silently-but-logged on: no CIK in crosswalk (INFO), exception during build (WARNING, `"skipping after error"`), or empty result from both tiers (INFO, `"no data from either tier"`). After the run, grep the collection log for these three strings — that's the actual completeness audit; nothing else produces one.
+- [ ] `validate_us_vs_vendor.py` checks value-correctness for only 4 hardcoded tickers (`AAPL, XOM, KO, JNJ` — `tests/data_collection/validate_us_vs_vendor.py:55`) plus a tier-seam jump check. `test_us_data_quality.py` checks raw-file cleanliness (OHLC, dupes), not universe/column coverage. A clean run of either is not proof the recollection was complete — only the log grep above is.
+- [ ] `mark_skip`/negative-result caching (`checkpoint.py:38`) is BR-only (`br/collectors.py`) — does **not** apply to the US pipeline, so no stale-skip-cache risk here. (Verified 2026-08-14; an earlier pass of this checklist assumed otherwise.)
+- [ ] After Stage 1 finishes: rerun `build_us_dataset.py` — the current `us_ml_dataset.parquet` predates this recollection and every fix above (`f1f4697`, staleness tolerance, non-common share-class drop). A recollect-only run leaves the processed dataset stale.
+- [ ] Recollecting fixes item **#2** (`shares_outstanding_rejected_outlier`, only 28/8,143 files had the fix applied) directly. It does **not** by itself fix item **#7** (thin XBRL line-item coverage) — that needs a `CONCEPT_MAP` investigation first, independent of recollection.
