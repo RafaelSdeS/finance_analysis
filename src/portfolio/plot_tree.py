@@ -15,6 +15,7 @@ import lightgbm as lgb
 import pandas as pd
 
 from src.build_dataset.paths import OUTPUT_PATH
+from src.build_dataset.terminal_events import load_terminal_events
 from src.portfolio import alpha, universe
 from src.portfolio.features import feature_columns
 from src.portfolio.labels import forward_excess_return
@@ -32,7 +33,7 @@ def main(top_n: int = 50, horizon_td: int = 21, rebalance_freq: str = "M",
     membership = universe.liquid_universe(df[["ticker", "trade_date", "traded_amount"]],
                                            top_n=top_n, rebalance_freq=rebalance_freq)
     df = universe.restrict_to_universe(df, membership)
-    df["label"] = forward_excess_return(df, horizon_td=horizon_td)
+    df["label"] = forward_excess_return(df, horizon_td=horizon_td, terminal_events=load_terminal_events())
 
     reb_dates = universe.rebalance_dates(membership)
     as_of = reb_dates[-1]  # latest rebalance -- the model with the most training history

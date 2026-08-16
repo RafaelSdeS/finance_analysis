@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 
 from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR, SPLIT_CONFIG_PATH
+from src.build_dataset.terminal_events import load_terminal_events
 from src.portfolio import alpha, artifacts, contrarian, universe
 from src.portfolio.backtest import buy_and_hold_curve, cdi_curve, equal_weight_fn, run_backtest
 from src.portfolio.features import feature_columns
@@ -133,7 +134,7 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6, hold_fra
     print(f"  restricted to {len(df)} rows, {df['ticker'].nunique()} tickers ever in the universe")
 
     print(f"Building the {horizon_td}-day forward-excess-return label...")
-    df["label"] = forward_excess_return(df, horizon_td=horizon_td)
+    df["label"] = forward_excess_return(df, horizon_td=horizon_td, terminal_events=load_terminal_events())
 
     reb_dates = universe.rebalance_dates(membership)
     print(f"Walk-forward training/prediction across {len(reb_dates)} rebalance dates...")

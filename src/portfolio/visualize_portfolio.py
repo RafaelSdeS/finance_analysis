@@ -24,6 +24,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from src.build_dataset.paths import OUTPUT_PATH, PRICES_DIR
+from src.build_dataset.terminal_events import load_terminal_events
 from src.portfolio import alpha, universe
 from src.portfolio.backtest import buy_and_hold_curve, cdi_curve, equal_weight_fn, run_backtest
 from src.portfolio.features import feature_columns
@@ -108,7 +109,7 @@ def main(top_n: int = 50, horizon_td: int = 252, top_frac: float = 0.6,
     df = universe.restrict_to_universe(df, membership)
 
     print(f"Building the {horizon_td}-day forward-excess-return label...")
-    df["label"] = forward_excess_return(df, horizon_td=horizon_td)
+    df["label"] = forward_excess_return(df, horizon_td=horizon_td, terminal_events=load_terminal_events())
 
     reb_dates = universe.rebalance_dates(membership)
     print(f"Walk-forward training/prediction across {len(reb_dates)} rebalance dates...")
