@@ -35,6 +35,16 @@ Two real findings this test encodes as regression guards, not just narrative:
   2. Everything else checked here (Inf, OHLC bracket sanity, macro
      completeness) was already clean at audit time -- these are hard
      zero-tolerance assertions, not rate ceilings.
+  3. validate.validate_prices gained a NaN-OHLC check 2026-08-16 (data
+     integrity review, see docs/DATA_INTEGRITY_TEST_PLAN.md D10/D2/D3):
+     every prior check there was a comparison, and NaN compares False in
+     pandas, so a NaN bar silently passed every one of them. Found on BR's
+     BOVA11 (the market-beta benchmark) and CAMB3; applying the new check
+     retroactively here surfaces the same defect class on 111/9700 US price
+     files (1.14%), all pre-dating the fix. Rate ceiling tolerates the
+     backlog while still catching a NEW regression; other validate_prices
+     errors (bracket violations, non-positive prices, ...) stay
+     zero-tolerance, unaffected by this ceiling.
 
 Skips gracefully (prints SKIP, still exits 0) if data/raw/us isn't collected
 yet -- it's gitignored, unlike BR's git-tracked data/raw/.
@@ -43,6 +53,7 @@ Run from project root:
     python tests/data_collection/test_us_data_quality.py
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -70,6 +81,16 @@ _NEGATIVE_ASSETS_RATE_CEILING = 0.01  # currently 3/2289 = 0.13%
 _MIN_PLAUSIBLE_XBRL_END = pd.Timestamp("1995-01-01")
 _ANCIENT_END_RATE_CEILING = 0.02  # currently 48/4775 tickers = 1.01%
 
+# validate.validate_prices gained a NaN-OHLC check 2026-08-16 (previously every
+# check there was a comparison, and NaN compares False in pandas, so a NaN bar
+# silently passed every one of them -- found via BR's BOVA11/CAMB3). Applied
+# retroactively here, it surfaces a pre-existing collection gap rather than a
+# regression: 111/9700 US price files (1.14%) carry it, all pre-dating the fix.
+# Rate ceiling tolerates today's backlog while still catching a NEW regression;
+# tighten (or drop, once recollected) after a fresh `collect_prices_us` pass.
+_NAN_OHLC_RATE_CEILING = 0.02  # currently 111/9700 files = 1.14%
+_NAN_OHLC_ERROR_RE = re.compile(r"^\d+ rows with NaN in \[")
+
 
 def _has_inf(df: pd.DataFrame) -> bool:
     numeric = df.select_dtypes(include="number")
@@ -86,6 +107,8 @@ def test_prices_clean():
         return True
 
     validate_errors = 0
+    nan_ohlc_files = []
+    other_error_files = []
     inf_files = []
     for f in files:
         df = pd.read_parquet(f)
@@ -93,14 +116,29 @@ def test_prices_clean():
         if not r.passed:
             validate_errors += 1
             print(f"FAIL  prices/{f.stem}: {r.errors}")
+            if len(r.errors) == 1 and _NAN_OHLC_ERROR_RE.match(r.errors[0]):
+                nan_ohlc_files.append(f.stem)
+            else:
+                other_error_files.append(f.stem)
         if _has_inf(df):
             inf_files.append(f.stem)
 
-    ok = validate_errors == 0 and not inf_files
+    nan_ohlc_rate = len(nan_ohlc_files) / len(files)
+    ok = not other_error_files and not inf_files and nan_ohlc_rate <= _NAN_OHLC_RATE_CEILING
     if inf_files:
         print(f"FAIL  prices: Inf present in {len(inf_files)} file(s): {inf_files[:10]}")
+    if other_error_files:
+        print(f"FAIL  prices: non-NaN-OHLC validate_prices error(s) in {len(other_error_files)} "
+              f"file(s): {other_error_files[:10]}")
+    if nan_ohlc_rate > _NAN_OHLC_RATE_CEILING:
+        print(f"FAIL  prices: NaN-OHLC rate {nan_ohlc_rate:.2%} exceeds "
+              f"{_NAN_OHLC_RATE_CEILING:.0%} ceiling -- {nan_ohlc_files[:10]}")
+    elif nan_ohlc_files:
+        print(f"note  prices: {len(nan_ohlc_files)} known-stale file(s) with NaN OHLC "
+              f"(pre-fix), within ceiling: {nan_ohlc_files[:10]}")
     print(f"{'PASS' if ok else 'FAIL'}  prices: {len(files)} files, "
-          f"{validate_errors} validate_prices errors, {len(inf_files)} with Inf")
+          f"{validate_errors} validate_prices errors ({len(nan_ohlc_files)} NaN-OHLC, "
+          f"{len(other_error_files)} other), {len(inf_files)} with Inf")
     return ok
 
 

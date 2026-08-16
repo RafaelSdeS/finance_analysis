@@ -93,5 +93,35 @@ def test_non_update_modes_force_bolsai_regardless_of_data_source(monkeypatch) ->
     yf_fn.assert_not_called()
 
 
+def test_recover_stale_company_info_tickers_picks_up_on_disk_orphans(tmp_path, monkeypatch) -> None:
+    """A ticker with an existing raw price file but missing/non-ATIVO in
+    company_info (BolsAI's own /companies/ registry structurally omits some
+    real, still-trading distressed names -- confirmed 2026-08-16 on
+    AMER3/Americanas and 14 others) must still be recovered for the free
+    yfinance --mode update refresh. A ticker with NO existing file must NOT
+    be recovered here -- that's collect_delisted.py's job."""
+    monkeypatch.setattr(config, "PRICES_DIR", tmp_path)
+    (tmp_path / "AMER3.parquet").touch()
+    (tmp_path / "PETR4.parquet").touch()  # already ATIVO -- in prices_tickers already
+
+    recovered = pipeline._recover_stale_company_info_tickers(
+        requested=["AMER3", "PETR4", "NEVERCOLLECTED3"],
+        prices_tickers={"PETR4"},
+    )
+
+    assert recovered == {"AMER3"}
+
+
+def test_recover_stale_company_info_tickers_empty_when_nothing_orphaned(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(config, "PRICES_DIR", tmp_path)
+    (tmp_path / "PETR4.parquet").touch()
+
+    recovered = pipeline._recover_stale_company_info_tickers(
+        requested=["PETR4"], prices_tickers={"PETR4"},
+    )
+
+    assert recovered == set()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

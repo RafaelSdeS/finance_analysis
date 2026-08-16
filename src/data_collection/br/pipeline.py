@@ -74,6 +74,28 @@ def _active_tickers() -> list[str]:
     return sorted(df[df["status"] == "ATIVO"]["ticker"].dropna().unique().tolist())
 
 
+def _recover_stale_company_info_tickers(requested: list[str], prices_tickers: set[str]) -> set[str]:
+    """--mode update's price collection is yfinance-only (free, no BolsAI dependency --
+    collect_prices_yf needs only a valid ticker symbol, nothing from company_info).
+    Gating it on BolsAI's company_info ATIVO status is unnecessarily restrictive:
+    BolsAI's own /companies/ registry is smaller than this repo's tracked universe
+    (523 tickers per CLAUDE.md) and structurally omits some real, still-trading
+    distressed/judicial-recovery names -- confirmed 2026-08-16 (AMER3/Americanas,
+    LIGT3, and 13 others): re-running collect_company_info() found zero of them in a
+    fresh BolsAI pull, ruling out "stale collection" and confirming a genuine vendor
+    coverage gap, not a staleness bug.
+
+    A ticker already on disk (collected once, however long ago) is a real,
+    previously-confirmed equity -- keep refreshing its free yfinance price series
+    even after BolsAI's own registry loses track of it. Tickers with NO existing
+    file are deliberately NOT recovered here (that's collect_delisted.py's job,
+    which already bypasses this same ATIVO gate for exactly that case, per its own
+    docstring).
+    """
+    on_disk = {p.stem for p in config.PRICES_DIR.glob("*.parquet")}
+    return (set(requested) & on_disk) - prices_tickers
+
+
 def setup_logging():
     config.LOG_DIR.mkdir(parents=True, exist_ok=True)
     logfile = config.LOG_DIR / f"collection-{datetime.now():%Y%m%d-%H%M%S}.log"
@@ -149,6 +171,15 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
     requested_benchmarks = [b for b in config.BENCHMARK_TICKERS if b in tickers]
     other_benchmarks = [b for b in config.BENCHMARK_TICKERS if b not in tickers]
     prices_tickers = sorted(set(active) | set(requested_benchmarks) | set(other_benchmarks))
+
+    if mode == "update":
+        recovered = _recover_stale_company_info_tickers(tickers, set(prices_tickers))
+        if recovered:
+            log.info("%d ticker(s) already on disk but missing/non-ATIVO in company_info -- "
+                      "including in the free yfinance price refresh anyway: %s",
+                      len(recovered), sorted(recovered)[:10])
+        prices_tickers = sorted(set(prices_tickers) | recovered)
+
     log.info("filtered to %d/%d requested tickers (ATIVO) + %d benchmarks for prices",
              len(active), len(tickers), len(requested_benchmarks) + len(other_benchmarks))
 

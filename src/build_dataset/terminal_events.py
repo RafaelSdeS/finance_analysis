@@ -87,6 +87,89 @@ def build_terminal_events(df: pd.DataFrame, delist_events: pd.DataFrame) -> pd.D
     return events[["ticker", "delist_date", "event_type", "terminal_payoff"]].reset_index(drop=True)
 
 
+# Confirmed via web research 2026-08-16 (docs/DATA_INTEGRITY_TEST_PLAN.md investigation
+# into the terminal-events coverage gap). CVM's registry shows every one of these
+# entities' `sit` as ATIVO or SUSPENSO(A) at the COMPANY level, with no resolved
+# motivo_cancel -- so build_terminal_events()'s registry path can't classify them, even
+# though the TICKER genuinely stopped trading and the real-world outcome is well
+# documented in public filings/press. Same precedent as sec/crosswalk.py's
+# CIK_OVERRIDES: a small, hand-verified table for cases the automated join can't reach.
+#
+# "failure": bankruptcy/liquidation decreed, equity wiped out -> payoff 0.
+# "acquired": bought out / merger / going-private tender offer -> payoff = last observed
+#   adj_close, same convention build_terminal_events() already uses. For the three
+#   100%-stock-swap mergers (OMGE3, IGTA3, CESP3/CESP5) this is a known approximation --
+#   the true payoff is the successor entity's later share value (Serena/MEGA3, IGTI11,
+#   AURE3 respectively), not a cash-confirmed figure like the four OPAs below it.
+#
+# Explicitly NOT included here (research surfaced these but they need different
+# handling, not a terminal payoff):
+#   - Confirmed renames needing a verified exchange ratio before ticker_continuity.json
+#     can splice them: BBRK3->NEXP3, CELP5/6/7->EQPA5/6/7, LIQO3->ATMP3->CTAX3.
+#   - ~13 tickers (incl. AMER3/Americanas, LIGT3) that are STILL ACTIVELY TRADING --
+#     their panel just stopped being collected (missing from company_info.parquet,
+#     invisible to both --mode update and collect_delisted.py). A terminal payoff for
+#     these would fabricate a death for a live company; see the collection-gap fix
+#     instead.
+#   - ~9 tickers genuinely still mid-crisis with no resolved outcome (Oi, Rossi,
+#     Bardella, João Fortes, Coteminas, Mendes Júnior) -- correctly left unlabeled.
+MANUAL_TERMINAL_EVENTS = {
+    "BPHA3": "failure",   # Brasil Pharma: bankruptcy decreed Jun 2019 (2nd Bankruptcy Court of SP)
+    "SLED3": "failure",   # Saraiva: falência decreed Oct 2023
+    "SLED4": "failure",   # Saraiva: falência decreed Oct 2023
+    "FRTA3": "failure",   # Pomifrutas: autofalência Apr 2024, assets auctioned
+    "TEKA3": "failure",   # Teka: RJ since 2012 failed, bankruptcy decreed ~Feb 2025
+    "TEKA4": "failure",   # Teka: RJ since 2012 failed, bankruptcy decreed ~Feb 2025
+    "ENBR3": "acquired",  # EDP going-private tender offer, settled Jul 2023 at R$23.73/share
+    "CPRE3": "acquired",  # CPFL Energias Renováveis OPA, concluded Jun 2020 at R$18.24/share
+    "PRBC4": "acquired",  # Parana Banco 2017 OPA at R$11.59/share
+    "CEPE3": "acquired",  # Celpe: Neoenergia OPA + Eletrobras stake auction Oct 2022, ~R$42-46
+    "CEPE5": "acquired",  # Celpe: Neoenergia OPA + Eletrobras stake auction Oct 2022, ~R$42-46
+    "CEPE6": "acquired",  # Celpe: Neoenergia OPA + Eletrobras stake auction Oct 2022, ~R$42-46
+    "ELPL3": "acquired",  # Eletropaulo: Enel OPA to cancel registration, notice ~Oct 2019
+    "EEEL3": "acquired",  # CEEE-T: CPFL privatization auction Jul 2021 (57% premium) + tag-along OPA
+    "EEEL4": "acquired",  # CEEE-T: CPFL privatization auction Jul 2021 (57% premium) + tag-along OPA
+    "OMGE3": "acquired",  # Omega Geração: 100% stock-swap into Omega Energia (now Serena/MEGA3)
+    "IGTA3": "acquired",  # Iguatemi: 100% stock-swap into Jereissati's Iguatemi S.A. (IGTI11)
+    "CESP3": "acquired",  # CESP: incorporated into VTRM Energia, successor Auren Energia (AURE3)
+    "CESP5": "acquired",  # CESP: incorporated into VTRM Energia, successor Auren Energia (AURE3)
+}
+
+
+def apply_manual_overrides(df: pd.DataFrame, events: pd.DataFrame) -> pd.DataFrame:
+    """Append MANUAL_TERMINAL_EVENTS for tickers build_terminal_events() couldn't
+    resolve from the CVM registry alone. Registry-derived rows always win on overlap
+    (though by construction there is none today -- every MANUAL_TERMINAL_EVENTS ticker
+    was confirmed unresolved by the registry path first). delist_date is the ticker's
+    own last positive-adj_close trade date in the panel (no CVM-sourced cancellation
+    date exists for these), same anchor build_terminal_events() uses for payoff.
+    """
+    new_tickers = [t for t in MANUAL_TERMINAL_EVENTS if t not in set(events["ticker"])]
+    if not new_tickers:
+        return events
+
+    last = (
+        df[df["ticker"].isin(new_tickers) & (df["adj_close"] > 0)]
+        .sort_values("trade_date")
+        .groupby("ticker")
+        .agg(delist_date=("trade_date", "last"), last_adj_close=("adj_close", "last"))
+    )
+
+    rows = [
+        {
+            "ticker": ticker,
+            "delist_date": last.loc[ticker, "delist_date"],
+            "event_type": event_type,
+            "terminal_payoff": 0.0 if event_type == "failure" else last.loc[ticker, "last_adj_close"],
+        }
+        for ticker, event_type in MANUAL_TERMINAL_EVENTS.items()
+        if ticker in new_tickers and ticker in last.index
+    ]
+    if not rows:
+        return events
+    return pd.concat([events, pd.DataFrame(rows)], ignore_index=True)
+
+
 def find_rename_candidates(df: pd.DataFrame, delist_events: pd.DataFrame) -> pd.DataFrame:
     """Dead tickers whose CVM registry status is still ATIVO -- the company
     survived, this ticker code just didn't. Cross-referenced against every
@@ -124,6 +207,7 @@ def main():
     )
 
     events = build_terminal_events(df, delist_events)
+    events = apply_manual_overrides(df, events)
     events.to_parquet(TERMINAL_EVENTS_PATH, index=False)
     n_failure = int((events["event_type"] == "failure").sum())
     n_acquired = int((events["event_type"] == "acquired").sum())

@@ -13,7 +13,10 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from src.build_dataset.terminal_events import build_terminal_events, find_rename_candidates  # noqa: E402
+import src.build_dataset.terminal_events as terminal_events_module  # noqa: E402
+from src.build_dataset.terminal_events import (  # noqa: E402
+    apply_manual_overrides, build_terminal_events, find_rename_candidates,
+)
 from src.portfolio.labels import forward_excess_return  # noqa: E402
 from tests.test_utils import print_check, print_header, print_section_end  # noqa: E402
 
@@ -88,6 +91,54 @@ def main():
           and np.isclose(acqd_row["terminal_payoff"], acqd_last_close))
     print_check("other cancellation reason -> event_type=acquired, payoff=last adj_close", ok,
                 f"got {acqd_row['terminal_payoff']}, expected {acqd_last_close}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    # --- apply_manual_overrides ----------------------------------------------
+    # GONE is registry-unresolvable (sit=ATIVO) -- exactly the class of ticker
+    # MANUAL_TERMINAL_EVENTS exists for. Monkeypatch the real (production)
+    # table with a synthetic one so this test doesn't depend on real tickers.
+    original_overrides = dict(terminal_events_module.MANUAL_TERMINAL_EVENTS)
+    terminal_events_module.MANUAL_TERMINAL_EVENTS.clear()
+    terminal_events_module.MANUAL_TERMINAL_EVENTS.update({"GONE": "failure", "LIVE": "acquired"})
+    try:
+        with_overrides = apply_manual_overrides(df, events)
+    finally:
+        terminal_events_module.MANUAL_TERMINAL_EVENTS.clear()
+        terminal_events_module.MANUAL_TERMINAL_EVENTS.update(original_overrides)
+
+    gone_row = with_overrides[with_overrides["ticker"] == "GONE"]
+    ok = (len(gone_row) == 1 and gone_row.iloc[0]["event_type"] == "failure"
+          and gone_row.iloc[0]["terminal_payoff"] == 0.0)
+    print_check("manual override resolves a registry-unresolvable dead ticker (failure, payoff=0)", ok,
+                f"got {gone_row.to_dict('records')}")
+    passed, failed = passed + ok, failed + (not ok)
+
+    # LIVE never stopped trading (not in `dead`) but IS in the override table --
+    # override only ever adds tickers absent from `events`; it doesn't touch
+    # whether a ticker is "dead" in the first place, and LIVE's own last row
+    # still anchors a payoff since apply_manual_overrides just needs a positive
+    # adj_close row to compute one, dead or not.
+    live_row = with_overrides[with_overrides["ticker"] == "LIVE"]
+    ok = len(live_row) == 1 and live_row.iloc[0]["event_type"] == "acquired"
+    print_check("override table entries apply even for a non-dead ticker (caller's responsibility "
+                "to only list genuinely dead tickers)", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    ok = len(apply_manual_overrides(df, events)) == len(events)
+    print_check("empty/no-match override table is a no-op", ok)
+    passed, failed = passed + ok, failed + (not ok)
+
+    terminal_events_module.MANUAL_TERMINAL_EVENTS.clear()
+    terminal_events_module.MANUAL_TERMINAL_EVENTS.update({"FAIL": "acquired"})  # FAIL already in `events`
+    try:
+        result = apply_manual_overrides(df, events)
+    finally:
+        terminal_events_module.MANUAL_TERMINAL_EVENTS.clear()
+        terminal_events_module.MANUAL_TERMINAL_EVENTS.update(original_overrides)
+    fail_rows = result[result["ticker"] == "FAIL"]
+    ok = len(fail_rows) == 1 and fail_rows.iloc[0]["event_type"] == "failure"
+    print_check("registry-derived row wins over a manual override for the same ticker", ok,
+                f"got {fail_rows.to_dict('records')}")
     passed, failed = passed + ok, failed + (not ok)
 
     # --- find_rename_candidates ---------------------------------------------
