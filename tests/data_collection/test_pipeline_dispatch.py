@@ -76,21 +76,40 @@ def test_defaults_to_bolsai_when_data_type_unconfigured(monkeypatch) -> None:
     yf_fn.assert_not_called()
 
 
-def test_non_update_modes_force_bolsai_regardless_of_data_source(monkeypatch) -> None:
-    """Regression test: full_scale/prototype are the one-time historical
-    backfill and must always use BolsAI's deep history, even if
-    config.DATA_SOURCE says yfinance (which governs `--mode update` only).
-    This bug previously routed full_scale silently through yfinance's
-    shallow ~5-quarter fundamentals depth instead of BolsAI's ~80-quarter
-    backfill (caught via BPAC11 getting incomplete fundamentals)."""
-    monkeypatch.setitem(config.DATA_SOURCE, "fundamentals", "yfinance")
+def test_dispatches_to_cvm_when_configured(monkeypatch) -> None:
+    monkeypatch.setitem(config.DATA_SOURCE, "fundamentals", "cvm")
     monkeypatch.setattr(config, "YFINANCE_ONLY_TICKERS", set())
-    with mock.patch.object(pipeline.collectors, "collect_fundamentals") as bolsai_fn, \
+    with mock.patch.object(pipeline.cvm_ratios, "collect_fundamentals_cvm") as cvm_fn, \
+         mock.patch.object(pipeline.collectors, "collect_fundamentals") as bolsai_fn, \
          mock.patch.object(pipeline.yf_collectors, "collect_fundamentals_yf") as yf_fn:
+        pipeline._collect("fundamentals", ["PETR4"], "update")
+
+    cvm_fn.assert_called_once_with(["PETR4"], "update")
+    bolsai_fn.assert_not_called()
+    yf_fn.assert_not_called()
+
+
+def test_default_fundamentals_source_is_never_the_broken_yfinance_path() -> None:
+    """Regression guard for BUG-1 (BOLSAI_EXIT_PLAN.md): yfinance's BR fundamentals
+    are wrong in level (point-in-time balance-sheet items falling ~5x quarter over
+    quarter), not just thin. "cvm" is a free superset of BolsAI's own depth -- the
+    repo's default must never regress back to "yfinance" for this data type."""
+    assert config.DATA_SOURCE["fundamentals"] != "yfinance"
+
+
+def test_full_scale_honors_data_source_same_as_update(monkeypatch) -> None:
+    """All modes (full_scale/prototype/update alike) now dispatch purely off
+    config.DATA_SOURCE -- the free sources (yfinance prices/dividends, CVM
+    fundamentals) match or exceed BolsAI's own depth (BOLSAI_EXIT_PLAN.md Task 5),
+    so full_scale no longer needs a mode-based override forcing BolsAI."""
+    monkeypatch.setitem(config.DATA_SOURCE, "fundamentals", "cvm")
+    monkeypatch.setattr(config, "YFINANCE_ONLY_TICKERS", set())
+    with mock.patch.object(pipeline.cvm_ratios, "collect_fundamentals_cvm") as cvm_fn, \
+         mock.patch.object(pipeline.collectors, "collect_fundamentals") as bolsai_fn:
         pipeline._collect("fundamentals", ["PETR4"], "full_scale")
 
-    bolsai_fn.assert_called_once_with(["PETR4"], "full_scale")
-    yf_fn.assert_not_called()
+    cvm_fn.assert_called_once_with(["PETR4"], "full_scale")
+    bolsai_fn.assert_not_called()
 
 
 def test_recover_stale_company_info_tickers_picks_up_on_disk_orphans(tmp_path, monkeypatch) -> None:

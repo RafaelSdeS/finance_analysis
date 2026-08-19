@@ -1,16 +1,21 @@
 """
 Test 1b (CVM-derived fundamentals): ratio math on synthetic statements +
-cross-source check against a BolsAI-sourced file when CVM caches exist.
+internal-consistency check against raw CVM statements when CVM caches exist,
+plus a cross-ticker discontinuity regression guard.
 
 Part 1 (always runs, pure code): a hand-built quarterly frame with known
 values must produce the exact BolsAI-convention ratios (verified live against
 BPAN4 2025-09-30: single-quarter flows, thousands for statements, R$ units
 for market_cap) and pass validate_fundamentals + carry all FUND_COLS.
 
-Part 2 (SKIPs until CVM caches are collected): for a ticker that has BOTH a
-BolsAI fundamentals file and CVM statement coverage, raw statement values
-(net_income, equity) must agree within tolerance — same cross-vendor bar as
-validate_vs_yfinance.py.
+Part 2 (SKIPs until CVM caches are collected): data/raw/br/fundamentals/*.parquet
+is CVM-sourced end to end since the 2026-08-19 rebuild (BOLSAI_EXIT_PLAN.md Task 1),
+so this is no longer a cross-VENDOR check -- it validates that build_fundamentals()'s
+per-cnpj price/shares join didn't corrupt the point-in-time balance items (equity)
+relative to the raw parsed statements they came from.
+
+Part 3 (SKIPs if no fundamentals on disk): scans every ticker's balance sheet for
+a vendor-switch cliff (see test_balance_sheet_has_no_vendor_switch_cliff below).
 
 Run from project root:
     python tests/data_collection/test_cvm_statements.py
@@ -32,33 +37,43 @@ TOLERANCE = 0.15  # 15%, consistent with validate_vs_yfinance's loose band
 
 
 def test_ratio_math():
-    # One synthetic quarter, values in R$ thousands (like CVM/BolsAI):
-    # net_income 100_000k, equity 1_000_000k, revenue 500_000k, assets 5_000_000k
-    # close 10.00, shares 1_000_000_000 -> market_cap 10e9
+    # Four synthetic quarters (compute_ratios TTMs flows internally via rolling(4) --
+    # see BOLSAI_EXIT_PLAN.md Task 1 -- so a single row now yields NaN flows; each
+    # quarter here carries 1/4 of the target ANNUAL figures below so the TTM'd last
+    # row lands on the same known numbers the old single-quarter fixture asserted).
+    # Values in R$ thousands (like CVM/BolsAI): net_income 100_000k, equity
+    # 1_000_000k, revenue 500_000k, assets 5_000_000k, close 10.00, shares
+    # 1_000_000_000 -> market_cap 10e9. Point-in-time items (balance sheet, price,
+    # shares) are NOT TTM'd, so they're just repeated every quarter.
+    quarters = pd.date_range("2019-06-30", "2020-03-31", freq="QE")
     q = pd.DataFrame({
-        "reference_date": [pd.Timestamp("2020-03-31")],
-        "net_revenue": [500_000.0],
-        "gross_profit": [200_000.0],
-        "ebit": [150_000.0],
-        "net_income": [100_000.0],
-        "total_assets": [5_000_000.0],
-        "current_assets": [800_000.0],
-        "cash_caixa": [50_000.0],
-        "cash_aplic": [150_000.0],
-        "current_liabilities": [400_000.0],
-        "debt_st": [100_000.0],
-        "debt_lt": [900_000.0],
-        "equity": [1_000_000.0],
-        "close_price": [10.0],
-        "shares_outstanding": [1_000_000_000],
+        "reference_date": quarters,
+        "net_revenue": [125_000.0] * 4,
+        "gross_profit": [50_000.0] * 4,
+        "ebit": [37_500.0] * 4,
+        "net_income": [25_000.0] * 4,
+        "depr_amort": [5_000.0] * 4,
+        "total_assets": [5_000_000.0] * 4,
+        "current_assets": [800_000.0] * 4,
+        "cash_caixa": [50_000.0] * 4,
+        "cash_aplic": [150_000.0] * 4,
+        "current_liabilities": [400_000.0] * 4,
+        "debt_st": [100_000.0] * 4,
+        "debt_lt": [900_000.0] * 4,
+        "equity": [1_000_000.0] * 4,
+        "close_price": [10.0] * 4,
+        "shares_outstanding": [1_000_000_000] * 4,
     })
     out = compute_ratios(q, "TEST CO")
-    r = out.iloc[0]
+    r = out.iloc[-1]  # last row = the first fully-populated TTM window
 
     assert abs(r["market_cap"] - 10e9) < 1, r["market_cap"]
-    assert abs(r["pl"] - 100.0) < 0.01, r["pl"]          # 10e9 / 100_000k
+    assert abs(r["pl"] - 100.0) < 0.01, r["pl"]          # 10e9 / 100_000k (TTM net_income)
     assert abs(r["pvp"] - 10.0) < 0.01, r["pvp"]         # 10e9 / 1_000_000k
     assert abs(r["p_sr"] - 20.0) < 0.01, r["p_sr"]
+    assert abs(r["p_ebit"] - 66.667) < 0.01, r["p_ebit"]     # 10e9 / 150_000k (BUG-2)
+    assert abs(r["p_ebitda"] - 58.8235) < 0.01, r["p_ebitda"]  # 10e9 / 170_000k (BUG-2)
+    assert abs(r["p_assets"] - 2.0) < 0.01, r["p_assets"]
     assert abs(r["roe"] - 10.0) < 0.01, r["roe"]         # 100k/1000k * 100
     assert abs(r["roa"] - 2.0) < 0.01, r["roa"]
     assert abs(r["net_margin"] - 20.0) < 0.01, r["net_margin"]
@@ -67,10 +82,13 @@ def test_ratio_math():
     assert abs(r["cash"] - 200_000.0) < 0.01, r["cash"]
     assert abs(r["total_debt"] - 1_000_000.0) < 0.01, r["total_debt"]
     assert abs(r["net_debt"] - 800_000.0) < 0.01, r["net_debt"]
+    assert abs(r["ev_ebit"] - 72.0) < 0.01, r["ev_ebit"]         # (10e9+8e8) / 150_000k (BUG-2)
+    assert abs(r["ev_ebitda"] - 63.529) < 0.01, r["ev_ebitda"]   # (10e9+8e8) / 170_000k (BUG-2)
     assert abs(r["debt_equity"] - 1.0) < 0.01, r["debt_equity"]
     assert abs(r["lpa"] - 0.10) < 0.001, r["lpa"]        # 100_000k*1000 / 1e9 shares
     assert abs(r["vpa"] - 1.00) < 0.001, r["vpa"]
-    assert r["ebitda"] == r["ebit"], "ebitda proxy must equal ebit"
+    assert abs(r["ebitda"] - 170_000.0) < 0.01, r["ebitda"]  # TTM ebit + TTM depr_amort (real EBITDA, Task 1)
+    assert abs(r["roic"] - 5.5) < 0.01, r["roic"]        # (150_000k*0.66) / 1_800_000k * 100
 
     # schema gate: exactly what collect_fundamentals-written files must satisfy
     out["ticker"] = "XXXX3"
@@ -118,6 +136,55 @@ def test_cross_source_vs_bolsai():
     return True
 
 
+def test_balance_sheet_has_no_vendor_switch_cliff():
+    """Regression guard (BOLSAI_EXIT_PLAN.md, "BUG-1"): `--mode update`'s fundamentals
+    stage (and, separately, refresh.py) used to route BR fundamentals through yfinance,
+    which stores point-in-time balance-sheet items wrong in LEVEL, not just thin --
+    confirmed on PETR4 2026-06-30: BOTH equity (445bn -> 92.9bn, ~4.79x) AND
+    total_assets (1,246bn -> 247bn, ~5.04x) fell by roughly the SAME factor in the
+    SAME (most recent) quarter -- a whole-statement rescale from a stray incremental
+    vendor append, "the most decision-relevant row in the panel" per the plan.
+
+    Deliberately scoped to only the last-vs-second-last quarter, not full history:
+    an entire-history scan for any such joint drop flags plenty of REAL historical
+    distress/restructuring events in this 612-ticker, 15-year, delisted-inclusive
+    panel (verified -- an earlier version of this test flagged dozens of genuine
+    small/micro-cap tickers). CLAUDE.md documents the same lesson for a related
+    problem (`repair.py`'s split-persistence guard, rejected 3x): "illiquid tickers'
+    ordinary volatility swamps any workable threshold" for a whole-history anomaly
+    scan. The production risk this guards against -- a future `--mode update` run
+    silently reverting to yfinance and re-corrupting the tail -- only ever shows up
+    at the tail, so that's the only transition worth asserting on.
+    """
+    files = sorted(config.FUND_DIR.glob("*.parquet"))
+    if not files:
+        print("SKIP  balance-sheet vendor-switch cliff: no fundamentals files on disk")
+        return True
+
+    flagged = []
+    for path in files:
+        df = pd.read_parquet(path, columns=["reference_date", "equity", "total_assets"]) \
+               .sort_values("reference_date").dropna(subset=["equity", "total_assets"])
+        if len(df) < 2:
+            continue
+        prev, last = df.iloc[-2], df.iloc[-1]
+        eq_ratio = last["equity"] / prev["equity"] if prev["equity"] else float("nan")
+        assets_ratio = last["total_assets"] / prev["total_assets"] if prev["total_assets"] else float("nan")
+        # Window bracketed on the confirmed PETR4 magnitude (~4.79x/~5.04x), with
+        # margin, NOT open-ended down to zero: a near-total wipeout (ratio near 0) is
+        # a plausible real event for an obscure micro-cap (e.g. a holding company
+        # spinning off nearly all its assets) -- categorically different from a
+        # same-scale ~5x vendor/unit mismatch, and not this test's job to adjudicate.
+        both_cliff = 0.1 <= eq_ratio < 0.5 and 0.1 <= assets_ratio < 0.5
+        same_scale = abs(eq_ratio - assets_ratio) < 0.2  # fell by roughly the same factor
+        if both_cliff and same_scale:
+            flagged.append((path.stem, round(eq_ratio, 2), round(assets_ratio, 2)))
+
+    assert not flagged, f"whole-statement-rescale in the most recent quarter: {flagged[:10]}"
+    print(f"PASS  balance-sheet vendor-switch cliff check: {len(files)} tickers' latest quarter clean")
+    return True
+
+
 if __name__ == "__main__":
-    ok = test_ratio_math() and test_cross_source_vs_bolsai()
+    ok = test_ratio_math() and test_cross_source_vs_bolsai() and test_balance_sheet_has_no_vendor_switch_cliff()
     sys.exit(0 if ok else 1)

@@ -157,9 +157,14 @@ LOG_DIR = PROJECT / "artifacts/logs/collection"
 # --- Collection limits ---
 DIVIDENDS_YEARS = 20  # API max; covers full history
 
-# --- yfinance update pipeline ---
-# Flip any entry to "yfinance" to fall back to the free collector for that data type.
-DATA_SOURCE = {"prices": "yfinance", "fundamentals": "yfinance", "dividends": "yfinance"}
+# --- free-source pipeline (see BOLSAI_EXIT_PLAN.md) ---
+# Governs every mode now (full_scale/prototype/update alike) -- flip an entry to
+# "bolsai" to opt back into the paid path for that data type (client.py and every
+# BolsAI collector stay in place, just unused by default). "fundamentals": "yfinance"
+# is available in pipeline.py's fn_map but must never be the default here -- yfinance's
+# BR financials are wrong in level (BUG-1), not just thin; "cvm" is a free superset of
+# BolsAI's own fundamentals depth (verified 2026-08-19).
+DATA_SOURCE = {"prices": "yfinance", "fundamentals": "cvm", "dividends": "yfinance"}
 YF_SUFFIX = ".SA"
 YF_RETRIES = 3
 YF_RETRY_SLEEP = 2          # seconds; doubles each retry

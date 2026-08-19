@@ -6,7 +6,8 @@ _merge_save -> checkpoint. Reuses _merge_save, checkpoint.py, validate.py as-is 
 yfinance is just another source feeding the same idempotent writer.
 
 company_info and macro have no yfinance equivalent and stay BolsAI/BCB-only
-(see collectors.py); not touched here.
+(see collectors.py); not touched here. corporate_events (collect_splits_yf) IS
+covered -- yfinance's Ticker.splits is a free, direct replacement.
 """
 
 import logging
@@ -1024,6 +1025,57 @@ def collect_dividends_yf(tickers: list[str], mode: str, dividend_dir=None,
     with ThreadPoolExecutor(max_workers=workers) as ex:
         list(ex.map(_one, tickers))
     return changed
+
+
+def collect_splits_yf(tickers: list[str], mode: str) -> None:
+    """Free replacement for BolsAI's /stocks/corporate-events -- writes the same
+    on-disk schema (ticker/date/type/ratio_from/ratio_to/factor) `repair.py`'s
+    split-repair logic already consumes as its audit log. Dedicated collector
+    (not folded into collect_prices_yf/collect_dividends_yf's changes_out side
+    channel) because corporate_events is its own pipeline stage, run
+    independently of whether prices are being re-fetched this pass -- reusing
+    the price-fetch's `raw` would couple two stages that don't otherwise share
+    state. `Ticker.splits` is a light, dedicated endpoint (not a full OHLCV
+    history() call), so a full-history re-fetch every run is cheap; `_merge_save`
+    dedups idempotently, same "small dataset, full overwrite" precedent as
+    collect_sectors(). `mode` unused (kept for stage-map signature parity with
+    every other collect_X(tickers, mode) in this module).
+
+    factor convention: yfinance's split value is already "new shares per old
+    share" (2.0 for a 2:1 split, 0.5 for a 1:2 reverse split) -- BolsAI's own
+    audit log direction is inconsistent (documented in repair.py, which
+    already tries both `factor` and `1/factor` when matching a price jump),
+    so no inversion is needed here either way.
+    """
+    rows = []
+    for ticker in tickers:
+        try:
+            splits = _retry(lambda: yf.Ticker(_yf_symbol(ticker)).splits, f"splits/{ticker}")
+        except Exception as e:
+            log.warning("splits %s: skipping after error: %s", ticker, e)
+            continue
+        finally:
+            sleep(config.YF_RATE_LIMIT_SLEEP)
+        if splits is None or splits.empty:
+            continue
+        ratio = splits.to_numpy(dtype=float)
+        rows.append(pd.DataFrame({
+            "ticker": ticker,
+            "date": splits.index.tz_localize(None),
+            "type": np.where(ratio >= 1, "SPLIT", "INPLIT"),
+            "ratio_from": 1.0,
+            "ratio_to": ratio,
+            "description": [f"1:{r:g}" for r in ratio],
+            "factor": ratio,
+        }))
+    if not rows:
+        log.info("splits: no new corporate events")
+        return
+    df = pd.concat(rows, ignore_index=True)
+    saved = _merge_save(df, config.CORP_EVENTS_PATH, "date",
+                         validate.validate_corporate_events, "corporate_events")
+    if saved is not None:
+        log.info("splits: %d total rows", len(saved))
 
 
 # ---------------------------------------------------------------------------

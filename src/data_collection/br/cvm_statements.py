@@ -19,9 +19,9 @@ its own module under cvm/:
   fundamentals  BolsAI-named ratio columns; per-ticker parquet written ONLY
                 where no BolsAI file exists (BolsAI stays source of truth
                 for active tickers)
-  company_info  CANCELADA registry rows (sector, cvm_code — ticker-less on
-                BolsAI) joined to tickers via the crosswalk, appended to
-                company_info.parquet with status=CANCELADA
+  company_info  status (ATIVO/CANCELADA) + sector refresh for every ticker
+                CVM's own CAD registry resolves, sourced via delistings.py's
+                build_delist_events() -- not BolsAI's CANCELADA registry
   delistings    cad_cia_aberta.csv (CVM's own cancellation reason/date),
                 joined to tickers via the crosswalk -> delist_events.parquet,
                 consumed by build_dataset/terminal_events.py to give a

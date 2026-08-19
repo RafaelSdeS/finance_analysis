@@ -8,8 +8,8 @@ import pandas as pd
 
 from .. import config, storage, validate
 from .crosswalk import CROSSWALK_PATH
-from .shares import SHARES_PATH
-from .statements import FLOW_COLS, load_statements
+from .shares import SHARES_PATH, collect_shares
+from .statements import FLOW_COLS, collect_statements, load_statements
 
 log = logging.getLogger("cvm")
 
@@ -181,3 +181,20 @@ def build_fundamentals(tickers: list[str] | None = None, rebuild: bool = False) 
             written += 1
             log.info("fundamentals %s: %d quarters (CVM)", ticker, len(saved))
     log.info("build_fundamentals: %d written, %d skipped (existing/no prices)", written, skipped)
+
+
+def collect_fundamentals_cvm(tickers: list[str], mode: str) -> None:
+    """pipeline.py's ("fundamentals", "cvm") DATA_SOURCE entry -- BUG-1's free, correct
+    replacement for the yfinance fundamentals path (see BOLSAI_EXIT_PLAN.md Task 5).
+    `mode` unused (fn_map signature parity with every other collect_X(tickers, mode)).
+
+    collect_statements()/collect_shares() only ever re-fetch the CURRENT CVM year (both
+    already cache-and-skip every prior year), so refreshing them every quarterly update
+    is cheap -- picks up newly-filed quarters before rebuilding ratios from them.
+    rebuild=True: `tickers` here is the caller's already-scoped list (e.g. `active`
+    ATIVO tickers in pipeline.py), not the full universe, so a full per-ticker recompute
+    every run is still fast.
+    """
+    collect_statements()
+    collect_shares()
+    build_fundamentals(tickers=tickers, rebuild=True)

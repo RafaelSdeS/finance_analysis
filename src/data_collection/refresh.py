@@ -49,10 +49,10 @@ import pandas as pd
 
 from . import checkpoint, config
 from .br import collectors as br_collectors
-from .br.pipeline import _active_tickers, setup_logging
+from .br.pipeline import _active_tickers, _collect, setup_logging
 from .sec import crosswalk, fundamentals as sec_fundamentals, universe as sec_universe
 from .us.fred_collectors import collect_macro_us
-from .yf_collectors import collect_dividends_yf, collect_fundamentals_yf, collect_prices_yf
+from .yf_collectors import collect_dividends_yf, collect_prices_yf
 
 log = logging.getLogger("refresh")
 
@@ -153,7 +153,12 @@ def _refresh_br(stages: set[str], full: bool, workers: int) -> None:
 
     if "fundamentals" in stages:
         log.info("--- BR fundamentals (%d tickers) ---", len(tickers))
-        collect_fundamentals_yf(tickers, "update", workers=workers)
+        # Routed through pipeline._collect (config.DATA_SOURCE) rather than calling a
+        # vendor collector directly -- this module used to hardcode collect_fundamentals_yf,
+        # which silently bypassed the CVM rebuild (BUG-1: yfinance's BR financials are
+        # wrong in level, not just thin -- see BOLSAI_EXIT_PLAN.md). One dispatcher, one
+        # place to flip the source, instead of two independently-tracked switches.
+        _collect("fundamentals", tickers, "update")
 
 
 def _refresh_us(stages: set[str], full: bool, workers: int) -> None:

@@ -21,15 +21,17 @@ import pandas as pd
 
 from . import collectors
 from .. import config, yf_collectors
+from ..cvm import company_info as cvm_company_info
+from ..cvm import ratios as cvm_ratios
+from ..cvm import sectors as cvm_sectors
 
 
 def _collect(name: str, tickers: list[str], mode: str):
-    """Per-data-type source switch. Non-update modes (full_scale, prototype) are
-    the one-time historical backfill and always use BolsAI, regardless of
-    config.DATA_SOURCE — that dict only governs `--mode update`, where it
-    defaults to yfinance (free, keyless, no full history needed for a
-    quarterly top-up). Matches the needs_bolsai check in run() below, which
-    already assumes non-update modes require BolsAI.
+    """Per-data-type source switch, from config.DATA_SOURCE -- governs every mode
+    alike (full_scale/prototype/update) now that the free sources (yfinance prices/
+    dividends, CVM fundamentals) match or exceed BolsAI's own depth (see
+    BOLSAI_EXIT_PLAN.md). Flip a DATA_SOURCE entry to "bolsai" to opt back into the
+    paid path for that data type, in any mode.
 
     Special handling: YFINANCE_ONLY_TICKERS (e.g. BOVA11) always use yfinance.
     """
@@ -42,12 +44,13 @@ def _collect(name: str, tickers: list[str], mode: str):
         ("prices", "yfinance"): yf_collectors.collect_prices_yf,
         ("fundamentals", "bolsai"): collectors.collect_fundamentals,
         ("fundamentals", "yfinance"): yf_collectors.collect_fundamentals_yf,
+        ("fundamentals", "cvm"): cvm_ratios.collect_fundamentals_cvm,
         ("dividends", "bolsai"): collectors.collect_dividends,
         ("dividends", "yfinance"): yf_collectors.collect_dividends_yf,
     }
 
     if others:
-        source = config.DATA_SOURCE.get(name, "bolsai") if mode == "update" else "bolsai"
+        source = config.DATA_SOURCE.get(name, "bolsai")
         fn = fn_map[(name, source)]
         fn(others, mode)
 
@@ -110,14 +113,15 @@ def setup_logging():
 def run(mode: str, tickers: list[str], dry_run: bool = False):
     log = logging.getLogger("pipeline")
 
-    # update mode skips company_info and may run prices/fundamentals/dividends
-    # entirely via yfinance — only require a BolsAI key if something actually needs it.
-    needs_bolsai = mode != "update" or any(
+    # DATA_SOURCE now governs every mode (see _collect) -- only warn, don't hard-fail,
+    # since a missing key only breaks the specific data type(s) actually routed to
+    # "bolsai"; every default entry is free/keyless (BOLSAI_EXIT_PLAN.md Task 5).
+    needs_bolsai = any(
         config.DATA_SOURCE.get(k) == "bolsai" for k in ("prices", "fundamentals", "dividends")
     )
     if needs_bolsai and not config.BOLSAI_API_KEY:
-        log.error("BOLSAI_API_KEY not set (add it to .env)")
-        return False
+        log.warning("BOLSAI_API_KEY not set (add it to .env) — data type(s) explicitly "
+                     "routed to bolsai in DATA_SOURCE will fail")
 
     # Always append benchmark tickers (prices only, for performance comparison)
     all_tickers = sorted(set(tickers) | set(config.BENCHMARK_TICKERS))
@@ -125,8 +129,8 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
     if dry_run:
         log.info("DRY RUN | mode=%s | %d tickers (+%d benchmarks)", mode, len(tickers), len(config.BENCHMARK_TICKERS))
         log.info("tickers: %s", all_tickers[:20] + (["..."] if len(all_tickers) > 20 else []))
-        stage_names = ["macro"] + ([] if mode == "update" else ["company_info", "sectors", "corporate_events"]) + ["prices", "fundamentals", "dividends"]
-        log.info("would run: %s (source: %s)", ", ".join(stage_names), config.DATA_SOURCE if mode == "update" else "bolsai")
+        stage_names = ["macro", "company_info", "sectors", "corporate_events", "prices", "fundamentals", "dividends"]
+        log.info("would run: %s (source: %s)", ", ".join(stage_names), config.DATA_SOURCE)
         return True
 
     log.info("=" * 60)
@@ -144,16 +148,17 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
         log.info("data stages: %d/%d tickers confirmed on BolsAI", len(active), len(tickers))
         return active
 
-    stages = [("macro", lambda: collectors.collect_macro(mode))]
-    if mode != "update":
-        # company_info, sectors, corporate_events are BolsAI-only and rarely
-        # change; update mode skips them to minimize BolsAI usage (and to keep
-        # `--mode update` fully usable with no BolsAI key at all). Run
-        # `--mode full_scale`/`prototype` manually to pick up new IPOs, status
-        # changes, or newly announced splits.
-        stages.append(("company_info", lambda: collectors.collect_company_info(tickers, mode)))
-        stages.append(("sectors", lambda: collectors.collect_sectors()))
-        stages.append(("corporate_events", lambda: collectors.collect_corporate_events(mode)))
+    # company_info/sectors/corporate_events are free (CVM CAD + yfinance), so they
+    # run in every mode now, including update -- no BolsAI usage to ration.
+    # collectors.collect_company_info/collect_sectors/collect_corporate_events (the
+    # original BolsAI versions) stay importable but unused by default; see
+    # BOLSAI_EXIT_PLAN.md Task 5.
+    stages = [
+        ("macro", lambda: collectors.collect_macro(mode)),
+        ("company_info", lambda: cvm_company_info.synthesize_company_info()),
+        ("sectors", lambda: cvm_sectors.build_sectors()),
+        ("corporate_events", lambda: yf_collectors.collect_splits_yf(all_tickers, mode)),
+    ]
 
     for name, fn in stages:
         log.info("--- stage: %s ---", name)
@@ -217,6 +222,13 @@ def main():
     elif args.mode == "prototype":
         tickers = config.PROTOTYPE_TICKERS
     elif args.mode == "update":
+        tickers = _active_tickers()
+    elif args.mode == "full_scale" and not config.BOLSAI_API_KEY:
+        # No key: get_all_tickers() needs BolsAI's /stocks/ registry for fresh-ticker
+        # discovery. Fall back to the universe already on disk (company_info.parquet,
+        # itself CVM-sourced -- see cvm/company_info.py) so full_scale can still refresh
+        # every known ticker's history keylessly; new IPOs need a key to discover (S4,
+        # BOLSAI_EXIT_PLAN.md -- pre-existing limitation, not a new gap).
         tickers = _active_tickers()
     else:
         tickers = collectors.get_all_tickers()

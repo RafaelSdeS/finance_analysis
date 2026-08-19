@@ -3,8 +3,10 @@
 **Goal:** run the BR pipeline indefinitely with no paid dependency, while getting *more*
 history, *more* coverage and *more* internal consistency than BolsAI currently gives.
 **Constraint:** BolsAI infrastructure stays — build around it, never delete it.
-**Status:** Tasks 0, 2, 3, 1 implemented and run against real data 2026-08-19 (see "Implementation
-log" near the end). Tasks 4–5 not started. **Written:** 2026-08-19.
+**Status:** Tasks 0, 2, 3, 1, 4, 5 implemented 2026-08-19 (see "Implementation log" near the end).
+Task 5's dataset rebuild/diff/CLAUDE.md update and the subscription cancellation are the only
+items left — both gated on running the pipeline against real data, deliberately not done in this
+pass. **Written:** 2026-08-19.
 
 ---
 
@@ -218,14 +220,14 @@ exists exactly to make this auditable).
       `company_info.parquet`. **Reuse the existing `sec/crosswalk.py` `CIK_OVERRIDES` pattern** —
       don't invent a second mechanism.
 
-### Task 4 — Free replacements for the remaining BolsAI-only collectors
+### Task 4 — Free replacements for the remaining BolsAI-only collectors ✅ DONE (2026-08-19)
 
-- [ ] `corporate_events`: new yfinance `Ticker.splits` collector writing the existing schema.
+- [x] `corporate_events`: new yfinance `Ticker.splits` collector writing the existing schema.
       Load-bearing — `repair.py` needs this log, and a price-jump heuristic was tried and
       rejected 3× (`repair.py:20`). Enable it in `--mode update`, where it's currently skipped.
-- [ ] `company_info` / `status`: source from CVM CAD. `delistings.py` already downloads and
+- [x] `company_info` / `status`: source from CVM CAD. `delistings.py` already downloads and
       correctly de-duplicates that exact file — reuse `build_delist_events()`, don't re-fetch.
-- [ ] `sectors`: source from CAD's `SETOR_ATIV` instead of BolsAI. Confirmed real and
+- [x] `sectors`: source from CAD's `SETOR_ATIV` instead of BolsAI. Confirmed real and
       populated — 30+ categories with hundreds of members each (e.g. "Bancos" 115,
       "Energia Elétrica" 117, "Metalurgia e Siderurgia" 139), already in the CAD file
       `delistings.py` downloads — no new fetch. Taxonomy differs from BolsAI's (different
@@ -234,16 +236,18 @@ exists exactly to make this auditable).
       `groupby`s on it), so the swap is safe. `sector` stays excluded from training either
       way, per `manifest.LOOKAHEAD_TAINTED_COLS`.
 
-### Task 5 — Cutover (keeping BolsAI infrastructure intact)
+### Task 5 — Cutover (keeping BolsAI infrastructure intact) ✅ code done (2026-08-19); dataset rebuild + cancellation still pending
 
-- [ ] Point `DATA_SOURCE["fundamentals"]` at CVM; drop yfinance from the fundamentals path.
-- [ ] Make `--mode full_scale` work end-to-end with no key, and relax the `needs_bolsai`
+- [x] Point `DATA_SOURCE["fundamentals"]` at CVM; drop yfinance from the fundamentals path.
+- [x] Make `--mode full_scale` work end-to-end with no key, and relax the `needs_bolsai`
       hard-fail (`pipeline.py:115-120`) to a warning.
-- [ ] **Leave `client.py` and every BolsAI collector in place and importable**, reachable via
+- [x] **Leave `client.py` and every BolsAI collector in place and importable**, reachable via
       an explicit opt-in flag. Per your constraint: build around it, don't delete it.
-- [ ] `tests/run_all.py --group fast`, then `--group data`. Add a regression test asserting no
+- [x] `tests/run_all.py --group fast`, then `--group data`. Add a regression test asserting no
       ticker's flow series changes convention mid-history (the BUG-1 signature).
-- [ ] Rebuild the dataset, diff against `dataset_v{N}`, update CLAUDE.md.
+- [ ] Rebuild the dataset, diff against `dataset_v{N}`, update CLAUDE.md. *(CLAUDE.md's Critical
+      Caveats/DATA_SOURCE-relevant lines updated already; the dataset rebuild+diff itself needs
+      an explicit go-ahead to run — not done in this pass.)*
 - [ ] Cancel the subscription **only after** the above is green.
 
 ---
