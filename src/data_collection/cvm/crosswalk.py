@@ -17,6 +17,31 @@ CROSSWALK_PATH = config.CVM_DIR / "fca_crosswalk.parquet"
 _TICKER = re.compile(r"^[A-Z0-9]{4}(?:[3-8]|11)$")
 _FCA_COLS = ["ticker", "cnpj", "corporate_name", "end_trading", "year"]
 
+# Tickers with no Codigo_Negociacao in any FCA year (crosswalk.py's documented 2010-2017
+# blank-field + survivor-style limits, or a filer whose FCA simply never lists this exact
+# code) -- confirmed 2026-08-19 to all have real CVM statement data under these CNPJs
+# (verified via cvm/statements.py's cnpj-keyed lookup), just no ticker link. Same pattern as
+# sec/crosswalk.py's CIK_OVERRIDES. cnpj/corporate_name seeded from company_info.parquet.
+TICKER_CNPJ_OVERRIDES = {
+    "AMAR3": ("61189288000189", "MARISA LOJAS SA"),
+    "BPAC11": ("30306294000145", "BANCO BTG PACTUAL S/A"),
+    "CMIN3": ("08902291000115", "CSN MINERAÇÃO S.A."),
+    "CSNA3": ("33042730000104", "CIA SIDERURGICA NACIONAL"),
+    "EGGY3": ("81616807000155", "GRANJA FARIA S.A."),
+    "EPAR3": ("42331462000131", "EMBPAR PARTICIPAÇÕES S/A"),
+    "EQMA3B": ("06272793000184", "EQUATORIAL MARANHÃO DISTRIBUIDORA DE ENERGIA S.A."),
+    "EQPA3": ("04895728000180", "EQUATORIAL PARÁ DISTRIBUIDORA DE ENERGIA S.A."),
+    "HAGA4": ("30540991000166", "HAGA S.A. INDÚSTRIA E COMÉRCIO"),
+    "LUXM4": ("92660570000126", "TREVISA  INVESTIMENTOS SA"),
+    "MAPT4": ("93828986000173", "CEMEPE INVESTIMENTOS SA"),
+    "MBRF3": ("03853896000140", "MARFRIG GLOBAL FOODS SA"),
+    "MRSA3B": ("01417222000177", "MRS LOGÍSTICA S/A"),
+    "NORD3": ("60884319000159", "NORDON INDUSTRIAS METALURGICAS S.A."),
+    "OBTC3": ("59693110000129", "ORANJEBTC S.A. - EDUCAÇÃO E INVESTIMENTO"),
+    "PLAS3": ("51928174000150", "PLASCAR PARTICIPAÇÕES INDUSTRIAIS S.A"),
+    "WDCN3": ("05917486000140", "LIVETECH DA BAHIA INDÚSTRIA E COMÉRCIO S.A."),
+}
+
 
 def build_crosswalk() -> pd.DataFrame:
     """ticker -> cnpj, cvm_code, corporate_name, end_trading. Latest FCA wins per ticker.
@@ -73,6 +98,14 @@ def build_crosswalk() -> pd.DataFrame:
           .sort_values("year")
           .drop_duplicates("ticker", keep="last")
           .drop(columns="year"))
+
+    override_rows = pd.DataFrame([
+        {"ticker": t, "cnpj": cnpj, "corporate_name": name, "end_trading": None}
+        for t, (cnpj, name) in TICKER_CNPJ_OVERRIDES.items() if t not in set(df["ticker"])
+    ])
+    if not override_rows.empty:
+        df = pd.concat([df, override_rows], ignore_index=True)
+        log.info("crosswalk: +%d ticker(s) from TICKER_CNPJ_OVERRIDES", len(override_rows))
 
     # cvm_code via filing_dates (already on disk, cnpj+cvm_code per filing)
     if FILING_DATES_PATH.exists():

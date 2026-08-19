@@ -1,6 +1,5 @@
-"""cvm/ratios.py — BolsAI-schema fundamentals (ratios) for delisted tickers,
-built from CVM raw statements + shares outstanding. Written only where no
-BolsAI-sourced fundamentals file already exists.
+"""cvm/ratios.py — BolsAI-schema fundamentals, rebuilt from CVM raw statements +
+shares outstanding for every crosswalk-resolvable ticker (not just delisted names).
 """
 
 import logging
@@ -10,17 +9,43 @@ import pandas as pd
 from .. import config, storage, validate
 from .crosswalk import CROSSWALK_PATH
 from .shares import SHARES_PATH
-from .statements import load_statements
+from .statements import FLOW_COLS, load_statements
 
 log = logging.getLogger("cvm")
 
+_TTM_COLS = FLOW_COLS + ["depr_amort"]  # net_revenue, gross_profit, ebit, net_income, depr_amort
+_TAX_RATE = 0.34  # Brazilian statutory corporate rate (IRPJ+CSLL combined) -- an approximation
+# of each company's actual effective rate, not a parsed tax-expense line. Documented
+# approximation, same spirit as the ebitda==ebit shortcut it replaces for corporates.
+
+
+def _ttm(q: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Single-quarter flow columns -> trailing-twelve-month, on a gap-safe quarter-end
+    grid: reindexed onto every expected quarter between the series' min/max first, so a
+    missing filing breaks the rolling window (NaN) instead of silently summing two
+    non-adjacent quarters. `q` must be one cnpj, sorted by reference_date."""
+    if q.empty:
+        return q.assign(**{c: pd.Series(dtype=float) for c in cols})
+    full_idx = pd.date_range(q["reference_date"].min(), q["reference_date"].max(), freq="QE")
+    grid = q.set_index("reference_date")[cols].reindex(full_idx)
+    ttm = grid.rolling(4, min_periods=4).sum()
+    out = q.copy()
+    for c in cols:
+        out[c] = ttm[c].reindex(q["reference_date"]).to_numpy()
+    return out
+
 
 def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
-    """Wide quarterly frame (one cnpj) + close_price/shares_outstanding columns
-    -> BolsAI-schema fundamentals. Ratio conventions verified against a live
-    BolsAI response (BPAN4 2025-09-30): flows are single-quarter (not TTM),
-    flow/balance values in R$ thousands, market_cap in R$ units."""
-    g = q.copy()
+    """Wide quarterly frame (one cnpj) + close_price/shares_outstanding columns ->
+    BolsAI-schema fundamentals. Flows are standardized to TTM for every ticker
+    (locked design decision, 2026-08-19 -- see BOLSAI_EXIT_PLAN.md Task 1): BolsAI
+    itself mixes single-quarter and TTM per ticker (measured: 309 vs 269 of 612,
+    near a coin flip), which corrupts any cross-sectional comparison
+    (`cross_sectional.py` z-scores within sector groups, `alpha.py` trains one
+    model across the whole panel) -- both need a column to mean the same thing for
+    every row. Balance-sheet items stay point-in-time, never TTM'd. Values in R$
+    thousands (statements) / R$ units (market_cap), matching BolsAI's own unit."""
+    g = _ttm(q.sort_values("reference_date"), [c for c in _TTM_COLS if c in q.columns])
 
     def col(name):
         return g[name] if name in g.columns else pd.Series(float("nan"), index=g.index)
@@ -30,9 +55,11 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     g["total_debt"] = col("debt_st").fillna(0) + col("debt_lt").fillna(0)
     g.loc[col("debt_st").isna() & col("debt_lt").isna(), "total_debt"] = float("nan")
     g["net_debt"] = g["total_debt"] - g["cash"]
-    # ponytail: EBITDA = EBIT (D&A needs DFC parsing; BolsAI itself ships
-    # ebitda==ebit for banks — add DFC_MI parsing if EBITDA precision matters)
-    g["ebitda"] = col("ebit")
+    # Real EBITDA for corporates (ebit + TTM D&A from the DFC cash-flow statement).
+    # Banks: ebit is already NaN (statements.py's dre_column() never labels a bank's
+    # 3.05 pre-tax line as EBIT), so ebitda stays NaN too -- a real industry
+    # difference (D&A isn't a meaningful concept on a bank's DRE), not a shortcut.
+    g["ebitda"] = col("ebit") + col("depr_amort")
 
     g["market_cap"] = g["close_price"] * g["shares_outstanding"]
     k = 1000.0  # statements are in thousands; market_cap in units
@@ -61,6 +88,10 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     g["net_debt_equity"] = g["net_debt"] / col("equity")
     g["net_debt_ebitda"] = g["net_debt"] / g["ebitda"]
     g["net_debt_ebit"] = g["net_debt"] / col("ebit")
+    # NOPAT / invested capital, invested capital = total_debt + equity - cash.
+    # Uses _TAX_RATE (statutory, not effective) -- see module docstring note.
+    invested_capital = g["total_debt"] + col("equity") - g["cash"]
+    g["roic"] = (col("ebit") * (1 - _TAX_RATE)) / invested_capital * 100
 
     # BolsAI has these; fill_missing_cagr() backfills them in Stage 2 from the
     # net_income/net_revenue history, exactly as it does for BolsAI nulls
@@ -71,7 +102,7 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     keep = ["reference_date", "close_price", "shares_outstanding", "market_cap",
             "pl", "pvp", "ev_ebitda", "ev_ebit", "p_ebitda", "p_ebit", "p_sr",
             "lpa", "vpa", "gross_margin", "net_margin", "ebitda_margin", "ebit_margin",
-            "roe", "roa", "ebit_over_assets", "asset_turnover", "p_assets",
+            "roe", "roa", "roic", "ebit_over_assets", "asset_turnover", "p_assets",
             "current_ratio", "debt_equity", "net_debt_equity", "net_debt_ebitda",
             "net_debt_ebit", "cagr_revenue_5y", "cagr_earnings_5y",
             "net_income", "equity", "net_revenue", "total_debt", "ebitda", "ebit",
@@ -80,7 +111,13 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     for c in keep:  # banks lack some accounts (e.g. 3.05) — NaN keeps the schema stable
         if c not in g.columns:
             g[c] = float("nan")
-    return g[keep]
+    g = g[keep]
+    # nonzero/0 divisions land as inf, not NaN (only 0/0 propagates NaN naturally) — clean
+    # at the source so raw parquet never stores literal inf. Same pattern as
+    # yf_collectors.compute_ratios(), which writes to this same fundamentals schema.
+    num = g.select_dtypes(include="number").columns
+    g[num] = g[num].replace([float("inf"), float("-inf")], float("nan"))
+    return g
 
 
 def _price_asof(prices: pd.DataFrame, ref_dates: pd.Series) -> pd.Series:
@@ -103,9 +140,16 @@ def _shares_asof(shares: pd.DataFrame, cnpj: str, ref_dates: pd.Series):
     return merged.set_index("reference_date")["shares"].reindex(ref_dates).to_numpy()
 
 
-def build_fundamentals(tickers: list[str] | None = None) -> None:
-    """Per-ticker fundamentals parquet for every crosswalk ticker that has a
-    prices file but NO fundamentals file (BolsAI-sourced files are never touched)."""
+def build_fundamentals(tickers: list[str] | None = None, rebuild: bool = False) -> None:
+    """Per-ticker fundamentals parquet for every crosswalk ticker with a prices file.
+
+    rebuild=False (default): only tickers with no existing fundamentals file get one
+    (the original delisted-only behavior). rebuild=True: recompute and overwrite every
+    ticker from CVM regardless of what's on disk -- `q` always carries that ticker's
+    FULL statement history, so `storage._merge_save()`'s existing concat+dedup(keep=
+    "last") already replaces every quarter with the freshly computed CVM value; no
+    separate overwrite path needed in storage.py.
+    """
     xwalk = pd.read_parquet(CROSSWALK_PATH)
     stmts = load_statements()
     shares = pd.read_parquet(SHARES_PATH) if SHARES_PATH.exists() else pd.DataFrame(
@@ -117,7 +161,7 @@ def build_fundamentals(tickers: list[str] | None = None) -> None:
         ticker, cnpj = row["ticker"], row["cnpj"]
         out = config.FUND_DIR / f"{ticker}.parquet"
         px_path = config.PRICES_DIR / f"{ticker}.parquet"
-        if out.exists() or not px_path.exists():
+        if (out.exists() and not rebuild) or not px_path.exists():
             skipped += 1
             continue
         q = stmts[stmts["cnpj"] == cnpj].sort_values("reference_date")
