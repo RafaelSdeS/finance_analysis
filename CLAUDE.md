@@ -160,7 +160,7 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 | `storage.py` | `_merge_save()` (idempotent append+dedup+validate+write) + `_chunk_dates()` — generic, used by every collector |
 | `yf_collectors.py` | yfinance: `collect_{prices,fundamentals,dividends}_yf()` — shared by BR's `--mode update` and US's full backfill |
 | `br/collectors.py` | BolsAI: `collect_{macro,prices,fundamentals,company_info,dividends,corporate_events,sectors}()` |
-| `br/pipeline.py` | BR orchestration CLI; dispatches to BolsAI/yfinance/CVM per `DATA_SOURCE` (default: yfinance prices/dividends, CVM fundamentals — BolsAI is opt-in only, see `docs/BOLSAI_EXIT_PLAN.md`) |
+| `br/pipeline.py` | BR orchestration CLI; dispatches to BolsAI/yfinance/CVM per `DATA_SOURCE` (default: yfinance prices/dividends, CVM fundamentals — BolsAI is opt-in only, see `docs/BOLSAI_EXIT_PLAN.md`). **Not a whole-panel rebuild tool**: `pipeline.py`'s fundamentals path always scopes to `_active_tickers()` (status == ATIVO) before calling `collect_fundamentals_cvm`/`build_fundamentals` — invisible at the call site, and the exact thing that would silently leave delisted-only tickers' fundamentals unmigrated (`docs/DATA_LAYER_CORRECTNESS_PLAN.md` §1 caught this at 115 stranded files). A full-crosswalk rebuild needs `cvm.ratios.build_fundamentals(tickers=None, rebuild=True)` directly. |
 | `br/collect_delisted.py` | Price backfill for delisted/never-collected BR tickers |
 | `br/cvm_statements.py` + `cvm/` | CVM open-data collection (delisted fundamentals + real filing dates); `--step` CLI over `cvm/{http,crosswalk,statements,shares,ratios,company_info,filing_dates}.py` |
 | `br/stats.py` | Post-collection data audit (BR only) |
@@ -227,6 +227,23 @@ git history and `docs/*AUDIT*.md`; this list is only the actionable "what's true
 
 **Feature engineering**
 - All feature engineering lives in Stage 2, not deferred downstream.
+- **Units convention (locked 2026-08-20, `docs/DATA_LAYER_CORRECTNESS_PLAN.md` §1):** every
+  monetary value is a full currency unit — full BRL, full USD — never "thousands". This wasn't
+  always true: BR fundamentals were stored in BRL thousands (a leftover BolsAI-API convention)
+  while US was already full-dollar, silently breaking any ratio that crosses the two scales
+  (`book_to_market`, `dividend_coverage_ratio` — both read 1000× too small). Enforced by
+  `tests/build_dataset/test_unit_scale_invariants.py` (DATA group): per ticker, both markets,
+  `vpa*shares==equity` · `lpa*shares==net_income` · `market_cap/shares==close` ·
+  `book_to_market*pvp==1`, 10% band, fails on the worst offender — not a pooled statistic (a panel
+  mixing correctly- and incorrectly-scaled tickers reads deceptively close to correct pooled).
+- **Periodicity convention (`docs/DATA_LAYER_CORRECTNESS_PLAN.md` §3):** `_qoq` means an
+  adjacent-quarter delta and is only accurately named on point-in-time inputs (e.g.
+  `debt_equity_qoq`, `current_ratio_qoq`). On a TTM input (e.g. `gross_margin_qoq`,
+  `net_margin_qoq`, `roe_qoq`), a 1-lag diff is actually a single-quarter **year-over-year**
+  change — subtracting two 4-quarter rolling sums cancels the three shared quarters. The `_qoq`
+  names on TTM-based columns are misleading (numbers are right, name isn't); a rename is deferred,
+  tracked in the plan. `*_trend_4q` (`diff(4)`, trailing year vs. prior year) is the complementary
+  slow signal to `_qoq`'s fast one — keep both, they're not redundant.
 - CAGR backfill is on unconditionally (`fill_missing_cagr()`): ~60% coverage from BolsAI + ~7% backfilled from earnings/revenue.
 - Valuation ratios (P/E, P/B, etc.) are re-anchored to current close daily via `recompute_valuation_daily()`, not left at filing-date close. Known ceiling: mid-quarter splits skew ratios until the next filing.
 - `*_zhist_5y`: causal rolling robust z-score (median/IQR, 5y window) per ticker for 11 fundamental ratios + 2 daily liquidity ratios — "how unusual for *this company*," distinct from the cross-sectional `RobustScaler` and `cross_sectional.py`'s peer-relative view. Stateless, no train/test split needed. Warm-up (<8 quarters / <252 days) is NaN.
@@ -260,7 +277,7 @@ git history and `docs/*AUDIT*.md`; this list is only the actionable "what's true
 `data/raw/{br,us}/` are symmetric, market-namespaced raw trees. The one real asymmetry is
 git-tracking, not layout: BR is git-tracked, US is gitignored (too large, rebuildable on demand).
 
-- **Raw, BR (`data/raw/br/`, git-tracked):** ~293 tickers + benchmark BOVA11, one parquet per ticker in `data/raw/br/{prices,fundamentals,dividends}/`. Prices/dividends current to 2026-06-30; fundamentals to 2026-03-31. Coverage isn't uniform (e.g. some tickers lack a dividends file) — treat gaps as "not yet collected," not "confirmed zero"; `has_dividends` (0/1) makes this explicit in the processed dataset.
+- **Raw, BR (`data/raw/br/`, git-tracked):** 1,328 price files + benchmark BOVA11 (567 reach `ml_dataset.parquet`; the rest are delisted names kept for price history only, or filtered by Stage 2's quality gates), 612 fundamentals files, one parquet per ticker in `data/raw/br/{prices,fundamentals,dividends}/`. Prices current to 2026-08-14; fundamentals to 2026-06-30. Coverage isn't uniform (e.g. some tickers lack a dividends file) — treat gaps as "not yet collected," not "confirmed zero"; `has_dividends` (0/1) makes this explicit in the processed dataset.
 - `data/raw/br/macro/{selic,cdi,ipca}.parquet` and `data/raw/br/company_info/company_info.parquet` are market-wide reference tables, not per-ticker. `company_info/sectors.parquet` is a small sanity-check aggregate, not a join key. `corporate_events/corporate_events.parquet` is a split/inplit audit log. Since 2026-08-19 all three are free (CVM CAD + yfinance `Ticker.splits`) and run in every mode, including `--mode update` (previously BolsAI-only and skipped there) — see `docs/BOLSAI_EXIT_PLAN.md` Task 4.
 - **Processed:** `data/processed/ml_dataset.parquet` + `ml_dataset.manifest.json` (reproducibility snapshot) + `split_config.json` (train/val/test cutoffs, a filter not a copy). Each build that changes output is snapshotted to `data/processed/dataset_v{N}/`; cite `dataset_v{N}` when referencing a specific build. `data/processed/scalers/` fit train-only via the separate `scale_features.py` step. All gitignored, regenerable from `data/raw/`, except the tracked `data/processed/README.md`.
 - **Raw, US (`data/raw/us/`, gitignored):** `macro/` (FRED), `prices/` (yfinance), `fundamentals/` (combined xbrl/ex27/item6 tiers), `sec/` (crosswalk, filings index, universe roster). `us_ml_dataset.parquet` has been built and validated at a scoped top-500-by-market-cap universe (Phase 6 of `docs/US_EQUITIES_EXPANSION_PLAN.md`); scaling the same code to the full ~10,432-ticker universe is Phase 6's current, in-progress step. Prices/fundamentals collection is gated by `sec/crosswalk.py`'s tier-1 crosswalk (SEC's `company_tickers.json`, current listings only) — survivor-only by construction, a decision accepted 2026-07-29 (`docs/US_COLLECTOR_FIX_PLAN.md` §4; free delisted-price recovery exists via Alpha Vantage but is rate-capped at 25 req/day, impractical at this universe's scale). `sec/universe.py` separately builds a genuinely survivorship-bias-free roster (every CIK that filed a 10-K/10-Q since 1994) purely to *measure* the gap — `build_us_dataset.py` now records the per-year coverage ratio as the manifest's `survivorship_coverage` field.

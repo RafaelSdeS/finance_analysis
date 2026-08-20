@@ -244,6 +244,20 @@ def validate(df):
         msg += f" [suspicious merge bug in: {', '.join(all_three)}]"
     checks.append((msg, prefix_ok))
 
+    # §2a (DATA_LAYER_CORRECTNESS_PLAN.md): extend the prefix-NaN rule to adj_close.
+    # A NaN or non-positive adj_close is never itself an error (2-decimal-precision
+    # underflow on deep-history microcaps is a known, accepted, unrecoverable gap --
+    # "flag only, no repair") but it MUST carry adj_close_precision_degraded == 1, so
+    # any consumer trusting that flag (as validate_prices's own comment already
+    # assumes) can actually rely on it. Before the §2a fix this failed outright: all
+    # 259 known NaN adj_close rows carried degraded == 0.
+    if {"adj_close", "adj_close_precision_degraded"}.issubset(df.columns):
+        bad_adj = (df["adj_close"].isna() | (df["adj_close"] <= 0))
+        unflagged = int((bad_adj & (df["adj_close_precision_degraded"] != 1)).sum())
+        checks.append((f"NaN/non-positive adj_close always flagged degraded=1 "
+                       f"[{unflagged} unflagged of {int(bad_adj.sum())} such rows]",
+                       unflagged == 0))
+
     # CAGR coverage: NaN values are expected (base year missing, negative earnings, etc).
     # Just report coverage stats and warn if suspiciously high NaN rate.
     if "cagr_earnings_5y_final" in df.columns and "n_quarters_available" in df.columns:

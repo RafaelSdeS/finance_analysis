@@ -203,7 +203,14 @@ def compute_price_features(df):
         # not a rounding artifact -- and must NOT be flagged.
         near_floor = (g["adj_close"] > 0) & (g["adj_close"] < 0.05)
         quantized = np.isclose(g["adj_close"], g["adj_close"].round(2))
-        g["adj_close_precision_degraded"] = (near_floor & quantized).astype(int)
+        # §2a (DATA_LAYER_CORRECTNESS_PLAN.md): NaN>0 and 0.0>0 are both False, so
+        # near_floor alone can never fire on a NaN or exact-zero adj_close -- exactly
+        # the rows validate_prices.py waves through as "already flagged here". isna()
+        # must be the FIRST OR term: np.isclose(NaN, NaN) is False, so folding it into
+        # `quantized` instead would silently drop NaN rows from the flag again.
+        g["adj_close_precision_degraded"] = (
+            g["adj_close"].isna() | (g["adj_close"] <= 0) | (near_floor & quantized)
+        ).astype(int)
 
         # Overnight gap / intraday return: log_return decomposed into the
         # portion that accrued outside trading hours (today's open vs. prior

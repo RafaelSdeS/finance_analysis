@@ -139,6 +139,55 @@ def roster_drift() -> list[str]:
     }
     return sorted(on_disk - set(FAST) - set(DATA) - EXCLUDED)
 
+
+def main_block_drift() -> dict[str, list[str]]:
+    """test_* functions defined in a file but never referenced in its own
+    `if __name__ == "__main__"` block -- silently never run, the second drift
+    trap alongside roster_drift() (DATA_LAYER_CORRECTNESS_PLAN.md §5).
+    pytest-discovered files (`pytest.main`) are exempt -- pytest itself finds
+    every test_*, no hand-list to drift.
+    """
+    import ast
+
+    problems = {}
+    for path in ROOT.glob("tests/**/*.py"):
+        if path.name == "run_all.py" or "__pycache__" in path.parts:
+            continue
+        rel = str(path.relative_to(ROOT))
+        if rel in EXCLUDED:
+            continue
+        src = path.read_text()
+        if "pytest.main" in src:
+            continue
+        tree = ast.parse(src, filename=rel)
+
+        funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+        test_fns = {name for name in funcs if name.startswith("test_")}
+        main_block = next((n for n in tree.body if isinstance(n, ast.If)
+                            and isinstance(n.test, ast.Compare)
+                            and isinstance(n.test.left, ast.Name) and n.test.left.id == "__name__"),
+                           None)
+        if not test_fns or main_block is None:
+            continue
+
+        # Transitive closure, not just the __main__ block itself: this repo's
+        # dominant shape is `def main(): test_x(); ...` + `if __name__==...: main()`,
+        # one level of indirection away from the block that names test_* directly.
+        referenced, to_visit, visited = set(), [main_block], set()
+        while to_visit:
+            node = to_visit.pop()
+            names = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+            names |= {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+            referenced |= names
+            for name in names & funcs.keys() - visited:
+                visited.add(name)
+                to_visit.append(funcs[name])
+
+        missing = sorted(test_fns - referenced)
+        if missing:
+            problems[rel] = missing
+    return problems
+
 # --- color -------------------------------------------------------------
 
 COLOR = sys.stdout.isatty() and "NO_COLOR" not in os.environ
@@ -298,6 +347,14 @@ def main() -> int:
         for path in drift:
             print(c("red", f"    {path}"))
         print(c("red", "  Add each to FAST or DATA, or to EXCLUDED with a reason."))
+        return 1
+
+    main_drift = main_block_drift()
+    if main_drift:
+        print(c("red", "✗ test_* functions defined but never called from their own __main__ block:"))
+        for path, missing in main_drift.items():
+            print(c("red", f"    {path}: {', '.join(missing)}"))
+        print(c("red", "  Call each from __main__, or switch the file to pytest.main([__file__])."))
         return 1
 
     scripts = {"fast": FAST, "data": DATA, "all": FAST + DATA}[args.group]

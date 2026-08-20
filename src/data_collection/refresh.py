@@ -1,5 +1,9 @@
 """refresh.py — one-command fast top-up for BR + US: macro, dividends, prices,
-fundamentals, tail-only by default.
+fundamentals, tail-only by default. BR's "macro" stage also refreshes
+company_info/sectors/corporate_events (free CVM CAD + yfinance sources) --
+folded in 2026-08-20 so this "one-command" path doesn't silently skip them
+the way it used to (§6, DATA_LAYER_CORRECTNESS_PLAN.md); US has no
+equivalent (CVM is BR-only).
 
 Dividends and prices are now ONE pass, not two (2026-08-13): yfinance's
 actions=True response already carries the Dividends/Stock Splits columns
@@ -50,9 +54,11 @@ import pandas as pd
 from . import checkpoint, config
 from .br import collectors as br_collectors
 from .br.pipeline import _active_tickers, _collect, setup_logging
+from .cvm import company_info as cvm_company_info
+from .cvm import sectors as cvm_sectors
 from .sec import crosswalk, fundamentals as sec_fundamentals, universe as sec_universe
 from .us.fred_collectors import collect_macro_us
-from .yf_collectors import collect_dividends_yf, collect_prices_yf
+from .yf_collectors import collect_dividends_yf, collect_prices_yf, collect_splits_yf
 
 log = logging.getLogger("refresh")
 
@@ -148,6 +154,20 @@ def _refresh_br(stages: set[str], full: bool, workers: int) -> None:
     if "macro" in stages:
         log.info("--- BR macro ---")
         br_collectors.collect_macro("update")
+
+        # company_info/sectors/corporate_events are free (CVM CAD + yfinance) and
+        # pipeline.py already runs them in every mode ("no BolsAI usage to ration") --
+        # folded in under the same "macro" stage here so refresh.py's one-command
+        # top-up doesn't skip them (previously only `pipeline.py --mode update` did,
+        # so a status change or new split never reached this path -- §6,
+        # DATA_LAYER_CORRECTNESS_PLAN.md).
+        log.info("--- BR company_info ---")
+        cvm_company_info.synthesize_company_info()
+        log.info("--- BR sectors ---")
+        cvm_sectors.build_sectors()
+        log.info("--- BR corporate_events ---")
+        all_tickers = sorted(set(tickers) | set(config.BENCHMARK_TICKERS))
+        collect_splits_yf(all_tickers, "update")
 
     _refresh_prices_and_dividends(tickers, "update", stages, full, workers)
 

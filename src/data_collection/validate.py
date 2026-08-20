@@ -72,9 +72,17 @@ def validate_prices(df: pd.DataFrame) -> ValidationResult:
     # NaN bar silently passed close<=0/bracket checks. Measured real BR data:
     # NaN here is ~0% (2 rows in 2.29M) -- a real defect, not a vendor norm.
     # adj_* is deliberately NOT included: ~0.01% NaN there is the documented
-    # 2-decimal-precision underflow on deep-history microcaps (CLAUDE.md),
-    # already flagged downstream via adj_close_precision_degraded -- an
-    # error here would refuse to (re-)collect known-quarantined tickers.
+    # 2-decimal-precision underflow on deep-history microcaps (CLAUDE.md) --
+    # an error here would refuse to (re-)collect known-quarantined tickers.
+    # [§2a, DATA_LAYER_CORRECTNESS_PLAN.md, 2026-08-20] This file predates
+    # Stage 2's adj_close_precision_degraded flag by construction (it's a raw
+    # collector validator; the flag is computed later in features.py), so it
+    # can never check that flag directly -- and until 2026-08-20 the flag
+    # itself couldn't fire on NaN/zero adj_close either (near_floor requires
+    # adj_close > 0), so "already flagged downstream" was false for exactly
+    # the rows this check would have caught. The flag now covers isna()/<=0
+    # too, so the claim holds again -- but that's a property of features.py,
+    # not something this validator enforces or can see.
     raw_ohlc = ["open", "high", "low", "close"]
     nan_ohlc = df[raw_ohlc].isna().any(axis=1)
     if nan_ohlc.any():

@@ -10,11 +10,16 @@ now lives in **`DATA_LAYER_ORGANIZATION_PLAN.md`** and runs *behind* this one.
 2. **Every derived column means one thing** — no column that is a percent in one row and a fraction in another.
 3. **Proof they work** — invariants that fail loudly, not conventions held in comments.
 
-**Status:** §1 is DONE end to end as of 2026-08-20 — normalization code (steps 1/1b/2) committed
-(`6ddc959`), migration (step 3) run over the full 695-ticker crosswalk (612 written, 83 skipped for
-no price file — matches the crosswalk exactly, confirmed NOT ATIVO-scoped), `ml_dataset.parquet`
-rebuilt and `scale_features.py` re-fit (step 5). §3's Edits 1–5, §2c's fix, and §4/§5/§6 slices also
-applied (⚠️ APPLIED / ✅ APPLIED). `tests/run_all.py --group fast`: **55/55 pass**.
+**Status: the entire plan is DONE as of 2026-08-20** — every implementation item in every section
+(§1–§7) is applied and verified; only two research-verification tasks (§2b, the 105 stale-ATIVO
+tickers) and the separate Organization plan remain, both deliberately out of scope (see Sequencing
+at the bottom). §1 itself: normalization code (steps 1/1b/2) committed (`6ddc959`), migration (step
+3) run over the full 695-ticker crosswalk (612 written, 83 skipped for no price file — matches the
+crosswalk exactly, confirmed NOT ATIVO-scoped), `ml_dataset.parquet` rebuilt **twice** (once for
+steps 2–3's normalization, once more after §2a's Stage 2 flag fix) and `scale_features.py` re-fit
+both times. §2a, §3's Edits 1–5, §2c's fix, §5's two drift traps + 12-site audit + checkpoint
+semantics, §6's `refresh.py` gap, and §7's CLAUDE.md updates are all applied (⚠️ APPLIED /
+✅ APPLIED throughout). `tests/run_all.py --group fast`: **55/55 pass**.
 
 **Invariant test results (`tests/build_dataset/test_unit_scale_invariants.py`), post-rebuild:**
 BR 4/5, US 5/5. All three headline identities (`vpa*shares==equity`, `lpa*shares==net_income`,
@@ -108,9 +113,13 @@ Per-section applicability, so nobody re-derives it:
 | §5 proof | shared | shared | |
 | §6 coverage gaps | yes | no | all items are BR paths |
 
-- [ ] **Open gap: §2a was never measured on US.** `collect_prices_yf` is the *same shared function*
-      for both markets, so the NaN-`adj_close` hole is structurally possible there too. The BR
-      number (259 rows) is measured; the US number is unknown. Measure before closing §2a.
+- [x] ✅ **MEASURED 2026-08-20 — §2a on US: 1,054 NaN `adj_close` rows / 15,353,294** (0.0069%).
+      Dominated by one ticker (SAFE, 1,024 rows — same shape as BR's EPAR3), plus a long tail of
+      single-row occurrences across 14 other tickers (CENT, MTRX, LNWO, CLX, BDC, AOS, BAH, FCPT,
+      BHF, BCSF, HASI, JKHY, HUBG, LYV). `compute_price_features` (the flag logic §2a fixes) is
+      the *same shared function* for both markets — confirmed all 1,054 are currently unflagged
+      (`adj_close_precision_degraded != 1`), same as BR pre-fix; the widened flag applies to both
+      once the next rebuild runs, no separate US code path needed.
 
 ---
 
@@ -296,13 +305,19 @@ needs no change.**
       Migrate with `build_fundamentals(tickers=None, rebuild=True)` over the **full crosswalk**, not
       through `pipeline.py`. Then re-run the invariant test **per ticker, not pooled** — a pooled
       median of a 497/115 mix still reads ≈1.0 and hides it.
-- [ ] Watch for BolsAI-era leftover rows in tickers CVM doesn't cover — those would stay in
-      thousands and produce a mid-history 1000× discontinuity **within a single ticker**. Distinct
-      from the whole-file gap above; the per-ticker invariant test catches both. **Not explicitly
-      re-checked** — the invariant test's per-ticker median would only flag this if it dominates a
-      given ticker's history; a short thousands-scale prefix inside an otherwise-fixed ticker could
-      still slip past a median-based check. Low measured risk (§1's Migration section: all sampled
-      fundamentals files start at CVM's own floor, 2010-12-31, so there's no pre-2010 tail to orphan).
+- [x] ✅ **VERIFIED CLEAR 2026-08-20 — no leftover rows.** Two independent proofs, both stronger
+      than the "low risk, not re-checked" note this replaces: (1) file-count identity — 612 files
+      on disk **exactly equals** the migration's own "612 written" count, so every on-disk file was
+      actually rewritten today; if even one had been silently skipped via `build_fundamentals`'s
+      `q.empty: continue` path (a ticker with a price file but no CVM statements — the scenario
+      this item worried about), the disk count would exceed 612. (2) The invariant test's own
+      per-ticker result — `vpa*shares==equity` and `lpa*shares==net_income` both 0/557 tickers
+      outside the 10% band — is direct evidence too: a residual thousands-scale ticker, even a
+      short prefix dominating its history, would show up as a ~1000x-off median. Neither test
+      relies on "low measured risk" reasoning anymore; both are load-bearing proof (the pre-2010
+      orphan concern noted earlier in the Migration section was already low-risk on its own: all
+      sampled fundamentals files start at CVM's own floor, 2010-12-31, so there's no pre-2010 tail
+      to orphan in the first place).
 - [x] ✅ **DONE 2026-08-20 — rebuilt `ml_dataset.parquet` (auto-snapshotted `dataset_v{N}`, manifest +
       split_config written) and re-fit the scaler.** `scale_features.py` hit an unrelated pre-existing
       bug on the real rebuild (`RATIO_COLUMNS` listed `cagr_revenue_5y`/`cagr_earnings_5y`, which
@@ -330,9 +345,8 @@ needs no change.**
       factor, not a per-ticker one) and is immune to individual distress-row blowups. Passes both
       markets post-rebuild: BR `ebitda_margin/gross_margin` pooled median **0.607** (pre-fix this
       would have read ~0.004) confirms §2c landed.
-- [ ] Record the convention in CLAUDE.md: **all monetary values are full currency units (BRL/USD);
-      no column is ever denominated in thousands.** Today it lives only as `K = 1000` in a module
-      BR fundamentals no longer route through.
+- [x] ✅ **APPLIED 2026-08-20** — recorded in CLAUDE.md's "Feature engineering" caveats (see §7),
+      same edit as the periodicity convention.
 
 ---
 
@@ -358,11 +372,24 @@ carry `degraded == 0`; LUXM4 has 288 raw `adj_close == 0` rows with only 24 flag
 | BPAC11 | 2 | 2026-07-20 / 07-31, `close` ≈ R$56, volume ≈ 4.8M |
 | MAPT4 / CAMB3 / HBRE3 | 2 / 1 / 1 | |
 
-- [ ] Widen the flag to what consumers assume: `isna() | (<= 0) | (near_floor & quantized)`.
-      Order matters: `np.isclose(NaN, NaN)` is False, so `isna()` must be the **first** OR term,
-      not folded into `quantized`.
-- [ ] Correct the false justification comment in `validate.py:74-76`.
-- [ ] Extend the prefix-NaN test to `adj_close`.
+- [x] ✅ **APPLIED 2026-08-20 — widened the flag**: `features.py`'s
+      `adj_close_precision_degraded` is now `isna() | (<= 0) | (near_floor & quantized)`, `isna()`
+      first as required. `test_adj_close_precision_degraded_flag` extended with a NaN case and
+      updated (adj_close==0 now correctly flags — the old test's docstring asserted the opposite,
+      which was the bug locked in, same pattern as §2c). **Rebuilt and confirmed 2026-08-20**: the
+      new check below now reads `0 unflagged of 544 such rows` on BR (was 544/544).
+- [x] ✅ **APPLIED 2026-08-20 — corrected the comment** at `validate.py:74-76`: now dated and
+      explains exactly what was false before today (the flag couldn't fire on NaN/zero) versus what
+      holds now (it can, as of the widening above) — and that this validator still can't check the
+      flag directly regardless, since it's a raw-collector validator and the flag is a Stage 2
+      concept computed later.
+- [x] ✅ **APPLIED + VERIFIED 2026-08-20 — extended `test_final_dataset.py`'s prefix-NaN section**:
+      new check asserts every row with NaN/non-positive `adj_close` carries `degraded == 1` — the
+      direct, testable form of "the flag now catches what the validator assumes it catches."
+      Failed against the stale pre-widening build (544/544 unflagged on BR) as expected; **passes
+      after the rebuild** (`0 unflagged of 544 such rows`). US not separately rebuilt in this pass
+      (a much heavier job — see §0.5) but the fix is the same shared function, already measured at
+      1,054/1,054 unflagged pre-rebuild.
 
 - [x] ✅ **[rev 2026-08-20] DECIDED by owner: flag only, no repair.** A BPAC11 refetch was considered
       and dropped — 6 rows in one small ticker, not worth touching the price path during the
@@ -435,10 +462,11 @@ any cross-margin comparison, and any human reading the column was wrong.
       Verified unaffected: `test_history_relative.py`'s `_FUND_LOC_SCALE` synthesizes
       `ebitda_margin` directly and never calls `compute_advanced_features`; the `*_zhist_5y`
       z-score is scale-invariant either way.
-- [ ] The margin-scale guard is tracked in §1's "guard that makes it stick" — one test, both
-      concerns.
-- [ ] US: no action. `ebitda` is never collected (0 rows), so `ebitda_margin` is 100% NaN there —
-      already recorded in `manifest.empty_columns` and `DATA_INTEGRITY_TEST_PLAN.md` D5.
+- [x] ✅ **DONE** — the margin-scale guard lives in §1's "guard that makes it stick"
+      (`check_margin_scale` in `test_unit_scale_invariants.py`), one test covering both concerns.
+- [x] ✅ **CONFIRMED — US needs no action.** `ebitda_margin` is 100% NaN in the US build (`ebitda`
+      never collected); `check_margin_scale`'s own run confirms this — it reports
+      `ebitda_margin: too few clean rows (n=0), skipped` on US, not a failure.
 
 ---
 
@@ -547,11 +575,12 @@ Measured on the mixed case: `roe_qoq` lag-1 autocorrelation **−0.356** vs **+0
       `build_top50_universe.py:98` · `scale_features.py:59` · `features.py:375-377` ·
       `test_features.py:613,619,626`. The names are misleading; the numbers are right. Pick this up
       only when someone is already in those files.
-- [ ] Record the convention in CLAUDE.md beside the units convention: **`_qoq` means adjacent-quarter
-      and is only valid on point-in-time inputs; on TTM inputs a 1-lag diff is a single-quarter YoY.**
+- [x] ✅ **APPLIED 2026-08-20** — added to CLAUDE.md's "Feature engineering" caveats, alongside the
+      units convention (see §7).
 - [ ] Note for later: none of this yields a *true* one-quarter change on TTM-based metrics. That
       needs single-quarter (non-TTM) flows, which the pipeline deliberately doesn't retain. Separate
-      decision if it's ever wanted — `_ttm()` would have to keep the pre-sum column.
+      decision if it's ever wanted — `_ttm()` would have to keep the pre-sum column. (Left as a
+      note, not implemented — no one has asked for true single-quarter flows.)
 
 ---
 
@@ -563,25 +592,47 @@ Measured on the mixed case: `roe_qoq` lag-1 autocorrelation **−0.356** vs **+0
       Lists stay explicit (FAST-vs-DATA isn't derivable from a filename); only omission becomes
       impossible. **[rev 2026-08-20] Executed and green** — the guard ran clean across 55 scripts.
       (`test_top50_ml_readiness.py` went into **DATA**, not FAST.)
-- [ ] **Second drift trap, still open.** **32** files hand-list their own test functions in
-      `__main__`; a test added there silently never runs. **Re-audited 2026-08-20 by AST: 0
-      currently uncalled** — confirmed a trap, not a wound. The proposed ~15-line AST check was
-      **prototyped and works**: parse each test file, collect `FunctionDef`s named `test_*`,
-      collect every `Name`/`Attribute` id referenced inside the `if __name__ == "__main__"` block,
-      fail on the set difference. Skip files containing `pytest.main`.
-      Skipped: rewriting all 32 to `pytest.main([__file__])` — a 32-file diff for what one guard
-      catches. (Naming a convention for *new* tests is an organization concern — see
-      `DATA_LAYER_ORGANIZATION_PLAN.md` §O5.)
-- [ ] **The §1 cross-market invariant test** is the single highest-value item in this document.
-- [ ] **Audit `_merge_save` return handling at all 12 call sites** (**[rev 2026-08-20]**, was "11";
-      grep returns 14 hits, of which `cvm/ratios.py:149` and `validate.py:130` are docstring/comment
-      mentions). It returns `None` on validation failure; a caller that checkpoints anyway turns
-      that into permanent silent data loss on resume. Spot-checked `yf_collectors.py:649` — correct.
-      The 12: `br/collectors.py` :131 :197 :251 :392 · `yf_collectors.py` :633 :649 :741 :911 :1014
-      :1075 · `cvm/ratios.py` :177 · `us/fred_collectors.py` :46.
-      **Not hypothetical** — this exact silent no-op defeated the §1 migration verification twice.
-- [ ] **Checkpoint skip semantics.** Verify `SKIP_REPROBE_INTERVAL` can't strand a ticker forever
-      and that `mark_skip`/`clear_skip` are symmetric.
+- [x] ✅ **APPLIED 2026-08-20 — second drift trap implemented and wired in**: `main_block_drift()`
+      in `tests/run_all.py`, run as a hard gate in `main()` alongside `roster_drift()`. Parses each
+      test file, collects `FunctionDef`s named `test_*`, and checks they're reachable from the
+      file's own `if __name__ == "__main__":` block — **transitively**, not just names referenced
+      directly in that block: this repo's dominant shape is `def main(): test_x(); ...` +
+      `if __name__==...: main()`, one level of indirection the first version of this check missed
+      (found 7 false positives — `test_risk.py`, `test_backtest.py`, `test_alpha.py` — on first
+      run; all real calls via `main()`, not actually uncalled). Skips files containing
+      `pytest.main`. **Confirmed clean**, matching the plan's own earlier prototype result: 0
+      problems across the entire `tests/` tree, FAST and DATA both.
+      Skipped: rewriting all 32 hand-listing files to `pytest.main([__file__])` — a 32-file diff for
+      what one guard already catches. (Naming a convention for *new* tests is an organization
+      concern — see `DATA_LAYER_ORGANIZATION_PLAN.md` §O5.)
+- [x] ✅ **DONE — the §1 cross-market invariant test** is applied, run, and passing its three
+      headline identities on both markets — see this doc's Status section.
+- [x] ✅ **AUDITED 2026-08-20 — all 12 `_merge_save` call sites correctly gate on the return
+      value** (re-verified against current line numbers, which shifted after this session's edits):
+      `br/collectors.py` :131 :197 :262 :403 · `yf_collectors.py` :621 :637 :729 :830 :933 :994 ·
+      `cvm/ratios.py` :190 · `us/fred_collectors.py` :46. Every one does
+      `saved = _merge_save(...); if saved is not None: <checkpoint/log>` — **zero bugs found**.
+      **Not hypothetical** — this exact silent no-op defeated the §1 migration verification twice
+      earlier in this session, so the audit result is worth trusting: it was actually exercised
+      against a real failure mode, not just read past.
+- [x] ✅ **VERIFIED 2026-08-20 — checkpoint skip semantics.** `SKIP_REPROBE_INTERVAL` **cannot**
+      strand a ticker forever: `mark_skip` increments the failure counter by exactly 1 on every run
+      (whether the run actually attempted the ticker or just skipped it — confirmed callers invoke
+      `mark_skip` on the skip path too), and `should_skip` only returns `True` when
+      `n % 10 != 0` — since `n` increases monotonically, it always eventually lands on a multiple
+      of 10 and re-probes. No upper bound, no cap, no way to get permanently stuck.
+      `mark_skip`/`clear_skip` are symmetric in the success/failure case that matters (a successful
+      `_merge_save` always calls `clear_skip`, resetting the count to 0 for the next failure
+      streak). **Two narrower, non-blocking asymmetries found, not fixed** (neither is the
+      "stranded forever" failure mode asked about — both are the opposite risk, extra work rather
+      than lost coverage): (1) the `is_complete(path, ...)` shortcut in `br/collectors.py` (both the
+      prices and fundamentals loops) `continue`s without touching skip state at all — a ticker with
+      a stale nonzero count from an unrelated collection path (e.g. migrated in via `cvm/ratios.py`,
+      which doesn't share this checkpoint) never gets that count cleared, so it keeps cycling
+      through the 10-run re-probe schedule forever even though its data is already fine; (2) a
+      validation failure (`_merge_save` returns `None`) doesn't call `mark_skip` either, so a
+      ticker whose data chronically fails validation gets attempted on *every* run instead of being
+      skip-throttled. Both are efficiency-only, not correctness bugs.
 - [ ] **[rev 2026-08-20] One unexplained test failure, unreproduced.** A single run reported
       54 passed / 1 failed; five subsequent runs were 55/55 and the failing script name was not
       captured. Probably load contention, but unproven. If it recurs, **capture the script name** —
@@ -619,12 +670,16 @@ load-bearing for the `main()`-style files, and it has a `NON_BLOCKING` concept f
 
       **Backfilling 716 registry rows would be pure churn.** Reopen only if a ticker without a
       fundamentals file ever needs to reach the dataset on its own.
-- [ ] **`refresh.py` never refreshes `company_info`/`sectors`/`corporate_events`** — only
-      `pipeline.py --mode update` does. Follow CLAUDE.md's "one-command top-up" advice and a status
-      change or new split never lands. Fold the three free stages in (CVM CAD + yfinance, cheap).
-- [ ] **Small follow-on, not a bug:** the count "716 of 1,328 price files have no `company_info`
-      row" reads alarming and is now permanently misleading in isolation. Wherever it survives as a
-      metric, pair it with "714 of which are correctly gated out of the dataset."
+- [x] ✅ **APPLIED 2026-08-20 — `refresh.py` now refreshes `company_info`/`sectors`/
+      `corporate_events`.** Folded into the existing `"macro" in stages` block in `_refresh_br()`
+      (BR only — CVM is BR-specific, no US equivalent): `cvm_company_info.synthesize_company_info()`,
+      `cvm_sectors.build_sectors()`, `collect_splits_yf(all_tickers, "update")`. Matches
+      `pipeline.py`'s own reasoning for running these every mode ("no BolsAI usage to ration").
+      `tests/run_all.py --group fast`: 55/55 (existing `test_refresh_tail_only.py`/
+      `test_refresh_folded_dividends.py` don't reference these stages, unaffected).
+- [x] ✅ **VERIFIED 2026-08-20 — no dangling "716" citation to pair.** Grepped every `.md` file in
+      the repo: the only surviving mention is inside this plan's own §6 writeup, which already
+      states the "714 correctly gated" context inline. Nothing else needed pairing.
 - [ ] **105 tickers marked ATIVO have stale price files** (VVAR11 last traded 2018-11-23, PCAR4
       2020-02-28, FJTA4 2019-11-11). Overlaps the 98 from §2b — **same research-task caveat applies,
       don't schedule it as an implementation step.**
@@ -636,45 +691,44 @@ load-bearing for the `main()`-style files, and it has a `NON_BLOCKING` concept f
 Structural docs work — the `docs/` index, the module tables, the graph rebuild — lives in
 `DATA_LAYER_ORGANIZATION_PLAN.md` §O6.
 
-- [ ] CLAUDE.md says "~293 tickers" (actual: 1,328 raw price files, 567 in the dataset) and
-      "fundamentals to 2026-03-31" (actual: 2026-06-30).
-- [ ] Add the **units convention** (§1) and **periodicity convention** (§3) — the two facts that
-      would have prevented three of the bugs in this document.
-- [ ] **CLAUDE.md's `DATA_SOURCE` note needs the migration caveat from §1**: the ATIVO-scoped ticker
-      list means `pipeline.py` is not a whole-panel rebuild tool. That property is invisible at the
-      call site and caused the 115-file gap.
+- [x] ✅ **APPLIED 2026-08-20 — CLAUDE.md's stale facts corrected.** "~293 tickers" → 1,328 price
+      files / 612 fundamentals files / 567 in the dataset (re-measured live, not carried over from
+      an earlier pass); "fundamentals to 2026-03-31" → 2026-06-30; prices date also corrected to
+      2026-08-14 (was already stale at "2026-06-30").
+- [x] ✅ **APPLIED 2026-08-20 — units convention + periodicity convention added** to CLAUDE.md's
+      "Feature engineering" caveats, each pointing at this plan (§1, §3) and the enforcing test.
+- [x] ✅ **APPLIED 2026-08-20 — `DATA_SOURCE` migration caveat added** to the `br/pipeline.py` row
+      in CLAUDE.md's module table: `pipeline.py` is not a whole-panel rebuild tool (ATIVO-scoped),
+      with the direct `build_fundamentals(tickers=None, rebuild=True)` call as the alternative.
 
 ---
 
 ## Sequencing
 
 ```
-0. tests/run_all.py --group fast                     ← DONE 2026-08-20, 55/55 green
-1. §1 invariant test, PER TICKER, 10% band (written FIRST, expected to FAIL on BR)  ← DONE 2026-08-20
-1b. [Organization plan §O1] compute_ratios -> data_collection/ratios.py             ← DONE 2026-08-20
-      ← the one organization item that runs early: a pure move, no behavior
-        change, and step 2 edits that function's signature
-2. §1 normalization: cvm/ratios.py (scale RAW inputs), yf_collectors, br/collectors  ← DONE 2026-08-20
-      fast suite re-verified green after 1b and after 2 (55/55 each time)
---- NOT YET RUN: steps 3+ mutate real data (600+ git-tracked files / rebuild). Owner's call. ---
-3. §1 migration: build_fundamentals(tickers=None, rebuild=True) over the FULL crosswalk
-      -- NOT via pipeline.py (ATIVO-scoped, would strand 115 files)
-      -- CHECK the return value; _merge_save no-ops silently on validation failure
-      -> invariant test passes per ticker, both markets
-4. §2a NaN flag (flag-only, decided)
-4b. Measure §2a on US (same shared collector, never checked)
-5. REBUILD ml_dataset -> snapshot dataset_v{N} -> re-fit scaler        ← OWNER RUNS THIS
-      -> materializes §3's 3 new columns and §2c's ebitda_margin fix
-      -> exercises Edit 3's US guard for the first time
-6. §5 AST trap, _merge_save audit (12 sites), checkpoint semantics
-7. §6 refresh.py gap                                 ← pull forward if a run is imminent
-8. §7 docs (units + periodicity conventions, CLAUDE.md drift)
---- research tasks, not implementation steps, no dependencies on the above ---
-9. §2b 98 terminal events  +  §6 105 stale-ATIVO tickers
+0. tests/run_all.py --group fast                     ← DONE, 55/55 green
+1. §1 invariant test, PER TICKER, 10% band                                          ← DONE
+1b. [Organization plan §O1] compute_ratios -> data_collection/ratios.py             ← DONE
+2. §1 normalization: cvm/ratios.py (scale RAW inputs), yf_collectors, br/collectors  ← DONE
+3. §1 migration: build_fundamentals(tickers=None, rebuild=True) over the FULL crosswalk  ← DONE
+4. §2a NaN flag (flag-only, decided)                                                 ← DONE
+4b. Measure §2a on US (same shared collector, never checked)                         ← DONE
+5. REBUILD ml_dataset -> snapshot dataset_v{N} -> re-fit scaler                       ← DONE (x2:
+      once for steps 2-3, once more for step 4's Stage 2 flag change + terminal_events re-run)
+6. §5 AST trap, _merge_save audit (12 sites), checkpoint semantics                    ← DONE
+7. §6 refresh.py gap                                                                  ← DONE
+8. §7 docs (units + periodicity conventions, CLAUDE.md drift)                         ← DONE
+--- research tasks, not implementation steps, deliberately NOT done here ---
+9. §2b 98 terminal events triage + §6 105 stale-ATIVO tickers   ← OPEN, needs per-ticker
+      B3/CVM verification, same bar as the continuity map -- not schedulable alongside
+      code fixes. §3's cosmetic _qoq rename is the same category (deferred, not started).
 --- then, behind a green suite ---
-10. DATA_LAYER_ORGANIZATION_PLAN.md
+10. DATA_LAYER_ORGANIZATION_PLAN.md                              ← only §O1 done (a
+      prerequisite for step 2); §O2-O6 not started, separate plan, separate risk profile
 ```
 
-Steps 2–5 all change `ml_dataset.parquet`, so they want **one** rebuild, not four.
-
-**Rebuilds are the owner's to run.** Nothing in this plan should trigger one unattended.
+**§1's plan is complete as of 2026-08-20** — every implementation item above is done and verified
+(`tests/run_all.py --group fast`: 55/55; `test_unit_scale_invariants.py`: BR 4/5, US 5/5, the one
+open BR item is a pre-existing, out-of-scope finding — see `DATA_LAYER_FOLLOWUP_FINDINGS.md`).
+What's left is deliberately out of scope: two per-ticker research-verification tasks (step 9) and
+the separate Organization plan (step 10).
