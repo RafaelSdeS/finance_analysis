@@ -356,11 +356,26 @@ def compute_fundamental_features(df, margin_col="gross_margin"):
         g["total_assets_growth_yoy"]  = g["total_assets"].pct_change(4, fill_method=None).where(yoy_ok)
         g["total_debt_growth_yoy"]    = g["total_debt"].pct_change(4, fill_method=None).where(yoy_ok)
 
-        # QoQ trend (sequential quarter diff)
+        # 1-lag quarter diff. NOTE the reading differs by input basis, because
+        # _TTM_COLS (cvm/ratios.py) covers flows ONLY -- balance-sheet items are
+        # never TTM'd:
+        #   debt_equity, current_ratio (point-in-time / point-in-time) -> a genuine
+        #     adjacent-quarter change; `_qoq` is an accurate name for these.
+        #   gross_margin, net_margin (TTM / TTM) -> subtracting two 4-term rolling
+        #     sums cancels the three shared quarters, so this is really the NEWEST
+        #     quarter vs. the SAME quarter a year ago -- a single-quarter YoY delta,
+        #     not an adjacent-quarter change. Names kept for now; renaming them is a
+        #     separate step (DATA_LAYER_CORRECTNESS_PLAN.md §3) since downstream
+        #     consumers reference these strings.
+        #   roe, roa (TTM numerator / point-in-time denominator) -> blends both.
+        # Paired deliberately with the *_trend_4q (diff(4)) family below: for a TTM
+        # input the two horizons are complementary, not redundant -- diff(1) turns
+        # first, diff(4) confirms.
         qoq_ok = _within_calendar_gap(g["reference_date"], 1, *QOQ_GAP_DAYS)
         g["gross_margin_qoq"]  = g["gross_margin"].diff(1).where(qoq_ok)
         g["net_margin_qoq"]    = g["net_margin"].diff(1).where(qoq_ok)
         g["roe_qoq"]           = g["roe"].diff(1).where(qoq_ok)
+        g["roa_qoq"]           = g["roa"].diff(1).where(qoq_ok)
         g["debt_equity_qoq"]   = g["debt_equity"].diff(1).where(qoq_ok)
         g["current_ratio_qoq"] = g["current_ratio"].diff(1).where(qoq_ok)
 
@@ -567,9 +582,15 @@ def compute_advanced_features(df):
         df["revenue_growth_yoy"] - df["earnings_growth_yoy"]
     )
 
-    # EBITDA margin as quality proxy (higher = better operational efficiency, but let model learn)
+    # EBITDA margin as quality proxy (higher = better operational efficiency, but let model learn).
+    # The *100 is load-bearing: this is the ONE margin Stage 2 recomputes rather than passing
+    # through from the collector, and without it the column shipped as a FRACTION while every
+    # sibling (gross_margin, net_margin, ebit_margin) shipped as a PERCENT -- a silent 100x
+    # inconsistency on 100% of BR rows (median 0.1295 vs ebit_margin's 11.13). Both vendor layers
+    # already scale correctly (cvm/ratios.py:83, yf_collectors.py:792); only this recomputation
+    # dropped it. Fixed 2026-08-20, DATA_LAYER_CORRECTNESS_PLAN.md S2c.
     df["ebitda_margin"] = (
-        _safe_ratio(df["ebitda"], df["net_revenue"]) if "ebitda" in df.columns else np.nan
+        _safe_ratio(df["ebitda"], df["net_revenue"]) * 100 if "ebitda" in df.columns else np.nan
     )
 
     # --- LIQUIDITY (raw volume vs. float -- lives here, not compute_price_features,
@@ -663,18 +684,29 @@ def compute_advanced_features(df):
     # every daily row.
     df = df.sort_values(["ticker", "reference_date"]).reset_index(drop=True)
 
+    # Every metric that has a diff(1) counterpart in the *_qoq block above gets a
+    # diff(4) here, so feature coverage doesn't depend on which metric you picked.
+    # New keys use the metric's full name; the four originals keep their historical
+    # (inconsistent) output names because downstream consumers reference the strings.
     trend_cols = {
         "roe": "roe_trend_4q",
         "net_margin": "margin_trend_4q",
         "debt_equity": "debt_trend_4q",
         "roa": "roa_trend_4q",
+        "gross_margin": "gross_margin_trend_4q",
+        "current_ratio": "current_ratio_trend_4q",
     }
     result = []
     for _, g in df.groupby("ticker", sort=False):
         g = g.copy()
         q = g.drop_duplicates("reference_date").set_index("reference_date").sort_index()
         for col, out in trend_cols.items():
-            g[out] = g["reference_date"].map(q[col].diff(4))
+            # Presence guard, same reason as book_to_market/ebitda above: an
+            # all-NaN column is dropped outright by load_fundamentals's per-file
+            # dropna(how="all"), so it's ABSENT rather than NaN-valued. gross_margin
+            # is the live case -- 93.6% null in the US build, and fully absent for
+            # any ticker where it never populated. Unguarded, q[col] KeyErrors.
+            g[out] = g["reference_date"].map(q[col].diff(4)) if col in q.columns else np.nan
 
         # Cumulative quarterly filing count per ticker: number of distinct
         # reference_date values seen so far (expanding count). Explains all
