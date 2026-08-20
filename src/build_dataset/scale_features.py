@@ -56,11 +56,13 @@ RATIO_COLUMNS = [
     "book_to_market", "earnings_yield",
     "revenue_growth_yoy", "earnings_growth_yoy", "ebitda_growth_yoy",
     "total_assets_growth_yoy", "total_debt_growth_yoy",
-    "gross_margin_qoq", "net_margin_qoq", "roe_qoq", "debt_equity_qoq", "current_ratio_qoq",
+    "gross_margin_qoq", "net_margin_qoq", "roe_qoq", "roa_qoq",
+    "debt_equity_qoq", "current_ratio_qoq",
     "peg_ratio", "pvp_to_roe_ratio", "earnings_yield_vs_selic",
     "payout_ratio", "dividend_coverage_ratio", "revenue_per_earning",
     "revenue_vs_earnings_growth_delta",
     "roe_trend_4q", "margin_trend_4q", "debt_trend_4q", "roa_trend_4q",
+    "gross_margin_trend_4q", "current_ratio_trend_4q",
     "volatility_ratio_20_60", "volume_ratio_20d", "amihud_illiquidity", "turnover_ratio",
 ]
 

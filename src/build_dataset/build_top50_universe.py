@@ -96,7 +96,7 @@ def zero_fill_missing_fundamentals(df: pd.DataFrame) -> pd.DataFrame:
         'net_debt_to_assets', 'working_capital_ratio', 'revenue_growth_yoy',
         'earnings_growth_yoy', 'ebitda_growth_yoy', 'total_assets_growth_yoy',
         'total_debt_growth_yoy', 'gross_margin_qoq', 'net_margin_qoq', 'roe_qoq',
-        'debt_equity_qoq', 'current_ratio_qoq', 'cagr_earnings_5y_final',
+        'roa_qoq', 'debt_equity_qoq', 'current_ratio_qoq', 'cagr_earnings_5y_final',
         'cagr_revenue_5y_final', 'payout_ratio', 'dividend_coverage_ratio',
         'revenue_per_earning', 'revenue_vs_earnings_growth_delta',
         'peg_ratio', 'pvp_to_roe_ratio', 'earnings_yield', 'earnings_yield_vs_selic',

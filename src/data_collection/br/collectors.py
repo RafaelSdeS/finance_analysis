@@ -400,57 +400,8 @@ def collect_dividends(tickers: list[str], mode: str):
         c.close()
 
 
-# ---------------------------------------------------------------------------
-# BolsAI corporate events (splits/reverse-splits, market-wide)
-# ---------------------------------------------------------------------------
-
-def collect_corporate_events(mode: str):
-    """All confirmed splits/reverse-splits for all tickers. Endpoint has no
-    offset param, so pagination = one call per calendar year."""
-    c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
-    cp = checkpoint.load("corporate_events", mode)
-    path = config.CORP_EVENTS_PATH
-    try:
-        start_year = cp.get("last_year", int(config.START_DATE[:4]) - 1) + 1
-        end_year = datetime.now().year
-        start_year = min(start_year, end_year)
-
-        rows = []
-        for year in range(start_year, end_year + 1):
-            d = client.get_json(c, "/stocks/corporate-events", {"year": year, "limit": 1000})
-            rows += d.get("events", [])
-        if not rows:
-            log.info("corporate_events: no new rows")
-            return
-
-        df = pd.DataFrame(rows)
-        saved = _merge_save(df, path, "date", validate.validate_corporate_events, "corporate_events")
-        if saved is not None:
-            # leave end_year unlocked: a same-year split can be announced after this run
-            cp["last_year"] = end_year - 1
-            checkpoint.save("corporate_events", mode, cp)
-            log.info("corporate_events: %d total rows", len(saved))
-    finally:
-        c.close()
-
-
-# ---------------------------------------------------------------------------
-# BolsAI sectors (reference table, no history)
-# ---------------------------------------------------------------------------
-
-def collect_sectors():
-    """Canonical sector names + active company counts. Single call, full overwrite."""
-    c = client.make_client(config.BOLSAI_BASE, config.BOLSAI_API_KEY)
-    path = config.COMPANY_DIR / "sectors.parquet"
-    try:
-        d = client.get_json(c, "/companies/sectors")
-        df = pd.DataFrame(d.get("sectors", []))
-        vr = validate.validate_sectors(df)
-        if not vr.passed:
-            log.error("sectors validation FAILED: %s", vr.errors)
-            return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        df.to_parquet(path, index=False)
-        log.info("sectors: %d sectors total", len(df))
-    finally:
-        c.close()
+# Deleted 2026-08-19: collect_corporate_events() and collect_sectors(). Both had
+# zero call sites -- pipeline.run()'s stage list has pointed at the free
+# replacements (yf_collectors.collect_splits_yf, cvm.sectors.build_sectors) since
+# the BolsAI exit, so these were the only BolsAI collectors with no way to reach
+# them even by flipping a DATA_SOURCE entry. Recoverable from git history.
