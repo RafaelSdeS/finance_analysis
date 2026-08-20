@@ -84,6 +84,7 @@ FAST = [
 # Needs data/raw/br/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
 DATA = [
     "tests/build_dataset/test_final_dataset.py",
+    "tests/build_dataset/test_unit_scale_invariants.py",
     "tests/build_dataset/test_top50_ml_readiness.py",
     "tests/build_dataset/test_top_traded_quality.py",
     "tests/build_dataset/test_universe_integrity.py",

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.data_collection import config, validate
 from src.data_collection.br import collectors
-from src.data_collection.yf_collectors import FUND_FULL_COLS
+from src.data_collection.ratios import FUND_FULL_COLS
 
 
 def _write(path, cols, ticker, drop=None):

@@ -11,12 +11,16 @@ now lives in **`DATA_LAYER_ORGANIZATION_PLAN.md`** and runs *behind* this one.
 3. **Proof they work** — invariants that fail loudly, not conventions held in comments.
 
 **Status:** applied to the working tree, uncommitted:
-§3's Edits 1–5, §2c's fix, and §4/§5/§6 slices (marked ⚠️ APPLIED / ✅ APPLIED).
-`tests/run_all.py --group fast`: **55/55 pass** as of 2026-08-20.
-Revert with `git checkout -- . && rm tests/data_collection/test_yf_collectors.py`.
+§3's Edits 1–5, §2c's fix, §1's invariant test + O1 move + normalization (steps 1/1b/2 below),
+and §4/§5/§6 slices (marked ⚠️ APPLIED / ✅ APPLIED).
+`tests/run_all.py --group fast`: **55/55 pass** as of 2026-08-20 (re-verified after §1's edits).
+Revert with `git checkout -- . && rm tests/data_collection/test_yf_collectors.py tests/build_dataset/test_unit_scale_invariants.py src/data_collection/ratios.py`.
 
-**§1 has not been started** — `cvm/ratios.py:65` still reads `k = 1000.0`, `yf_collectors.py:28`
-still defines `K = 1000`, and the `/ K` divisions at `yf_collectors.py:871`/`:876` are untouched.
+**§1 normalization code is done (steps 1/1b/2); the migration (step 3) is NOT run** —
+`data/raw/br/fundamentals/*.parquet` still holds the old thousands-scale values, since step 3
+rewrites 600+ git-tracked files and is the owner's call, not something to trigger unattended.
+`tests/build_dataset/test_unit_scale_invariants.py` (new, DATA group) will fail on BR until step 3
++ step 5's rebuild land — that's expected, per its own docstring.
 
 All findings measured read-only against the real tree: 1,328 BR price files, 612 BR fundamentals,
 8,283 US fundamentals, `ml_dataset.parquet` at 1,706,604 rows / 567 tickers / 22,832 ticker-quarters.
@@ -147,7 +151,7 @@ Don't "fix" it.)
 the inputs once, at ingest. **US already does this — it becomes the reference implementation and
 needs no change.**
 
-- [ ] **`cvm/ratios.py`** — scale the level columns ×1000 once after `_ttm()`, then set `k = 1.0`
+- [x] ✅ **APPLIED 2026-08-20 — `cvm/ratios.py`** — scale the level columns ×1000 once after `_ttm()`, then set `k = 1.0`
       (or delete `k`). Every ratio it computes stays **numerically identical**: `pl`/`pvp`/`p_*`/
       `ev_*`/`lpa`/`vpa` already multiply by `k`, and `roe`/`roa`/margins/`asset_turnover`/
       `current_ratio`/`debt_equity`/`net_debt_*`/`roic` are scale-invariant. Only stored levels move.
@@ -166,24 +170,24 @@ needs no change.**
       `p_ebitda`, `net_debt_*` silently wrong — the exact bug class this fixes.
       `market_cap` is computed at line 64 from `close_price * shares_outstanding`, both already
       units: leave it, and leave the scaling point **above** it.
-- [ ] **`yf_collectors.py::collect_fundamentals_yf`** — drop the two `/ K` divisions (they currently
-      convert yfinance's already-full-BRL figures *down* into thousands) and pass `unit_scale=1`.
-      Retire the module-level `K`.
-- [ ] **`br/collectors.py::collect_fundamentals`** (BolsAI) — scale the response's level columns
-      ×1000 on ingest, so the paid path obeys the same convention if `DATA_SOURCE` is ever flipped
-      back. Cold path, but leaving it is how the convention silently breaks later.
-- [ ] **`features.py:344` and `:556`** — both become correct with **no edit**. Do not add an interim
-      ×1000; that would double-count after normalization. This is the whole point of fixing it at
-      the source.
-- [ ] **`sec/*`** — no change. Verify only. **[rev 2026-08-20]** `compute_ratios` is imported by
-      **six** modules, not the one originally cited: `sec/fundamentals.py:102`, `sec/fds.py:200`
-      + `:219` + `:501`, `sec/tenq.py:311`, `sec/companyfacts.py:659`,
-      `sec/selected_financial_data.py:645`. All six already pass `unit_scale=1` explicitly, so
-      "no change" holds — but the verification list is six files.
+- [x] ✅ **APPLIED 2026-08-20 — `yf_collectors.py::collect_fundamentals_yf`** — dropped the two `/ K`
+      divisions (they used to convert yfinance's already-full-BRL figures *down* into thousands) and
+      `compute_ratios(base)` now passes `unit_scale=1` explicitly. The module-level `K` is retired
+      from `yf_collectors.py` (no longer imported there — it still lives in the moved `ratios.py`
+      as `compute_ratios`'s own default for the BolsAI/CVM callers).
+- [x] ✅ **APPLIED 2026-08-20 — `br/collectors.py::collect_fundamentals`** (BolsAI) — the response's
+      11 level columns are now scaled ×1000 on ingest, so the paid path obeys the same convention if
+      `DATA_SOURCE` is ever flipped back. Cold path, but leaving it is how the convention silently
+      breaks later.
+- [x] ✅ **VERIFIED 2026-08-20 — `features.py:344` and `:556`** — both become correct with **no edit**,
+      confirmed unchanged. No interim ×1000 added; that would double-count after normalization.
+- [x] ✅ **VERIFIED 2026-08-20 — `sec/*`** — no change, all six import sites already pass
+      `unit_scale=1` explicitly: `sec/fundamentals.py:102`, `sec/fds.py:200` + `:219` + `:501`,
+      `sec/tenq.py:311`, `sec/companyfacts.py:659`, `sec/selected_financial_data.py:645`.
 
-      **Cross-plan note:** the Organization plan moves `compute_ratios` to a neutral module
-      *before* this step. Doing it in that order means these six imports are already pointing at
-      their final home when the signature work happens. See `DATA_LAYER_ORGANIZATION_PLAN.md` §O1.
+      **Cross-plan note:** `DATA_LAYER_ORGANIZATION_PLAN.md` §O1 (`compute_ratios` + `FUND_FULL_COLS`
+      → `src/data_collection/ratios.py`) is done — see that plan's status. All six `sec/*` imports
+      plus `br/collectors.py`'s `FUND_FULL_COLS` import now point at `..ratios`, not `..yf_collectors`.
 
 **The 11 level columns that change (BR only):** `net_income`, `equity`, `net_revenue`, `total_debt`,
 `ebitda`, `ebit`, `net_debt`, `cash`, `total_assets`, `current_assets`, `current_liabilities`.
@@ -254,17 +258,20 @@ needs no change.**
 
 ### The guard that makes it stick
 
-- [ ] **One invariant test, run for BOTH markets** — this is the real deliverable, not the two
-      one-line fixes. Assert the scale identities that already hold in the vendor layer:
-      `vpa * shares == equity` · `lpa * shares == net_income` · `market_cap / shares == close` ·
-      `book_to_market * pvp == 1`. Cross-market execution is what makes the convention *enforced*
-      rather than *documented*. Add to `tests/build_dataset/`, DATA group.
-      **Assert per ticker and fail on the worst offender, not on a pooled median** — see the
-      115-file finding: a pooled statistic over a mixed-scale panel reads correct. Report the count
-      of tickers failing, not just pass/fail. **Use the 10% band** (see the tolerance banner).
-- [ ] **Extend the same test to margin-scale consistency** (from §2c): assert all four `*_margin`
-      columns share one convention. The existing vendor validators structurally cannot catch this —
-      they check raw collector output, which was already correct.
+- [x] ✅ **APPLIED 2026-08-20 — one invariant test, run for BOTH markets**:
+      `tests/build_dataset/test_unit_scale_invariants.py` (new, DATA group). Asserts the scale
+      identities that already hold in the vendor layer — `vpa * shares == equity` ·
+      `lpa * shares == net_income` · `market_cap / shares == close` · `book_to_market * pvp == 1` —
+      per ticker (min 5 valid rows), failing on the worst offender at the 10% band, not a pooled
+      median, and reports the count of tickers failing plus the worst 5. Runs against both
+      `ml_dataset.parquet` and `us_ml_dataset.parquet`. **Not yet run** (needs the DATA group;
+      expected to fail on BR until step 3's migration + step 5's rebuild land — see this doc's
+      Status section).
+- [x] ✅ **APPLIED 2026-08-20 — margin-scale consistency**, same file: per ticker, the largest
+      pairwise ratio among the 4 `*_margin` columns' medians must stay under 10x (an
+      order-of-magnitude guard, not the 10% identity band — margins legitimately differ ticker to
+      ticker; measured worst *healthy* pairwise spread in this dataset is ~5x, the §2c bug produced
+      ~86x). Same not-yet-run caveat as above (§2c's fix needs the rebuild to reach the parquet).
 - [ ] Record the convention in CLAUDE.md: **all monetary values are full currency units (BRL/USD);
       no column is ever denominated in thousands.** Today it lives only as `K = 1000` in a module
       BR fundamentals no longer route through.
@@ -585,11 +592,13 @@ Structural docs work — the `docs/` index, the module tables, the graph rebuild
 
 ```
 0. tests/run_all.py --group fast                     ← DONE 2026-08-20, 55/55 green
-1. §1 invariant test, PER TICKER, 10% band (written FIRST, expected to FAIL on BR)
-1b. [Organization plan §O1] compute_ratios -> data_collection/ratios.py
+1. §1 invariant test, PER TICKER, 10% band (written FIRST, expected to FAIL on BR)  ← DONE 2026-08-20
+1b. [Organization plan §O1] compute_ratios -> data_collection/ratios.py             ← DONE 2026-08-20
       ← the one organization item that runs early: a pure move, no behavior
         change, and step 2 edits that function's signature
-2. §1 normalization: cvm/ratios.py (scale RAW inputs), yf_collectors, br/collectors
+2. §1 normalization: cvm/ratios.py (scale RAW inputs), yf_collectors, br/collectors  ← DONE 2026-08-20
+      fast suite re-verified green after 1b and after 2 (55/55 each time)
+--- NOT YET RUN: steps 3+ mutate real data (600+ git-tracked files / rebuild). Owner's call. ---
 3. §1 migration: build_fundamentals(tickers=None, rebuild=True) over the FULL crosswalk
       -- NOT via pipeline.py (ATIVO-scoped, would strand 115 files)
       -- CHECK the return value; _merge_save no-ops silently on validation failure

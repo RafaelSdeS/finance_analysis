@@ -15,7 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pandas as pd
 
-from ..yf_collectors import compute_ratios
+from ..ratios import compute_ratios
 from .. import config, validate
 from . import companyfacts, crosswalk, fds, selected_financial_data, tenq, universe
 

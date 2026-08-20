@@ -15,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from src.data_collection.yf_collectors import compute_ratios
+from src.data_collection.ratios import compute_ratios
 
 
 def test_zero_denominator_yields_nan():

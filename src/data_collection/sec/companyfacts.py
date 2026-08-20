@@ -26,7 +26,7 @@ import numpy as np
 import pandas as pd
 
 from . import http
-from ..yf_collectors import compute_ratios
+from ..ratios import compute_ratios
 
 log = logging.getLogger("sec")
 

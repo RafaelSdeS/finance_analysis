@@ -47,7 +47,7 @@ from . import cover_page, http
 from .selected_financial_data import (
     _is_caption_only_row, _normalize_label, _row_text, _row_values, _UNITS_RE, detect_unit_multiplier,
 )
-from ..yf_collectors import compute_ratios
+from ..ratios import compute_ratios
 
 # Filings in this window can plausibly carry real 10-Q HTML statements --
 # bounded the same way fds.py's EX27_ERA_END and selected_financial_data's

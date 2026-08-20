@@ -29,6 +29,7 @@ import yfinance as yf
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.data_collection import checkpoint, config, validate  # noqa: E402
+from src.data_collection.ratios import compute_ratios  # noqa: E402
 from src.data_collection.yf_collectors import (  # noqa: E402
     _MAX_FLAT_RUN_FRACTION,
     TRUSTED_MIN_YF_ROWS,
@@ -43,7 +44,6 @@ from src.data_collection.yf_collectors import (  # noqa: E402
     _seed_last_date,
     _yf_symbol,
     collect_dividends_yf,
-    compute_ratios,
 )
 
 

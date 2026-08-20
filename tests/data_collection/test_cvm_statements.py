@@ -41,10 +41,14 @@ def test_ratio_math():
     # see BOLSAI_EXIT_PLAN.md Task 1 -- so a single row now yields NaN flows; each
     # quarter here carries 1/4 of the target ANNUAL figures below so the TTM'd last
     # row lands on the same known numbers the old single-quarter fixture asserted).
-    # Values in R$ thousands (like CVM/BolsAI): net_income 100_000k, equity
+    # Input rows in R$ thousands (like CVM/BolsAI): net_income 100_000k, equity
     # 1_000_000k, revenue 500_000k, assets 5_000_000k, close 10.00, shares
     # 1_000_000_000 -> market_cap 10e9. Point-in-time items (balance sheet, price,
-    # shares) are NOT TTM'd, so they're just repeated every quarter.
+    # shares) are NOT TTM'd, so they're just repeated every quarter. compute_ratios()
+    # scales these thousands inputs to full R$ units internally (§1,
+    # DATA_LAYER_CORRECTNESS_PLAN.md) -- ratios stay numerically identical (k
+    # compensates), but stored LEVEL columns (cash/total_debt/net_debt/ebitda
+    # below) come out 1000x their thousands-convention input, on purpose.
     quarters = pd.date_range("2019-06-30", "2020-03-31", freq="QE")
     q = pd.DataFrame({
         "reference_date": quarters,
@@ -79,15 +83,15 @@ def test_ratio_math():
     assert abs(r["net_margin"] - 20.0) < 0.01, r["net_margin"]
     assert abs(r["gross_margin"] - 40.0) < 0.01, r["gross_margin"]
     assert abs(r["current_ratio"] - 2.0) < 0.01, r["current_ratio"]
-    assert abs(r["cash"] - 200_000.0) < 0.01, r["cash"]
-    assert abs(r["total_debt"] - 1_000_000.0) < 0.01, r["total_debt"]
-    assert abs(r["net_debt"] - 800_000.0) < 0.01, r["net_debt"]
+    assert abs(r["cash"] - 200_000_000.0) < 1, r["cash"]              # §1: 200_000k -> full R$ units
+    assert abs(r["total_debt"] - 1_000_000_000.0) < 1, r["total_debt"]  # §1: 1_000_000k -> full R$ units
+    assert abs(r["net_debt"] - 800_000_000.0) < 1, r["net_debt"]     # §1: 800_000k -> full R$ units
     assert abs(r["ev_ebit"] - 72.0) < 0.01, r["ev_ebit"]         # (10e9+8e8) / 150_000k (BUG-2)
     assert abs(r["ev_ebitda"] - 63.529) < 0.01, r["ev_ebitda"]   # (10e9+8e8) / 170_000k (BUG-2)
     assert abs(r["debt_equity"] - 1.0) < 0.01, r["debt_equity"]
     assert abs(r["lpa"] - 0.10) < 0.001, r["lpa"]        # 100_000k*1000 / 1e9 shares
     assert abs(r["vpa"] - 1.00) < 0.001, r["vpa"]
-    assert abs(r["ebitda"] - 170_000.0) < 0.01, r["ebitda"]  # TTM ebit + TTM depr_amort (real EBITDA, Task 1)
+    assert abs(r["ebitda"] - 170_000_000.0) < 1, r["ebitda"]  # §1: TTM ebit + TTM depr_amort, full R$ units
     assert abs(r["roic"] - 5.5) < 0.01, r["roic"]        # (150_000k*0.66) / 1_800_000k * 100
 
     # schema gate: exactly what collect_fundamentals-written files must satisfy
@@ -126,7 +130,11 @@ def test_cross_source_vs_bolsai():
         # ponytail: net_income has ~75% systematic divergence between CVM and BolsAI
         # (likely different earnings definitions: adjusted vs reported). Equity matches <3%,
         # so balance sheet data is reliable. Check only equity; net_income needs deeper audit.
-        b, c = both["equity_b"], both["equity_c"]
+        # equity_b comes from compute_ratios() output (full R$ units, §1); equity_c is
+        # load_statements()'s raw value, which stays in CVM's thousands convention by
+        # design (statements.py:163) -- scale it up before comparing, or every row
+        # trips the 15% band on the deliberate 1000x, not a real join bug.
+        b, c = both["equity_b"], both["equity_c"] * 1000.0
         rel = ((b - c).abs() / b.abs().clip(lower=1)).median()
         assert rel < TOLERANCE, f"{ticker} equity: median rel diff {rel:.1%} > {TOLERANCE:.0%}"
         print(f"PASS  cross-source {ticker}: {len(both)} quarters, equity within {TOLERANCE:.0%}")

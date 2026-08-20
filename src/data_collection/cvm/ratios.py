@@ -43,9 +43,21 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     near a coin flip), which corrupts any cross-sectional comparison
     (`cross_sectional.py` z-scores within sector groups, `alpha.py` trains one
     model across the whole panel) -- both need a column to mean the same thing for
-    every row. Balance-sheet items stay point-in-time, never TTM'd. Values in R$
-    thousands (statements) / R$ units (market_cap), matching BolsAI's own unit."""
+    every row. Balance-sheet items stay point-in-time, never TTM'd. Values are
+    full R$ units throughout (DATA_LAYER_CORRECTNESS_PLAN.md §1) -- CVM's raw
+    statements are in thousands, scaled up once below, right after TTM."""
     g = _ttm(q.sort_values("reference_date"), [c for c in _TTM_COLS if c in q.columns])
+
+    # §1: scale the RAW inputs, not the derived output names -- cash/total_debt/
+    # net_debt/ebitda are derived FROM these just below, so scaling only stored
+    # output columns would miss them (leaving ev_*/p_ebitda/net_debt_* wrong).
+    # market_cap (close_price * shares_outstanding) is already full units; leave
+    # it, and keep this scaling point above it.
+    for c in ("net_income", "equity", "net_revenue", "ebit", "total_assets",
+              "current_assets", "current_liabilities", "gross_profit", "depr_amort",
+              "cash_caixa", "cash_aplic", "debt_st", "debt_lt"):
+        if c in g.columns:
+            g[c] = g[c] * 1000.0
 
     def col(name):
         return g[name] if name in g.columns else pd.Series(float("nan"), index=g.index)
@@ -62,7 +74,8 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     g["ebitda"] = col("ebit") + col("depr_amort")
 
     g["market_cap"] = g["close_price"] * g["shares_outstanding"]
-    k = 1000.0  # statements are in thousands; market_cap in units
+    k = 1.0  # inputs already scaled to full R$ units above (§1) -- kept as a
+    # multiplier (not deleted) so every crossing below stays visually marked
     g["pl"] = g["market_cap"] / (col("net_income") * k)
     g["pvp"] = g["market_cap"] / (col("equity") * k)
     g["p_sr"] = g["market_cap"] / (col("net_revenue") * k)

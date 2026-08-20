@@ -40,10 +40,15 @@ yfinance collector.
 dependency *and* adds a layer on top of it. After that split, `sec/companyfacts.py` would import a
 yfinance shim, which forwards into a yfinance package, to reach vendor-neutral algebra.
 
-- [ ] **Move `compute_ratios` + `FUND_FULL_COLS` to `src/data_collection/ratios.py`.** The package
-      root already *is* the shared-infra tier — `config`, `storage`, `validate`, `checkpoint`,
-      `client`; everything imports from it, nothing market-specific lives there. Then `yf/`, `sec/`
-      and `cvm/` all import from one neutral place. **6 import lines + one move.**
+- [x] ✅ **DONE 2026-08-20 — moved `compute_ratios` + `FUND_FULL_COLS` to `src/data_collection/ratios.py`.**
+      `yf_collectors.py` now imports both from `.ratios` (still uses them internally — the module
+      keeping the name isn't the same as the module keeping the code). All 6 downstream import
+      sites repointed to `..ratios`: `sec/fundamentals.py`, `sec/fds.py`, `sec/tenq.py`,
+      `sec/companyfacts.py`, `sec/selected_financial_data.py`, `br/collectors.py`
+      (`FUND_FULL_COLS`). Two test files also fixed (`tests/data_collection/test_yf_collectors.py`,
+      `test_ratios_no_inf.py`, `test_skip_existing.py`) rather than left on the old path — a
+      re-export shim was explicitly rejected above, so nothing should still import vendor-neutral
+      code through `yf_collectors`. `tests/run_all.py --group fast`: 55/55 after the move.
 
 **Sequence it before the correctness plan's §1**, which edits `compute_ratios`' signature
 (`unit_scale`). Moving a function is a cleaner diff than moving one that just changed, and the six

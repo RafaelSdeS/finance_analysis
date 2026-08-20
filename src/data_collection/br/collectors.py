@@ -24,7 +24,7 @@ import pandas as pd
 
 from .. import checkpoint, client, config, validate
 from ..storage import _chunk_dates, _merge_save, is_complete
-from ..yf_collectors import FUND_FULL_COLS
+from ..ratios import FUND_FULL_COLS
 
 log = logging.getLogger(__name__)
 
@@ -247,6 +247,17 @@ def collect_fundamentals(tickers: list[str], mode: str):
 
                 df = pd.DataFrame(hist)
                 df["ticker"] = ticker
+
+                # §1 (DATA_LAYER_CORRECTNESS_PLAN.md): BolsAI's response is in BRL
+                # thousands, same convention as CVM's raw statements. Scale to full
+                # BRL on ingest so this cold path (DATA_SOURCE flipped back to
+                # "bolsai") still obeys the one-currency-unit convention instead of
+                # silently reintroducing the thousands-vs-units split.
+                for level_col in ("net_income", "equity", "net_revenue", "total_debt",
+                                   "ebitda", "ebit", "net_debt", "cash", "total_assets",
+                                   "current_assets", "current_liabilities"):
+                    if level_col in df.columns:
+                        df[level_col] = df[level_col] * 1000.0
 
                 saved = _merge_save(df, path, "reference_date",
                                     validate.validate_fundamentals, f"fundamentals/{ticker}")
