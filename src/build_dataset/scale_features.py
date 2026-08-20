@@ -52,7 +52,10 @@ RATIO_COLUMNS = [
     "roe", "roa", "roic", "ebit_over_assets", "asset_turnover",
     "current_ratio", "cash_ratio", "net_debt_to_assets", "working_capital_ratio",
     "debt_equity", "net_debt_equity", "net_debt_ebitda", "net_debt_ebit",
-    "cagr_revenue_5y", "cagr_earnings_5y", "cagr_revenue_5y_final", "cagr_earnings_5y_final",
+    # cagr_revenue_5y/cagr_earnings_5y are intermediate (BolsAI-only, pre-fill)
+    # columns dropped before the final dataset is written -- only the *_final
+    # (BolsAI-or-backfilled) columns ever reach ml_dataset.parquet.
+    "cagr_revenue_5y_final", "cagr_earnings_5y_final",
     "book_to_market", "earnings_yield",
     "revenue_growth_yoy", "earnings_growth_yoy", "ebitda_growth_yoy",
     "total_assets_growth_yoy", "total_debt_growth_yoy",

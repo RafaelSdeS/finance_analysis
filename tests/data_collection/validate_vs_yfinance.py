@@ -5,8 +5,9 @@ Cross-validates BolsAI raw parquet data against yfinance for PETR4, VALE3, WEGE3
 
 Prices:       BolsAI close vs yfinance Close (auto_adjust=False), post-last-split only.
               (adj_close skipped — dividend-adjustment methods diverge, uninformative.)
-Fundamentals: BolsAI net_revenue/net_income (BRL thousands, TTM) vs yfinance
-              quarterly_financials (single-quarter -> rolling 4Q TTM).
+Fundamentals: BolsAI net_revenue/net_income (full BRL units since the §1 currency-unit
+              migration, 2026-08-20; TTM) vs yfinance quarterly_financials (single-quarter
+              -> rolling 4Q TTM).
 CAGR:         Not re-checked here. Run: python src/build_dataset/cagr_handler.py --ticker PETR4
 
 Usage (from project root):
@@ -119,7 +120,8 @@ def validate_fundamentals(ticker) -> bool:
 
 
 def _print_fund_rows(label, col, fund, yf_series) -> bool:
-    """Compare a BolsAI column (BRL thousands) against a yfinance series (full BRL)."""
+    """Compare a BolsAI column against a yfinance series -- both full BRL units
+    since the §1 currency-unit migration (2026-08-20; DATA_LAYER_CORRECTNESS_PLAN.md)."""
     print(f"  {label}:")
     printed = False
     ok = True
@@ -127,7 +129,7 @@ def _print_fund_rows(label, col, fund, yf_series) -> bool:
         row = fund[fund["reference_date"] == dt]
         if row.empty or yf_val == 0:
             continue
-        bolsai = row[col].values[0] * 1000  # BolsAI stores BRL thousands
+        bolsai = row[col].values[0]
         pct = (bolsai - yf_val) / abs(yf_val) * 100
         note = "  [likely currency mismatch — check reporting currency]" if abs(pct) > 200 else ""
         print(f"    {dt.date()}: BolsAI={bolsai/1e9:.2f}B  yf={yf_val/1e9:.2f}B  diff={pct:+.1f}%{note}")
@@ -145,22 +147,24 @@ def check_internal_consistency(ticker) -> bool:
     fund = pd.read_parquet(FUND_DIR / f"{ticker}.parquet").sort_values("reference_date")
     r = fund.iloc[-1]
     ok = True
-    K = 1000  # financials are BRL thousands; market_cap/close_price are full BRL / per-share
+    # Since the §1 currency-unit migration (2026-08-20), every column here is full BRL
+    # units -- no thousands->units crossing needed (was K=1000, matching cvm/ratios.py's
+    # old k before that fix; see DATA_LAYER_CORRECTNESS_PLAN.md).
 
     # (label, BolsAI value, recomputed value). See units note in validate run.
     checks = [
         ("market_cap",    r["market_cap"],   r["close_price"] * r["shares_outstanding"]),
-        ("lpa",           r["lpa"],          r["net_income"] * K / r["shares_outstanding"]),
-        ("vpa",           r["vpa"],          r["equity"] * K / r["shares_outstanding"]),
-        ("pl",            r["pl"],           r["market_cap"] / (r["net_income"] * K)),
-        ("pvp",           r["pvp"],          r["market_cap"] / (r["equity"] * K)),
+        ("lpa",           r["lpa"],          r["net_income"] / r["shares_outstanding"]),
+        ("vpa",           r["vpa"],          r["equity"] / r["shares_outstanding"]),
+        ("pl",            r["pl"],           r["market_cap"] / r["net_income"]),
+        ("pvp",           r["pvp"],          r["market_cap"] / r["equity"]),
         ("roe",           r["roe"],          r["net_income"] / r["equity"] * 100),
         ("roa",           r["roa"],          r["net_income"] / r["total_assets"] * 100),
         ("net_margin",    r["net_margin"],   r["net_income"] / r["net_revenue"] * 100),
         ("ebitda_margin", r["ebitda_margin"], r["ebitda"] / r["net_revenue"] * 100),
         ("net_debt",      r["net_debt"],     r["total_debt"] - r["cash"]),
         ("debt_equity",   r["debt_equity"],  r["total_debt"] / r["equity"]),
-        ("ev_ebitda",     r["ev_ebitda"],    (r["market_cap"] + r["net_debt"] * K) / (r["ebitda"] * K)),
+        ("ev_ebitda",     r["ev_ebitda"],    (r["market_cap"] + r["net_debt"]) / r["ebitda"]),
     ]
 
     print(f"  Latest quarter: {r['reference_date'].date()}")

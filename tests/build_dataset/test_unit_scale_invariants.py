@@ -1,17 +1,16 @@
 """§1 guard from docs/DATA_LAYER_CORRECTNESS_PLAN.md: money must be in one
-scale (full currency units, never thousands) and all four `*_margin` columns
-must share one convention (percent, never a mix of percent and fraction).
+scale (full currency units, never thousands) and the `*_margin` columns must
+share one convention (percent, never a mix of percent and fraction).
 
-Written FIRST, before the §1 normalization fix lands -- expected to FAIL on
-BR today (book_to_market*pvp reads ~0.001, not 1.0) and pass once the raw
-CVM fundamentals are rebuilt in real currency units. US already passes
-(unit_scale=1 at the source).
-
-Asserted per ticker, worst offender reported -- not a pooled median. A
-pooled statistic over a panel that mixes 497 correctly-scaled tickers with
-115 still-in-thousands tickers reads deceptively close to correct (measured
-in the plan: pooled median ~1.0 hides a clean 1000x split). See the plan's
+The four scale identities (vpa*shares==equity, etc.) are asserted PER TICKER,
+worst offender reported -- not a pooled median. A pooled statistic over a
+panel that mixes correctly-scaled and still-in-thousands tickers reads
+deceptively close to correct (measured in the plan: a 497/115-ticker mixed
+panel pooled to ~1.0 median and hid a clean 1000x split). See the plan's
 tolerance banner for why every identity here uses a 10% band, not a tight one.
+
+The margin-scale check is POOLED instead, deliberately -- see its own
+docstring for why per-ticker doesn't work there.
 
 Usage: python tests/build_dataset/test_unit_scale_invariants.py
 """
@@ -33,12 +32,22 @@ BAND = 0.10  # DATA_LAYER_CORRECTNESS_PLAN.md tolerance banner: vendors legitima
              # disagree by a few percent; the real bugs this catches are off by 100-1000x.
 MIN_ROWS = 5  # a median over fewer than this isn't a meaningful per-ticker signal
 
-# Order-of-magnitude guard, NOT an identity -- margins legitimately differ
-# ticker to ticker, so this isn't held to the 10% band. Measured on this
-# dataset's healthy siblings: worst normal pairwise spread is ~5x (gross vs
-# net margin). The ebitda_margin bug this guards against (§2c) produced ~86x.
-MARGIN_SPREAD_MAX = 10.0
-MARGIN_COLS = ["gross_margin", "ebit_margin", "net_margin", "ebitda_margin"]
+# Order-of-magnitude guard, NOT an identity, and POOLED (not per-ticker) --
+# unlike the four scale identities above, a per-ticker check here produces
+# false positives: a near-zero-net_revenue distress quarter sends ebit_margin/
+# net_margin into the millions of percent (CLAUDE.md documents this as
+# intentional, kept unclipped -- e.g. OBTC3 measured at -31,023,867%), which
+# swamps a per-ticker spread check without being a scale bug at all. The
+# original §2c bug's own signature was a UNIFORM panel-wide factor (ratio
+# exactly 0.01 at every quantile p01-p99), so a pooled median -- computed only
+# over rows where both margins are in a plausible range, filtering out the
+# distress blowups -- reproduces exactly how that bug was actually found.
+ANCHOR_MARGIN = "gross_margin"  # dense in BR (CLAUDE.md), assumed correctly scaled
+COMPARE_MARGINS = ["ebit_margin", "net_margin", "ebitda_margin"]
+REASONABLE_MARGIN_BOUND = 1000.0  # exclude near-zero-denominator distress blowups
+MARGIN_RATIO_BAND = 20.0  # measured healthy cross-margin ratios stay under ~6x;
+                          # the ebitda_margin bug produced ~86-100x
+MARGIN_COLS = [ANCHOR_MARGIN, *COMPARE_MARGINS]
 
 # label -> ratio(df) that should equal 1.0 on every valid row if the scale is right
 IDENTITIES = [
@@ -67,27 +76,33 @@ def check_identity(df, fn):
 
 
 def check_margin_scale(df):
-    """All four *_margin columns must read as the same convention per ticker."""
-    present = [c for c in MARGIN_COLS if c in df.columns]
-    med = df.groupby(df["ticker"])[present].median()
-    cnt = df.groupby(df["ticker"])[present].count()
+    """All *_margin columns must read as the same convention, checked pooled
+    against the ANCHOR_MARGIN (see module docstring for why not per-ticker)."""
+    if ANCHOR_MARGIN not in df.columns:
+        return True, f"{ANCHOR_MARGIN} not in this dataset", []
 
-    failing = {}
-    for ticker in med.index:
-        vals = {c: abs(med.at[ticker, c]) for c in present
-                 if cnt.at[ticker, c] >= MIN_ROWS
-                 and pd.notna(med.at[ticker, c])
-                 and abs(med.at[ticker, c]) > 1e-6}
-        if len(vals) < 2:
+    anchor = df[ANCHOR_MARGIN]
+    in_bound = np.isfinite(anchor) & (anchor.abs().between(0.5, REASONABLE_MARGIN_BOUND))
+
+    ok = True
+    detail_parts, worst = [], []
+    for col in COMPARE_MARGINS:
+        if col not in df.columns:
             continue
-        spread = max(vals.values()) / min(vals.values())
-        if spread > MARGIN_SPREAD_MAX:
-            failing[ticker] = spread
+        other = df[col]
+        valid = in_bound & np.isfinite(other) & (other.abs().between(0.5, REASONABLE_MARGIN_BOUND))
+        n = int(valid.sum())
+        if n < 100:
+            detail_parts.append(f"{col}: too few clean rows (n={n}), skipped")
+            continue
+        ratio = (other[valid] / anchor[valid]).median()
+        pair_ok = (1.0 / MARGIN_RATIO_BAND) <= ratio <= MARGIN_RATIO_BAND
+        ok &= pair_ok
+        detail_parts.append(f"{col}/{ANCHOR_MARGIN}={ratio:.3f} (n={n})")
+        if not pair_ok:
+            worst.append(f"{col} vs {ANCHOR_MARGIN}: pooled median ratio {ratio:.4f} (n={n})")
 
-    worst_tickers = sorted(failing, key=failing.get, reverse=True)[:5]
-    worst = [f"{t} (spread {failing[t]:.1f}x)" for t in worst_tickers]
-    detail = f"{len(failing)}/{len(med)} tickers with margin spread > {MARGIN_SPREAD_MAX:.0f}x"
-    return not failing, detail, worst
+    return ok, ", ".join(detail_parts), worst
 
 
 def run(path, market):

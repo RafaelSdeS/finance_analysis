@@ -2,9 +2,15 @@
 features.py -- the §4.4-E "keep" feature partition from
 docs/PORTFOLIO_ARCHITECTURE_PROPOSAL.md, as a literal list. Verified
 column-by-column against the real data/processed/ml_dataset.parquet schema
-and manifest.LOOKAHEAD_TAINTED_COLS (2026-07-24): 121 real columns total
-(120 numeric + `sector`), none of them identifiers, lookahead-tainted, or
-non-stationary raw price/volume/currency levels (§4.4 A/B/C/D).
+and manifest.LOOKAHEAD_TAINTED_COLS: 119 real columns total (118 numeric +
+`sector`), none of them identifiers, lookahead-tainted, or non-stationary
+raw price/volume/currency levels (§4.4 A/B/C/D).
+
+[2026-08-20] `cagr_revenue_5y`/`cagr_earnings_5y` (bare, pre-fill columns)
+dropped: they no longer exist in the built dataset -- only the
+BolsAI-or-backfilled `..._final` columns do (same root cause as
+scale_features.py's RATIO_COLUMNS fix). Count was 121/120 as of 2026-07-24;
+this list quietly stopped matching real data before this fix.
 
 `sector` is kept separate (not in the numeric groups): it's a static
 low-cardinality categorical, verified absent from
@@ -27,7 +33,7 @@ LEVERAGE = [
     "cash_ratio", "net_debt_to_assets", "working_capital_ratio",
 ]
 GROWTH = [
-    "cagr_revenue_5y", "cagr_earnings_5y", "cagr_earnings_5y_final", "cagr_revenue_5y_final",
+    "cagr_earnings_5y_final", "cagr_revenue_5y_final",
     "revenue_growth_yoy", "earnings_growth_yoy", "ebitda_growth_yoy", "total_assets_growth_yoy",
     "total_debt_growth_yoy", "revenue_vs_earnings_growth_delta", "gross_margin_qoq",
     "net_margin_qoq", "roe_qoq", "debt_equity_qoq", "current_ratio_qoq",

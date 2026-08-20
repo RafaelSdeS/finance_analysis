@@ -26,13 +26,13 @@ def main():
     passed = failed = 0
 
     cols = feature_columns(include_sector=False)
-    count_ok = len(cols) == 120 == len(set(cols))
-    print_check("120 unique numeric features (proposal §4.4 count)", count_ok, f"got {len(cols)}")
+    count_ok = len(cols) == 118 == len(set(cols))
+    print_check("118 unique numeric features (proposal §4.4 count)", count_ok, f"got {len(cols)}")
     passed, failed = passed + count_ok, failed + (not count_ok)
 
     with_sector = feature_columns(include_sector=True)
-    sector_ok = len(with_sector) == 121 and "sector" in with_sector
-    print_check("121 with include_sector=True", bool(sector_ok), f"got {len(with_sector)}")
+    sector_ok = len(with_sector) == 119 and "sector" in with_sector
+    print_check("119 with include_sector=True", bool(sector_ok), f"got {len(with_sector)}")
     passed, failed = passed + sector_ok, failed + (not sector_ok)
 
     no_taint_ok = not (set(with_sector) & set(LOOKAHEAD_TAINTED_COLS))

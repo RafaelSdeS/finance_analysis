@@ -10,17 +10,55 @@ now lives in **`DATA_LAYER_ORGANIZATION_PLAN.md`** and runs *behind* this one.
 2. **Every derived column means one thing** — no column that is a percent in one row and a fraction in another.
 3. **Proof they work** — invariants that fail loudly, not conventions held in comments.
 
-**Status:** applied to the working tree, uncommitted:
-§3's Edits 1–5, §2c's fix, §1's invariant test + O1 move + normalization (steps 1/1b/2 below),
-and §4/§5/§6 slices (marked ⚠️ APPLIED / ✅ APPLIED).
-`tests/run_all.py --group fast`: **55/55 pass** as of 2026-08-20 (re-verified after §1's edits).
-Revert with `git checkout -- . && rm tests/data_collection/test_yf_collectors.py tests/build_dataset/test_unit_scale_invariants.py src/data_collection/ratios.py`.
+**Status:** §1 is DONE end to end as of 2026-08-20 — normalization code (steps 1/1b/2) committed
+(`6ddc959`), migration (step 3) run over the full 695-ticker crosswalk (612 written, 83 skipped for
+no price file — matches the crosswalk exactly, confirmed NOT ATIVO-scoped), `ml_dataset.parquet`
+rebuilt and `scale_features.py` re-fit (step 5). §3's Edits 1–5, §2c's fix, and §4/§5/§6 slices also
+applied (⚠️ APPLIED / ✅ APPLIED). `tests/run_all.py --group fast`: **55/55 pass**.
 
-**§1 normalization code is done (steps 1/1b/2); the migration (step 3) is NOT run** —
-`data/raw/br/fundamentals/*.parquet` still holds the old thousands-scale values, since step 3
-rewrites 600+ git-tracked files and is the owner's call, not something to trigger unattended.
-`tests/build_dataset/test_unit_scale_invariants.py` (new, DATA group) will fail on BR until step 3
-+ step 5's rebuild land — that's expected, per its own docstring.
+**Invariant test results (`tests/build_dataset/test_unit_scale_invariants.py`), post-rebuild:**
+BR 4/5, US 5/5. All three headline identities (`vpa*shares==equity`, `lpa*shares==net_income`,
+`book_to_market*pvp==1`) pass 100% on both markets — confirms the migration worked (PETR4 spot
+check: `equity` 481,854,000 → 481,854,000,000, exactly ×1000). Margin-scale check (redesigned
+pooled, not per-ticker — see the test's own docstring) also passes both markets, confirming §2c.
+**One open, pre-existing finding, out of §1's scope:** `market_cap/shares == close` fails on
+**19/549 BR tickers** (worst: TIMS3, ratio ~99x, n=1979) — `market_cap`/`shares_outstanding`/`close`
+were never touched by §1's currency-unit fix, so this predates this work; looks like stale
+shares-outstanding not tracking a real split (TIMS3's `close` ranges 0.000038→18.79 across its
+history). Not investigated further here — needs the same per-event verification rigor as the
+continuity map, not a quick patch.
+
+**Also fixed in this pass, unrelated to §1's currency-unit scope but directly exposed by running
+real data through the rebuilt pipeline:**
+- `scale_features.py`'s `RATIO_COLUMNS` and `src/portfolio/features.py`'s `GROWTH` list both
+  referenced `cagr_revenue_5y`/`cagr_earnings_5y` (intermediate, pre-fill columns dropped before
+  the final dataset is written) instead of the real `..._final` columns. Both always broken —
+  masked by synthetic-fixture tests (`test_scale_features.py`, `test_features.py`) that manufacture
+  a column for every listed name regardless of whether it's real. Fixed both, plus
+  `test_features.py`'s hardcoded 120/121 count assertions → 118/119. **This one was live-breaking**:
+  `alpha.py` derives its design matrix straight from `feature_columns()`, so Stage 3 would have
+  hard-crashed (`KeyError`) on the next run, not just failed a test.
+- `validate_vs_yfinance.py` hardcoded its own local `K = 1000` in two places
+  (`_print_fund_rows`, `check_internal_consistency`) — a third, independent copy of the
+  thousands-convention assumption §1 was written to eliminate. Post-migration this double-scaled
+  every recomputed ratio and fundamentals comparison by 1000x (`lpa` read 1589.67 vs BolsAI's 1.59,
+  a fake +99900% "mismatch"). Fixed; re-run: `OVERALL: PASS`, all real vendor diffs back to a sane
+  0–8% range.
+- `terminal_events.parquet` needed a re-run after the `ml_dataset.parquet` rebuild (documented in
+  CLAUDE.md's Run Commands as a required post-`build_ml_dataset.py` step) — not a bug, just an
+  ordering step that hadn't happened yet. Re-ran: same 104 rows as before (§2b's territory,
+  untouched by §1).
+
+**Real pre-existing findings surfaced by running the DATA group post-rebuild, reported but NOT
+fixed here** (each is a different subsystem than §1's currency-unit scope — `market_cap/shares==
+close` on 19 BR tickers, `cagr_revenue` coverage, 4 tickers' single-day NaN holes, `pl` freeze rate,
+CAMB3/LUXM4 price quality, 9 top50 NOT READY tickers, 12 uncovered dead tickers): moved to their own
+tracked file, **`DATA_LAYER_FOLLOWUP_FINDINGS.md`**, so this doc stays scoped to §1's own history.
+
+Revert with `git checkout -- . && rm tests/data_collection/test_yf_collectors.py tests/build_dataset/test_unit_scale_invariants.py src/data_collection/ratios.py`
+— note this does **not** revert the migration's data changes (`data/raw/br/fundamentals/*.parquet`,
+`ml_dataset.parquet`, the scaler); those need `git checkout -- data/raw/br/fundamentals/` separately
+if ever needed (processed/ outputs are gitignored and just need a re-run of the old code).
 
 All findings measured read-only against the real tree: 1,328 BR price files, 612 BR fundamentals,
 8,283 US fundamentals, `ml_dataset.parquet` at 1,706,604 rows / 567 tickers / 22,832 ticker-quarters.
@@ -231,7 +269,16 @@ needs no change.**
          and the data's floor are the same date, so there is nothing to orphan. Re-check if any
          pre-2010 fundamentals are ever added.
 
-- [ ] 🔴 **Do NOT migrate via `pipeline.py`. It would silently leave 115 files in thousands.**
+- [x] ✅ **DONE 2026-08-20 — migrated correctly, NOT via `pipeline.py`.** Ran
+      `build_fundamentals(tickers=None, rebuild=True)` directly (no CLI exposes `rebuild=True` over
+      the full crosswalk — `cvm_statements.py --step fundamentals` defaults `rebuild=False`).
+      Result: `612 written, 83 skipped (existing/no prices)`, and **83 + 612 = 695 = the exact
+      crosswalk size** — confirmed read-only afterward, proving every crosswalk ticker was
+      attempted, not just the 565 ATIVO ones. Spot-checked the previously-stranded sample
+      (`AELP3`, `ALSC3`, `APER3`, `BFRE11`, `BIDI3/4/11`, `BLUT3`) — all rewritten at the migration's
+      timestamp. The 115-file trap below did **not** recur.
+
+      🔴 **Do NOT migrate via `pipeline.py`. It would silently leave 115 files in thousands.**
       `collect_fundamentals_cvm(tickers, mode)` forwards the caller's already-scoped list to
       `build_fundamentals(tickers=..., rebuild=True)`, and `pipeline.py` scopes that list to
       **`_active_tickers()` (status == ATIVO)**. Measured: 612 fundamentals files on disk vs **565
@@ -251,27 +298,38 @@ needs no change.**
       median of a 497/115 mix still reads ≈1.0 and hides it.
 - [ ] Watch for BolsAI-era leftover rows in tickers CVM doesn't cover — those would stay in
       thousands and produce a mid-history 1000× discontinuity **within a single ticker**. Distinct
-      from the whole-file gap above; the per-ticker invariant test catches both.
-- [ ] Rebuild `ml_dataset.parquet`, snapshot `dataset_v{N}`, re-fit the scaler
-      (`scale_features.py` — a RobustScaler fit on thousands is invalid afterward).
-      **Owner runs this. Do not run rebuilds unattended.**
+      from the whole-file gap above; the per-ticker invariant test catches both. **Not explicitly
+      re-checked** — the invariant test's per-ticker median would only flag this if it dominates a
+      given ticker's history; a short thousands-scale prefix inside an otherwise-fixed ticker could
+      still slip past a median-based check. Low measured risk (§1's Migration section: all sampled
+      fundamentals files start at CVM's own floor, 2010-12-31, so there's no pre-2010 tail to orphan).
+- [x] ✅ **DONE 2026-08-20 — rebuilt `ml_dataset.parquet` (auto-snapshotted `dataset_v{N}`, manifest +
+      split_config written) and re-fit the scaler.** `scale_features.py` hit an unrelated pre-existing
+      bug on the real rebuild (`RATIO_COLUMNS` listed `cagr_revenue_5y`/`cagr_earnings_5y`, which
+      don't exist in the output — only the `..._final` columns do; fixed, see this doc's Status
+      section). Owner ran the rebuild + migration; the scaler fix and re-run were done in this pass
+      once real data exposed the bug.
 
 ### The guard that makes it stick
 
-- [x] ✅ **APPLIED 2026-08-20 — one invariant test, run for BOTH markets**:
+- [x] ✅ **APPLIED + RUN 2026-08-20 — one invariant test, run for BOTH markets**:
       `tests/build_dataset/test_unit_scale_invariants.py` (new, DATA group). Asserts the scale
       identities that already hold in the vendor layer — `vpa * shares == equity` ·
       `lpa * shares == net_income` · `market_cap / shares == close` · `book_to_market * pvp == 1` —
       per ticker (min 5 valid rows), failing on the worst offender at the 10% band, not a pooled
-      median, and reports the count of tickers failing plus the worst 5. Runs against both
-      `ml_dataset.parquet` and `us_ml_dataset.parquet`. **Not yet run** (needs the DATA group;
-      expected to fail on BR until step 3's migration + step 5's rebuild land — see this doc's
-      Status section).
-- [x] ✅ **APPLIED 2026-08-20 — margin-scale consistency**, same file: per ticker, the largest
-      pairwise ratio among the 4 `*_margin` columns' medians must stay under 10x (an
-      order-of-magnitude guard, not the 10% identity band — margins legitimately differ ticker to
-      ticker; measured worst *healthy* pairwise spread in this dataset is ~5x, the §2c bug produced
-      ~86x). Same not-yet-run caveat as above (§2c's fix needs the rebuild to reach the parquet).
+      median. **Post-rebuild result: 4/5 BR, 5/5 US.** The three headline identities pass 100% on
+      both markets — see this doc's Status section for the PETR4 spot check and the one remaining
+      finding (`market_cap/shares==close`, 19 BR tickers, pre-existing, out of §1's scope).
+- [x] ✅ **APPLIED + RUN 2026-08-20 — margin-scale consistency**, same file, **redesigned mid-flight**:
+      the original per-ticker spread design (largest pairwise ratio among the 4 `*_margin` columns'
+      medians, >10x fails) produced false positives on genuine near-zero-`net_revenue` distress
+      quarters (one BR ticker's `ebit_margin` legitimately reads -31,023,867% — CLAUDE.md documents
+      these as intentionally kept unclipped). Replaced with a **pooled** median ratio of each margin
+      against `gross_margin` (the anchor), computed only over rows where both are in a plausible
+      [0.5, 1000] range — this mirrors how the real §2c bug was actually found (a uniform panel-wide
+      factor, not a per-ticker one) and is immune to individual distress-row blowups. Passes both
+      markets post-rebuild: BR `ebitda_margin/gross_margin` pooled median **0.607** (pre-fix this
+      would have read ~0.004) confirms §2c landed.
 - [ ] Record the convention in CLAUDE.md: **all monetary values are full currency units (BRL/USD);
       no column is ever denominated in thousands.** Today it lives only as `K = 1000` in a module
       BR fundamentals no longer route through.
