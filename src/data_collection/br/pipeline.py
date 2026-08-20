@@ -60,14 +60,6 @@ def _collect(name: str, tickers: list[str], mode: str):
         fn(yf_only, mode)
 
 
-def _tickers_with_company_info() -> list[str]:
-    """Return tickers that matched BolsAI company info (exist on the platform)."""
-    path = config.COMPANY_INFO_PATH
-    if not path.exists():
-        return []
-    return sorted(pd.read_parquet(path)["ticker"].dropna().unique().tolist())
-
-
 def _active_tickers() -> list[str]:
     """Return only tickers with status='ATIVO' (exclude delisted/suspended)."""
     path = config.COMPANY_INFO_PATH
@@ -139,15 +131,6 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
 
     # (name, callable) in dependency order: macro is ticker-independent; prices
     # and fundamentals are the heavy, failure-prone payloads, so they run last.
-    # After company_info, narrow to only tickers confirmed to exist on BolsAI —
-    # saves ~2x requests by skipping ghost tickers in the per-ticker collectors.
-    def _data_tickers():
-        matched = _tickers_with_company_info()
-        # Exclude benchmarks from company_info/fundamentals/dividends (they're ETFs, not stocks)
-        active = [t for t in tickers if t in set(matched)]
-        log.info("data stages: %d/%d tickers confirmed on BolsAI", len(active), len(tickers))
-        return active
-
     # company_info/sectors/corporate_events are free (CVM CAD + yfinance), so they
     # run in every mode now, including update -- no BolsAI usage to ration.
     # collectors.collect_company_info/collect_sectors/collect_corporate_events (the
