@@ -974,7 +974,10 @@ def test_ratio_columns_nan_when_denominator_near_zero() -> None:
         # (result column, column to zero out, expected value on the "real" row)
         ("payout_ratio", "lpa", 0.5 / 1.0),
         ("revenue_per_earning", "net_income", 500.0 / 50.0),
-        ("ebitda_margin", "net_revenue", 100.0 / 500.0),
+        # *100 because ebitda_margin is a PERCENT, like every sibling margin. This case
+        # previously expected the bare fraction (0.2) and so locked in the 100x bug it was
+        # meant to guard against -- see DATA_LAYER_CORRECTNESS_PLAN.md S2c.
+        ("ebitda_margin", "net_revenue", 100.0 / 500.0 * 100),
         ("peg_ratio", "earnings_growth_yoy", 10.0 / (0.03 * 100)),
         ("pvp_to_roe_ratio", "roe", 2.0 / 0.15),
         ("earnings_yield", "pl", 1.0 / 10.0),

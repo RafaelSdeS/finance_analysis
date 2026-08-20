@@ -63,7 +63,7 @@ FAST = [
     "tests/data_collection/test_refresh_folded_dividends.py",
     "tests/data_collection/test_ratios_no_inf.py",
     "tests/data_collection/test_skip_existing.py",
-    "tests/data_collection/test_yf_collectors_demo.py",
+    "tests/data_collection/test_yf_collectors.py",
     "tests/data_collection/test_fred_collectors.py",
     "tests/data_collection/test_sec_http.py",
     "tests/data_collection/test_sec_universe.py",
@@ -84,6 +84,7 @@ FAST = [
 # Needs data/raw/br/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.
 DATA = [
     "tests/build_dataset/test_final_dataset.py",
+    "tests/build_dataset/test_top50_ml_readiness.py",
     "tests/build_dataset/test_top_traded_quality.py",
     "tests/build_dataset/test_universe_integrity.py",
     "tests/build_dataset/test_artifact_coherence.py",
@@ -111,6 +112,31 @@ NON_BLOCKING = {
     "tests/data_collection/validate_vs_yfinance.py",
     "tests/data_collection/validate_us_vs_vendor.py",
 }
+
+# Deliberately not in any group. Anything else on disk must be in FAST or DATA --
+# see roster_drift() below for why.
+EXCLUDED = {
+    "tests/test_utils.py",              # shared helpers, not a test itself
+    "tests/api/bolsai_api_validator.py",  # live BolsAI endpoint probes; BolsAI is no
+    "tests/api/bolsai_api_macro_depth.py",  # longer the default for any DATA_SOURCE
+    "tests/api/bolsai_api_price_depth.py",  # entry, and each needs a paid API key.
+    "tests/api/bolsai_test_cagr.py",        # Run by hand if the BolsAI path is revived.
+}
+
+
+def roster_drift() -> list[str]:
+    """Test files on disk that are in no group -- they'd silently never run.
+
+    Not hypothetical: test_top50_ml_readiness.py (478 lines) and tests/api/*
+    sat unrun this way until 2026-08-19. Group membership isn't derivable from
+    a filename (FAST vs DATA is about whether the test needs data/raw on disk),
+    so the lists stay explicit -- this just makes *omission* impossible.
+    """
+    on_disk = {
+        str(p.relative_to(ROOT)) for p in ROOT.glob("tests/**/*.py")
+        if p.name != "run_all.py" and "__pycache__" not in p.parts
+    }
+    return sorted(on_disk - set(FAST) - set(DATA) - EXCLUDED)
 
 # --- color -------------------------------------------------------------
 
@@ -264,6 +290,14 @@ def main() -> int:
                          help="print a src/ coverage report after running (informational, "
                               "requires the `coverage` package)")
     args = parser.parse_args()
+
+    drift = roster_drift()
+    if drift:
+        print(c("red", "✗ test files on disk but in no group (they would never run):"))
+        for path in drift:
+            print(c("red", f"    {path}"))
+        print(c("red", "  Add each to FAST or DATA, or to EXCLUDED with a reason."))
+        return 1
 
     scripts = {"fast": FAST, "data": DATA, "all": FAST + DATA}[args.group]
     results = [run(script, coverage=args.coverage) for script in scripts]
