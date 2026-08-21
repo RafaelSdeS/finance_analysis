@@ -29,7 +29,7 @@ def test_dispatches_to_bolsai_when_configured(monkeypatch) -> None:
     monkeypatch.setitem(config.DATA_SOURCE, "prices", "bolsai")
     monkeypatch.setattr(config, "YFINANCE_ONLY_TICKERS", set())
     with mock.patch.object(pipeline.collectors, "collect_prices") as bolsai_fn, \
-         mock.patch.object(pipeline.yf_collectors, "collect_prices_yf") as yf_fn:
+         mock.patch.object(pipeline.yf_prices, "collect_prices_yf") as yf_fn:
         pipeline._collect("prices", ["PETR4", "VALE3"], "prototype")
 
     bolsai_fn.assert_called_once_with(["PETR4", "VALE3"], "prototype")
@@ -40,7 +40,7 @@ def test_dispatches_to_yfinance_when_configured(monkeypatch) -> None:
     monkeypatch.setitem(config.DATA_SOURCE, "fundamentals", "yfinance")
     monkeypatch.setattr(config, "YFINANCE_ONLY_TICKERS", set())
     with mock.patch.object(pipeline.collectors, "collect_fundamentals") as bolsai_fn, \
-         mock.patch.object(pipeline.yf_collectors, "collect_fundamentals_yf") as yf_fn:
+         mock.patch.object(pipeline.yf_fundamentals, "collect_fundamentals_yf") as yf_fn:
         pipeline._collect("fundamentals", ["PETR4"], "update")
 
     yf_fn.assert_called_once_with(["PETR4"], "update")
@@ -54,7 +54,7 @@ def test_yfinance_only_tickers_bypass_data_source_and_split_from_batch(monkeypat
     monkeypatch.setitem(config.DATA_SOURCE, "prices", "bolsai")
     monkeypatch.setattr(config, "YFINANCE_ONLY_TICKERS", {"BOVA11"})
     with mock.patch.object(pipeline.collectors, "collect_prices") as bolsai_fn, \
-         mock.patch.object(pipeline.yf_collectors, "collect_prices_yf") as yf_fn:
+         mock.patch.object(pipeline.yf_prices, "collect_prices_yf") as yf_fn:
         pipeline._collect("prices", ["PETR4", "BOVA11"], "full_scale")
 
     bolsai_fn.assert_called_once_with(["PETR4"], "full_scale")
@@ -69,7 +69,7 @@ def test_defaults_to_bolsai_when_data_type_unconfigured(monkeypatch) -> None:
     monkeypatch.setattr(config, "DATA_SOURCE", {})
     monkeypatch.setattr(config, "YFINANCE_ONLY_TICKERS", set())
     with mock.patch.object(pipeline.collectors, "collect_dividends") as bolsai_fn, \
-         mock.patch.object(pipeline.yf_collectors, "collect_dividends_yf") as yf_fn:
+         mock.patch.object(pipeline.yf_dividends, "collect_dividends_yf") as yf_fn:
         pipeline._collect("dividends", ["PETR4"], "update")
 
     bolsai_fn.assert_called_once_with(["PETR4"], "update")
@@ -81,7 +81,7 @@ def test_dispatches_to_cvm_when_configured(monkeypatch) -> None:
     monkeypatch.setattr(config, "YFINANCE_ONLY_TICKERS", set())
     with mock.patch.object(pipeline.cvm_ratios, "collect_fundamentals_cvm") as cvm_fn, \
          mock.patch.object(pipeline.collectors, "collect_fundamentals") as bolsai_fn, \
-         mock.patch.object(pipeline.yf_collectors, "collect_fundamentals_yf") as yf_fn:
+         mock.patch.object(pipeline.yf_fundamentals, "collect_fundamentals_yf") as yf_fn:
         pipeline._collect("fundamentals", ["PETR4"], "update")
 
     cvm_fn.assert_called_once_with(["PETR4"], "update")

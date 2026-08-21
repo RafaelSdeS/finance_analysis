@@ -3,7 +3,7 @@ validate_us_vs_vendor.py
 =========================
 Cross-validates US raw parquet data against independent vendors, mirroring
 validate_vs_yfinance.py's role for BR. Provenance is inverted from BR though:
-US prices already ARE yfinance (yf_collectors.py), and US fundamentals are
+US prices already ARE yfinance (yf/prices.py), and US fundamentals are
 SEC EDGAR parsed by 3 homegrown regex/HTML tiers (ex27/tenq/item6) plus one
 structured-API tier (xbrl) -- see CLAUDE.md's sec/ module row. So:
 
@@ -22,7 +22,7 @@ Tier seams:   Universe-wide (not just the 4 sample tickers). Flags implausible
               ticker -- the only proxy check available for the three homegrown
               1994-2006 parsers, since no free vendor covers that range.
 Prices:       Alpha Vantage TIME_SERIES_DAILY (raw as-traded) vs our `close`
-              (also nominal -- yf_collectors.py reverse-adjusts every split
+              (also nominal -- yf/prices.py reverse-adjusts every split
               since US always fetches from floor="1900-01-01"). Key-gated
               (free tier, 25 req/day) -- SKIPs cleanly with no key.
               outputsize=compact (~100 most recent trading days) -- AV's free

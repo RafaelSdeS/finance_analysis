@@ -27,7 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pandas as pd
 
-from src.data_collection import yf_collectors as yfc
+from src.data_collection.yf import _common as common
+from src.data_collection.yf import dividends as yfc
 
 
 def _write_prices_fixture(path, dates, num_trades_nan=True):
@@ -40,10 +41,10 @@ def _write_prices_fixture(path, dates, num_trades_nan=True):
 def test_tail_only_true_starts_after_last_stored_row():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "AAPL.parquet"
-        dates = pd.bdate_range("2026-01-01", periods=yfc.TRUSTED_MIN_YF_ROWS + 5)
+        dates = pd.bdate_range("2026-01-01", periods=common.TRUSTED_MIN_YF_ROWS + 5)
         _write_prices_fixture(path, dates)
 
-        start = yfc._prices_fetch_start({}, "AAPL", path, tail_only=True)
+        start = common._prices_fetch_start({}, "AAPL", path, tail_only=True)
         expected = (dates.max() + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
         assert start == expected, f"expected {expected}, got {start}"
     print("OK: tail_only=True starts the day after the last stored row")
@@ -52,10 +53,10 @@ def test_tail_only_true_starts_after_last_stored_row():
 def test_tail_only_false_still_starts_at_earliest_yfinance_row():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "AAPL.parquet"
-        dates = pd.bdate_range("2026-01-01", periods=yfc.TRUSTED_MIN_YF_ROWS + 5)
+        dates = pd.bdate_range("2026-01-01", periods=common.TRUSTED_MIN_YF_ROWS + 5)
         _write_prices_fixture(path, dates)
 
-        start = yfc._prices_fetch_start({}, "AAPL", path)  # tail_only defaults False
+        start = common._prices_fetch_start({}, "AAPL", path)  # tail_only defaults False
         expected = str(dates.min().date())
         assert start == expected, f"expected {expected}, got {start}"
     print("OK: tail_only=False (default) is unchanged -- refetches the whole yfinance era")
@@ -64,10 +65,10 @@ def test_tail_only_false_still_starts_at_earliest_yfinance_row():
 def test_thin_file_ignores_tail_only_and_falls_back_to_floor():
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "GRTX.parquet"
-        dates = pd.bdate_range("2026-01-01", periods=yfc.TRUSTED_MIN_YF_ROWS - 1)  # below trust floor
+        dates = pd.bdate_range("2026-01-01", periods=common.TRUSTED_MIN_YF_ROWS - 1)  # below trust floor
         _write_prices_fixture(path, dates)
 
-        start = yfc._prices_fetch_start({}, "GRTX", path, floor="1900-01-01", tail_only=True)
+        start = common._prices_fetch_start({}, "GRTX", path, floor="1900-01-01", tail_only=True)
         assert start == "1900-01-01", \
             f"a thin/possibly-truncated file must ignore tail_only and use the deep floor, got {start}"
     print("OK: a thin on-disk span ignores tail_only=True and still refetches from the floor")

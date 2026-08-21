@@ -18,7 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.data_collection import config
-from src.data_collection.br import collectors
+from src.data_collection.br import macro
 
 
 def test_bare_object_response():
@@ -28,12 +28,12 @@ def test_bare_object_response():
 
         with mock.patch.object(config, "MACRO_DIR", macro_dir), \
              mock.patch.object(config, "BCB_SERIES", {"cdi": 12}), \
-             mock.patch.object(collectors.client, "get_json",
+             mock.patch.object(macro.client, "get_json",
                                return_value={"data": "11/07/2026", "valor": "0.0538"}), \
-             mock.patch.object(collectors.client, "make_client", return_value=mock.MagicMock()), \
-             mock.patch.object(collectors.checkpoint, "load", return_value={}), \
-             mock.patch.object(collectors.checkpoint, "save"):
-            collectors.collect_macro(mode="update")
+             mock.patch.object(macro.client, "make_client", return_value=mock.MagicMock()), \
+             mock.patch.object(macro.checkpoint, "load", return_value={}), \
+             mock.patch.object(macro.checkpoint, "save"):
+            macro.collect_macro(mode="update")
 
         df = __import__("pandas").read_parquet(macro_dir / "cdi.parquet")
         assert len(df) == 1, f"expected 1 row, got {len(df)}"

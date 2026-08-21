@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pandas as pd
 
-from src.data_collection import yf_collectors as yfc
+from src.data_collection.yf import prices as yfc
 
 
 def test_skip_existing_true_skips_tickers_already_on_disk():

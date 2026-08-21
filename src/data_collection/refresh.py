@@ -52,13 +52,14 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from . import checkpoint, config
-from .br import collectors as br_collectors
+from .br import macro as br_macro
 from .br.pipeline import _active_tickers, _collect, setup_logging
 from .cvm import company_info as cvm_company_info
 from .cvm import sectors as cvm_sectors
 from .sec import crosswalk, fundamentals as sec_fundamentals, universe as sec_universe
 from .us.fred_collectors import collect_macro_us
-from .yf_collectors import collect_dividends_yf, collect_prices_yf, collect_splits_yf
+from .yf.dividends import collect_dividends_yf, collect_splits_yf
+from .yf.prices import collect_prices_yf
 
 log = logging.getLogger("refresh")
 
@@ -67,7 +68,7 @@ log = logging.getLogger("refresh")
 # with workers. 4 matches collect_dividends_yf's own conservative default; pass
 # --workers explicitly for a larger backfill.
 DEFAULT_WORKERS = 4
-US_MODE = "us_full_scale_v2"  # reuse run_us_full_scale.py's checkpoints, not a fresh mode
+US_MODE = "us_full_scale_v2"  # reuse us/pipeline.py's checkpoints, not a fresh mode
 ALL_STAGES = ["macro", "dividends", "prices", "fundamentals"]
 
 # First-ever run has no "refresh" checkpoint to diff against -- look back this
@@ -153,7 +154,7 @@ def _refresh_br(stages: set[str], full: bool, workers: int) -> None:
     tickers = _active_tickers()
     if "macro" in stages:
         log.info("--- BR macro ---")
-        br_collectors.collect_macro("update")
+        br_macro.collect_macro("update")
 
         # company_info/sectors/corporate_events are free (CVM CAD + yfinance) and
         # pipeline.py already runs them in every mode ("no BolsAI usage to ration") --

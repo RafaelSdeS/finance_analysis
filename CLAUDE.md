@@ -98,7 +98,8 @@ jupyter notebook src/visualizations/exploration.ipynb    # full dataset validati
 
 ### Tests
 
-Plain Python scripts, no pytest. Unified test runner:
+Plain Python scripts (not a pytest suite — no fixtures/conftest, no `pytest` invocation to
+collect the whole tree), each runnable standalone. Unified test runner:
 
 ```bash
 python tests/run_all.py --group fast   # pure-code unit tests, no data files needed — used by CI
@@ -112,6 +113,14 @@ which script is in which group — don't hand-copy the roster here, it drifts. S
 runs anywhere); `DATA` covers final-dataset/universe/vendor-cross-validation checks that need the
 real `data/raw/` + a built dataset; `NON_BLOCKING` is the subset of `DATA` that hits a live vendor
 and shouldn't fail CI on vendor flakiness.
+
+**New test files:** end with `if __name__ == "__main__": raise SystemExit(pytest.main([__file__]))`
+and write real `test_*` functions with bare `assert` (see `tests/data_collection/test_pipeline_dispatch.py`)
+— `pytest` is already pinned and it's the largest single convention already in use (15 of 50 files).
+Don't migrate the other 32 hand-listed `if __name__ == "__main__": test_a(); test_b(); ...` files to
+match — `tests/run_all.py`'s `main_block_drift()` check already guards those against a silently
+uncalled test function, so the migration would buy consistency the guard already delivers as a
+15-line check, for a 32-file diff. Convention for new files, guard for old ones.
 
 **Linting:**
 ```bash
@@ -158,15 +167,17 @@ data/processed/scalers/feature_scaler.joblib  (train-only fit, per split_config.
 | `checkpoint.py` | Resume state (JSON per collector) |
 | `validate.py` | Quality gates (schemas, ranges, continuity) → `ValidationResult` |
 | `storage.py` | `_merge_save()` (idempotent append+dedup+validate+write) + `_chunk_dates()` — generic, used by every collector |
-| `yf_collectors.py` | yfinance: `collect_{prices,fundamentals,dividends}_yf()` — shared by BR's `--mode update` and US's full backfill |
-| `br/collectors.py` | BolsAI: `collect_{macro,prices,fundamentals,company_info,dividends,corporate_events,sectors}()` |
+| `ratios.py` | Vendor-neutral fundamentals algebra: `compute_ratios()`, `FUND_FULL_COLS` — shared by the yfinance, CVM, and every SEC tier |
+| `yf/` | yfinance collectors, split by concern: `_common.py` (shared fetch/repair helpers), `prices.py` (`collect_prices_yf`, `backfill_price_gap`), `fundamentals.py` (`collect_fundamentals_yf`), `dividends.py` (`collect_dividends_yf`, `collect_splits_yf`) — shared by BR's `--mode update` and US's full backfill |
+| `br/collectors.py` | BolsAI: `collect_{prices,fundamentals,company_info,dividends,corporate_events,sectors}()` |
+| `br/macro.py` | BCB SGS (SELIC/CDI/IPCA), free/keyless — split out of `collectors.py` as the only live-by-default function in a module whose every other function needs a paid BolsAI key |
 | `br/pipeline.py` | BR orchestration CLI; dispatches to BolsAI/yfinance/CVM per `DATA_SOURCE` (default: yfinance prices/dividends, CVM fundamentals — BolsAI is opt-in only, see `docs/BOLSAI_EXIT_PLAN.md`). **Not a whole-panel rebuild tool**: `pipeline.py`'s fundamentals path always scopes to `_active_tickers()` (status == ATIVO) before calling `collect_fundamentals_cvm`/`build_fundamentals` — invisible at the call site, and the exact thing that would silently leave delisted-only tickers' fundamentals unmigrated (`docs/DATA_LAYER_CORRECTNESS_PLAN.md` §1 caught this at 115 stranded files). A full-crosswalk rebuild needs `cvm.ratios.build_fundamentals(tickers=None, rebuild=True)` directly. |
 | `br/collect_delisted.py` | Price backfill for delisted/never-collected BR tickers |
 | `br/cvm_statements.py` + `cvm/` | CVM open-data collection (delisted fundamentals + real filing dates); `--step` CLI over `cvm/{http,crosswalk,statements,shares,ratios,company_info,filing_dates}.py` |
 | `br/stats.py` | Post-collection data audit (BR only) |
 | `us/fred_collectors.py` | FRED (US macro), keyless `fredgraph.csv` |
-| `us/run_us_full_scale.py` | Driver for US full-scale backfill |
-| `sec/` | US fundamentals from SEC EDGAR: `http.py` (shared retry GET), `universe.py` (point-in-time filer roster), `crosswalk.py` (ticker↔CIK + `CIK_OVERRIDES`), `companyfacts.py` (XBRL 2009+/IFRS tier), `fds.py` (EX-27 tier, 1995–2000), `selected_financial_data.py` (Item 6, fills 2001–2006 gap), `fundamentals.py` (combines all 3 tiers, point-in-time `fundamentals_available_date`). Extensive bug log: `docs/US_EQUITIES_EXPANSION_PLAN.md`. |
+| `us/pipeline.py` | US orchestration CLI (`--mode`/`--tickers`/`--dry-run`/`--steps`, same shape as `br/pipeline.py`) over the six `run_*` stage functions — universe, macro, prices, dividends, fundamentals, company_info |
+| `sec/` | US fundamentals from SEC EDGAR: `http.py` (shared retry GET), `universe.py` (point-in-time filer roster), `crosswalk.py` (ticker↔CIK + `CIK_OVERRIDES`), `companyfacts.py` (XBRL 2009+/IFRS tier), `fds.py` (EX-27 tier, 1995–2000), `selected_financial_data.py` (Item 6 annual tier, fills 2001–2006 gap), `tenq.py` (10-Q inline-HTML tier, real Q1–Q3 resolution for that same 2001–2006 window; Q4 is derived cross-tier against item6's annual total), `fundamentals.py` (combines all tiers, point-in-time `fundamentals_available_date`). Extensive bug log: `docs/US_EQUITIES_EXPANSION_PLAN.md`. |
 | `one_off/*` | One-time incident-fix scripts (confirmed BolsAI data gaps/corruption for specific tickers); not part of the regular pipeline |
 
 **Stage 2 (Dataset Build)** — `src/build_dataset/`, split by pipeline stage:

@@ -13,7 +13,7 @@ row count that's actually 90%+ a single repeated close. 24 tickers were
 silently corrupted this way and had to be reverted from data/raw/br/prices/ by
 hand; 2 more (EUCA4, NUTR3) were ~50% contaminated and reverted out of an
 abundance of caution. backfill_price_gap() now has a flat-run guard
-(_flat_run_fraction in yf_collectors.py) that rejects any fetch matching
+(_flat_run_fraction in yf/prices.py) that rejects any fetch matching
 this signature before it can reach disk, so GAPS below only lists tickers
 CONFIRMED clean by that guard (i.e. already successfully filled once it
 existed). The corrupted/ambiguous ones are listed separately in
@@ -23,14 +23,14 @@ Each entry below is (ticker, gap_start, gap_end) as directly observed in the
 raw file (the trade_date immediately before, and immediately after, the
 gap). Dates are NOT tight bounds — backfill_price_gap() only ever writes
 dates that are genuinely absent from the existing file (see its docstring
-in yf_collectors.py), so padding here is harmless.
+in yf/prices.py), so padding here is harmless.
 
 Run from project root: python -m src.data_collection.one_off.backfill_known_gaps
 """
 
 import logging
 
-from ..yf_collectors import backfill_price_gap
+from ..yf.prices import backfill_price_gap
 
 log = logging.getLogger(__name__)
 

@@ -13,7 +13,7 @@ import logging
 
 import pandas as pd
 
-from .. import config
+from .. import config, validate
 from . import http
 from .crosswalk import CROSSWALK_PATH
 from .delistings import CAD_URL
@@ -61,6 +61,10 @@ def build_sectors() -> None:
                 .rename(columns={"sector": "name"})
                 .sort_values("count", ascending=False)
                 .reset_index(drop=True))
+    vr = validate.validate_sectors(df)
+    if not vr.passed:
+        log.error("sectors: validation FAILED: %s", vr.errors)
+        return
     SECTORS_PATH.parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(SECTORS_PATH, index=False)
     log.info("sectors: %d sectors total -> %s", len(df), SECTORS_PATH)

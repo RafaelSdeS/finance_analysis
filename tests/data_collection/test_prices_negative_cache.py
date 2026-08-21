@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import pandas as pd
 
-from src.data_collection import yf_collectors as yfc
+from src.data_collection.yf import prices as yfc
 
 
 def _fake_checkpoint_store():

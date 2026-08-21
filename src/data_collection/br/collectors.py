@@ -5,8 +5,10 @@ Each collector: fetch (resilient, resumable) → validate → idempotent save
 (append + dedup) → checkpoint. No abstract base class: the four sources have
 genuinely different fetch logic and share nothing worth abstracting.
 
+collect_macro moved to br/macro.py (BCB SGS, free/keyless — the odd one out
+in a module whose every other function needs a paid BolsAI key).
+
 Sources:
-  - collect_macro             BCB SGS (SELIC/CDI/IPCA), keyless, date-chunked
   - collect_prices            BolsAI daily OHLCV, date-window paginated
   - collect_fundamentals      BolsAI quarterly, single call
   - collect_company_info      BolsAI metadata, fuzzy search
@@ -19,7 +21,6 @@ import logging
 from datetime import datetime
 from time import sleep
 
-import httpx
 import pandas as pd
 
 from .. import checkpoint, client, config, validate
@@ -78,64 +79,6 @@ def get_all_tickers() -> list[str]:
     result = set(t for t in get_all_tickers_raw() if _standard.match(t))
     result |= KNOWN_UNIT_TICKERS
     return sorted(result)
-
-
-# ---------------------------------------------------------------------------
-# BCB macro
-# ---------------------------------------------------------------------------
-
-def collect_macro(mode: str):
-    # BCB needs "bcdata.sgs.{id}/dados" (dot, not slash) — base_url joining would
-    # mangle it, so use a baseless client and pass the full URL.
-    c = client.make_client("")
-    cp = checkpoint.load("macro", mode)
-    try:
-        for name, sid in config.BCB_SERIES.items():
-            path = config.MACRO_DIR / f"{name}.parquet"
-            start = cp.get(name, {}).get("last_date")
-            start = (pd.to_datetime(start) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") \
-                if start else config.START_DATE
-            end = datetime.now().strftime("%Y-%m-%d")
-            if start > end:
-                log.info("macro %s: up to date", name)
-                continue
-
-            rows = []
-            for s, e in _chunk_dates(start, end, 10):
-                try:
-                    d = client.get_json(c, f"{config.BCB_BASE}.{sid}/dados", {
-                        "formato": "json",
-                        "dataInicial": datetime.strptime(s, "%Y-%m-%d").strftime("%d/%m/%Y"),
-                        "dataFinal": datetime.strptime(e, "%Y-%m-%d").strftime("%d/%m/%Y"),
-                    })
-                except httpx.HTTPStatusError as ex:
-                    # BCB returns 404 for ranges with no published data (e.g. weekends)
-                    if ex.response.status_code == 404:
-                        continue
-                    raise
-                # BCB returns a bare object (not a list) when the range has exactly
-                # one data point — normalize before extending, or dict iteration
-                # silently corrupts rows with its keys instead of the record.
-                if isinstance(d, dict):
-                    d = [d]
-                rows += d or []
-            if not rows:
-                log.info("macro %s: no new rows", name)
-                continue
-
-            df = pd.DataFrame(rows)
-            df["reference_date"] = pd.to_datetime(df["data"], dayfirst=True)
-            df[name] = pd.to_numeric(df["valor"].astype(str).str.replace(",", "."), errors="coerce")
-            df = df[["reference_date", name]].dropna()
-
-            saved = _merge_save(df, path, "reference_date",
-                                lambda x: validate.validate_macro(x, name), f"macro/{name}")
-            if saved is not None:
-                cp[name] = {"last_date": str(saved["reference_date"].max().date()), "rows": len(saved)}
-                checkpoint.save("macro", mode, cp)
-                log.info("macro %s: %d total rows", name, len(saved))
-    finally:
-        c.close()
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +356,6 @@ def collect_dividends(tickers: list[str], mode: str):
 
 # Deleted 2026-08-19: collect_corporate_events() and collect_sectors(). Both had
 # zero call sites -- pipeline.run()'s stage list has pointed at the free
-# replacements (yf_collectors.collect_splits_yf, cvm.sectors.build_sectors) since
+# replacements (yf.dividends.collect_splits_yf, cvm.sectors.build_sectors) since
 # the BolsAI exit, so these were the only BolsAI collectors with no way to reach
 # them even by flipping a DATA_SOURCE entry. Recoverable from git history.

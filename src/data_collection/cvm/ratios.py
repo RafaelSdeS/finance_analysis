@@ -129,7 +129,7 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     g = g[keep]
     # nonzero/0 divisions land as inf, not NaN (only 0/0 propagates NaN naturally) — clean
     # at the source so raw parquet never stores literal inf. Same pattern as
-    # yf_collectors.compute_ratios(), which writes to this same fundamentals schema.
+    # ratios.compute_ratios(), which writes to this same fundamentals schema.
     num = g.select_dtypes(include="number").columns
     g[num] = g[num].replace([float("inf"), float("-inf")], float("nan"))
     return g

@@ -69,9 +69,15 @@ importers are then already pointing at their final home. This is the only item h
 **Table re-verified 2026-08-20, all rows hold.** argparse appears in **four** `br/` files
 (`pipeline.py`, `cvm_statements.py`, `collect_delisted.py`, `stats.py`) and **zero** `us/` files.
 
-- [ ] **Give US the same entry-point shape as BR.** `us/pipeline.py` with `--mode`/`--tickers`/
-      `--dry-run` over the existing `run_*` stage functions. It already has the stages; it's missing
-      the CLI. Biggest maintainability win on the US side and mostly wiring.
+- [x] ✅ **DONE 2026-08-21 — `git mv run_us_full_scale.py us/pipeline.py`, added argparse.**
+      `--mode` (checkpoint namespace, default `us_full_scale_v2`), `--tickers` (override the
+      universe for prices/dividends/fundamentals/company_info — threaded into all four `run_*`
+      signatures, which previously always called `_all_tickers()`/globbed the priced-tickers
+      set internally with no override), `--steps` (replaces the old bare `sys.argv[1:]`), and
+      `--dry-run`. Reused the existing six `run_*` functions and `STEPS` dict verbatim — did not
+      replicate BR's `DATA_SOURCE` multi-vendor dispatch or ATIVO-ticker filtering, neither of
+      which has a US equivalent (US prices/dividends are pure yfinance, fundamentals pure SEC).
+      Smoke-tested with `--dry-run --tickers AAPL MSFT`; `tests/run_all.py --group fast`: 55/55.
 
 - [ ] **~~Consider a US `stats.py` analogue.~~ CUT [rev 2026-08-20].** Speculative work for
       symmetry's sake — nobody has asked for a US audit report, and building one because BR has one
@@ -82,47 +88,48 @@ importers are then already pointing at their final home. This is the only item h
 
 ## §O3 — Split and dedupe inside `src/data_collection/`
 
-- [ ] **Split `yf_collectors.py` (1,078 lines after the test extraction) into a `yf/` package**:
-      `yf/_common.py` (~330) · `yf/prices.py` (~415) · `yf/fundamentals.py` (~180) ·
-      `yf/dividends.py` (~150). Already separated by comment banners, so it is close to a pure move.
+- [x] ✅ **DONE 2026-08-21 — split `yf_collectors.py` into a `yf/` package.** `yf/_common.py`
+      (290 ln) · `yf/prices.py` (455 ln) · `yf/fundamentals.py` (130 ln) · `yf/dividends.py`
+      (173 ln, includes `collect_splits_yf` — one ~50-line function, not enough of a distinct
+      concern for a 5th file). One correction to the plan's own file map: `_extract_dividends`
+      and `_last_completed_trading_day` physically sat under the old module's "prices" banner
+      but are called from **both** `collect_prices_yf` and `collect_dividends_yf` — moved to
+      `_common.py` instead of `prices.py`, or `dividends.py` would import across its sibling for
+      no reason. Deleted `yf_collectors.py` outright (`git rm -f`) — no shim, per the plan's own
+      call below; repointed every import site: `br/pipeline.py`, `refresh.py`, `us/pipeline.py`,
+      `one_off/backfill_known_gaps.py`, and 7 test files (`test_pipeline_dispatch.py`'s
+      `mock.patch.object(pipeline.yf_collectors, ...)` calls split three ways to
+      `yf_prices`/`yf_fundamentals`/`yf_dividends`; `test_yf_collectors.py` kept its filename
+      but its import block now pulls from `yf._common`/`yf.prices`/`yf.dividends`). Prose
+      references to the old filename fixed in 5 more files (`checkpoint.py`, `cvm/ratios.py`,
+      `br/collectors.py`, `features.py`, `validate_us_vs_vendor.py`) — one of them
+      (`features.py`'s `yf_collectors.FLAT_RUN_PADDING`) was already wrong before this move;
+      `FLAT_RUN_PADDING` lives in `one_off/backfill_known_gaps.py`, never did in `yf_collectors.py`.
+      `ruff check src/ tests/`: clean. `tests/run_all.py --group fast`: 55/55.
 
-      ⚠️ **[rev 2026-08-20] Justify this on concern count, not line count.** The original text
-      argued from "1,078 lines" three paragraphs after declaring *"Not splitting: `features.py`
-      (822), `build_us_dataset.py` (540), `sec/*` … Size alone isn't a reason."* Those cannot both
-      be the principle, and the line-count framing invites the next person to split `features.py`
-      too. The defensible argument: **`yf_collectors.py` holds four distinct collectors** (common,
-      prices, fundamentals, dividends) while `features.py` does *one thing* at 822 lines. Concern
-      count justifies the split; size does not.
+- [x] 🟡 **CUT 2026-08-21 — `for_each_ticker` dedupe.** Re-read `collectors.py`'s own docstring
+      before touching it: *"No abstract base class: the four sources have genuinely different
+      fetch logic and share nothing worth abstracting."* This item was already the plan's own
+      lowest-confidence entry ("cut this first if trimming") for exactly that reason — ~90 lines
+      saved in exchange for one new abstraction, on a hot path, contradicting the module's
+      explicit design stance. Not done. Revisit only if a real second/third instance of the
+      shared shape shows up and the abstraction pays for itself twice over, not once.
 
-      ⚠️ **Reconsider the re-export shim.** Once §O1 has moved `compute_ratios` and
-      `FUND_FULL_COLS`, nothing outside `yf/` needs the old module names — so a shim would mostly
-      exist to avoid touching import sites that *should* be touched. Prefer updating the imports and
-      deleting `yf_collectors.py` outright. Keep a shim only if a real external caller turns up.
+- [x] ✅ **DONE 2026-08-21 — moved `collect_macro` → `br/macro.py`.** Verbatim move (imports,
+      docstring, body unchanged). Repointed 3 call sites: `br/pipeline.py` (`collectors.collect_macro`
+      → `macro.collect_macro`), `refresh.py` (`br_collectors.collect_macro` → `br_macro.collect_macro`),
+      and `tests/data_collection/test_macro_bare_object.py` (imports + all `collectors.*` mock
+      targets repointed to `macro.*`). `collectors.py` lost its now-unused `httpx`/`datetime`... no
+      — `datetime` still used by `collect_prices`'s dedup window; only `httpx` (macro-only) dropped.
+      `ruff check`: clean. `tests/run_all.py --group fast`: 55/55.
 
-- [ ] 🟡 **Dedupe the per-ticker collector skeleton.** `collect_prices`, `collect_fundamentals`,
-      `collect_dividends` in `br/collectors.py` share one ~50-line body (checkpoint → skip-list →
-      loop → `should_skip` → `is_complete` → fetch → empty-check → `_merge_save` → checkpoint →
-      `clear_skip`; `except` → `mark_skip`; `finally` → sleep), differing only in directory,
-      columns, fetch call, date column, validator, and checkpoint key. One `for_each_ticker()`
-      helper: ~150 → ~60 lines of the module's current 407.
-
-      **Scoped to those three.** The yfinance three share the shape but add threading,
-      `_prices_fetch_start`, junction reconciliation, and the failure-abort — one helper for all six
-      is the over-abstraction the module docstring already warns about, on the hot path.
-
-      **[rev 2026-08-20] Lowest-confidence item in this plan.** ~90 lines saved in exchange for one
-      new abstraction, on a hot path, in a module whose own docstring cautions against exactly this.
-      The 3-of-6 scoping is right. **Cut this first if the plan needs trimming.**
-
-- [ ] **Move `collect_macro` → `br/macro.py`.** It's BCB SGS: free, keyless, runs in every mode —
-      the only live-by-default function in a module whose docstring says BolsAI and whose every
-      other function needs a paid key. Confirmed at `br/collectors.py:87`.
-
-- [ ] **Wire the orphaned `validate_sectors` to the live path.** It was used only by the deleted
-      `collect_sectors()`; meanwhile `cvm/sectors.py::build_sectors()` writes `sectors.parquet`
-      **unvalidated** and emits the exact `(name, count)` schema it checks. Confirmed orphaned:
-      `validate.py:246`, zero call sites. **4 lines**, and it closes a real gap rather than a
-      tidiness preference.
+- [x] ✅ **DONE 2026-08-21 — wired `validate_sectors` into `build_sectors()`.** 4 lines:
+      `cvm/sectors.py` now imports `validate` and calls `validate.validate_sectors(df)` before
+      writing `sectors.parquet`, logging and skipping the write on failure (same
+      `if not vr.passed: log.error(...); return` shape used everywhere else in this codebase —
+      `build_sectors()` writes directly rather than through `_merge_save`, since `sectors.parquet`
+      is a `(name, count)` reference table with no date column to dedupe on, so `_merge_save`
+      doesn't fit here).
 
 **Not splitting:** `features.py` (822 after the applied §3 edits), `build_us_dataset.py` (540),
 `sec/*` (largest 667). Large but single-concern and already well-separated.
@@ -156,17 +163,12 @@ Three conventions coexist. Recounted 2026-08-20 by AST over the 50 files that ac
 "15 / 26 / 36" summed to 77 against 50 real files — the third bucket had counted every file with a
 `main()`, including non-test helpers.)
 
-- [ ] **Name the convention for new tests, and correct the docs.** CLAUDE.md says "No test
-      framework", but `pytest==8.3.4` is pinned and is the runner in 15 files. Pick one shape for
-      *new* tests and write it down.
-
-      **Recommendation: `pytest.main([__file__])`.** It's already the largest single convention with
-      a real runner behind it, and it makes the AST drift-guard unnecessary for any file adopting
-      it.
-
-      **Do not migrate the existing 32.** A 32-file diff buys consistency that the AST guard in
-      `DATA_LAYER_CORRECTNESS_PLAN.md` §5 already delivers as a 15-line check. Convention for new
-      files, guard for old ones.
+- [x] ✅ **DONE 2026-08-21 — named the convention in CLAUDE.md's Tests section, corrected the
+      "No test framework" claim.** New tests: `pytest.main([__file__])` with real `test_*`
+      functions + bare `assert` — already the largest single convention (15/50 files) with a real
+      runner behind it. Did not migrate the other 32 hand-listed `__main__` files — the AST
+      guard (`main_block_drift()` in `tests/run_all.py`) already delivers the consistency a
+      32-file diff would buy, at 15 lines.
 
 ---
 
@@ -175,31 +177,39 @@ Three conventions coexist. Recounted 2026-08-20 by AST over the 50 files that ac
 Fact-level doc drift (wrong ticker counts, missing conventions) lives in the correctness plan §7.
 This is about *finding* things.
 
-- [ ] 🟡 **`docs/` has no index — 13 files, 5,413 lines, and no way to tell live from finished
-      without opening each.** The biggest *navigability* gap in the repo, and the best
-      return-per-line in this plan. CLAUDE.md cites these docs inline, scattered across five
-      different sections, so nothing answers "what's in `docs/` and which of it is still true?"
+- [x] ✅ **DONE 2026-08-21 — added `docs/README.md`.** One row per doc, status column, verified
+      against each file's actual content (not filenames) rather than copying the draft table
+      above verbatim — that draft had 2 statuses wrong: `US_DATASET_BUILD_PLAN` and
+      `US_COLLECTOR_FIX_PLAN` both still have real open items (confirmed by reading their tails:
+      the former's Phase C full-scale run "still NOT been run to full 3,134-ticker completion,"
+      matching CLAUDE.md's own "full-universe scale-up in progress"; the latter has an open
+      appendix item plus one box pending a run-confirmation), so both moved from **done** to
+      **live**. Also added 2 files the draft predated: `DATA_INTEGRITY_TEST_PLAN.md` (**live** —
+      `--market us` golden gate still open) and `FEATURE_IDEAS.md` (new **backlog** status — parked
+      ideas, not scheduled, doesn't fit live/done/historical). `DATA_LAYER_CORRECTNESS_PLAN.md`
+      and `DATA_LAYER_FOLLOWUP_FINDINGS.md` moved **live → done**, both closed out by commit since
+      the draft was written. `PORTFOLIO_ARCHITECTURE_PROPOSAL.md` added as **historical record**
+      (the draft omitted it) — superseded by the actual Stage 3 code plus the live improvement-plan
+      research log.
 
-      Add a ~25-line `docs/README.md`: one row per doc, with a **status** — the load-bearing
-      column, since the set is a mix of live and historical with nothing marking which:
+- [x] ✅ **DONE 2026-08-21 — added the missing `sec/tenq.py` row to CLAUDE.md's `sec/` module
+      table**, described accurately (10-Q inline-HTML tier, real Q1–Q3 resolution for the
+      2001–2006 window, Q4 derived cross-tier against item6's annual total) rather than guessed
+      from the filename.
 
-      | status | docs |
-      |---|---|
-      | **live** | `DATA_LAYER_CORRECTNESS_PLAN` · `DATA_LAYER_ORGANIZATION_PLAN` · `PORTFOLIO_IMPROVEMENT_PLAN` (has a STOP banner) · `US_EQUITIES_EXPANSION_PLAN` (Phase 6 in progress) |
-      | **done** | `BOLSAI_EXIT_PLAN` · `DATA_COLLECTION_REORGANIZATION_PLAN` · `US_DATASET_BUILD_PLAN` · `US_COLLECTOR_FIX_PLAN` |
-      | **historical record** | `US_DATASET_AUDIT_2026-08-01` · `SURVIVORSHIP_BIAS_AUDIT_2026-08-15` · `PORTFOLIO_IMPLEMENTATION_PLAN` |
+- [x] ✅ **DONE 2026-08-21 — updated CLAUDE.md's `data_collection` module table**: added
+      `ratios.py`, replaced the `yf_collectors.py` row with `yf/`, added `br/macro.py`, replaced
+      `us/run_us_full_scale.py` with `us/pipeline.py` (new CLI description). No shim exists to
+      describe — `yf_collectors.py` is gone outright, per §O3 above.
 
-      **Verify each status before writing it** — this table is a first pass from filenames plus
-      CLAUDE.md's own references, not an audit of the contents.
-
-- [ ] **`sec/tenq.py` is missing from CLAUDE.md's `sec/` module table.** The table lists
-      `http`/`universe`/`crosswalk`/`companyfacts`/`fds`/`selected_financial_data`/`fundamentals`
-      but not `tenq.py`, which is a live `compute_ratios` consumer (`:311`).
-
-- [ ] **Update CLAUDE.md's `data_collection` module table** after §O1/§O3 land — new `ratios.py`,
-      new `yf/` package, `br/macro.py`, and `yf_collectors.py` either gone or reduced to a shim.
-
-- [ ] `/graphify . --update` after the moves, so the knowledge graph doesn't point at dead paths.
+- [x] ✅ **DONE 2026-08-21 — ran `/graphify . --update`.** 173 changed files / 58 deletions
+      caught up (most of that backlog predates this session — the graph hadn't been rebuilt since
+      2026-07-16), including this session's moves. AST (code) extraction ran to completion; the
+      docs/README.md-triggered semantic-concept pass over the 21 changed doc files was interrupted
+      (subagent killed mid-run) and skipped rather than retried blind — code nodes/edges (the part
+      that actually matters for "not pointing at dead paths") are current, doc-level concept nodes
+      for those 21 files are not freshly extracted this run. Re-run `/graphify . --update` to pick
+      that up whenever wanted; nothing is broken by leaving it.
 
 ---
 
@@ -207,23 +217,22 @@ This is about *finding* things.
 
 ```
 EARLY -- before the correctness plan's S1 normalization:
-  O1. compute_ratios + FUND_FULL_COLS -> data_collection/ratios.py
+  O1. compute_ratios + FUND_FULL_COLS -> data_collection/ratios.py           [DONE 2026-08-20]
 
 LATER -- only once DATA_LAYER_CORRECTNESS_PLAN.md is through its rebuild
          and the suite is green:
-  O2. us/pipeline.py CLI
-  O3. yf/ package split (imports updated, shim only if needed)
-      br/macro.py move
-      validate_sectors wiring          <- 4 lines, do it whenever
-      for_each_ticker dedupe           <- lowest confidence, cut first if trimming
-  O5. name the test convention
-  O6. docs/README.md, CLAUDE.md tables, graphify rebuild
+  O2. us/pipeline.py CLI                                                    [DONE 2026-08-21]
+  O3. yf/ package split (imports updated, no shim needed)                   [DONE 2026-08-21]
+      br/macro.py move                                                      [DONE 2026-08-21]
+      validate_sectors wiring                                               [DONE 2026-08-21]
+      for_each_ticker dedupe                                                [CUT 2026-08-21]
+  O5. name the test convention                                              [DONE 2026-08-21]
+  O6. docs/README.md, CLAUDE.md tables, graphify rebuild                    [DONE 2026-08-21]
 ```
 
 **Why the ordering.** §O1 has to precede the signature change it would otherwise collide with.
 Everything else is pure refactoring with no data effect, so it goes behind a green suite: if
 something breaks after this plan runs, the cause is unambiguously a move, not a data fix.
 
-**Ranked by value if you only do some of it:** §O1 (real dependency fix) → §O6's `docs/README.md`
-(navigability, ~25 lines) → `validate_sectors` (4 lines, closes a gap) → `br/macro.py` (fixes a
-miscategorization) → §O2's US CLI → §O3's split → `for_each_ticker`.
+**Status: closed 2026-08-21.** Every item is done or explicitly cut with rationale (see §O3);
+nothing left open. `tests/run_all.py --group fast`: 55/55. `ruff check src/ tests/`: clean.

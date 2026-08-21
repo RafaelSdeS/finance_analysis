@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import pandas as pd
 import yfinance as yf
 
-from src.data_collection import yf_collectors as yfc
+from src.data_collection.yf import prices as yfc
 
 _IDX = pd.to_datetime(["2020-01-01", "2020-01-02", "2020-01-03"]).tz_localize("America/New_York")
 
@@ -102,7 +102,7 @@ def test_collect_dividends_true_no_activity_writes_no_dividend_file():
 
 def test_collect_dividends_false_returns_none_and_never_touches_dividend_dir():
     # Backward compatibility: every EXISTING caller (br/pipeline.py's update mode via
-    # refresh.py pre-2026-08-13, run_us_full_scale.py) must see byte-identical behavior --
+    # refresh.py pre-2026-08-13, us/pipeline.py) must see byte-identical behavior --
     # no dividend_dir, no return value, even when the underlying fetch DOES include a
     # real dividend (proves this isn't just "dividend_dir defaults to None so nothing
     # happens" but an active off-switch).

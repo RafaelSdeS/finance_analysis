@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
-Self-check for yf_collectors.py's pure helper functions -- most importantly
+Self-check for the yf/ package's pure helper functions -- most importantly
 _prices_fetch_start(), the staleness-anchor fix for `--mode update` (CLAUDE.md:
 without it, a dividend paid after one quarter's fetch would permanently fail
 to propagate back into that quarter's already-stored adj_close -- one silent,
 cumulative discontinuity per update, forever).
 
-Moved here verbatim from yf_collectors._demo() (2026-08-19). It had grown to
+Moved here verbatim from yf_collectors._demo() (2026-08-19, before the yf/
+package split -- see docs/DATA_LAYER_ORGANIZATION_PLAN.md §O3). It had grown to
 462 lines -- a third of the module -- which is well past the size where an
 inline `_demo()` self-check pays for itself; production code should not ship
 its own test suite. The `_demo()` convention still stands for genuinely small
@@ -30,20 +31,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from src.data_collection import checkpoint, config, validate  # noqa: E402
 from src.data_collection.ratios import compute_ratios  # noqa: E402
-from src.data_collection.yf_collectors import (  # noqa: E402
-    _MAX_FLAT_RUN_FRACTION,
+from src.data_collection.yf._common import (  # noqa: E402
     TRUSTED_MIN_YF_ROWS,
     _bolsai_junction_date,
-    _drop_incomplete_today,
-    _fetch_and_shape_prices,
-    _flat_run_fraction,
     _prices_fetch_start,
     _reconcile_yfinance_junction,
     _repair_bad_ohlc,
     _retry,
     _seed_last_date,
     _yf_symbol,
-    collect_dividends_yf,
+)
+from src.data_collection.yf.dividends import collect_dividends_yf  # noqa: E402
+from src.data_collection.yf.prices import (  # noqa: E402
+    _MAX_FLAT_RUN_FRACTION,
+    _drop_incomplete_today,
+    _fetch_and_shape_prices,
+    _flat_run_fraction,
 )
 
 
@@ -323,7 +326,7 @@ def main():
     # _fetch_and_shape_prices to return a synthetic fetch spanning both a
     # pre-existing date (should be dropped) and two real gap dates (should
     # be kept).
-    import src.data_collection.yf_collectors as _mod
+    import src.data_collection.yf.prices as _mod
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "GAPTEST.parquet"
         existing = pd.DataFrame({

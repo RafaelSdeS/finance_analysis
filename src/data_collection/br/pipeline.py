@@ -19,11 +19,14 @@ from datetime import datetime
 
 import pandas as pd
 
-from . import collectors
-from .. import config, yf_collectors
+from . import collectors, macro
+from .. import config
 from ..cvm import company_info as cvm_company_info
 from ..cvm import ratios as cvm_ratios
 from ..cvm import sectors as cvm_sectors
+from ..yf import dividends as yf_dividends
+from ..yf import fundamentals as yf_fundamentals
+from ..yf import prices as yf_prices
 
 
 def _collect(name: str, tickers: list[str], mode: str):
@@ -41,12 +44,12 @@ def _collect(name: str, tickers: list[str], mode: str):
 
     fn_map = {
         ("prices", "bolsai"): collectors.collect_prices,
-        ("prices", "yfinance"): yf_collectors.collect_prices_yf,
+        ("prices", "yfinance"): yf_prices.collect_prices_yf,
         ("fundamentals", "bolsai"): collectors.collect_fundamentals,
-        ("fundamentals", "yfinance"): yf_collectors.collect_fundamentals_yf,
+        ("fundamentals", "yfinance"): yf_fundamentals.collect_fundamentals_yf,
         ("fundamentals", "cvm"): cvm_ratios.collect_fundamentals_cvm,
         ("dividends", "bolsai"): collectors.collect_dividends,
-        ("dividends", "yfinance"): yf_collectors.collect_dividends_yf,
+        ("dividends", "yfinance"): yf_dividends.collect_dividends_yf,
     }
 
     if others:
@@ -137,10 +140,10 @@ def run(mode: str, tickers: list[str], dry_run: bool = False):
     # original BolsAI versions) stay importable but unused by default; see
     # BOLSAI_EXIT_PLAN.md Task 5.
     stages = [
-        ("macro", lambda: collectors.collect_macro(mode)),
+        ("macro", lambda: macro.collect_macro(mode)),
         ("company_info", lambda: cvm_company_info.synthesize_company_info()),
         ("sectors", lambda: cvm_sectors.build_sectors()),
-        ("corporate_events", lambda: yf_collectors.collect_splits_yf(all_tickers, mode)),
+        ("corporate_events", lambda: yf_dividends.collect_splits_yf(all_tickers, mode)),
     ]
 
     for name, fn in stages:

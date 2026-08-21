@@ -145,7 +145,7 @@ def compute_dividend_features(dataset, dividends):
 # log_return is computed by ROW adjacency (.shift(1)), not calendar-date
 # adjacency. A ticker with a genuine raw-data hole (delisted/relisted under a
 # recycled code, or an unfillable vendor collection gap -- e.g. UGPA3's
-# confirmed 2010-2011 gap, in yf_collectors.FLAT_RUN_PADDING because yfinance
+# confirmed 2010-2011 gap, in one_off/backfill_known_gaps.FLAT_RUN_PADDING because yfinance
 # has no real data for it either) would otherwise silently produce a fake
 # multi-day/multi-year "single-day" return (confirmed: VBBR3/BRDT3 read
 # -95.6% across a 14.9-year hole, UGPA3 +46.8% across a 499-day one,
@@ -595,7 +595,7 @@ def compute_advanced_features(df):
     # through from the collector, and without it the column shipped as a FRACTION while every
     # sibling (gross_margin, net_margin, ebit_margin) shipped as a PERCENT -- a silent 100x
     # inconsistency on 100% of BR rows (median 0.1295 vs ebit_margin's 11.13). Both vendor layers
-    # already scale correctly (cvm/ratios.py:83, yf_collectors.py:792); only this recomputation
+    # already scale correctly (cvm/ratios.py:83, yf/fundamentals.py's compute_ratios call); only this recomputation
     # dropped it. Fixed 2026-08-20, DATA_LAYER_CORRECTNESS_PLAN.md S2c.
     df["ebitda_margin"] = (
         _safe_ratio(df["ebitda"], df["net_revenue"]) * 100 if "ebitda" in df.columns else np.nan

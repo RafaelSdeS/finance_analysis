@@ -13,7 +13,7 @@ no split events found for 2019-2022).
 
 yfinance's MBRF3.SA series is independently clean across every one of the
 flagged dates (spot-checked directly) and its own flat-run fraction is 0%
-(not vendor coverage-padding, see _flat_run_fraction in yf_collectors.py).
+(not vendor coverage-padding, see _flat_run_fraction in yf/prices.py).
 Rather than replace BolsAI's OHLCV wholesale (which would also discard its
 volume/close, not shown to be wrong), this recomputes only the adj_* columns
 by applying yfinance's own (adj_close/close) ratio to BolsAI's own raw OHLC

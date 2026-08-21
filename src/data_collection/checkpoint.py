@@ -36,7 +36,7 @@ def save(name: str, mode: str, data: dict) -> None:
 
 
 # Re-probe a skip-listed ticker every Nth run instead of excluding it forever.
-# Mirrors yf_collectors.EMPTY_RUNS_REPROBE_INTERVAL (same value, same semantics) --
+# Mirrors yf/prices.py's EMPTY_RUNS_REPROBE_INTERVAL (same value, same semantics) --
 # the yfinance path already had this safety net; BolsAI's `_skip` did not, and
 # cleared only by hand-editing the checkpoint JSON. With MAX_RETRIES previously
 # at 1 (i.e. no retries at all), a single transient BolsAI 503/timeout was enough
@@ -69,7 +69,7 @@ def mark_skip(name: str, mode: str, cp: dict, skip: dict, ticker: str) -> None:
     Called both when a fetch actually fails AND when a ticker is skipped without
     being attempted -- the counter has to advance on skipped runs too, or a
     ticker sitting on a multiple of SKIP_REPROBE_INTERVAL would re-probe on
-    every single run instead of every Nth. Same design as yf_collectors'
+    every single run instead of every Nth. Same design as yf/prices.py's
     `empty_runs`, which increments on its skip path for exactly this reason.
     Mutates `skip` and `cp` in place.
     """
