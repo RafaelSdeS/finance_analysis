@@ -24,13 +24,16 @@ Run from project root:
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from src.data_collection import config, validate  # noqa: E402
-from src.data_collection.cvm.ratios import compute_ratios  # noqa: E402
+from src.data_collection.cvm.ratios import (  # noqa: E402
+    _apply_share_events, _share_events, _ticker_family, compute_ratios,
+)
 from src.data_collection.cvm.statements import load_statements  # noqa: E402
 
 TOLERANCE = 0.15  # 15%, consistent with validate_vs_yfinance's loose band
@@ -193,6 +196,74 @@ def test_balance_sheet_has_no_vendor_switch_cliff():
     return True
 
 
+def test_ticker_family_resolves_continuity_chain():
+    """_ticker_family must resolve TIMP3 and TIMS3 (real ticker_continuity.json
+    rename entry) to the same family, both directions, and leave an unrelated
+    ticker as a singleton -- this is what lets a real 2025 TIMS3-keyed split
+    reach TIMP3's own raw fundamentals file (see _share_events)."""
+    fam_old = _ticker_family("TIMP3")
+    fam_new = _ticker_family("TIMS3")
+    assert fam_old == fam_new, f"TIMP3 and TIMS3 must resolve to the same family: {fam_old} vs {fam_new}"
+    assert {"TIMP3", "TIMS3"}.issubset(fam_old), fam_old
+
+    assert _ticker_family("__NO_SUCH_TICKER__") == {"__NO_SUCH_TICKER__"}
+    print("PASS  ticker-family continuity-chain resolution")
+    return True
+
+
+def test_share_events_adjustment():
+    """docs/DATA_LAYER_FOLLOWUP_FINDINGS.md's shares/splits mitigation: a
+    synthetic corporate_events.parquet replicating TIMS3's exact real shape
+    (one reverse split recorded TWICE, 2 days apart, at an inverse-but-equal
+    ratio -- 1000:1 and 1:0.001 -- plus one later, independent forward split)
+    must collapse to exactly 2 real events, and _apply_share_events must only
+    apply an event when it happened AFTER the matched FRE record's own
+    effective_date."""
+    events = pd.DataFrame({
+        "ticker": ["TESTX3"] * 3,
+        "date": pd.to_datetime(["2007-07-01", "2007-07-03", "2010-01-01"]),
+        "type": ["INPLIT", "INPLIT", "SPLIT"],
+        "ratio_from": [1000.0, 1.0, 1.0],
+        "ratio_to": [1.0, 0.001, 2.0],
+        "factor": [1000.0, 0.001, 2.0],
+    })
+    tmp_path = ROOT / "tests" / "data_collection" / "_tmp_corp_events_test.parquet"
+    events.to_parquet(tmp_path, index=False)
+    orig_path = config.CORP_EVENTS_PATH
+    try:
+        config.CORP_EVENTS_PATH = tmp_path
+
+        dedup = _share_events("TESTX3")
+        assert len(dedup) == 2, f"expected 2 real events after dedup, got {len(dedup)}:\n{dedup}"
+        assert abs(dedup.iloc[0]["share_multiplier"] - 0.001) < 1e-9
+        assert abs(dedup.iloc[1]["share_multiplier"] - 2.0) < 1e-9
+
+        ref_dates = pd.Series(pd.to_datetime(
+            ["2005-01-01", "2008-01-01", "2011-01-01", "2011-01-01"]))
+        # Row 0: before either event -> untouched.
+        # Row 1: FRE record from before the 2007 event -> apply it once.
+        # Row 2: FRE record from before BOTH events -> apply both, compounded.
+        # Row 3: FRE record ALREADY from after the 2007 event -> only the 2010
+        #        one is new information; re-applying 2007's would double-count.
+        shares_vals = np.array([1_000_000.0, 1_000_000.0, 1_000_000.0, 1_000.0])
+        eff_dates = pd.to_datetime(
+            ["2004-01-01", "2006-01-01", "2000-01-01", "2008-01-01"]).to_numpy()
+
+        out = _apply_share_events(shares_vals, eff_dates, ref_dates, "TESTX3")
+        assert abs(out[0] - 1_000_000.0) < 1e-6, out[0]
+        assert abs(out[1] - 1_000.0) < 1e-6, out[1]              # 1e6 * 0.001
+        assert abs(out[2] - 2_000.0) < 1e-6, out[2]              # 1e6 * 0.001 * 2
+        assert abs(out[3] - 2_000.0) < 1e-6, out[3]              # 1e3 * 2 (2007 already baked in)
+    finally:
+        config.CORP_EVENTS_PATH = orig_path
+        tmp_path.unlink(missing_ok=True)
+
+    print("PASS  share-events dedup + forward-adjustment")
+    return True
+
+
 if __name__ == "__main__":
-    ok = test_ratio_math() and test_cross_source_vs_bolsai() and test_balance_sheet_has_no_vendor_switch_cliff()
+    ok = (test_ratio_math() and test_cross_source_vs_bolsai()
+          and test_balance_sheet_has_no_vendor_switch_cliff()
+          and test_ticker_family_resolves_continuity_chain() and test_share_events_adjustment())
     sys.exit(0 if ok else 1)

@@ -66,6 +66,15 @@ def load_prices(dir=None, tickers=None):
     prices = pd.concat(dfs, ignore_index=True, sort=False)
     prices = prices.sort_values(["ticker", "trade_date"])
 
+    # Phantom non-trading day: every OHLC field NaN (confirmed CAMB3
+    # 2019-08-15, volume 0) -- a raw-source artifact, not a real trading row.
+    ohlc_cols = [c for c in ("open", "high", "low", "close") if c in prices.columns]
+    if ohlc_cols:
+        all_nan = prices[ohlc_cols].isna().all(axis=1)
+        if all_nan.any():
+            print(f"Dropping {int(all_nan.sum())} phantom all-NaN OHLC row(s)")
+            prices = prices[~all_nan]
+
     print(f"Total price rows: {len(prices)}")
 
     return prices

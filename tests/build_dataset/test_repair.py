@@ -160,5 +160,86 @@ def test_repair_skips_missing_corporate_events_file(tmp_path, monkeypatch) -> No
     assert np.allclose(result["adj_close"], [100.0, 100.0, 100.0])
 
 
+def _price_series(ticker, dates, close, adj_close):
+    return pd.DataFrame({
+        "ticker": ticker,
+        "trade_date": pd.to_datetime(dates),
+        "open": close, "high": close, "low": close, "close": close,
+        "adj_open": adj_close, "adj_high": adj_close, "adj_low": adj_close, "adj_close": adj_close,
+    })
+
+
+def test_glitch_repair_snaps_back_isolated_single_day_pulse() -> None:
+    """PETR4/ITUB4/SBSP3/... shape (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md): a
+    single day's adj_close is corrupted -- ratio (adj_close/close) jumps hard
+    on day D and reverts back to the pre-glitch level by day D+1, while close
+    barely moves. Must repair only that one row, holding the prior day's
+    ratio, and leave every other row untouched."""
+    dates = pd.date_range("2026-01-01", periods=6, freq="D")
+    close = [10.0] * 6
+    adj_close = [5.0, 5.0, 1.5, 5.0, 5.0, 5.0]  # steady ratio 0.5 except the glitch day
+    prices = _price_series("TEST3", dates, close, adj_close)
+
+    result = repair.repair_isolated_adj_close_glitches(prices.copy())
+
+    assert np.allclose(result["adj_close"], [5.0] * 6), result["adj_close"].tolist()
+    assert np.allclose(result["adj_open"], [5.0] * 6)
+
+
+def test_glitch_repair_ignores_ratio_pulse_caused_by_bad_close() -> None:
+    """AFLT3's real shape (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md): a single
+    day's RAW close is the one that's wrong (not adj_close) -- close dips
+    and bounces back while adj_close is already correctly, permanently
+    adjusted (e.g. right after repair_unadjusted_splits fixed a real split
+    that raw close's own error happened to land next to). The ratio still
+    pulses-and-reverts on that day, but adj_close is the side that's right
+    here -- "fixing" it would reintroduce a discontinuity that was already
+    removed. Must be left alone."""
+    dates = pd.date_range("2026-01-01", periods=6, freq="D")
+    close = [18.0, 18.0, 0.018, 18.0, 18.0, 18.0]     # bad raw close for one day
+    adj_close = [6.35] * 6                             # already correctly adjusted, stable
+    prices = _price_series("TEST3", dates, close, adj_close)
+
+    result = repair.repair_isolated_adj_close_glitches(prices.copy())
+
+    assert np.allclose(result["adj_close"], adj_close), "a bad raw close must not corrupt a correct adj_close"
+
+
+def test_glitch_repair_leaves_real_split_alone() -> None:
+    """A real split changes the ratio PERMANENTLY -- day D+1 does NOT revert
+    to the pre-event level, so this must never be treated as a glitch."""
+    dates = pd.date_range("2026-01-01", periods=6, freq="D")
+    close = [10.0] * 6
+    adj_close = [5.0, 5.0, 2.5, 2.5, 2.5, 2.5]  # ratio steps down and stays
+    prices = _price_series("TEST3", dates, close, adj_close)
+
+    result = repair.repair_isolated_adj_close_glitches(prices.copy())
+
+    assert np.allclose(result["adj_close"], adj_close), "a genuine permanent shift must be left alone"
+
+
+def test_glitch_repair_leaves_real_price_moves_alone() -> None:
+    """A real, volatile price move (even a sharp round trip) keeps ratio flat
+    because close and adj_close move together -- must never false-positive."""
+    dates = pd.date_range("2026-01-01", periods=6, freq="D")
+    close = [10.0, 10.0, 3.0, 10.0, 10.0, 10.0]  # crash and recovery
+    adj_close = [5.0, 5.0, 1.5, 5.0, 5.0, 5.0]   # same ratio (0.5) throughout
+    prices = _price_series("TEST3", dates, close, adj_close)
+
+    result = repair.repair_isolated_adj_close_glitches(prices.copy())
+
+    assert np.allclose(result["adj_close"], adj_close), "a real price move with flat ratio must be left alone"
+
+
+def test_glitch_repair_handles_short_series() -> None:
+    """Fewer than 3 rows: nothing to compare against, must not crash."""
+    dates = pd.date_range("2026-01-01", periods=2, freq="D")
+    prices = _price_series("TEST3", dates, [10.0, 10.0], [5.0, 5.0])
+
+    result = repair.repair_isolated_adj_close_glitches(prices.copy())
+
+    assert np.allclose(result["adj_close"], [5.0, 5.0])
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

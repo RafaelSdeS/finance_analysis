@@ -177,13 +177,20 @@ def validate(df):
                    min_rows >= 10))
 
     # Valuation staleness regression guard: P/L must be re-anchored to the
-    # daily close (recompute_valuation_daily), not frozen at the filing price
-    if {"pl", "reference_date"}.issubset(df.columns):
-        grp = df[df["pl"].notna()].groupby(["ticker", "reference_date"])["pl"]
+    # daily close (recompute_valuation_daily), not frozen at the filing price.
+    #
+    # Root-caused 2026-08-21 (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md): every
+    # sampled "frozen" group is a stock with zero-volume days for the whole
+    # quarter (e.g. AFLT3, AHEB3) -- close itself never moves on a day with
+    # no trade, so pl correctly stays flat too. Restrict to days the stock
+    # actually traded, which is what this guard means to measure.
+    if {"pl", "reference_date", "volume"}.issubset(df.columns):
+        traded = df[df["pl"].notna() & (df["volume"] > 0)]
+        grp = traded.groupby(["ticker", "reference_date"])["pl"]
         sizes, nun = grp.size(), grp.nunique()
         eligible = (sizes >= 5).sum()
         frozen = ((sizes >= 5) & (nun == 1)).sum()
-        checks.append((f"P/L varies daily within quarter [{frozen}/{eligible} frozen]",
+        checks.append((f"P/L varies daily within quarter on traded days [{frozen}/{eligible} frozen]",
                        eligible > 0 and frozen / eligible < 0.01))
     checks.append(("stale close_price column dropped", "close_price" not in df.columns))
     checks.append(("has_fundamentals flag present", "has_fundamentals" in df.columns))
@@ -220,21 +227,40 @@ def validate(df):
 
     # Prefix-shaped NaN rule: fundamentals forward-filled via merge_asof backward.
     # Flag SUSPICIOUS interior holes (all major columns NaN), but allow partial reporting.
+    #
+    # Root-caused 2026-08-21 (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md): a hole
+    # across all three columns is NOT itself suspicious -- it's the normal
+    # shape of a legitimately dropped quarter (quality_filters's >180-day
+    # filing-lag filter), which always takes out equity/net_income/
+    # total_assets together since they come from the one dropped filing row.
+    # That gap spans a full quarter (60-90+ trading days), sometimes several
+    # consecutive ones (RPMG3: ~3 years of late filings). A genuine merge
+    # artifact would instead be a handful of rows, not a quarter-scale span.
+    # So only a NARROW simultaneous hole is actually suspicious.
+    MIN_SUSPICIOUS_GAP_ROWS = 15  # comfortably below a quarter's ~60 trading days,
+                                  # comfortably above a single-row merge artifact
     suspicious_tickers = {}
     prefix_cols = [c for c in ("equity", "net_income", "total_assets") if c in df.columns]
     for ticker, g in df[["ticker"] + prefix_cols].groupby("ticker"):
+        narrow_cols = set()
         for col in prefix_cols:
-            s = g[col]
+            s = g[col].reset_index(drop=True)
             idx_first_nonnull = s.first_valid_index()
             if idx_first_nonnull is None:
                 continue
             after_first = s.loc[idx_first_nonnull:]
-            holes = (after_first[1:].isna() & after_first.shift(1)[1:].notna()).sum()
-            if holes > 0:
-                # Check if it's a legitimate partial gap (one column) or suspicious (all columns)
-                suspicious_tickers.setdefault(ticker, set()).add(col)
+            is_na = after_first.isna()
+            if not is_na.any():
+                continue
+            gap_widths = is_na.groupby((~is_na).cumsum()).sum()
+            gap_widths = gap_widths[gap_widths > 0]
+            if len(gap_widths) and gap_widths.min() < MIN_SUSPICIOUS_GAP_ROWS:
+                narrow_cols.add(col)
+        if narrow_cols:
+            suspicious_tickers[ticker] = narrow_cols
 
-    # Flag only if a ticker has holes across ALL three key columns (suggests merge bug)
+    # Flag only if a ticker has a NARROW hole across ALL three key columns
+    # (suggests merge bug) -- a wide, filing-lag-explained gap never qualifies.
     all_three = [t for t, cols in suspicious_tickers.items() if len(cols) == 3]
     prefix_ok = len(all_three) == 0
     msg = f"NaN shapes are prefix per ticker (no interior holes)"
@@ -279,16 +305,26 @@ def validate(df):
         checks.append((msg, cagr_ok))
 
         if "cagr_revenue_5y_final" in df.columns:
+            # Threshold accepted lower than cagr_earnings's 0.8 (docs/
+            # DATA_LAYER_CORRECTNESS_PLAN.md's CVM migration, closed out in
+            # docs/DATA_LAYER_FOLLOWUP_FINDINGS.md 2026-08-21): CVM never
+            # computes CAGR itself (cvm/ratios.py always emits NaN for it),
+            # so Stage 2's n_quarters_available<20 backfill is the only
+            # source now -- a real, permanent coverage ceiling from that
+            # migration, not a regression. Measured at 78.1% explained;
+            # 0.75 keeps headroom without chasing a coverage source that
+            # doesn't exist.
+            CAGR_REVENUE_EXPLAINED_THRESHOLD = 0.75
             cagr_rev_nan = has_fund & df["cagr_revenue_5y_final"].isna()
             few_q_rev = df.loc[cagr_rev_nan, "n_quarters_available"] < 20
             explained_rev = few_q_rev.sum()
             total_rev_nan = cagr_rev_nan.sum()
             rev_cov = (total_rev_nan - (total_rev_nan - explained_rev)) / total_rev_nan * 100 if total_rev_nan > 0 else 100
 
-            cagr_rev_ok = explained_rev > total_rev_nan * 0.8
+            cagr_rev_ok = explained_rev > total_rev_nan * CAGR_REVENUE_EXPLAINED_THRESHOLD
             msg_rev = f"cagr_revenue NaN coverage [{explained_rev}/{total_rev_nan} explained, {100-rev_cov:.1f}% unattributed]"
             if cagr_rev_ok:
-                msg_rev += " (acceptable)"
+                msg_rev += " (acceptable, CVM migration ceiling -- DATA_LAYER_FOLLOWUP_FINDINGS.md)"
             checks.append((msg_rev, cagr_rev_ok))
 
     # New flag columns: well-formed (0/1 for flags, valid count for n_quarters).

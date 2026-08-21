@@ -174,3 +174,67 @@ def repair_unadjusted_splits(prices):
 
     print(f"Repaired {n_fixed} unadjusted events")
     return prices
+
+
+def repair_isolated_adj_close_glitches(prices):
+    """Snap back a single-day adj_close value that's inconsistent with both of
+    its neighbors, while raw close is fine.
+
+    Root-caused 2026-08-21 (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md, and
+    TOP50_ML_READINESS_AUDIT.md's PETR4/ITUB4/SBSP3/BBDC4/BBAS3/ITSA4/GGBR4/
+    GOAU4/VIVT3 findings): a vendor batch defect corrupts adj_close for one
+    day on two specific calendar dates (2012-02-22, 2020-11-20) -- confirmed
+    dataset-wide (92 rows / 58 tickers, unrelated sectors, no matching
+    corporate_events entry), not a per-company corporate action.
+
+    Detection works on ratio = adj_close/close instead of the raw return:
+    on an ordinary day (even a huge real price move) ratio is flat, because
+    close and adj_close move together. A REAL split changes ratio once and
+    it STAYS changed. Only a data glitch makes ratio jump on day D and land
+    back near its day-(D-1) level by day D+1.
+
+    That's not quite airtight on its own, though (found 2026-08-21, AFLT3):
+    if raw `close` itself has an isolated one-day error (unrelated to any
+    split) sitting right after `repair_unadjusted_splits` has ALREADY made
+    adj_close continuous, the ratio pulses and reverts for exactly the same
+    shape -- but here `close` is the broken side, and "fixing" adj_close
+    would overwrite an already-correct value with a wrong one, reintroducing
+    the very discontinuity `repair_unadjusted_splits` just removed. So also
+    require `close` itself to stay flat across the window: a real glitch
+    only ever shows up in one side of the ratio, never both.
+
+    Repair: hold the prior day's (confirmed-good) ratio through the bad row.
+    """
+    print()
+    print("=" * 80)
+    print("REPAIRING ISOLATED SINGLE-DAY adj_close GLITCHES")
+    print("=" * 80)
+
+    n_fixed = 0
+    for ticker, g in prices.groupby("ticker"):
+        if len(g) < 3:
+            continue
+        idx = g.index.to_numpy()
+        close = g["close"].to_numpy(dtype=float)
+        adj_close = g["adj_close"].to_numpy(dtype=float)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = np.where(close > 0, adj_close / close, np.nan)
+            lr_in = np.log(ratio[1:-1] / ratio[:-2])
+            lr_revert = np.log(ratio[2:] / ratio[:-2])
+            close_lr_in = np.log(close[1:-1] / close[:-2])
+            close_lr_revert = np.log(close[2:] / close[:-2])
+        glitch = (np.isfinite(lr_in) & np.isfinite(lr_revert)
+                  & np.isfinite(close_lr_in) & np.isfinite(close_lr_revert)
+                  & (np.abs(lr_in) >= MIN_DETECTABLE_JUMP) & (np.abs(lr_revert) < JUMP_MATCH_TOL)
+                  & (np.abs(close_lr_in) < MIN_DETECTABLE_JUMP) & (np.abs(close_lr_revert) < MIN_DETECTABLE_JUMP))
+        for r in np.where(glitch)[0] + 1:  # +1: back to the middle (glitch) row
+            good_ratio = ratio[r - 1]
+            for raw_col, adj_col in (("open", "adj_open"), ("high", "adj_high"),
+                                      ("low", "adj_low"), ("close", "adj_close")):
+                prices.loc[idx[r], adj_col] = g[raw_col].iloc[r] * good_ratio
+            n_fixed += 1
+            print(f"  {ticker} {pd.Timestamp(g['trade_date'].iloc[r]).date()}: "
+                  f"repaired isolated adj_close glitch")
+
+    print(f"Repaired {n_fixed} isolated adj_close glitches")
+    return prices

@@ -2,8 +2,10 @@
 shares outstanding for every crosswalk-resolvable ticker (not just delisted names).
 """
 
+import json
 import logging
 
+import numpy as np
 import pandas as pd
 
 from .. import config, storage, validate
@@ -143,14 +145,126 @@ def _price_asof(prices: pd.DataFrame, ref_dates: pd.Series) -> pd.Series:
 
 
 def _shares_asof(shares: pd.DataFrame, cnpj: str, ref_dates: pd.Series):
+    """Returns (shares, effective_date) per ref_date -- the effective_date is
+    needed by `_apply_share_events` to know how stale each matched FRE record
+    already was at ref_date."""
     tl = shares[shares["cnpj"] == cnpj].sort_values("effective_date")
     if tl.empty:
-        return float("nan")
+        nan_shares = pd.Series(float("nan"), index=ref_dates.index)
+        nat_dates = pd.Series(pd.NaT, index=ref_dates.index)
+        return nan_shares.to_numpy(), nat_dates.to_numpy()
     merged = pd.merge_asof(
         pd.DataFrame({"reference_date": ref_dates}).sort_values("reference_date"),
         tl[["effective_date", "shares"]],
         left_on="reference_date", right_on="effective_date", direction="backward")
-    return merged.set_index("reference_date")["shares"].reindex(ref_dates).to_numpy()
+    merged = merged.set_index("reference_date").reindex(ref_dates)
+    return merged["shares"].to_numpy(), merged["effective_date"].to_numpy()
+
+
+# Some real corporate actions are recorded twice within a few days at an
+# inverse-but-numerically-identical ratio (e.g. TIMS3's 2007 reverse split is
+# stored both as "1000:1" and "1:0.001", same net 0.001 multiplier) --
+# collapsing near-duplicates avoids applying one real event twice.
+_EVENT_DEDUP_WINDOW_DAYS = 10
+_EVENT_DEDUP_TOL = 0.02
+
+_CONTINUITY_PATH = config.BR_RAW_DIR / "reference" / "ticker_continuity.json"
+
+
+def _ticker_family(ticker: str) -> set[str]:
+    """Every ticker code connected to `ticker` through ticker_continuity.json's
+    rename/merger chain (both directions, any number of hops). Needed because
+    a corporate_events row is recorded under whichever code was trading when
+    the event happened, which may not be the code a given raw fundamentals
+    file is built under: TIMS3's real 2025 split is recorded under "TIMS3",
+    but TIMP3's own raw file (the pre-splice donor for TIMS3's early history,
+    per ticker_continuity.json's TIMP3->TIMS3 rename) needs to see it too --
+    they're one continuous real entity, not two independent histories."""
+    if not _CONTINUITY_PATH.exists():
+        return {ticker}
+    events = json.loads(_CONTINUITY_PATH.read_text()).get("events", [])
+    parent = {}
+
+    def find(t):
+        parent.setdefault(t, t)
+        root = t
+        while parent[root] != root:
+            root = parent[root]
+        while parent[t] != root:  # path compression
+            parent[t], t = root, parent[t]
+        return root
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for e in events:
+        if e.get("type") in ("tender", "keep_separate"):
+            continue  # no splice -- these stay genuinely independent histories
+        old, new = e.get("old"), e.get("new")
+        if old and new:
+            union(old, new)
+
+    if ticker not in parent:
+        return {ticker}
+    root = find(ticker)
+    return {t for t in parent if find(t) == root}
+
+
+def _share_events(ticker: str) -> pd.DataFrame:
+    """`ticker`'s corporate_events.parquet rows (plus any recorded under a
+    continuity-chain relative, see `_ticker_family`), deduplicated to one row
+    per real event, reduced to (date, share_multiplier). A forward split
+    multiplies shares outstanding by ratio_to/ratio_from; a reverse split
+    (INPLIT) divides it -- the same field expresses both directions."""
+    if not config.CORP_EVENTS_PATH.exists():
+        return pd.DataFrame(columns=["date", "share_multiplier"])
+    ev = pd.read_parquet(config.CORP_EVENTS_PATH)
+    ev = ev[(ev["ticker"].isin(_ticker_family(ticker)))
+            & (ev["ratio_from"] > 0) & (ev["ratio_to"] > 0)].copy()
+    if ev.empty:
+        return pd.DataFrame(columns=["date", "share_multiplier"])
+    ev["date"] = pd.to_datetime(ev["date"])
+    ev["share_multiplier"] = ev["ratio_to"] / ev["ratio_from"]
+    ev = ev.sort_values("date")
+
+    kept = []
+    for _, row in ev.iterrows():
+        if kept and (row["date"] - kept[-1]["date"]).days <= _EVENT_DEDUP_WINDOW_DAYS \
+                and abs(row["share_multiplier"] - kept[-1]["share_multiplier"]) < _EVENT_DEDUP_TOL:
+            continue  # same real event, already counted
+        kept.append(row)
+    return pd.DataFrame(kept)[["date", "share_multiplier"]].reset_index(drop=True)
+
+
+def _apply_share_events(shares_vals, effective_dates, ref_dates: pd.Series, ticker: str):
+    """Forward-adjust a FRE-sourced share count by any real split/inplit that
+    happened AFTER the matched FRE record's own effective_date and at-or-before
+    ref_date -- the gap `_shares_asof`'s backward-merge alone leaves stale
+    (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md: TIMS3's shares_outstanding was
+    frozen across its real 2025 100:1 reverse split because FRE never filed
+    a post-split capital_social update for its CNPJ). Only closes THAT gap --
+    a CNPJ with no FRE row at all still comes out NaN/stale; this is a partial
+    mitigation, not a substitute for ticker_continuity.json-level verification.
+    """
+    events = _share_events(ticker)
+    if events.empty:
+        return shares_vals
+    out = np.array(shares_vals, dtype=float)
+    # list(...) first: forces a plain 0..n-1 positional index on both Series,
+    # regardless of whatever index `ref_dates` came in with, so `.iloc[i]`
+    # lines up with `out[i]` (itself already 0-indexed by `_shares_asof`'s
+    # own positional `.to_numpy()`).
+    ref_dates = pd.to_datetime(pd.Series(list(ref_dates)))
+    eff_dates = pd.Series(list(effective_dates))
+    for i in range(len(out)):
+        if pd.isna(out[i]) or pd.isna(eff_dates.iloc[i]):
+            continue
+        applicable = events[(events["date"] > eff_dates.iloc[i]) & (events["date"] <= ref_dates.iloc[i])]
+        if not applicable.empty:
+            out[i] *= applicable["share_multiplier"].prod()
+    return out
 
 
 def build_fundamentals(tickers: list[str] | None = None, rebuild: bool = False) -> None:
@@ -183,7 +297,9 @@ def build_fundamentals(tickers: list[str] | None = None, rebuild: bool = False) 
         prices = pd.read_parquet(px_path)
         q = q.copy()
         q["close_price"] = _price_asof(prices, q["reference_date"])
-        q["shares_outstanding"] = _shares_asof(shares, cnpj, q["reference_date"])
+        shares_vals, shares_eff_dates = _shares_asof(shares, cnpj, q["reference_date"])
+        q["shares_outstanding"] = _apply_share_events(
+            shares_vals, shares_eff_dates, q["reference_date"], ticker)
 
         df = compute_ratios(q, row["corporate_name"])
         df["ticker"] = ticker

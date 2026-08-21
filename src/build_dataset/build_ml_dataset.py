@@ -63,7 +63,7 @@ from .quality_filters import (
     filter_excessive_filing_lag,
     filter_tickers_with_no_fundamentals,
 )
-from .repair import repair_unadjusted_splits
+from .repair import repair_isolated_adj_close_glitches, repair_unadjusted_splits
 
 # IBOV-proxy ETF, used as the true market benchmark for beta_1y/
 # momentum_vs_market_* (cross_sectional.py) -- collected the same as every
@@ -275,6 +275,9 @@ def main():
     # so the factor math runs on the pre-splice data. Continuity then renames both
     # the repaired old leg and its associated rows onto the new ticker.
     prices       = repair_unadjusted_splits(prices)
+    # isolated single-day adj_close glitches (vendor batch defect, unrelated
+    # to any split) -- same "repair before continuity" ordering rationale.
+    prices       = repair_isolated_adj_close_glitches(prices)
     # splice AFTER split repair: each leg is now internally continuous; splicing
     # them together preserves that invariant.
     prices, fundamentals = apply_ticker_continuity(prices, fundamentals)
