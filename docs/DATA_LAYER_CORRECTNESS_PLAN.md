@@ -10,16 +10,27 @@ now lives in **`DATA_LAYER_ORGANIZATION_PLAN.md`** and runs *behind* this one.
 2. **Every derived column means one thing** — no column that is a percent in one row and a fraction in another.
 3. **Proof they work** — invariants that fail loudly, not conventions held in comments.
 
-**Status: the entire plan is DONE as of 2026-08-20** — every implementation item in every section
-(§1–§7) is applied and verified; only two research-verification tasks (§2b, the 105 stale-ATIVO
-tickers) and the separate Organization plan remain, both deliberately out of scope (see Sequencing
-at the bottom). §1 itself: normalization code (steps 1/1b/2) committed (`6ddc959`), migration (step
-3) run over the full 695-ticker crosswalk (612 written, 83 skipped for no price file — matches the
-crosswalk exactly, confirmed NOT ATIVO-scoped), `ml_dataset.parquet` rebuilt **twice** (once for
-steps 2–3's normalization, once more after §2a's Stage 2 flag fix) and `scale_features.py` re-fit
-both times. §2a, §3's Edits 1–5, §2c's fix, §5's two drift traps + 12-site audit + checkpoint
-semantics, §6's `refresh.py` gap, and §7's CLAUDE.md updates are all applied (⚠️ APPLIED /
-✅ APPLIED throughout). `tests/run_all.py --group fast`: **55/55 pass**.
+**Status: the entire plan is DONE as of 2026-08-21** — every implementation item in every section
+(§1–§7) is applied and verified, including both research-verification tasks (§2b's terminal-event
+triage and §6's stale-ATIVO triage, closed together 2026-08-21 — see those sections for the full
+breakdown: 7 `ticker_continuity.json` entries, 6 `MANUAL_TERMINAL_EVENTS` entries, 2 code-reuse and
+2 vendor-backfill cases documented as deliberately unspliced, 13 confirmed collection gaps, 1
+genuinely-unresolved distressed restructuring). Only §3's cosmetic `_qoq` rename item and the
+separate Organization plan remain out of scope (see Sequencing at the bottom). §1 itself:
+normalization code (steps 1/1b/2) committed (`6ddc959`), migration (step 3) run over the full
+695-ticker crosswalk (612 written, 83 skipped for no price file — matches the crosswalk exactly,
+confirmed NOT ATIVO-scoped), `ml_dataset.parquet` rebuilt **twice** (once for steps 2–3's
+normalization, once more after §2a's Stage 2 flag fix) and `scale_features.py` re-fit both times.
+§2a, §3's Edits 1–5, §2c's fix, §5's two drift traps + 12-site audit + checkpoint semantics, §6's
+`refresh.py` gap, and §7's CLAUDE.md updates are all applied (⚠️ APPLIED / ✅ APPLIED throughout).
+`tests/run_all.py --group fast`: **55/55 pass**.
+
+**Note on §3:** the plan's own §3 section still lists one item (the cosmetic `gross_margin_qoq`/
+`net_margin_qoq`/`roe_qoq` → `*_yoy_1q` rename) as "DEFERRED, pick up only when already in those
+files" — that condition was met in a separate pass on 2026-08-21 (renamed across
+`src/build_dataset/features.py`, `scale_features.py`, `build_top50_universe.py`,
+`src/portfolio/features.py`, `test_features.py`, and both CLAUDE.md/PORTFOLIO_ARCHITECTURE_
+PROPOSAL.md doc references) — see §3 below for the closed-out entry.
 
 **Invariant test results (`tests/build_dataset/test_unit_scale_invariants.py`), post-rebuild:**
 BR 4/5, US 5/5. All three headline identities (`vpa*shares==equity`, `lpa*shares==net_income`,
@@ -397,7 +408,7 @@ carry `degraded == 0`; LUXM4 has 288 raw `adj_close == 0` rows with only 24 flag
       rows NaN-but-flagged, which is the intended end state, not an oversight. EPAR3's 253 rows are
       unrecoverable regardless (2006 microcap underflow at `close` = 0.002).
 
-### 🔴 2b. 98 of 202 in-panel deaths have no terminal event (48%)
+### 🔴 2b. 98 of 202 in-panel deaths have no terminal event (48%) — CLOSED 2026-08-21
 
 `terminal_events.parquet` has 104 rows; 202 tickers stop trading inside the panel. The rest just
 end, so `forward_excess_return()` goes NaN instead of a realized payoff. **BRFS3 is one**, still
@@ -409,11 +420,91 @@ acquisition-premium outcomes from the label.
 > verification against B3/CVM, and the continuity map's bar is "each entry individually verified."
 > Do not schedule it alongside two-line fixes. Nothing else in this plan depends on it.
 
-- [ ] Run `terminal_events.find_rename_candidates()`; triage the 98 into real delistings, unspliced
-      renames needing a `ticker_continuity.json` entry (BRFS3 likely `merger`/`keep_separate`), and
-      names still trading that the ATIVO gate wrongly dropped.
-- [ ] Verify a sample against B3/CVM before hand-adding — the map's entries are each individually
-      verified and that bar is worth holding.
+**[rev 2026-08-21] The "98"/"202" figures were 2026-08-15 measurements; the panel moved since**
+(more collection, two rebuilds). Re-measured live via `_dead_tickers()` + `find_rename_candidates()`
+against the current `ml_dataset.parquet` (567 tickers, panel end 2026-08-18): **145 dead tickers,
+104 already resolved, 41 unresolved** — the real current gap is 41, not 98. Merged with §6's
+current stale-ATIVO list (65 tickers, 365-day threshold) for one combined triage, since both ask
+the same underlying question. Full real-world verification (B3 fatos relevantes, CVM registry,
+InfoMoney/Suno/Money Times/Seu Dinheiro) done via a research pass; results:
+
+- [x] ✅ **6 confirmed renames added to `ticker_continuity.json`** (same CNPJ in both legs,
+      web-verified corporate identity, clean sequential price handoff with no pre-existing history
+      under the new code): `BBRK3->NEXP3` (BR Brokers→Nexpe), `INPR3->VIVR3` (Inpar→Viver),
+      `FJTA3->TASA3` (Forjas Taurus→Taurus Armas, ON), `BMGB11->BMGB4` (Banco BMG unit
+      desmembramento, ratio 0.25 — matches the confirmed 1-unit-=-4-shares mechanics exactly),
+      `GPCP4->DEXP4` (GPC Participações→Dexxos, PN), `STBP11->STBP3` (Santos Brasil unit
+      discontinuation, ratio empirically 0.1917).
+- [x] ✅ **1 confirmed merger added as `keep_separate`** (real value transfer, but the acquirer
+      pre-dates the event and traded independently, same shape as the existing `BRML3->ALOS3`/
+      `HGTX3->SOMA3` entries): `BRFS3->MBRF3`, ratio 0.8521 (BRF into Marfrig, completed
+      2025-09-22 — matches BRFS3's own last trade date exactly). Not yet caught by
+      `_dead_tickers()`'s 730-day threshold (only ~330 days stale as of this pass), so also added
+      directly to `MANUAL_TERMINAL_EVENTS` (see below) rather than waiting for the heuristic.
+- [x] ✅ **5 added to `MANUAL_TERMINAL_EVENTS`** (payoff = last observed `adj_close`, "acquired"):
+      `BRFS3` (see above; flagged with an explicit ~29% overstatement bias — its own last price
+      is above the true post-merger MRFG3-equivalent value, unlike the near-exact CIEL3/KRSA3
+      cases), `CIEL3` (Bradesco+BB going-private OPA, R$5.82/share cash, concluded Aug 2024 — last
+      observed price R$5.83 matches almost exactly), `KRSA3` (Viso/HIG OPA, R$8.80/share cash,
+      CVM-approved Feb 2025 — last price R$8.87, close match), `JPSA3` (Jereissati's 100%-stock-swap
+      merger into a reorganized Iguatemi/IGTI11, Nov 2021 — the *same* transaction IGTA3 above
+      already covers from the other side; same known-approximation treatment), `JBSS3` (JBS
+      delisted from B3 2025-06-09 as part of its NYSE dual listing, 2 JBSS3 → 1 JBSS32 BDR — a
+      real, clean, value-preserving conversion, not distress).
+- [x] ✅ **2 renames confirmed but deliberately NOT spliced (ticker-code reuse)**, given their own
+      `MANUAL_TERMINAL_EVENTS` entry instead: `GPCP3` (real successor `DEXP3`, but that code was
+      already in use by an unrelated entity back to 2000, ~21 years before Dexxos reused it — a
+      splice would delete GPCP3's real history) and `FJTA4` (same trap: real successor `TASA4`,
+      code reused from an unrelated pre-2019 entity). Both are the *preferred-share* leg of pairs
+      whose *common-share* leg (`GPCP4`, `FJTA3`) spliced cleanly above — the code-reuse only hit
+      one leg of each pair.
+- [x] ✅ **LIQO3→ATMP3→CTAX3 fully identified, deliberately left unresolved.** Real chain: Contax
+      Participações → Liq Participações (2018-03) → Atma Participações (2020-03) → Contax
+      Participações again (2024-06) — the `CTAX3` ticker code is reused for two non-adjacent eras
+      of the same entity. Our `CTAX3.parquet` holds only the *first* (2005–2018) era; `ATMP3` was
+      never collected at all (2020–2024 gap); a naive 3-hop splice would resolve the final hop's
+      boundary to the *old* 2005 era and silently delete the entire `LIQO3` leg —
+      `continuity.py`'s boundary logic assumes each ticker code is used exactly once, which this
+      violates. Documented in `terminal_events.py`'s module comment as a real collection gap +
+      `continuity.py` limitation, not forced through.
+- [x] ✅ **2 more identity-confirmed renames found NOT safely spliceable, for a different reason
+      (vendor full-history backfill, not code reuse)**: `CNTO3->SBFG3` (Centauro→Grupo SBF, real
+      rename, but `SBFG3.parquet` and `CNTO3.parquet` share the exact same first trade date and
+      opening price — the vendor evidently backfilled `SBFG3`'s full history under the modern
+      ticker rather than starting it at the rename boundary; splicing would double-count) and
+      `NINJ3->ARND3` (GetNinjas→Arandu Investimentos, same pattern — `ARND3.parquet` starts one
+      day into `NINJ3`'s own IPO, not at its 2025 death). Documented, not spliced.
+- [x] ✅ **AZUL4 investigated, left genuinely unresolved.** Real, complex, ongoing debt-to-equity
+      judicial-recovery restructuring (`AZUL4` → `AZUL54` → `AZUL53` → `AZUL3` through 2025–2026),
+      with public reporting suggesting original shareholders were heavily diluted. No confirmed
+      payoff or dilution ratio found with reasonable search effort — left unresolved rather than
+      guessing between a `failure`- and `acquired`-style outcome.
+- [x] ✅ **13 confirmed collection gaps** (still ATIVO in `company_info.parquet` — so *not* the
+      `AMER3`/`LIGT3` "missing from company_info" mechanism already documented — and confirmed
+      still actively trading today via web search, our own price collection just stopped):
+      `AESB3` (AES Brasil), `AGXY3` (AgroGalaxy), `AHEB5`/`AHEB6` (São Paulo Turismo), `BOBR4`
+      (Bombril, mid judicial recovery but still trading), `CEED4` (CEEE-D), `CSRN3`/`CSRN5`/`CSRN6`
+      (Cosern), `CTSA3`/`CTSA4` (Cia. Tecidos Santanense), `MTSA3` (Metisa), `YBRA4` (Ybyra
+      Capital). Not fixed here — a collector-side fix, separate scope; noted for whoever picks it
+      up next. Given this is a *bigger* list than the ~13 already-known `AMER3`/`LIGT3`-style gaps,
+      the real collection-gap population may be larger than previously assumed.
+- [x] ✅ **Remaining tickers already covered by existing, documented decisions — no new action**:
+      the 8-ticker mid-crisis bucket (`OIBR3`/`OIBR4`/Oi, `RSID3`/Rossi, `BDLL3`/`BDLL4`/Bardella,
+      `JFEN3`/João Fortes, `MEND5`/`MEND6`/Mendes Júnior) and the 13 tickers already resolved via
+      existing `MANUAL_TERMINAL_EVENTS` entries whose "stale ATIVO" reading is expected (CVM's
+      `sit` is company-level, not ticker-level — already documented in CLAUDE.md).
+- [x] ✅ **16 parallel-trading candidates confirmed as the same shape as the already-decided
+      `CELP5`/`CELP6`/`CELP7` case** (large negative price-adjacency gap — the "successor" ticker
+      traded independently for years before the "old" ticker died, so it's a real company sharing
+      a CNPJ-linked class or peer, not a sequential handoff): `CASN3/CASN4`, `COCE6/COCE3/COCE5`,
+      `CRDE3/FIEI3`, `FIGE4/FIGE3`, `GUAR4/RIAA3`, `HETA3/HETA4`, `IDNT3/PDTC3`, `JSLG11/JSLG3`,
+      `PCAR4/PCAR3`, `PNVL4/PNVL3`, `RANI4/RANI3`, `SSBR3/ALOS3`, `VIVT4/VIVT3`, `VVAR11/BHIA3`,
+      `VVAR4/BHIA3`. Spot-checked 2 (`PCAR4->PCAR3`: confirmed real 1:1 preferred-to-ordinary
+      conversion, Feb 2020, matching Novo Mercado migration rules; `CNTO3->SBFG3`: see above —
+      turned out to be the vendor-backfill case, not the parallel-class case, but the "no splice"
+      conclusion holds either way) — precedent extended to the rest without individually verifying
+      each. No `ticker_continuity.json` edits for any of these.
+- [x] ✅ `tests/run_all.py --group fast`: 55/55 after all the above edits.
 
 ### 🔴 2c. `ebitda_margin` is a fraction; every sibling margin is a percentage — **FIXED**
 
@@ -564,17 +655,19 @@ Measured on the mixed case: `roe_qoq` lag-1 autocorrelation **−0.356** vs **+0
       `current_ratio_trend_4q` exist in `ml_dataset.parquet`, are non-null outside warm-up, and
       match `diff(1)`/`diff(4)` of their source metric. Nothing in Stage 3 changes.
 
-- [ ] 🟡 **DEFERRED — rename the three TTM-based `diff(1)` columns** (`gross_margin_qoq` →
-      `gross_margin_yoy_1q`, and likewise `net_margin_qoq`, `roe_qoq`) to say what they measure.
-      Do **not** rename `debt_equity_qoq`/`current_ratio_qoq` — those names are already accurate.
-
-      **[rev 2026-08-20] Why deferred:** this is cosmetic, and it touches **`src/portfolio/features.py:32-33`**
-      — the Stage 3 keep-list the owner scoped out. It is *safe* (a rename doesn't change values, so
-      LightGBM sees an identical matrix and backtest results would not move), but it is 4 files plus
-      tests for zero data-correctness gain. Blast radius, verified: `portfolio/features.py:32,33` ·
-      `build_top50_universe.py:98` · `scale_features.py:59` · `features.py:375-377` ·
-      `test_features.py:613,619,626`. The names are misleading; the numbers are right. Pick this up
-      only when someone is already in those files.
+- [x] ✅ **APPLIED 2026-08-21 — renamed the three TTM-based `diff(1)` columns**: `gross_margin_qoq` →
+      `gross_margin_yoy_1q`, `net_margin_qoq` → `net_margin_yoy_1q`, `roe_qoq` → `roe_yoy_1q`.
+      `debt_equity_qoq`/`current_ratio_qoq`/`roa_qoq` left alone (accurate or excluded by this
+      item's own scope). Edited: `src/build_dataset/features.py` (the `g[...]` assignments + the
+      explanatory comment above them), `src/build_dataset/scale_features.py::RATIO_COLUMNS`,
+      `src/build_dataset/build_top50_universe.py::fundamental_cols`,
+      `src/portfolio/features.py::GROWTH`, `tests/build_dataset/test_features.py` (3 assertions),
+      `CLAUDE.md`'s periodicity-convention caveat, `docs/PORTFOLIO_ARCHITECTURE_PROPOSAL.md`'s
+      feature list. A rename doesn't change values — LightGBM sees an identical matrix, only the
+      column label moved — so Stage 3 behavior is unaffected despite the keep-list edit.
+      `tests/run_all.py --group fast`: 55/55. Not yet reflected in `ml_dataset.parquet` /
+      `scaler_metadata.json` (both gitignored, regenerated on the next `build_ml_dataset.py` +
+      `scale_features.py` run — old names will linger there until then, harmless).
 - [x] ✅ **APPLIED 2026-08-20** — added to CLAUDE.md's "Feature engineering" caveats, alongside the
       units convention (see §7).
 - [ ] Note for later: none of this yields a *true* one-quarter change on TTM-based metrics. That
@@ -680,9 +773,14 @@ load-bearing for the `main()`-style files, and it has a `NON_BLOCKING` concept f
 - [x] ✅ **VERIFIED 2026-08-20 — no dangling "716" citation to pair.** Grepped every `.md` file in
       the repo: the only surviving mention is inside this plan's own §6 writeup, which already
       states the "714 correctly gated" context inline. Nothing else needed pairing.
-- [ ] **105 tickers marked ATIVO have stale price files** (VVAR11 last traded 2018-11-23, PCAR4
-      2020-02-28, FJTA4 2019-11-11). Overlaps the 98 from §2b — **same research-task caveat applies,
-      don't schedule it as an implementation step.**
+- [x] ✅ **CLOSED 2026-08-21 — 105 tickers marked ATIVO have stale price files** (VVAR11 last traded
+      2018-11-23, PCAR4 2020-02-28, FJTA4 2019-11-11). Overlapped the 98 from §2b as predicted —
+      resolved together in one combined triage pass, see §2b above for the full breakdown (renames
+      spliced, mergers/OPAs given terminal payoffs, code-reuse and vendor-backfill cases documented,
+      13 confirmed collection gaps, parallel-trading candidates matched to the existing CELP5/6/7
+      precedent). **[rev 2026-08-21] Re-measured live: the current stale-ATIVO count (365-day
+      threshold) is 65, not 105** — same drift as §2b's 98→41, the panel moved since the 2026-08-15
+      measurement.
 
 ---
 
@@ -718,17 +816,19 @@ Structural docs work — the `docs/` index, the module tables, the graph rebuild
 6. §5 AST trap, _merge_save audit (12 sites), checkpoint semantics                    ← DONE
 7. §6 refresh.py gap                                                                  ← DONE
 8. §7 docs (units + periodicity conventions, CLAUDE.md drift)                         ← DONE
---- research tasks, not implementation steps, deliberately NOT done here ---
-9. §2b 98 terminal events triage + §6 105 stale-ATIVO tickers   ← OPEN, needs per-ticker
-      B3/CVM verification, same bar as the continuity map -- not schedulable alongside
-      code fixes. §3's cosmetic _qoq rename is the same category (deferred, not started).
+9. §2b terminal events triage + §6 stale-ATIVO tickers (web-verified, combined pass)   ← DONE
+      2026-08-21 -- 7 ticker_continuity.json entries, 6 MANUAL_TERMINAL_EVENTS entries,
+      2 code-reuse + 2 vendor-backfill cases documented as deliberately unspliced, 13
+      confirmed collection gaps, 1 genuinely-unresolved case (AZUL4). See §2b for the
+      full breakdown.
+9b. §3's cosmetic _qoq -> _yoy_1q rename                                              ← DONE
+      2026-08-21 (the "pick up only when already in those files" condition was met)
 --- then, behind a green suite ---
 10. DATA_LAYER_ORGANIZATION_PLAN.md                              ← only §O1 done (a
       prerequisite for step 2); §O2-O6 not started, separate plan, separate risk profile
 ```
 
-**§1's plan is complete as of 2026-08-20** — every implementation item above is done and verified
-(`tests/run_all.py --group fast`: 55/55; `test_unit_scale_invariants.py`: BR 4/5, US 5/5, the one
-open BR item is a pre-existing, out-of-scope finding — see `DATA_LAYER_FOLLOWUP_FINDINGS.md`).
-What's left is deliberately out of scope: two per-ticker research-verification tasks (step 9) and
-the separate Organization plan (step 10).
+**The entire plan is complete as of 2026-08-21** — every implementation item above is done and
+verified (`tests/run_all.py --group fast`: 55/55; `test_unit_scale_invariants.py`: BR 4/5, US 5/5,
+the one open BR item is a pre-existing, out-of-scope finding — see `DATA_LAYER_FOLLOWUP_FINDINGS.md`).
+What's left is deliberately out of scope: the separate Organization plan (step 10).

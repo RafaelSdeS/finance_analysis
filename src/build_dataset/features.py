@@ -371,17 +371,18 @@ def compute_fundamental_features(df, margin_col="gross_margin"):
         #   gross_margin, net_margin (TTM / TTM) -> subtracting two 4-term rolling
         #     sums cancels the three shared quarters, so this is really the NEWEST
         #     quarter vs. the SAME quarter a year ago -- a single-quarter YoY delta,
-        #     not an adjacent-quarter change. Names kept for now; renaming them is a
-        #     separate step (DATA_LAYER_CORRECTNESS_PLAN.md §3) since downstream
-        #     consumers reference these strings.
-        #   roe, roa (TTM numerator / point-in-time denominator) -> blends both.
+        #     not an adjacent-quarter change. roe is TTM numerator / point-in-time
+        #     denominator -- also a YoY-flavored delta, not adjacent-quarter. All
+        #     three named `_yoy_1q` accordingly (DATA_LAYER_CORRECTNESS_PLAN.md §3).
+        #   roa (TTM numerator / point-in-time denominator, same shape as roe) ->
+        #     kept as `_qoq`; not renamed in that pass, left alone here too.
         # Paired deliberately with the *_trend_4q (diff(4)) family below: for a TTM
         # input the two horizons are complementary, not redundant -- diff(1) turns
         # first, diff(4) confirms.
         qoq_ok = _within_calendar_gap(g["reference_date"], 1, *QOQ_GAP_DAYS)
-        g["gross_margin_qoq"]  = g["gross_margin"].diff(1).where(qoq_ok)
-        g["net_margin_qoq"]    = g["net_margin"].diff(1).where(qoq_ok)
-        g["roe_qoq"]           = g["roe"].diff(1).where(qoq_ok)
+        g["gross_margin_yoy_1q"] = g["gross_margin"].diff(1).where(qoq_ok)
+        g["net_margin_yoy_1q"]   = g["net_margin"].diff(1).where(qoq_ok)
+        g["roe_yoy_1q"]         = g["roe"].diff(1).where(qoq_ok)
         g["roa_qoq"]           = g["roa"].diff(1).where(qoq_ok)
         g["debt_equity_qoq"]   = g["debt_equity"].diff(1).where(qoq_ok)
         g["current_ratio_qoq"] = g["current_ratio"].diff(1).where(qoq_ok)

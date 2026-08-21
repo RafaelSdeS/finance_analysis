@@ -35,8 +35,8 @@ LEVERAGE = [
 GROWTH = [
     "cagr_earnings_5y_final", "cagr_revenue_5y_final",
     "revenue_growth_yoy", "earnings_growth_yoy", "ebitda_growth_yoy", "total_assets_growth_yoy",
-    "total_debt_growth_yoy", "revenue_vs_earnings_growth_delta", "gross_margin_qoq",
-    "net_margin_qoq", "roe_qoq", "debt_equity_qoq", "current_ratio_qoq",
+    "total_debt_growth_yoy", "revenue_vs_earnings_growth_delta", "gross_margin_yoy_1q",
+    "net_margin_yoy_1q", "roe_yoy_1q", "debt_equity_qoq", "current_ratio_qoq",
 ]
 PIOTROSKI = [
     "f_score", "f_roa_positive", "f_roa_improving", "f_margin_improving",

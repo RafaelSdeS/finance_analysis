@@ -242,6 +242,62 @@
       "notes": "Estacio Participacoes renamed Yduqs Participacoes (new holding brand, Estacio brand retained for higher-ed operations). Web-verified: ticker change effective 2019-07-23. Data confirms adjacency: ESTC3 last trade 2019-07-22 @ R$33.52, YDUQ3 first trade 2019-07-23 @ R$34.36 (ratio 1.025, effectively 1:1)."
     },
     {
+      "old": "BRFS3",
+      "new": "MBRF3",
+      "date": "2025-09-23",
+      "type": "keep_separate",
+      "ratio": 0.8521,
+      "notes": "BRF S.A. fully incorporated into Marfrig Global Foods, forming MBRF (web-verified, multiple BR financial press sources): each BRFS3 share converted to 0.8521 MRFG3 shares (Marfrig itself renamed MBRF3 the same week -- see the separate MRFG3->MBRF3 entry above). Acquirer MRFG3/MBRF3 traded independently since 2007-06-29, ~2 years before BRFS3's own 2009-12-10 start -- a parallel-trading acquirer, not a successor entity, same shape as BRML3->ALOS3/HGTX3->SOMA3 above. Both legs kept separate; BRFS3 treated as delisted at 2025-09-22 (its own real last trade date, exactly matching the confirmed merger-completion date)."
+    },
+    {
+      "old": "BBRK3",
+      "new": "NEXP3",
+      "date": "2022-05-18",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "BR Brokers Participacoes renamed Nexpe Participacoes (real estate brokerage rebrand). Web-verified, same CNPJ (08.613.550/0001-98) confirmed in our own CVM registry data. Data confirms adjacency: BBRK3 last trade 2022-05-17 @ R$0.80, NEXP3 first trade 2022-05-18 @ R$0.77 (ratio 0.963, effectively 1:1)."
+    },
+    {
+      "old": "INPR3",
+      "new": "VIVR3",
+      "date": "2011-05-05",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Inpar S.A. renamed Viver Incorporadora e Construtora (InfoMoney-confirmed). Data confirms adjacency: INPR3 last trade 2011-05-04 @ R$2.92, VIVR3 first trade 2011-05-05 @ R$2.84 (ratio 0.973, effectively 1:1)."
+    },
+    {
+      "old": "FJTA3",
+      "new": "TASA3",
+      "date": "2019-11-12",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "Forjas Taurus renamed Taurus Armas (company left the forging/helmet segment); ordinary shares FJTA3 -> TASA3 (web-verified, multiple BR financial press sources). Data confirms adjacency: FJTA3 last trade 2019-11-11 @ R$4.66, TASA3 first trade 2019-11-12 @ R$4.90 (ratio 1.052, effectively 1:1). NOTE: the mirror pair FJTA4->TASA4 (preferred shares) is deliberately NOT spliced -- our TASA4.parquet already has data back to 2000-01-03, ~19 years before this rename, meaning that ticker code was in use by an unrelated entity/listing before Taurus's 2019 rename reused it (same trap as CTAX3, see terminal_events.py's MANUAL_TERMINAL_EVENTS -- a splice would delete FJTA4's entire real history). FJTA4 is instead given a terminal-event payoff off its own last observed price."
+    },
+    {
+      "old": "BMGB11",
+      "new": "BMGB4",
+      "date": "2019-11-29",
+      "type": "rename",
+      "ratio": 0.25,
+      "notes": "Banco BMG's IPO Units (BMGB11 = 1 preferred share + 3 subscription receipts) underwent mandatory desmembramento: each Unit converted into 4 BMGB4 preferred shares, discontinuing Unit trading from 2019-11-29 (web-verified). Ratio matches exactly: BMGB11 last trade 2019-11-28 @ R$33.60, BMGB4 first trade 2019-11-29 @ R$8.40 -- empirical 8.40/33.60 = 0.2500, exactly 1/4."
+    },
+    {
+      "old": "GPCP4",
+      "new": "DEXP4",
+      "date": "2021-06-08",
+      "type": "rename",
+      "ratio": 1.0,
+      "notes": "GPC Participacoes renamed Dexxos Participacoes (chemicals/steel-tubes holding rebrand), effective 2021-06-08 (web-verified, multiple BR financial press sources). Data confirms adjacency: GPCP4 last trade 2021-06-07 @ R$45.51, DEXP4 first trade 2021-06-08 @ R$42.90 (ratio 0.943, effectively 1:1). NOTE: the mirror pair GPCP3->DEXP3 (common shares) is deliberately NOT spliced -- our DEXP3.parquet already has data back to 2000-03-24, ~21 years before this rename, meaning that ticker code was in use by an unrelated entity/listing before Dexxos's 2021 rename reused it (same trap as FJTA4/TASA4 above). GPCP3 is instead given a terminal-event payoff off its own last observed price."
+    },
+    {
+      "old": "STBP11",
+      "new": "STBP3",
+      "date": "2016-08-22",
+      "type": "rename",
+      "ratio": 0.1917,
+      "notes": "Santos Brasil Participacoes' Units (STBP11, B3 suffix 'UNT') were discontinued and converted into STBP3 common shares around 2016-08-22 -- confirmed STBP11 was a real Unit instrument (not independently confirmed: the exact bundling count), so the ratio here is empirically derived from the boundary prices, same method as BKBR3->ZAMP3/WIZS3->WIZC3/etc. above: STBP11 last trade 2016-08-19 @ R$14.40, STBP3 first trade 2016-08-22 @ R$2.76 (ratio 0.1917, i.e. ~1 Unit per ~5.2 common shares). STBP3 itself was later acquired by CMA CGM and delisted 2025-10-03 (R$14.38/share cash tender) -- out of scope here, a separate future terminal-event item if STBP3 ever needs one."
+    },
+    {
       "old": "CCRO3",
       "new": "MOTV3",
       "date": "2025-05-02",

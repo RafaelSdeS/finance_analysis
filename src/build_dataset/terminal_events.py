@@ -104,13 +104,41 @@ def build_terminal_events(df: pd.DataFrame, delist_events: pd.DataFrame) -> pd.D
 #
 # Explicitly NOT included here (research surfaced these but they need different
 # handling, not a terminal payoff):
-#   - Confirmed renames needing a verified exchange ratio before ticker_continuity.json
-#     can splice them: BBRK3->NEXP3, CELP5/6/7->EQPA5/6/7, LIQO3->ATMP3->CTAX3.
-#   - ~13 tickers (incl. AMER3/Americanas, LIGT3) that are STILL ACTIVELY TRADING --
-#     their panel just stopped being collected (missing from company_info.parquet,
-#     invisible to both --mode update and collect_delisted.py). A terminal payoff for
-#     these would fabricate a death for a live company; see the collection-gap fix
-#     instead.
+#   - Confirmed renames, now spliced into ticker_continuity.json (resolved 2026-08-21):
+#     BBRK3->NEXP3, INPR3->VIVR3, FJTA3->TASA3, BMGB11->BMGB4, GPCP4->DEXP4, STBP11->STBP3.
+#   - CELP5/CELP6/CELP7->EQPA5/6/7: deliberately left unspliced (see CELP3->EQPA3's own
+#     note in ticker_continuity.json) -- preferred classes traded in parallel with CELP3
+#     for years, no surviving preferred successor with fundamentals coverage.
+#   - LIQO3->ATMP3->CTAX3: fully identified 2026-08-21 (Contax Participações -> Liq
+#     Participações [2018-03] -> Atma Participações [2020-03] -> Contax Participações
+#     again [2024-06], the SAME "CTAX3" code reused for two non-adjacent eras of the
+#     same entity). Genuinely too dangerous to splice: our CTAX3.parquet holds the
+#     FIRST (2005-2018) era; ATMP3 was never collected at all (2020-2024 gap); a naive
+#     LIQO3->ATMP3->CTAX3 chain would resolve `first_trade.get("CTAX3")` to the OLD
+#     2005 era and silently delete the entire LIQO3 leg (continuity.py's boundary logic
+#     assumes each ticker code is used exactly once). Left as a genuine, documented
+#     collection gap + a `continuity.py` limitation, not something to force through here.
+#   - CNTO3->SBFG3: identity confirmed (Centauro renamed Grupo SBF, 2021-03-31), but our
+#     SBFG3.parquet and CNTO3.parquet share the exact same first trade date (2019-04-17,
+#     same opening close R$12.30) -- the price vendor evidently backfilled SBFG3's full
+#     history under the current ticker code rather than starting it at the rename
+#     boundary. Splicing would double-count already-duplicated history. No fix applied.
+#   - NINJ3->ARND3 (GetNinjas renamed Arandu Investimentos): same vendor-backfill
+#     pattern as CNTO3/SBFG3 -- ARND3.parquet starts 2021-05-18, one day into NINJ3's
+#     own 2021-05-17 IPO, not at NINJ3's real 2025-01-09 death. Not spliced.
+#   - AZUL4: real, complex, ongoing debt-to-equity judicial-recovery restructuring
+#     (AZUL4 -> AZUL54 -> AZUL53 -> AZUL3 through 2025-2026), with public reporting
+#     suggesting original shareholders were heavily diluted. No confirmed payoff or
+#     dilution ratio found with reasonable search effort; left genuinely unresolved
+#     rather than guessing between "failure" and "acquired".
+#   - Collection gaps: 13 tickers confirmed STILL ACTIVELY TRADING today, our own
+#     pipeline just stopped collecting them (ATIVO in company_info.parquet, so this is
+#     NOT the "missing from company_info" mechanism AMER3/LIGT3 hit -- a distinct
+#     collection-path gap): AESB3 (AES Brasil), AGXY3 (AgroGalaxy), AHEB5/AHEB6 (São
+#     Paulo Turismo), BOBR4 (Bombril, mid judicial recovery but still trading), CEED4
+#     (CEEE-D), CSRN3/CSRN5/CSRN6 (Cosern), CTSA3/CTSA4 (Cia. Tecidos Santanense),
+#     MTSA3 (Metisa), YBRA4 (Ybyra Capital). Confirmed 2026-08-16: AMER3, LIGT3, and
+#     ~11 others of the same "missing from company_info" shape.
 #   - ~9 tickers genuinely still mid-crisis with no resolved outcome (Oi, Rossi,
 #     Bardella, João Fortes, Coteminas, Mendes Júnior) -- correctly left unlabeled.
 MANUAL_TERMINAL_EVENTS = {
@@ -133,6 +161,47 @@ MANUAL_TERMINAL_EVENTS = {
     "IGTA3": "acquired",  # Iguatemi: 100% stock-swap into Jereissati's Iguatemi S.A. (IGTI11)
     "CESP3": "acquired",  # CESP: incorporated into VTRM Energia, successor Auren Energia (AURE3)
     "CESP5": "acquired",  # CESP: incorporated into VTRM Energia, successor Auren Energia (AURE3)
+    # Added 2026-08-21 (DATA_LAYER_CORRECTNESS_PLAN.md §2b/§6 triage, web-verified):
+    "BRFS3": "acquired",  # BRF fully incorporated into Marfrig (MBRF3), completed 2025-09-22, each
+                           # BRFS3 share -> 0.8521 MRFG3/MBRF3 shares (see ticker_continuity.json's
+                           # keep_separate entry -- MBRF3 pre-existed independently since 2007, so
+                           # not spliced). KNOWN BIAS, larger than the other stock-swap cases here:
+                           # BRFS3's own last observed price (R$17.95) is ~29% ABOVE the true
+                           # post-merger value (0.8521 x MBRF3's ~R$16 = ~R$13.9) -- unlike
+                           # CIEL3/KRSA3 below, whose last price closely tracks the real cash payout.
+                           # Not caught by _dead_tickers()'s STALE_TICKER_DAYS heuristic yet (last
+                           # trade is <365 days before the current panel end) but the merger is a
+                           # confirmed, completed, real-world fact, so listed here regardless.
+    "CIEL3": "acquired",  # Cielo: Bradesco+Banco do Brasil (EloPar) going-private OPA, R$5.82/share
+                           # cash, concluded Aug 2024. Last observed adj_close (R$5.83) matches the
+                           # confirmed cash price almost exactly.
+    "KRSA3": "acquired",  # Kora Saúde: Viso/HIG-controlled OPA, R$8.80/share cash, CVM-approved
+                           # Feb 2025, converting registry A->B and exiting Novo Mercado. Last
+                           # observed adj_close (R$8.87) matches the confirmed cash price closely.
+    "JPSA3": "acquired",  # Jereissati Participações: 100%-stock-swap merger into a reorganized
+                           # Iguatemi S.A. (IGTI11/IGTI3), Nov 2021 -- the SAME transaction that
+                           # IGTA3 above already covers from Iguatemi's side (every 7 JPSA3 ON ->
+                           # 1 IGTI11 unit). Same "known approximation" treatment as IGTA3/OMGE3/
+                           # CESP3/CESP5: true payoff is IGTI11's later share value, not a
+                           # cash-confirmed figure, so not spliced into ticker_continuity.json.
+    "JBSS3": "acquired",  # JBS: delisted from B3 2025-06-09 (last trade 2025-06-06 @ R$39.03) as
+                           # part of the NYSE dual-listing restructuring -- 2 ordinary JBSS3 shares
+                           # converted into 1 Level II BDR (JBSS32), which we don't track as a
+                           # normal equity ticker. Real, clean, value-preserving conversion (not a
+                           # distress event), so "acquired" off the last observed price, same
+                           # precedent as the stock-swap mergers above.
+    "GPCP3": "acquired",  # GPC Participações (common shares) renamed Dexxos Participações in the
+                           # same 2021-06-08 event as GPCP4->DEXP4 (see ticker_continuity.json), but
+                           # its natural successor code DEXP3 is unsafe to splice -- that ticker
+                           # code was already in use by an unrelated entity back to 2000, ~21 years
+                           # before Dexxos reused it. Real, ongoing company, not a distress event;
+                           # "acquired" off GPCP3's own last observed price as an approximation.
+    "FJTA4": "acquired",  # Forjas Taurus preferred shares renamed Taurus Armas (TASA4) in the same
+                           # 2019-11-12 event as FJTA3->TASA3 (see ticker_continuity.json), but its
+                           # natural successor code TASA4 is unsafe to splice -- that ticker code
+                           # was already in use by an unrelated entity back to 2000, ~19 years
+                           # before Taurus reused it. Real, ongoing company, not a distress event;
+                           # "acquired" off FJTA4's own last observed price as an approximation.
 }
 
 

@@ -238,11 +238,12 @@ git history and `docs/*AUDIT*.md`; this list is only the actionable "what's true
   mixing correctly- and incorrectly-scaled tickers reads deceptively close to correct pooled).
 - **Periodicity convention (`docs/DATA_LAYER_CORRECTNESS_PLAN.md` §3):** `_qoq` means an
   adjacent-quarter delta and is only accurately named on point-in-time inputs (e.g.
-  `debt_equity_qoq`, `current_ratio_qoq`). On a TTM input (e.g. `gross_margin_qoq`,
-  `net_margin_qoq`, `roe_qoq`), a 1-lag diff is actually a single-quarter **year-over-year**
-  change — subtracting two 4-quarter rolling sums cancels the three shared quarters. The `_qoq`
-  names on TTM-based columns are misleading (numbers are right, name isn't); a rename is deferred,
-  tracked in the plan. `*_trend_4q` (`diff(4)`, trailing year vs. prior year) is the complementary
+  `debt_equity_qoq`, `current_ratio_qoq`, `roa_qoq`). On a TTM input, a 1-lag diff is actually a
+  single-quarter **year-over-year** change — subtracting two 4-quarter rolling sums cancels the
+  three shared quarters — so `gross_margin`/`net_margin`/`roe`'s 1-lag columns are named
+  `*_yoy_1q`, not `*_qoq` (renamed 2026-08-21; `roa_qoq` keeps its name — same TTM-numerator/
+  point-in-time-denominator mix as `roe` but excluded from the rename by the plan). `*_trend_4q`
+  (`diff(4)`, trailing year vs. prior year) is the complementary
   slow signal to `_qoq`'s fast one — keep both, they're not redundant.
 - CAGR backfill is on unconditionally (`fill_missing_cagr()`): ~60% coverage from BolsAI + ~7% backfilled from earnings/revenue.
 - Valuation ratios (P/E, P/B, etc.) are re-anchored to current close daily via `recompute_valuation_daily()`, not left at filing-date close. Known ceiling: mid-quarter splits skew ratios until the next filing.

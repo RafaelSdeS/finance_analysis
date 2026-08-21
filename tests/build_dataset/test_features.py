@@ -610,20 +610,20 @@ def test_yoy_qoq_fscore_nan_across_a_missing_quarter() -> None:
     row4 = result.iloc[4]
     assert pd.isna(row4["revenue_growth_yoy"])
     assert pd.isna(row4["earnings_growth_yoy"])
-    assert pd.isna(row4["gross_margin_qoq"])
+    assert pd.isna(row4["gross_margin_yoy_1q"])
     assert pd.isna(row4["f_roa_improving"])
     assert pd.isna(row4["f_score"])
 
     # Row 3 (2020-12-31): row-back-1 is row 2 (2020-09-30), a real ~92-day
     # quarter -- QoQ must still compute normally, unaffected by a LATER gap.
-    assert not pd.isna(result.iloc[3]["gross_margin_qoq"])
+    assert not pd.isna(result.iloc[3]["gross_margin_yoy_1q"])
 
     # Row 5 (2021-09-30): row-back-4 is row 1 (2020-06-30) -- still spans the
     # missing quarter, so still NaN.
     assert pd.isna(result.iloc[5]["revenue_growth_yoy"])
     # Row 5's row-back-1 is row 4 (2021-06-30), a real ~92-day quarter -- QoQ
     # recovers on the very next row after the gap.
-    assert not pd.isna(result.iloc[5]["gross_margin_qoq"])
+    assert not pd.isna(result.iloc[5]["gross_margin_yoy_1q"])
 
 
 def test_recompute_valuation_daily_rescales_by_price_factor() -> None:
