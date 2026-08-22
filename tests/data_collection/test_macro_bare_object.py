@@ -42,5 +42,16 @@ def test_bare_object_response():
     print("OK: bare-object BCB response is normalized into a single row, not corrupted")
 
 
+def test_series_ids_match_documented_bcb_codes():
+    """CLAUDE.md's documented gotcha: ipca is BCB SGS series 433 (monthly), not
+    432 (the annual meta target) -- a real mixup this has bitten before. Pure-code
+    assert on the config dict itself, no network/data needed, so a series-ID swap
+    is caught immediately rather than only downstream via test_br_data_quality.py's
+    ipca row-count heuristic, which needs data collected first to notice at all."""
+    assert config.BCB_SERIES == {"selic": 11, "cdi": 12, "ipca": 433}, config.BCB_SERIES
+    print("OK: BCB_SERIES matches the documented selic=11/cdi=12/ipca=433 codes")
+
+
 if __name__ == "__main__":
     test_bare_object_response()
+    test_series_ids_match_documented_bcb_codes()

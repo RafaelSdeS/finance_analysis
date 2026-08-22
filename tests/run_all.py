@@ -79,6 +79,9 @@ FAST = [
     "tests/data_collection/test_cvm_filing_dates.py",
     "tests/data_collection/test_client_fail_fast.py",
     "tests/data_collection/test_chunk_dates_leap_year.py",
+    "tests/data_collection/test_cvm_crosswalk.py",
+    "tests/data_collection/test_company_info.py",
+    "tests/data_collection/test_validate_price_jump.py",
 ]
 
 # Needs data/raw/br/* on disk (git-tracked) and/or a built data/processed/ml_dataset.parquet.

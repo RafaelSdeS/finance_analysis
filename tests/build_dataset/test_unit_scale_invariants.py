@@ -20,6 +20,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -43,7 +44,12 @@ MIN_ROWS = 5  # a median over fewer than this isn't a meaningful per-ticker sign
 # over rows where both margins are in a plausible range, filtering out the
 # distress blowups -- reproduces exactly how that bug was actually found.
 ANCHOR_MARGIN = "gross_margin"  # dense in BR (CLAUDE.md), assumed correctly scaled
-COMPARE_MARGINS = ["ebit_margin", "net_margin", "ebitda_margin"]
+# net_margin_q (0827f8b): single-quarter companion to net_margin, scaled via its
+# own *1000 list entries in ratios.py (net_revenue_q/net_income_q) -- a future
+# edit that drops one of those two entries but not the other would desync this
+# margin's numerator/denominator scale by 1000x while leaving net_margin itself
+# untouched, exactly the regression class this pooled check exists to catch.
+COMPARE_MARGINS = ["ebit_margin", "net_margin", "ebitda_margin", "net_margin_q"]
 REASONABLE_MARGIN_BOUND = 1000.0  # exclude near-zero-denominator distress blowups
 MARGIN_RATIO_BAND = 20.0  # measured healthy cross-margin ratios stay under ~6x;
                           # the ebitda_margin bug produced ~86-100x
@@ -114,7 +120,12 @@ def run(path, market):
 
     needed = {"ticker", "vpa", "lpa", "equity", "net_income", "shares_outstanding",
               "market_cap", "close", "book_to_market", "pvp", *MARGIN_COLS}
-    df = pd.read_parquet(path, columns=sorted(needed))
+    # net_margin_q (0827f8b) is BR-only (CVM's single-quarter companion columns
+    # have no US/SEC equivalent) -- a fixed columns= projection would hard-fail
+    # reading the US file entirely instead of letting check_margin_scale's own
+    # per-column guard skip it, so intersect against this file's real schema first.
+    available = set(pq.read_schema(path).names)
+    df = pd.read_parquet(path, columns=sorted(needed & available))
 
     passed = failed = 0
     for label, fn in IDENTITIES:

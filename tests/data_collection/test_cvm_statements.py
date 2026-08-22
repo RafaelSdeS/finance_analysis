@@ -97,6 +97,16 @@ def test_ratio_math():
     assert abs(r["ebitda"] - 170_000_000.0) < 1, r["ebitda"]  # §1: TTM ebit + TTM depr_amort, full R$ units
     assert abs(r["roic"] - 5.5) < 0.01, r["roic"]        # (150_000k*0.66) / 1_800_000k * 100
 
+    # Single-quarter (non-TTM) companions (0827f8b): raw per-quarter net_revenue/
+    # net_income, scaled to full R$ units same as their TTM siblings above --
+    # this fixture's quarters are all equal, so net_margin_q/roe_q land on the
+    # same value as the TTM net_margin/roe would if they weren't 4x'd; the point
+    # here is the *_q scale/formula, not an inflection scenario.
+    assert abs(r["net_revenue_q"] - 125_000_000.0) < 1, r["net_revenue_q"]  # 125_000k * 1000
+    assert abs(r["net_income_q"] - 25_000_000.0) < 1, r["net_income_q"]      # 25_000k * 1000
+    assert abs(r["net_margin_q"] - 20.0) < 0.01, r["net_margin_q"]
+    assert abs(r["roe_q"] - 2.5) < 0.01, r["roe_q"]      # 25_000_000 / 1e9 (equity) * 100
+
     # schema gate: exactly what collect_fundamentals-written files must satisfy
     out["ticker"] = "XXXX3"
     vr = validate.validate_fundamentals(out)
