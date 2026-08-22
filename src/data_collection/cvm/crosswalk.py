@@ -14,7 +14,11 @@ log = logging.getLogger("cvm")
 
 CROSSWALK_PATH = config.CVM_DIR / "fca_crosswalk.parquet"
 
-_TICKER = re.compile(r"^[A-Z0-9]{4}(?:[3-8]|11)$")
+# (?=.*[A-Z]) rejects pure-digit matches -- a few FCA filings put the numeric
+# CVM registration code (e.g. "023574") in the Codigo_Negociacao field instead
+# of a real B3 ticker; [A-Z0-9]{4} alone accepted those (confirmed on disk:
+# tickers "11215"/"23574"/"25585", each == that row's own cvm_code).
+_TICKER = re.compile(r"^(?=.*[A-Z])[A-Z0-9]{4}(?:[3-8]|11)$")
 _FCA_COLS = ["ticker", "cnpj", "corporate_name", "end_trading", "year"]
 
 # Tickers with no Codigo_Negociacao in any FCA year (crosswalk.py's documented 2010-2017
