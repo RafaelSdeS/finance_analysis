@@ -98,6 +98,79 @@ pre-existing issue; fixed same day.
       shape (vs. TIMS3's shape) isn't yet confirmed — the "worst 5" list changed identity (AZUL3,
       ADMF3, RVEE3, CELP6 now visible) but the total count didn't move, so no regression is evident,
       just an unconfirmed reshuffle of which of the 19 rank worst.
+      **TIMS3 itself resolved 2026-08-22, and it was neither a shares-freezing nor a splice
+      problem after all**: TIMS3's raw (non-`adj_*`) `open`/`high`/`low`/`close` is itself on a
+      wrong ~100x-too-small scale for its whole pre-2025-07-03 history — a vendor OHLC defect,
+      confirmed by cross-checking against `TIMP3` (its real pre-2020 entity, spliced in via
+      continuity), whose close is exactly 100.000000x TIMS3's native close on all 2,273
+      overlapping trading days 2011–2020. `repair_unadjusted_splits()` already detected and fixed
+      this for `adj_close` (the two-year-old "TIMS3's /10000 arrives as two /100 jumps" comment)
+      but never rescaled the plain OHLC columns — which is exactly what `_price_asof()` and
+      `merge.py`'s close-price lookup both read. Fixed via a new `RAW_OHLC_ALSO_UNADJUSTED = {"TIMS3"}`
+      set in `repair.py` that also rescales raw OHLC for flagged tickers. Not yet run against a
+      full rebuild to confirm `test_unit_scale_invariants.py` goes green.
+
+      **AZUL3/ADMF3/RVEE3/CELP6 investigated independently 2026-08-22 (per the note above — do
+      NOT assume they share TIMS3's mechanism, and they don't):** none has a `ticker_continuity.json`
+      splice, and only RVEE3 has any `corporate_events.parquet` row at all, so the TIMS3-style
+      "spliced donor stopped filing before a real split" shape doesn't apply to any of the four.
+      Two different, more general mechanisms are responsible instead:
+
+      1. **A universal `reference_date`-vs-`fundamentals_available_date` price-anchor mismatch —
+         present dataset-wide, just usually small enough to pass.** `cvm/ratios.py:312` computes
+         `market_cap` (and every price-linear ratio: `pl`, `pvp`, `p_sr`, `p_ebit`, `p_ebitda`,
+         `p_assets`, `ev_*`) off `close_price = _price_asof(reference_date)` — the fiscal
+         quarter-end price. `merge.py`'s later close-price lookup (its own comment: "BolsAI's
+         close_price is from reference_date, 45-90 days earlier") deliberately **overwrites**
+         `close_price` with the price as of `fundamentals_available_date` instead, to kill stale-
+         price valuation jumps — but does **not** rescale `market_cap`/the ratios already built
+         off the old anchor to match. `recompute_valuation_daily()` then re-anchors those ratios
+         to the *daily* close using `factor = close/close_price`, where `close_price` is now the
+         availability-date price while `market_cap`'s embedded basis is still the reference-date
+         price. Net effect: `(market_cap/shares_outstanding)/close` collapses to exactly
+         `close_price@reference_date / close_price@fundamentals_available_date` — a **constant per
+         fundamentals quarter**, confirmed empirically (std ≈ 0 within every `fundamentals_available_date`
+         group, for all 4 tickers **and** for PETR4/VALE3 too — 62/61 quarters, ratio wobbling
+         0.69–1.26 around 1.0). It's invisible for stable large caps because price rarely moves
+         much in a 45–90 day gap; it dominates for anything volatile within that window:
+         - **AZUL3**: ratio is a *perfect* constant (std ~0) across all 43 non-null rows — one
+           quarter (`reference_date` 2026-03-31, `close_price` 228.83) whose `fundamentals_available_date`
+           (2026-05-07ish) fell right after AZUL3's own real ~90% single-day crash
+           (2026-04-20, confirmed in its raw price file, no corporate_events/continuity entry —
+           this is the still-unresolved AZUL4→AZUL54→AZUL53→AZUL3 judicial-recovery restructuring
+           documented above). Both close-price readings are individually correct; they're just
+           6 weeks apart across a real crash, which is exactly what this mechanism can't survive.
+         - **ADMF3**, **CELP6**: same mechanism, recurring per-quarter with a different ratio each
+           time (ADMF3: 2.01/3.68/0.52/1.25 across its 4 fundamentals quarters; CELP6: 1.0/1.0/
+           0.057/2.34/1.26/0.36/1.01 across 7) — ordinary small/micro-cap volatility inside each
+           filing-lag window, nothing split- or vendor-related.
+      2. **RVEE3 additionally has its own, genuine bug — a real split double-counted.**
+         `corporate_events.parquet` records a real 1:10 split for RVEE3 on 2025-08-07 (confirmed:
+         raw close drops from ~70 to ~6.88 that day, matching the recorded factor). But
+         `data/raw/br/cvm/shares.parquet`'s own FRE record for RVEE3's CNPJ *already* jumps
+         1,017,115 → 10,171,150 (exactly 10x) at `effective_date` 2025-08-06 — CVM's own filing
+         already reflects the post-split count, one day before the trading-adjustment date.
+         `_apply_share_events()` (added for TIMS3, `cvm/ratios.py`) can't tell "FRE already caught
+         up" from "FRE is frozen": it reapplies the corporate_events factor whenever the event
+         date falls after the matched FRE row's `effective_date`, so it multiplies the
+         *already-adjusted* 10,171,150 by another 10x, landing on 101,711,500 — confirmed exactly
+         in the raw fundamentals file (`shares_outstanding` reads 101,711,500 from 2025-09-30
+         onward, should be 10,171,150). This is a real regression surfaced by the TIMS3 fix, not
+         present before it — TIMS3 needed the forward-adjustment because its donor (TIMP3) never
+         filed again after the split; RVEE3 never needed it at all, but the code has no way to
+         distinguish the two shapes. Not fixed here (investigation only, per owner's standing
+         "don't fix without being asked" rule) — the fix would need `_apply_share_events()` to
+         skip an event whenever the matched FRE row's `effective_date` is already on-or-after
+         that event's date (i.e., only forward-adjust for events *after* the FRE record, never
+         events the FRE record already absorbed).
+
+      **Net assessment:** none of the 4 need TIMS3-style raw-OHLC repair. Mechanism 1 (anchor
+      mismatch) is the dominant driver for all four and is likely the real explanation for most of
+      the remaining 18 tickers outside `test_unit_scale_invariants.py`'s band, not just these —
+      worth its own scoped fix (rescale `market_cap` by the same reference→availability price
+      ratio at the point `merge.py` swaps `close_price`, before `recompute_valuation_daily()` runs)
+      rather than another per-ticker patch. Mechanism 2 (RVEE3's double-count) is narrow and
+      specific to `_apply_share_events()`.
 
 ## Fundamentals coverage
 

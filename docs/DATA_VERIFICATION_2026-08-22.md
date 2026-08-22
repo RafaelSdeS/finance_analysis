@@ -75,9 +75,55 @@ corporate_events log:
   reads raw price directly (not `adj_close`) — no action needed unless that
   changes.
 
+## yfinance fundamentals: USD-denominated data mislabeled as BRL (ADR-linked tickers)
+
+Investigated a user-recalled concern that some tickers' yfinance data might be in USD
+instead of BRL. **Prices are fine** (`Ticker.history`, `info['currency']` both correctly
+report BRL for every ticker checked, on-disk `close`/`adj_close` match live BRL quotes).
+The bug is real but confined to yfinance's *fundamentals* endpoints
+(`quarterly_balance_sheet`, `quarterly_financials`) for tickers that are also dual-listed
+as a US ADR — Yahoo's backend appears to serve the ADR's USD-denominated financials under
+the BR ticker's own `.SA` symbol, while `info['financialCurrency']` still (wrongly) reports
+`"BRL"`, so that field can't be used to auto-detect it.
+
+Method: compare live yfinance `quarterly_balance_sheet` Stockholders Equity against
+on-disk CVM `equity` for the latest overlapping quarter-end, across every BR ticker in
+`data/raw/br/fundamentals/` that also has a US-listed ADR.
+
+- **Confirmed affected: VALE3 (ADR `VALE`) and PETR4/PETR3 (ADR `PBR`/`PBR.A`).** Ratio
+  CVM/yfinance ≈ 5.19–5.3 for both — matches the BRL/USD FX rate, not a segment or
+  reporting-method difference. VALE3 e.g. 2026-06-30 equity: CVM R$201.47B vs. yfinance
+  R$38.01B (labeled); PETR4 same date: CVM R$481.85B vs. yfinance R$92.91B (labeled).
+- **Checked clean** (ratio 1.00–1.24, ordinary vendor/definition noise): ITUB4, BBDC4,
+  BBDC3, ABEV3, SBSP3, CMIG4, BRKM5, GGBR4, CSNA3, TIMS3, UGPA3, VIVT3, PCAR3, MBRF3,
+  SUZB3 — i.e. every other dual-listed BR/ADR pair checked does NOT reproduce the bug.
+- **Separate, unrelated gap found in passing:** EMBR3 (ADR `ERJ`) — yfinance's
+  `quarterly_balance_sheet` returns a completely empty index for this ticker. Missing
+  data, not a currency mismatch.
+
+**Zero impact on the shipped dataset.** `DATA_SOURCE["fundamentals"] = "cvm"`
+(`config.py`) means `collect_fundamentals_yf` is never called for BR by default — the
+on-disk `equity` values above for both VALE3 and PETR4 are the correct CVM ones, verified
+against a live CVM pull in the same session. The only place this surfaces at all is
+`tests/data_collection/validate_vs_yfinance.py`'s cross-check (`TICKERS = ["PETR4",
+"VALE3", "WEGE3"]` — PETR4 was already in the default list), where it already produces
+the intended "likely currency mismatch" note rather than a false FAIL, because that
+script's `>200%`-no-fail threshold (`_print_fund_rows`) already exists for exactly this
+shape of vendor divergence.
+
+**Standing caveat, not a bug to fix:** this is a property of yfinance's own data, not
+something in this repo to patch. The condition that keeps it harmless is
+`DATA_SOURCE["fundamentals"]` staying `"cvm"` for BR — if that switch is ever flipped to
+`"yfinance"`, VALE3/PETR4 (and presumably any other BR/ADR pair, e.g. a future addition)
+would need this resolved first. See also CLAUDE.md's yfinance caveat under "Data sources
+& limits".
+
 ## Bottom line
 
 The data layer's own test suite is doing its job — it caught a real regression
 (AFLT3) that a stale build artifact reintroduced, and correctly separates it from
 three unrelated, already-accepted residuals. No new correctness bugs found beyond
 the stale-build issue above; recommend the rebuild + rerun steps checked off above.
+The yfinance-fundamentals-in-USD finding (previous section) is a confirmed vendor
+quirk, already harmless by construction (CVM is the real BR fundamentals source) —
+informational, not on the rebuild punch list.
