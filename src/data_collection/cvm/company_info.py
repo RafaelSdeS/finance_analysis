@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from .. import config
-from .crosswalk import CROSSWALK_PATH
+from .crosswalk import CROSSWALK_PATH, build_crosswalk
 from .delistings import build_delist_events
 from .sectors import sector_by_ticker
 
@@ -53,7 +53,13 @@ def synthesize_company_info() -> None:
     append rows for delisted tickers not yet in company_info.parquet. Reuses
     build_delist_events() (already downloads+dedupes cad_cia_aberta.csv) rather
     than re-fetching; `trade_name` is left NaN for newly-added rows -- CVM's CAD
-    has no clean equivalent split, honest gap rather than a guess."""
+    has no clean equivalent split, honest gap rather than a guess.
+
+    Calls build_crosswalk() first (cache-and-skip on every year but the current one,
+    same cheap pattern as cvm/ratios.py's collect_fundamentals_cvm()) so a ticker that
+    just IPO'd and filed its first FCA this year is discoverable without BolsAI's
+    /stocks/ registry -- see BOLSAI_EXIT_PLAN.md S4."""
+    build_crosswalk()
     xwalk = pd.read_parquet(CROSSWALK_PATH)[["ticker", "cnpj", "corporate_name", "cvm_code"]]
     delist = build_delist_events().drop_duplicates("ticker", keep="last")  # ticker, cnpj, delist_date, motivo_cancel, sit
     sector_by = sector_by_ticker()

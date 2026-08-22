@@ -50,6 +50,15 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     statements are in thousands, scaled up once below, right after TTM."""
     g = _ttm(q.sort_values("reference_date"), [c for c in _TTM_COLS if c in q.columns])
 
+    # Single-quarter (non-TTM) companions for net_revenue/net_income -- deliberately not
+    # a full mirror of every TTM column (see docs re: minimal scope), just the pair that
+    # lets a downstream margin/ROE catch a loss-to-profit inflection TTM smooths over.
+    # q is the pre-TTM frame _ttm() copied from (same row order), so its own values are
+    # the true single-quarter figures.
+    q_sorted = q.sort_values("reference_date")
+    for c in ("net_revenue", "net_income"):
+        g[f"{c}_q"] = q_sorted[c].to_numpy() if c in q_sorted.columns else float("nan")
+
     # §1: scale the RAW inputs, not the derived output names -- cash/total_debt/
     # net_debt/ebitda are derived FROM these just below, so scaling only stored
     # output columns would miss them (leaving ev_*/p_ebitda/net_debt_* wrong).
@@ -57,7 +66,8 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     # it, and keep this scaling point above it.
     for c in ("net_income", "equity", "net_revenue", "ebit", "total_assets",
               "current_assets", "current_liabilities", "gross_profit", "depr_amort",
-              "cash_caixa", "cash_aplic", "debt_st", "debt_lt"):
+              "cash_caixa", "cash_aplic", "debt_st", "debt_lt",
+              "net_revenue_q", "net_income_q"):
         if c in g.columns:
             g[c] = g[c] * 1000.0
 
@@ -94,6 +104,8 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
     g["roa"] = col("net_income") / col("total_assets") * 100
     g["gross_margin"] = col("gross_profit") / col("net_revenue") * 100
     g["net_margin"] = col("net_income") / col("net_revenue") * 100
+    g["net_margin_q"] = col("net_income_q") / col("net_revenue_q") * 100
+    g["roe_q"] = col("net_income_q") / col("equity") * 100
     g["ebit_margin"] = col("ebit") / col("net_revenue") * 100
     g["ebitda_margin"] = g["ebitda"] / col("net_revenue") * 100
     g["ebit_over_assets"] = col("ebit") / col("total_assets") * 100
@@ -122,6 +134,7 @@ def compute_ratios(q: pd.DataFrame, corporate_name: str) -> pd.DataFrame:
             "net_debt_ebit", "cagr_revenue_5y", "cagr_earnings_5y",
             "net_income", "equity", "net_revenue", "total_debt", "ebitda", "ebit",
             "net_debt", "cash", "total_assets", "current_assets", "current_liabilities",
+            "net_revenue_q", "net_income_q", "net_margin_q", "roe_q",
             "corporate_name"]
     for c in keep:  # banks lack some accounts (e.g. 3.05) — NaN keeps the schema stable
         if c not in g.columns:
