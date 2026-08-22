@@ -169,6 +169,37 @@ def _price_series(ticker, dates, close, adj_close):
     })
 
 
+def test_repair_rescales_raw_ohlc_for_flagged_tickers(tmp_path, monkeypatch) -> None:
+    """RAW_OHLC_ALSO_UNADJUSTED tickers (currently just TIMS3) need their plain
+    open/high/low/close rescaled the same way as adj_*, because the vendor's
+    "unadjusted" close is itself on the wrong scale for that ticker -- not
+    the normal case, where raw close deliberately keeps showing the real
+    historical jump. An unflagged ticker with the exact same shape must have
+    its raw OHLC left alone."""
+    monkeypatch.setattr(repair, "CORPORATE_EVENTS_PATH", _events_file(
+        tmp_path, [{"ticker": "TIMS3", "date": pd.Timestamp("2026-03-01"), "factor": 100.0},
+                   {"ticker": "TEST3", "date": pd.Timestamp("2026-03-01"), "factor": 100.0}]
+    ))
+
+    dates = pd.date_range("2026-02-15", periods=10, freq="D")
+    close = [200.0] * 5 + [2.0] * 5  # unadjusted 100:1 jump, both raw and adj_*
+    prices = pd.concat([
+        _price_series("TIMS3", dates, close, close),
+        _price_series("TEST3", dates, close, close),
+    ], ignore_index=True)
+
+    result = repair.repair_unadjusted_splits(prices.copy())
+
+    tims3 = result[result["ticker"] == "TIMS3"].reset_index(drop=True)
+    assert np.allclose(tims3.loc[:4, "close"], 2.0), "TIMS3's raw close must be rescaled like adj_close"
+    assert np.allclose(tims3.loc[:4, "open"], 2.0), "every RAW_PRICE_COLS column must be rescaled together"
+    assert np.allclose(tims3.loc[5:, "close"], 2.0), "post-event rows untouched"
+
+    test3 = result[result["ticker"] == "TEST3"].reset_index(drop=True)
+    assert np.allclose(test3.loc[:4, "adj_close"], 2.0), "adj_close is still repaired for an unflagged ticker"
+    assert np.allclose(test3.loc[:4, "close"], 200.0), "but its raw close must be left alone"
+
+
 def test_glitch_repair_snaps_back_isolated_single_day_pulse() -> None:
     """PETR4/ITUB4/SBSP3/... shape (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md): a
     single day's adj_close is corrupted -- ratio (adj_close/close) jumps hard

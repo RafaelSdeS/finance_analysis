@@ -7,7 +7,29 @@ import pandas as pd
 from .paths import CORPORATE_EVENTS_PATH, CONTINUITY_PATH
 
 ADJ_PRICE_COLS = ["adj_open", "adj_high", "adj_low", "adj_close"]
+RAW_PRICE_COLS = ["open", "high", "low", "close"]
 VOLUME_COLS = ["volume", "volume_adjusted"]
+
+# Tickers where the vendor's plain (non-adj_*) OHLC is ALSO unadjusted for a
+# real split -- not just adj_close, which is what this repair normally
+# assumes is the only column needing it (raw close/open/high/low are meant to
+# show real historical nominal jumps at genuine corporate events, so they're
+# left alone for every other ticker). Confirmed for TIMS3 by directly
+# cross-checking against TIMP3 (the real pre-2020-08-31 entity, spliced in via
+# ticker_continuity.json): TIMP3's OHLC is exactly 100.00x TIMS3's own native
+# OHLC on all 2,273 overlapping trading dates 2011-08-03..2020-10-09 (std
+# <0.4%, not market noise), and TIMP3's basis is the one consistent with CVM's
+# real fundamentals (shares_outstanding x close_price implies a plausible
+# ~R$28B TIM market cap in 2019 off TIMP3's close; TIMS3's own native close
+# implies ~R$280M, implausible for TIM). This -- not a missed corporate-share-
+# count update -- is what caused test_unit_scale_invariants.py's
+# market_cap/shares==close check to flag TIMS3 worst (ratio ~99x): CVM
+# fundamentals were correctly spliced from TIMP3, but merge.py's close-price-
+# at-filing lookup and this repair both compare against raw `close`, which
+# for TIMS3 alone carries the same defect adj_close already gets fixed for
+# ("TIMS3's /10000 arrives as two /100 jumps", see below) -- just never
+# applied to the non-adj_* columns (confirmed 2026-08-22).
+RAW_OHLC_ALSO_UNADJUSTED = {"TIMS3"}
 
 # An event is only detectable when its raw jump ln(1/factor) stands out from
 # normal market moves (0.3 ≈ ±35%); the observed return must match it within
@@ -121,6 +143,8 @@ def repair_unadjusted_splits(prices):
         g_idx = prices.index[mask]  # trade_date-sorted (load_prices sorts)
         adj = prices.loc[g_idx, "adj_close"].to_numpy(dtype=float)
         dates = prices.loc[g_idx, "trade_date"].to_numpy()
+        price_cols = ADJ_PRICE_COLS + RAW_PRICE_COLS if ticker in RAW_OHLC_ALSO_UNADJUSTED \
+            else ADJ_PRICE_COLS
 
         # The audit log's factor direction is inconsistent (SBSP3 records 0.2
         # where the observed basis change is x5, ETER3 records 100 for /100),
@@ -151,7 +175,7 @@ def repair_unadjusted_splits(prices):
                 break  # all windows clean — the normal case is zero passes
             jump, factor = best
             applied.add(dates[jump])
-            prices.loc[g_idx[:jump], ADJ_PRICE_COLS] /= factor
+            prices.loc[g_idx[:jump], price_cols] /= factor
             # volume scales OPPOSITE to price: 1:4 split divides price by 4,
             # multiplies volume by 4 (same economic activity, more shares
             # outstanding trading it) so that volume*price (dollar volume)
