@@ -48,8 +48,8 @@ METADATA_PATH = SCALER_DIR / "scaler_metadata.json"
 RATIO_COLUMNS = [
     "pl", "pvp", "ev_ebitda", "ev_ebit", "p_ebitda", "p_ebit", "p_sr", "p_assets",
     "lpa", "vpa",
-    "gross_margin", "net_margin", "ebitda_margin", "ebit_margin",
-    "roe", "roa", "roic", "ebit_over_assets", "asset_turnover",
+    "gross_margin", "net_margin", "net_margin_q", "ebitda_margin", "ebit_margin",
+    "roe", "roe_q", "roa", "roic", "ebit_over_assets", "asset_turnover",
     "current_ratio", "cash_ratio", "net_debt_to_assets", "working_capital_ratio",
     "debt_equity", "net_debt_equity", "net_debt_ebitda", "net_debt_ebit",
     # cagr_revenue_5y/cagr_earnings_5y are intermediate (BolsAI-only, pre-fill)
