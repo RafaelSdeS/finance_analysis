@@ -307,7 +307,9 @@ git-tracking, not layout: BR is git-tracked, US is gitignored (too large, rebuil
 
 ## Knowledge Graph (graphify)
 
-A persistent knowledge graph of this repo lives in `graphify-out/` (gitignored, regenerable). Built with the `graphify` skill (`/graphify`).
+A persistent knowledge graph of this repo lives in `graphify-out/` (git-tracked — committed
+deliberately since `feat: add graphify`, 2026-07-16 — but regenerable via the command below if
+ever deleted). Built with the `graphify` skill (`/graphify`).
 
 - **Query it first** for architecture/"how does X work"/"what calls Y" questions instead of re-reading source: `graphify query "<question>"` (BFS), `graphify path "A" "B"`, `graphify explain "<node>"`.
 - **Outputs:** `graphify-out/graph.html` (interactive), `GRAPH_REPORT.md` (god nodes, communities, surprising links), `graph.json` (raw).

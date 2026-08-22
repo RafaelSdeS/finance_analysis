@@ -10,7 +10,7 @@ rationale. **historical record** — a dated snapshot (audit/proposal), not mean
 
 | doc | status | what it's for |
 |---|---|---|
-| `DATA_LAYER_ORGANIZATION_PLAN.md` | live | Stage 1 file/module reorganization (this doc) |
+| `DATA_LAYER_ORGANIZATION_PLAN.md` | done | Stage 1 file/module reorganization; closed 2026-08-21, all items done or cut |
 | `DATA_LAYER_CORRECTNESS_PLAN.md` | done | Stage 1/2 bug-fix pass; closed out, 2 non-blocking notes left |
 | `DATA_LAYER_FOLLOWUP_FINDINGS.md` | done | findings surfaced while verifying the correctness plan's §1 migration |
 | `DATA_INTEGRITY_TEST_PLAN.md` | live | data-quality test coverage; `--market us` golden gate still open |
