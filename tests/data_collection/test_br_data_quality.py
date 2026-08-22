@@ -70,6 +70,20 @@ US_ROOT = ROOT / "data/raw/us"
 _ADJ_PRECISION_ERROR_RE = re.compile(r"^\d+ rows with non-positive adj_")
 _ADJ_PRECISION_RATE_CEILING = 0.01  # currently 1/1328 files (LUXM4) = 0.08%
 
+# validate.validate_prices' day-over-day adj_close jump guard
+# (MAX_PLAUSIBLE_DAILY_MOVE): fires at collection time, before repair.py's
+# Stage-2 split-rescale runs, so it's expected to catch a real backlog, not
+# just noise. Measured 2026-08-22: 149/1328 files, almost all thinly-traded
+# delisted/microcap names, e.g. BMEB3 (800.0 -> 15.5, 7-day gap, vol 3->10k)
+# -- consistent with an unrepaired split/bonus-share event, the exact class
+# repair.py exists to fix downstream. A few look like genuine decimal-entry
+# corruption rather than a corporate action, e.g. AFLT3 (18.0 -> 0.018,
+# 1-day gap, real volume both sides) -- an exact 1000x, not a plausible
+# split ratio. Rate ceiling tolerates today's backlog while catching a NEW
+# regression (e.g. a systemic scale bug spiking the rate well above today's).
+_JUMP_WARNING_RE = re.compile(r"^\d+ day\(s\) with adj_close moving >")
+_JUMP_RATE_CEILING = 0.12  # currently 149/1328 files = 11.22%
+
 # validate_fundamentals (BR) has no Inf check of its own (unlike
 # validate_us_fundamentals) -- measured directly here. Rate ceiling
 # tolerates today's real backlog while catching a NEW systemic regression;
@@ -105,6 +119,7 @@ def test_prices_clean():
     other_error_files = []
     unsorted_files = []
     weekend_files = []
+    jump_warning_files = []
     for f in files:
         df = pd.read_parquet(f)
         r = validate.validate_prices(df)
@@ -114,6 +129,8 @@ def test_prices_clean():
                 adj_precision_files.append(f.stem)
             else:
                 other_error_files.append(f.stem)
+        if any(_JUMP_WARNING_RE.match(w) for w in r.warnings):
+            jump_warning_files.append(f.stem)
         d = pd.to_datetime(df["trade_date"])
         if not d.is_monotonic_increasing:
             unsorted_files.append(f.stem)
@@ -121,8 +138,10 @@ def test_prices_clean():
             weekend_files.append(f.stem)
 
     adj_precision_rate = len(adj_precision_files) / len(files)
+    jump_rate = len(jump_warning_files) / len(files)
     ok = (not other_error_files and not unsorted_files and not weekend_files
-          and adj_precision_rate <= _ADJ_PRECISION_RATE_CEILING)
+          and adj_precision_rate <= _ADJ_PRECISION_RATE_CEILING
+          and jump_rate <= _JUMP_RATE_CEILING)
     if other_error_files:
         print(f"FAIL  prices: non-adj-precision validate_prices error(s) in {len(other_error_files)} "
               f"file(s): {other_error_files[:10]}")
@@ -132,13 +151,19 @@ def test_prices_clean():
     elif adj_precision_files:
         print(f"note  prices: {len(adj_precision_files)} known file(s) with adj_close precision "
               f"underflow (CLAUDE.md-documented), within ceiling: {adj_precision_files[:10]}")
+    if jump_rate > _JUMP_RATE_CEILING:
+        print(f"FAIL  prices: implausible day-over-day adj_close jump rate {jump_rate:.2%} exceeds "
+              f"{_JUMP_RATE_CEILING:.0%} ceiling -- {jump_warning_files[:10]}")
+    elif jump_warning_files:
+        print(f"note  prices: {len(jump_warning_files)} file(s) with a >{validate.MAX_PLAUSIBLE_DAILY_MOVE}x "
+              f"day-over-day adj_close move, within ceiling: {jump_warning_files[:10]}")
     if unsorted_files:
         print(f"FAIL  prices: {len(unsorted_files)} file(s) not sorted by trade_date: {unsorted_files[:10]}")
     if weekend_files:
         print(f"FAIL  prices: {len(weekend_files)} file(s) with a weekend trade_date: {weekend_files[:10]}")
     print(f"{'PASS' if ok else 'FAIL'}  prices: {len(files)} files, {len(other_error_files)} other "
-          f"validate_prices errors, {len(adj_precision_files)} adj-precision, {len(unsorted_files)} "
-          f"unsorted, {len(weekend_files)} with weekend rows")
+          f"validate_prices errors, {len(adj_precision_files)} adj-precision, {len(jump_warning_files)} "
+          f"jump-warning, {len(unsorted_files)} unsorted, {len(weekend_files)} with weekend rows")
     return ok
 
 

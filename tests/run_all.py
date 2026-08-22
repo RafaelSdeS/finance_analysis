@@ -93,6 +93,7 @@ DATA = [
     "tests/build_dataset/test_raw_processed_reconciliation.py",
     "tests/data_collection/test_cagr_calculation.py",
     "tests/data_collection/test_blue_chip_tickers.py",
+    "tests/data_collection/test_us_blue_chip_tickers.py",
     "tests/data_collection/validate_vs_yfinance.py",
     "tests/data_collection/test_collect_delisted.py",
     "tests/data_collection/test_us_data_quality.py",

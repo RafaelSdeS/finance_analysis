@@ -91,6 +91,19 @@ _ANCIENT_END_RATE_CEILING = 0.02  # currently 48/4775 tickers = 1.01%
 _NAN_OHLC_RATE_CEILING = 0.02  # currently 111/9700 files = 1.14%
 _NAN_OHLC_ERROR_RE = re.compile(r"^\d+ rows with NaN in \[")
 
+# validate.validate_prices' day-over-day adj_close jump guard
+# (MAX_PLAUSIBLE_DAILY_MOVE): the US build has no equivalent of BR's
+# repair.py split-rescale step (build_us_dataset.py deliberately skips it,
+# per CLAUDE.md), so any jump caught here survives into us_ml_dataset.parquet
+# unrepaired, unlike BR. Measured 2026-08-22: 316/9700 files, almost all
+# sub-$1 OTC-adjacent penny names on a 1-3 day gap, e.g. AAGH (0.10 -> 0.001,
+# 1-day gap, real volume both sides) -- consistent with an unrepaired
+# reverse split rather than corruption, but not verified against a
+# corporate-actions feed the way BR's repair.py cross-checks its jumps.
+# Rate ceiling tolerates today's backlog while catching a NEW regression.
+_JUMP_WARNING_RE = re.compile(r"^\d+ day\(s\) with adj_close moving >")
+_JUMP_RATE_CEILING = 0.035  # currently 316/9700 files = 3.26%
+
 
 def _has_inf(df: pd.DataFrame) -> bool:
     numeric = df.select_dtypes(include="number")
@@ -110,6 +123,7 @@ def test_prices_clean():
     nan_ohlc_files = []
     other_error_files = []
     inf_files = []
+    jump_warning_files = []
     for f in files:
         df = pd.read_parquet(f)
         r = validate.validate_prices(df)
@@ -120,11 +134,16 @@ def test_prices_clean():
                 nan_ohlc_files.append(f.stem)
             else:
                 other_error_files.append(f.stem)
+        if any(_JUMP_WARNING_RE.match(w) for w in r.warnings):
+            jump_warning_files.append(f.stem)
         if _has_inf(df):
             inf_files.append(f.stem)
 
     nan_ohlc_rate = len(nan_ohlc_files) / len(files)
-    ok = not other_error_files and not inf_files and nan_ohlc_rate <= _NAN_OHLC_RATE_CEILING
+    jump_rate = len(jump_warning_files) / len(files)
+    ok = (not other_error_files and not inf_files
+          and nan_ohlc_rate <= _NAN_OHLC_RATE_CEILING
+          and jump_rate <= _JUMP_RATE_CEILING)
     if inf_files:
         print(f"FAIL  prices: Inf present in {len(inf_files)} file(s): {inf_files[:10]}")
     if other_error_files:
@@ -136,9 +155,16 @@ def test_prices_clean():
     elif nan_ohlc_files:
         print(f"note  prices: {len(nan_ohlc_files)} known-stale file(s) with NaN OHLC "
               f"(pre-fix), within ceiling: {nan_ohlc_files[:10]}")
+    if jump_rate > _JUMP_RATE_CEILING:
+        print(f"FAIL  prices: implausible day-over-day adj_close jump rate {jump_rate:.2%} exceeds "
+              f"{_JUMP_RATE_CEILING:.0%} ceiling -- {jump_warning_files[:10]}")
+    elif jump_warning_files:
+        print(f"note  prices: {len(jump_warning_files)} file(s) with a >{validate.MAX_PLAUSIBLE_DAILY_MOVE}x "
+              f"day-over-day adj_close move, within ceiling: {jump_warning_files[:10]}")
     print(f"{'PASS' if ok else 'FAIL'}  prices: {len(files)} files, "
           f"{validate_errors} validate_prices errors ({len(nan_ohlc_files)} NaN-OHLC, "
-          f"{len(other_error_files)} other), {len(inf_files)} with Inf")
+          f"{len(other_error_files)} other), {len(inf_files)} with Inf, "
+          f"{len(jump_warning_files)} jump-warning")
     return ok
 
 

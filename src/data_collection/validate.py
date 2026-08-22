@@ -22,6 +22,10 @@ DIVIDEND_COLS = ["ticker", "ex_date", "payment_date", "type", "value_per_share",
 
 CORP_EVENT_COLS = ["ticker", "date", "type", "ratio_from", "ratio_to", "factor"]
 
+# validate_prices: a same-ticker adj_close ratio beyond this in a single day is
+# treated as implausible price action (see validate_prices docstring comment).
+MAX_PLAUSIBLE_DAILY_MOVE = 50
+
 
 @dataclass
 class ValidationResult:
@@ -112,6 +116,18 @@ def validate_prices(df: pd.DataFrame) -> ValidationResult:
     gaps = df.sort_values("trade_date")["trade_date"].diff().dt.days
     if (gaps > 5).sum() > 0:
         r.warn(f"{(gaps > 5).sum()} gaps > 5 days (holidays/halts?)")
+    # Single-day adj_close move beyond MAX_PLAUSIBLE_DAILY_MOVE (either direction):
+    # adj_close is supposed to already be split-adjusted, so a jump this large is
+    # far more likely a scale/decimal error (e.g. a stray 1000x) or an unrepaired
+    # split (see repair.py) than real single-day price action -- even the largest
+    # real reverse splits stay well under this bound. Warn, don't fail: a genuine
+    # rare large reverse split does happen and shouldn't block collection.
+    adj_close = df.sort_values("trade_date")["adj_close"]
+    ratio = (adj_close / adj_close.shift()).abs()
+    extreme = ratio[(ratio > MAX_PLAUSIBLE_DAILY_MOVE) | (ratio < 1 / MAX_PLAUSIBLE_DAILY_MOVE)]
+    if len(extreme):
+        r.warn(f"{len(extreme)} day(s) with adj_close moving >{MAX_PLAUSIBLE_DAILY_MOVE}x "
+               f"day-over-day (possible unrepaired split or scale/decimal error)")
     return r
 
 

@@ -1,0 +1,83 @@
+# Data Verification — 2026-08-22
+
+Ran the full test suite (`tests/run_all.py --group all`) plus targeted checks against
+the real, on-disk data. Fast group: 55/55 pass. Data group: 14/19 pass — the 5
+failures are broken down below with root cause. Also ran an independent raw-price
+scan (not part of the existing suite) looking for scale artifacts.
+
+## Root cause: `ml_dataset.parquet` is 3 commits stale
+
+`data/processed/ml_dataset.manifest.json` records `git_commit: 25cdd84`. HEAD is
+`b2907a2`, and one of the 3 commits in between — `35532d9 fix: close out
+DATA_LAYER_FOLLOWUP_FINDINGS.md` — patches `src/build_dataset/repair.py` with a
+close-stability guard. **The shipped parquet was built before that fix landed.**
+
+Confirmed directly: ran `repair_unadjusted_splits` + `repair_isolated_adj_close_glitches`
+from the *current* code against AFLT3's raw price file — output is correct (glitch
+guard fires, 0 misfires). But the on-disk `ml_dataset.parquet` still shows the
+pre-fix bug: `adj_close` on 2007-12-07 is `0.006353` where it should be `6.352723`
+(an extra, erroneous ÷1000 that the old `repair_isolated_adj_close_glitches` applied
+before the guard existed). This is what `test_final_dataset.py`'s "2 events leaking"
+failure is — both leak entries are the same single AFLT3 incident.
+
+- [ ] Rebuild: `python -m src.build_dataset.build_ml_dataset`
+- [ ] Rerun `python -m src.build_dataset.terminal_events` (currently older than
+      `ml_dataset.parquet` — `test_artifact_coherence.py`'s failure, and
+      `forward_excess_return()` silently no-ops without it)
+- [ ] Refit scaler: `python -m src.build_dataset.scale_features` — its mtime
+      (08:56) is *older* than `ml_dataset.parquet`'s (10:26) on the same day, i.e.
+      the checked-in scaler was fit before the last rebuild, not after
+- [ ] Re-run `tests/run_all.py --group data` after, to confirm the AFLT3 leak and
+      terminal_events checks go green
+
+## Already-known, already-accepted (no new action)
+
+Verified these against `docs/DATA_LAYER_FOLLOWUP_FINDINGS.md` /
+`DATA_LAYER_CORRECTNESS_PLAN.md` — all three are deliberate, documented, owner-
+accepted residuals, not new bugs, and a rebuild will **not** change them:
+
+- `test_unit_scale_invariants.py`: 19/544 tickers outside the 10% `market_cap/shares
+  == close` band — documented limitation of the shares-outstanding forward-adjust
+  fix (a continuity donor that stopped filing before its real split, e.g. TIMS3).
+- `test_top_traded_quality.py`: LUXM4's 289 non-positive `adj_*` rows — the
+  CLAUDE.md-documented 2-decimal precision underflow ticker; "flag only, no
+  repair" was already decided. The validator just isn't taught to exempt it.
+- `test_raw_processed_reconciliation.py`: 12 uncovered dead tickers (BDLL3/4,
+  CTSA3/4, JFEN3, LIQO3, MEND5/6, OIBR3/4, RSID3, YBRA4) — same bucket as the
+  already-tracked "98 of 202 in-panel deaths have no terminal event" research
+  item (§2b), explicitly deprioritized, not an implementation gap.
+
+## New observation (informational, zero current impact)
+
+Independent raw-price scan (all 1,328 BR ticker files, not gated on any
+corporate_events match) for a same-day close ratio near an exact power of ten
+(10/100/1000) with zero volume around the jump — the signature of a scale
+artifact, distinct from what `repair_unadjusted_splits` already covers via the
+corporate_events log:
+
+- 9 of 11 hits (BALM4, BSLI3, CALI3, MNPR3, NORD3, NUTR3, RSUL4, UGPA3, VULC3)
+  are exactly the tickers already listed in
+  `src/data_collection/one_off/backfill_known_gaps.py`'s `FLAT_RUN_PADDING` —
+  confirmed vendor-side (BolsAI/yfinance both) gap-padding artifacts, "no fix
+  available from this vendor for this window," already triaged.
+- GEPA4 looked new but is **correctly handled**: it has a matching
+  `corporate_events.parquet` entry (INPLIT, factor 0.001, 2007-11-01) and
+  `adj_close`/`log_return` are already continuous across it in the built
+  dataset — false positive from the scan, not a bug.
+- HAGA4 is a single-day round-trip at ~0.00001–0.00010 (2000-06-01, immediately
+  reverts) — economically negligible, already at the documented precision floor.
+- UGPA3 specifically: raw `close` jumps exactly ×1000 for 431 rows
+  (2005-08-23 → 2007-05-04), volume=0 throughout. Confirmed **zero live effect**
+  on the ML dataset — `market_cap`/`pl` are NaN for every row in that window (no
+  fundamentals coincide), so no downstream feature is corrupted today. Flagging
+  only because raw `close`/`open`/`high`/`low` ship as columns in
+  `ml_dataset.parquet` and this window would corrupt any future feature that
+  reads raw price directly (not `adj_close`) — no action needed unless that
+  changes.
+
+## Bottom line
+
+The data layer's own test suite is doing its job — it caught a real regression
+(AFLT3) that a stale build artifact reintroduced, and correctly separates it from
+three unrelated, already-accepted residuals. No new correctness bugs found beyond
+the stale-build issue above; recommend the rebuild + rerun steps checked off above.
