@@ -73,6 +73,24 @@ from .repair import repair_isolated_adj_close_glitches, repair_unadjusted_splits
 BENCHMARK_TICKER = "BOVA11"
 
 
+def _reclaim_memory():
+    """gc.collect() + malloc_trim(0): CPython's refcounting frees objects
+    immediately, but glibc malloc doesn't hand freed heap arenas back to the
+    OS just because nothing references them anymore -- RSS reflects the
+    high-water mark, not live data. Call after any loop iteration that
+    allocates/frees a large (multi-hundred-MB+) frame, or retained-but-unused
+    arenas ratchet RSS up iteration over iteration until the OS kills the
+    process (confirmed real at US full-build scale, both in Pass 1's
+    per-ticker-batch loop and Pass 3's per-row-group loop below). Cheap
+    (sub-second) and a no-op on non-glibc platforms (guarded).
+    """
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except OSError:
+        pass
+
+
 # =============================================================================
 # FEATURE COMPUTATION
 # =============================================================================
@@ -172,6 +190,8 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
                 # cast to the schema locked in by batch 1 so row groups stay uniform
                 table = table.cast(writer.schema)
             writer.write_table(table)
+            del batch, table
+            _reclaim_memory()
     finally:
         if writer is not None:
             writer.close()
@@ -195,23 +215,10 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     if batch_fn is not None:
         getattr(batch_fn, "release", lambda: None)()
 
-    # Pass 1 ran ~21 batches of alloc/free churn (each batch's own merge +
-    # feature frames). CPython's refcounting frees those objects immediately,
-    # but glibc malloc doesn't hand freed heap arenas back to the OS just
-    # because nothing references them anymore -- the process's RSS reflects
-    # the high-water mark, not live data. gc.collect() clears any reference
-    # cycles pandas/numpy left behind (the real memory, if any leaked);
-    # malloc_trim(0) then asks glibc to actually return freed-but-retained
-    # arenas to the OS before Pass 2 builds its own resident full-universe
-    # frame. Cheap (sub-second) and a no-op on non-glibc platforms (guarded).
     # Confirmed real: a full US-scale run OOM-killed inside Pass 2 twice on
     # 2026-08-16 (journalctl: anon-rss ~8.5-9.2GB, this machine's 15GB minus
     # ~4GB in other resident apps) right at this Pass 1->2 boundary.
-    gc.collect()
-    try:
-        ctypes.CDLL("libc.so.6").malloc_trim(0)
-    except OSError:
-        pass
+    _reclaim_memory()
 
     print()
     print("=" * 80)
@@ -248,6 +255,8 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
 
             total_rows += len(batch)
             print(f"Row group {rg + 1}/{pf.num_row_groups}: {len(batch)} rows (total {total_rows})")
+            del batch, table
+            _reclaim_memory()
     finally:
         if writer is not None:
             writer.close()
