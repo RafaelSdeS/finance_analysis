@@ -35,6 +35,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from . import memory
 from .clean import clean_dataset
 from .continuity import apply_ticker_continuity
 from .cross_sectional import (
@@ -144,7 +145,11 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     = one row group): too small hurts compression badly (dictionary/RLE
     encoding resets every row group — 25 tickers/batch measured at ~4% size
     reduction vs. ~75% for a single row group), too large risks OOM again.
-    150 tickers/batch gives ~4-5 row groups for the full universe.
+    Both main()s derive it from the machine's actual free memory at startup
+    (memory.report / memory.chunk_size_for) rather than hardcoding it — the
+    default here is only for tests and direct callers. That's what makes the
+    same build fit an idle machine and a busy one; the memory.MIN_CHUNK clamp
+    is where "too small to compress" is enforced.
 
     `benchmark`: BOVA11's own price-feature series (trade_date + log_return/
     return_1m/3m/12m), passed through unchanged into Pass 2's
@@ -152,6 +157,7 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     function's docstring.
     """
     tmp_path = output_path.with_suffix(".tmp.parquet")
+    slim_path = output_path.with_suffix(".slim.parquet")
 
     if tickers is None:
         tickers = dataset["ticker"].unique()
@@ -162,8 +168,8 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     print(f"PASS 1/3: PER-TICKER FEATURES IN {len(batches)} BATCHES (chunk_size={chunk_size})")
     print("=" * 80)
 
-    slim_parts = []
     writer = None
+    slim_writer = None
     try:
         for batch_idx, batch_tickers in enumerate(batches, 1):
             if batch_fn is not None:
@@ -179,8 +185,23 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
             batch = compute_advanced_features(batch)
             batch = compute_history_relative_features(batch)
 
+            # Stream the slim projection to its own parquet rather than
+            # accumulating every batch's slice in a list for Pass 2 to concat.
+            # The list held the entire universe's slim frame resident for all
+            # of Pass 1 (~3.0GB at full US scale, growing batch over batch),
+            # and `pd.concat(slim_parts)` then held the parts AND the
+            # concatenated result at once -- a ~6GB spike at the Pass 1->2
+            # boundary, on a machine measured with ~8.5GB available. Writing
+            # it out costs one extra file and makes Pass 1's memory genuinely
+            # bounded by one batch.
             slim_cols = [c for c in CROSS_SECTIONAL_INPUT_COLS if c in batch.columns]
-            slim_parts.append(batch[slim_cols].copy())
+            slim_table = pa.Table.from_pandas(batch[slim_cols], preserve_index=False)
+            if slim_writer is None:
+                slim_writer = pq.ParquetWriter(slim_path, slim_table.schema)
+            else:
+                slim_table = slim_table.cast(slim_writer.schema)
+            slim_writer.write_table(slim_table)
+            del slim_table
 
             table = pa.Table.from_pandas(batch, preserve_index=False)
             if writer is None:
@@ -195,6 +216,8 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     finally:
         if writer is not None:
             writer.close()
+        if slim_writer is not None:
+            slim_writer.close()
 
     # Release batch_fn's captured state now, not just at function exit --
     # Pass 2/3 never call it again. NOTE: a plain `del batch_fn` here does
@@ -225,12 +248,42 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     print("PASS 2/3: CROSS-SECTIONAL (MARKET/SECTOR) FEATURES")
     print("=" * 80)
 
-    slim = pd.concat(slim_parts, ignore_index=True)
-    del slim_parts
+    # Read the slim projection back dictionary-encoded: ticker/sector are the
+    # two object columns and at full US scale they hold ~1.9GB of raw Python
+    # strings between them (vs ~0.12GB for a float64 column), so handing
+    # pandas a dictionary-typed arrow column -- which lands as `category`
+    # dtype -- avoids ever materializing them. compute_cross_sectional_features
+    # wants exactly that dtype anyway; see its own memory-shape comment.
+    slim_tbl = pq.read_table(slim_path)
+    for name in ("ticker", "sector"):
+        if name in slim_tbl.column_names:
+            i = slim_tbl.schema.get_field_index(name)
+            slim_tbl = slim_tbl.set_column(i, name, slim_tbl.column(name).dictionary_encode())
+    slim = slim_tbl.to_pandas()
+    del slim_tbl
+
+    # Returns exactly ["ticker", "trade_date"] + CROSS_SECTIONAL_OUTPUT_COLS,
+    # already narrow and already in that order -- re-selecting those columns
+    # here is what used to hold the wide frame and its narrow copy at the same
+    # time (~6.9GB peak, the measured OOM point), so don't. Assert instead:
+    # dropping the re-selection means column order is now the producer's
+    # responsibility, and a silent reorder would change the output parquet's
+    # schema. Cheap (a list compare), and it fails at the Pass 2 boundary
+    # rather than at the end of an hour-long build.
     slim = compute_cross_sectional_features(slim, benchmark)
-    slim = slim[["ticker", "trade_date"] + CROSS_SECTIONAL_OUTPUT_COLS].set_index(
-        ["ticker", "trade_date"]
+    expected_cols = ["ticker", "trade_date"] + CROSS_SECTIONAL_OUTPUT_COLS
+    assert list(slim.columns) == expected_cols, (
+        f"cross-sectional output columns drifted from CROSS_SECTIONAL_OUTPUT_COLS:\n"
+        f"  got:      {list(slim.columns)}\n  expected: {expected_cols}"
     )
+    slim = slim.set_index(["ticker", "trade_date"])
+
+    # Same rationale as the Pass1->2 boundary above -- Pass 2's own merge/
+    # groupby machinery churns through several large temporary frames
+    # (confirmed real: a full-universe run OOM-killed INSIDE
+    # compute_cross_sectional_features itself, not just at a pass boundary,
+    # 2026-08-23), so reclaim before Pass 3 starts its own per-row-group loop.
+    _reclaim_memory()
 
     print()
     print("=" * 80)
@@ -262,6 +315,7 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
             writer.close()
 
     tmp_path.unlink()
+    slim_path.unlink(missing_ok=True)
     print(f"Feature computation complete: {total_rows} rows")
     return True
 
@@ -273,6 +327,12 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
 def main():
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    # Size the batches to the RAM actually free right now (minus a reserve for
+    # the rest of the machine) instead of a fixed chunk_size=150, and cap this
+    # process so an overrun raises MemoryError here rather than handing the
+    # kernel's OOM killer a choice of victims. See memory.py.
+    chunk_size = memory.report("BR build", memory.BR_BYTES_PER_TICKER)
 
     prices       = load_prices()
     fundamentals = load_fundamentals()
@@ -322,7 +382,7 @@ def main():
     del company_info
     dataset = merge_macro(dataset)
     dataset = merge_dividends(dataset, dividends)
-    compute_features_chunked(dataset, dividends, benchmark, OUTPUT_PATH, chunk_size=150)
+    compute_features_chunked(dataset, dividends, benchmark, OUTPUT_PATH, chunk_size=chunk_size)
     del dataset
 
     print()

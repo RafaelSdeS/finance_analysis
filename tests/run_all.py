@@ -41,6 +41,7 @@ FAST = [
     "tests/build_dataset/test_top50_universe.py",
     "tests/build_dataset/test_loaders.py",
     "tests/build_dataset/test_manifest.py",
+    "tests/build_dataset/test_memory.py",
     "tests/build_dataset/test_build_us_dataset.py",
     "tests/build_dataset/test_no_hardcoded_data_paths.py",
     "tests/portfolio/test_labels.py",

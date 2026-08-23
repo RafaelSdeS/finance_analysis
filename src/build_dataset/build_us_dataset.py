@@ -23,11 +23,13 @@ import re
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from src.data_collection.sec.crosswalk import CROSSWALK_PATH as SEC_CROSSWALK_PATH
 from src.data_collection.sec.universe import ROSTER_PATH as SEC_ROSTER_PATH
 from src.data_collection.sec.universe import compute_coverage
 
+from . import memory
 from .build_ml_dataset import compute_features_chunked
 from .cross_sectional import BENCHMARK_COLS
 from .features import compute_fundamental_features, compute_price_features, fill_missing_cagr
@@ -319,10 +321,46 @@ def build_universe_gate(prices, min_rows=MIN_PRICE_ROWS, min_median_close=MIN_ME
     return tickers
 
 
+def _load_batch_from_disk(batch_tickers):
+    """Read exactly this batch's price + fundamentals files off disk and run
+    the per-ticker fundamentals stages on them.
+
+    This is the fix for Pass 1's memory FLOOR. The previous design loaded the
+    whole gated universe up front (measured 5.5GB for prices+fundamentals,
+    docs/US_DATASET_BUILD_PLAN.md §8.0) and had the batcher slice it — so the
+    build's baseline was 5.5GB before a single feature was computed, and every
+    per-batch fix bought headroom on top of a floor that never moved.
+
+    Reading per batch costs NO extra I/O: raw data is one parquet per ticker,
+    so each file is read exactly once either way — the batches just partition
+    the same reads instead of preceding them. And it's byte-identical, because
+    both fundamentals stages below are strictly `groupby("ticker")` passes
+    (compute_fundamental_features iterates per ticker; fill_missing_cagr splits
+    per ticker first): computing them on a batch equals computing them on the
+    universe and slicing. That is exactly the property Pass 2's
+    cross-sectional features do NOT have, which is why they stay whole-universe.
+    """
+    p = load_prices(dir=US_PRICES_DIR, tickers=batch_tickers, quiet=True)
+    p = drop_orphan_prefix_rows(p)  # no-op for US tickers, kept for parity
+
+    f = load_fundamentals(dir=US_FUNDAMENTALS_DIR, tickers=batch_tickers,
+                          optimize_dtypes=True, quiet=True)
+    # net_margin, not the default gross_margin: SEC filers routinely skip a
+    # separate COGS/gross-profit tag (93.6% null in the US corpus vs
+    # net_margin's 49.98%), which left f_margin_improving/f_score effectively
+    # undefined for the whole US build (2026-08-01 audit).
+    f = compute_fundamental_features(f, margin_col="net_margin")
+    # anchor_month=None: US fiscal year ends vary by company (8.6% of tickers
+    # have zero December-ending quarters, e.g. Agilent's Oct 31 FYE) with no
+    # reliable per-ticker FYE column to anchor to instead -- see
+    # cagr_handler.calc_annual_cagr's docstring.
+    f = fill_missing_cagr(f, anchor_month=None)
+    return p, f
+
+
 class _MergeBatcher:
     """Callable batch_fn for compute_features_chunked (build_ml_dataset.py),
-    PLUS an explicit release() to drop its captured prices/fundamentals/
-    company_info/dividends references once Pass 1 is done with it.
+    PLUS an explicit release() to drop what it holds once Pass 1 is done.
 
     A plain closure + `del batch_fn` inside compute_features_chunked is NOT
     enough: main() keeps its OWN reference to this same object bound in its
@@ -331,61 +369,73 @@ class _MergeBatcher:
     its own copy of a reference, so refcounting alone never reaches 0 there
     (confirmed via a minimal repro before landing this). release() instead
     MUTATES this instance's own attributes to None -- visible through every
-    reference to it, main()'s included -- which is what actually frees the
-    tables before Pass 2/3, which never call batch_fn again. main() must
-    ALSO drop its own separate `prices`/`fundamentals`/`company_info` names
-    for this to work (mutating THIS object's attributes doesn't touch a
-    caller's own separate variable pointing at the same DataFrame).
+    reference to it, main()'s included -- which is what actually frees them
+    before Pass 2/3, which never call batch_fn again.
+
+    `load_batch(tickers) -> (prices, fundamentals)` is injected rather than
+    hardcoded: production passes _load_batch_from_disk, tests pass a slicer
+    over in-memory fixtures, and this class stays about MERGING a batch
+    rather than about where the batch came from.
     """
 
-    def __init__(self, prices, fundamentals, company_info, dividends):
-        self.prices = prices
-        self.fundamentals = fundamentals
+    def __init__(self, load_batch, company_info, dividends):
+        self.load_batch = load_batch
         self.company_info = company_info
         self.dividends = dividends
 
     def __call__(self, batch_tickers):
         bt = set(batch_tickers)
-        p = self.prices[self.prices["ticker"].isin(bt)]
-        f = self.fundamentals[self.fundamentals["ticker"].isin(bt)]
+        p, f = self.load_batch(bt)
         d = self.dividends[self.dividends["ticker"].isin(bt)]
 
         merged = merge_prices_and_fundamentals(p, f)
+        del p, f  # the merged panel supersedes both; holding them through the
+        # three joins below is pure dead weight at the batch's peak
         merged = merge_company_info_us(merged, self.company_info)
         merged = merge_macro_us(merged)
         merged = merge_dividends(merged, d)
         return merged
 
     def release(self):
-        self.prices = self.fundamentals = self.company_info = self.dividends = None
+        self.load_batch = self.company_info = self.dividends = None
 
 
-def make_merge_batch_fn(prices, fundamentals, company_info, dividends):
-    """Returns a _MergeBatcher (see its docstring for release()) that does
-    the 4 merges (prices+fundamentals, company_info, macro, dividends)
-    scoped to just one ticker-batch at a time, instead of once over the
-    full universe.
+def make_merge_batch_fn(company_info, dividends, load_batch=_load_batch_from_disk):
+    """Returns a _MergeBatcher (see its docstring for release()) that loads
+    and merges one ticker-batch at a time instead of the whole universe.
 
-    Why: merge_prices_and_fundamentals's OUTPUT -- the daily panel with every
-    fundamentals column forward-filled onto it -- is ~1,000 B/row at US
-    fundamentals' width; at the full ~15.4M-row universe that alone is
-    ~15GB, before company_info/macro/dividends are even joined. Measured
-    directly: an 800/3,134-ticker slice already peaked at 5.9GB RSS through
-    this merge (docs/US_DATASET_BUILD_PLAN.md §8.0.1) -- extrapolating
-    linearly to the full universe lands past this machine's available RAM,
-    which is exactly what OOM-killed the real run. None of the 4 merges are
-    cross-sectional (unlike compute_cross_sectional_features/Pass 2, which
-    genuinely needs the whole universe at once) -- each operates strictly
-    per-ticker or via join, so scoping them to a batch changes nothing about
-    correctness, only how much is resident at once.
+    Why the merge itself must be batched: merge_prices_and_fundamentals's
+    OUTPUT -- the daily panel with every fundamentals column forward-filled
+    onto it -- is ~1,000 B/row at US fundamentals' width; at the full ~15.4M-row
+    universe that alone is ~15GB, before company_info/macro/dividends are even
+    joined. Measured directly: an 800/3,134-ticker slice already peaked at
+    5.9GB RSS through this merge (docs/US_DATASET_BUILD_PLAN.md §8.0.1). None
+    of the 4 merges are cross-sectional (unlike compute_cross_sectional_features/
+    Pass 2, which genuinely needs the whole universe at once) -- each operates
+    strictly per-ticker or via join, so scoping them to a batch changes nothing
+    about correctness, only how much is resident at once.
 
-    `prices`/`fundamentals`/`company_info`/`dividends` are the already-loaded
-    (narrow) raw tables -- kept resident for Pass 1 only (measured ~5.5GB for
-    prices+fundamentals alone; release() drops them before Pass 2/3), which
-    is what makes this safe: only the wide MERGED product is ever bounded to
-    one batch.
+    `company_info` (one small parquet) and `dividends` (~26MB) stay resident --
+    they're join-side reference tables, small enough that per-batch reloading
+    would be churn for no gain. `prices`/`fundamentals` are the ones that
+    dominate, and those now arrive per batch via `load_batch`.
     """
-    return _MergeBatcher(prices, fundamentals, company_info, dividends)
+    return _MergeBatcher(load_batch, company_info, dividends)
+
+
+def fundamentals_ticker_index(dir):
+    """One row per ticker that actually has fundamentals on disk.
+
+    filter_tickers_with_no_fundamentals only ever reads
+    `fundamentals["ticker"].unique()` from its second argument, so handing it
+    this stub instead of the real ~0.5GB table gives an identical answer for
+    free. Row counts come from parquet metadata (a footer read, no column
+    data), so a file that exists but holds zero rows still counts as
+    uncovered -- same as it would have under a real load.
+    """
+    tickers = [f.stem for f in sorted(dir.glob("*.parquet"))
+               if pq.ParquetFile(f).metadata.num_rows > 0]
+    return pd.DataFrame({"ticker": tickers})
 
 
 def build_universe_gate_from_files(dir, min_rows=MIN_PRICE_ROWS, min_median_close=MIN_MEDIAN_CLOSE,
@@ -433,66 +483,68 @@ def main():
     # against ~8GB available, an OOM before a single row is written
     # (docs/US_DATASET_BUILD_PLAN.md §8.0 Failure 1). The per-file scan reads
     # only close/volume per ticker.
+    # Size the build to the RAM that's actually free, minus a reserve left for
+    # whatever else the machine is doing, and cap the process so a mis-estimate
+    # raises MemoryError here instead of letting the kernel OOM killer pick a
+    # victim (it has picked the user's editor before -- see memory.py).
+    chunk_size = memory.report("US build", memory.US_BYTES_PER_TICKER)
+
     universe = build_universe_gate_from_files(US_PRICES_DIR)
     n_before = len(universe)
     universe = {t for t in universe if not _is_non_common(t)}
     print(f"Dropped {n_before - len(universe)} non-common share class(es) "
           f"(preferred/ETN/baby-bond) from the universe gate")
-    prices = load_prices(dir=US_PRICES_DIR, tickers=universe | {BENCHMARK_TICKER})
-    fundamentals = load_fundamentals(dir=US_FUNDAMENTALS_DIR, optimize_dtypes=True)
-    prices = drop_orphan_prefix_rows(prices)  # no-op for US tickers, kept for parity
 
     # Capture SPY (market benchmark) before the fundamentals-coverage filter
     # drops it -- same reasoning as build_ml_dataset.main()'s BOVA11 capture.
-    benchmark_prices = prices[prices["ticker"] == BENCHMARK_TICKER].copy()
+    # Loaded on its own (one file) rather than sliced out of a full-universe
+    # frame, which no longer exists at any point in this build.
+    benchmark_prices = load_prices(dir=US_PRICES_DIR, tickers={BENCHMARK_TICKER}, quiet=True)
     if benchmark_prices.empty:
         raise ValueError(f"{BENCHMARK_TICKER} not found in prices -- required as the "
                           f"market benchmark for beta_1y/momentum_vs_market_*")
     benchmark = compute_price_features(benchmark_prices)[BENCHMARK_COLS]
+    del benchmark_prices
 
-    prices, dropped_no_fundamentals = filter_tickers_with_no_fundamentals(
-        prices, fundamentals, known_no_fundamentals=KNOWN_NO_FUNDAMENTALS_US
+    # Resolve the final ticker list from a NARROW projection, not the dense
+    # panel. filter_tickers_with_no_fundamentals needs only ticker/trade_date
+    # from prices (ticker sets, last-trade dates, per-ticker row counts) and
+    # only the ticker set from fundamentals -- so a 2-column read (~0.36GB at
+    # US scale, vs ~5GB dense) and a filename index answer it exactly. The
+    # dense universe frame this used to build was the build's memory floor:
+    # 5.5GB resident before Pass 1 computed anything.
+    #
+    # One deliberate difference: load_prices's phantom all-NaN-OHLC row drop
+    # can't run on a projection carrying no OHLC columns, so a ticker's row
+    # count here can be a handful higher than under a dense load. That only
+    # feeds the MIN_PRICE_ROWS check, which build_universe_gate_from_files has
+    # already applied above against the real close/volume data on the same
+    # threshold -- nothing reaches this that the gate didn't already clear.
+    price_keys = load_prices(dir=US_PRICES_DIR, tickers=universe | {BENCHMARK_TICKER},
+                              columns=["ticker", "trade_date"], quiet=True)
+    price_keys = drop_orphan_prefix_rows(price_keys)
+    price_keys, dropped_no_fundamentals = filter_tickers_with_no_fundamentals(
+        price_keys, fundamentals_ticker_index(US_FUNDAMENTALS_DIR),
+        known_no_fundamentals=KNOWN_NO_FUNDAMENTALS_US,
     )
-    # net_margin, not the default gross_margin: SEC filers routinely skip a
-    # separate COGS/gross-profit tag (93.6% null in the US corpus vs
-    # net_margin's 49.98%), which left f_margin_improving/f_score effectively
-    # undefined for the whole US build (2026-08-01 audit).
-    fundamentals = compute_fundamental_features(fundamentals, margin_col="net_margin")
-    # anchor_month=None: US fiscal year ends vary by company (8.6% of tickers
-    # have zero December-ending quarters, e.g. Agilent's Oct 31 FYE) with no
-    # reliable per-ticker FYE column to anchor to instead -- see
-    # cagr_handler.calc_annual_cagr's docstring.
-    fundamentals = fill_missing_cagr(fundamentals, anchor_month=None)
+    tickers = sorted(price_keys["ticker"].unique())
+    del price_keys
+
     company_info = pd.read_parquet(US_COMPANY_INFO_PATH)
     dividends = load_dividends(dir=US_DIVIDENDS_DIR)
 
-    # Merge per-batch (inside compute_features_chunked's existing Pass-1 loop)
-    # instead of once over the full universe -- see make_merge_batch_fn's
-    # docstring for why the full-universe merge OOMs at US scale even though
-    # none of the 4 merges are cross-sectional. Only needed for Pass 1 (the
-    # merge itself); Pass 2/3 never touch batch_fn again.
-    batch_fn = make_merge_batch_fn(prices, fundamentals, company_info, dividends)
-    tickers = sorted(prices["ticker"].unique())
-
-    # Drop OUR OWN references to prices/fundamentals/company_info now.
-    # compute_features_chunked is called synchronously below, so main()'s own
-    # locals stay bound for the ENTIRE call (all 3 passes) regardless of what
-    # happens inside it -- if we kept prices/fundamentals/company_info
-    # (~3GB+) referenced here too, they'd sit resident through Pass 2/3 as
-    # well, which don't need them at all. This alone isn't sufficient though:
-    # batch_fn (a _MergeBatcher instance, make_merge_batch_fn) ALSO holds its
-    # own references to the same tables, and batch_fn itself stays bound in
-    # THIS frame for the whole call too -- see _MergeBatcher.release()'s
-    # docstring for why compute_features_chunked calling `.release()` on it
-    # after Pass 1 (mutating the instance in place) is what actually drops
-    # the last reference, not a plain `del`. Both halves are required
-    # together. This exact leak was a real 3rd OOM in this build
-    # (docs/US_DATASET_BUILD_PLAN.md §8.0.2 follow-up): batch_fn/tickers
-    # fixed Pass 1, but the tables it captured kept living through Pass 2/3
-    # too, on top of the fix in §8.3.
-    del prices, fundamentals, company_info
+    # Load AND merge per-batch, inside compute_features_chunked's Pass-1 loop
+    # -- see _load_batch_from_disk / make_merge_batch_fn. Only Pass 1 uses
+    # batch_fn; release() (called there, after Pass 1) drops company_info/
+    # dividends so they don't sit through Pass 2/3, which never call it again.
+    # main()'s own `dividends` name is dropped separately below for the same
+    # reason -- mutating the batcher's attributes can't unbind a caller's
+    # variable pointing at the same frame (§8.0.3).
+    batch_fn = make_merge_batch_fn(company_info, dividends)
+    del company_info
 
     compute_features_chunked(None, dividends, benchmark, US_OUTPUT_PATH,
+                              chunk_size=chunk_size,
                               valuation_fn=compute_valuation_daily_us,
                               tickers=tickers, batch_fn=batch_fn)
     del dividends

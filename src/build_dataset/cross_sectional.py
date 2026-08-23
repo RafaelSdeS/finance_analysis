@@ -3,7 +3,20 @@ compute_features_chunked). Unlike features.py, these need the full universe
 on the same date at once, so they can't run on a ticker-batch in isolation.
 """
 
+import numpy as np
 import pandas as pd
+
+# Every column this module emits is a derived statistic — a z-score, a
+# percentile rank, a return difference, a rolling beta — carrying two or three
+# significant digits of real signal on top of inputs that are themselves
+# noisy estimates. float32's ~7 digits is far more than any of them mean, and
+# this is the one stage that holds the whole universe at once: at US scale the
+# 12 output columns are 1.47GB in float64 and 0.74GB here, and Pass 3 then
+# keeps that same frame resident while it cleans every row group. Halving it
+# is the cheapest real headroom available in either pass. (US fundamentals are
+# already float32 throughout via load_fundamentals(optimize_dtypes=True), so
+# this also stops the outputs being wider than the inputs they derive from.)
+OUT_DTYPE = "float32"
 
 # Inputs compute_cross_sectional_features() needs, and the columns it adds —
 # used to slim the frame down before holding the full universe in memory.
@@ -74,15 +87,50 @@ def compute_cross_sectional_features(df, benchmark):
     print("COMPUTING CROSS-SECTIONAL (MARKET/SECTOR) FEATURES")
     print("=" * 80)
 
+    # --- MEMORY SHAPE (why this function looks the way it does) ---
+    #
+    # This is the one stage that must hold the whole universe at once, so it
+    # is also the one stage where frame width is a hard memory constraint.
+    # Measured at full US scale (15.35M rows, 2026-08-23): the two OBJECT
+    # columns dominate everything else combined -- `sector` 1.07GB and
+    # `ticker` 0.80GB of raw Python strings, vs ~0.12GB for a float64 column.
+    #
+    # Two consequences, both load-bearing:
+    #
+    # 1. ticker/sector are cast to `category` (dictionary + int codes) for the
+    #    groupby work: 1.87GB -> ~0.05GB, and the groupbys hash ints instead
+    #    of strings. `sector` is an INPUT only (never an output column), so it
+    #    is simply never carried into the result.
+    #
+    # 2. Results are accumulated into a separate NARROW frame (`out`) rather
+    #    than assigned back onto `df`. Widening `df` meant the caller then had
+    #    to slice the 12 output columns back out of a ~24-column frame, which
+    #    holds the wide frame and the narrow copy simultaneously -- measured
+    #    ~6.9GB peak against ~8.5GB available, and the actual point a real
+    #    full-universe run was OOM-killed (2026-08-23, died between this
+    #    function's final print and the caller's re-selection). `out` is built
+    #    directly in `["ticker", "trade_date"] + CROSS_SECTIONAL_OUTPUT_COLS`
+    #    order so the caller needs no re-selection at all -- keep the
+    #    assignment order below in sync with that list.
+    df["ticker"] = df["ticker"].astype("category")
+    df["sector"] = df["sector"].astype("category")
+
+    out = pd.DataFrame(index=df.index)
+
     # ponytail: vectorized z-score via cython groupby transforms (no Python per-group calls)
     # NaN-sector rows are dropped by groupby and stay NaN, matching the old loop's skip.
-    sector_grp = df.groupby(["trade_date", "sector"], sort=False)
+    # observed=True: explicit regardless of pandas-version default, now that sector is
+    # categorical -- without it, a categorical grouper can produce one group per
+    # (trade_date, sector) COMBINATION including sector levels never actually observed
+    # on that date, wasting work computing empty groups.
+    sector_grp = df.groupby(["trade_date", "sector"], sort=False, observed=True)
     for col in ["pl", "pvp", "roe", "debt_equity"]:
         if col in df.columns:
             mean = sector_grp[col].transform("mean")
             std = sector_grp[col].transform("std")
             # std <= 0 or NaN (single-stock sectors) → NaN, same as the old guard
-            df[f"{col}_zscore_sector"] = (df[col] - mean) / std.where(std > 0)
+            out[f"{col}_zscore_sector"] = ((df[col] - mean) / std.where(std > 0)).astype(OUT_DTYPE)
+            del mean, std
 
     # Sector-of-one guard: with a single member, a stock's "vs sector" metric
     # trivially collapses to itself (mean = own value, rank = 100th pct) —
@@ -90,9 +138,9 @@ def compute_cross_sectional_features(df, benchmark):
     sector_size = sector_grp["ticker"].transform("size")
 
     # Dividend yield percentile: percentile rank within sector per date
-    df["div_yield_sector_percentile"] = sector_grp["div_yield_12m"].rank(
+    out["div_yield_sector_percentile"] = sector_grp["div_yield_12m"].rank(
         pct=True
-    ).where(sector_size > 1)
+    ).where(sector_size > 1).astype(OUT_DTYPE)
 
     # --- MOMENTUM DECOMPOSITION (stock vs sector vs market) ---
 
@@ -103,15 +151,21 @@ def compute_cross_sectional_features(df, benchmark):
     # are same-exchange (B3) daily data sharing the same trading calendar, so
     # a date BOVA11 didn't trade is correctly NaN here too, not silently
     # papered over with a stale prior value.
-    bench = benchmark[BENCHMARK_COLS].rename(columns={
-        "log_return": "_mkt_log_return", "return_1m": "_mkt_return_1m",
-        "return_3m": "_mkt_return_3m", "return_12m": "_mkt_return_12m",
-    })
-    df = df.merge(bench, on="trade_date", how="left")
+    #
+    # .map() against a trade_date-indexed lookup, not .merge(): merge() builds
+    # an entirely new frame holding every existing column plus the benchmark
+    # ones -- a full second copy of the whole-universe frame just to attach 4
+    # narrow columns. Each mapped series is also a local, freed as soon as
+    # it's consumed, rather than a column parked on `df` until a later drop.
+    # drop_duplicates: .map needs a unique index, and a duplicated benchmark
+    # date would silently raise here rather than quietly broadcasting as the
+    # old merge did.
+    bench = benchmark[BENCHMARK_COLS].drop_duplicates("trade_date").set_index("trade_date")
 
-    df["momentum_vs_market_1m"] = df["return_1m"] - df["_mkt_return_1m"]
-    df["momentum_vs_market_3m"] = df["return_3m"] - df["_mkt_return_3m"]
-    df["momentum_vs_market_12m"] = df["return_12m"] - df["_mkt_return_12m"]
+    for horizon in ("1m", "3m", "12m"):
+        mkt = df["trade_date"].map(bench[f"return_{horizon}"])
+        out[f"momentum_vs_market_{horizon}"] = (df[f"return_{horizon}"] - mkt).astype(OUT_DTYPE)
+        del mkt
 
     # Sector momentum: subtract sector mean (per date, sector) from each
     # return. Reuses sector_grp (built once above) instead of rebuilding
@@ -120,42 +174,64 @@ def compute_cross_sectional_features(df, benchmark):
     # universe instead of 1, real transient-memory/CPU waste that was part
     # of what pushed a real run into an OOM kill (confirmed via journalctl,
     # 2026-08-16).
-    df["momentum_vs_sector_1m"] = (
-        df["return_1m"] - sector_grp["return_1m"].transform("mean")
-    ).where(sector_size > 1)
-    df["momentum_vs_sector_3m"] = (
-        df["return_3m"] - sector_grp["return_3m"].transform("mean")
-    ).where(sector_size > 1)
-    df["momentum_vs_sector_12m"] = (
-        df["return_12m"] - sector_grp["return_12m"].transform("mean")
-    ).where(sector_size > 1)
+    for horizon in ("1m", "3m", "12m"):
+        out[f"momentum_vs_sector_{horizon}"] = (
+            df[f"return_{horizon}"] - sector_grp[f"return_{horizon}"].transform("mean")
+        ).where(sector_size > 1).astype(OUT_DTYPE)
+
+    del sector_grp, sector_size
 
     # --- ROLLING BETA VS MARKET ---
 
     # Same BOVA11 series as above, now rolled per-ticker over TIME (not a
     # same-date snapshot) -- needs one groupby("ticker") pass.
     #
-    # Accumulate only the narrow (cov/var-derived) per-ticker beta Series,
-    # not a full-width copy of `g` -- this loop runs on the WHOLE universe at
-    # once (unlike compute_price_features's identically-shaped per-ticker
-    # loop, which only ever sees one ~150-ticker Pass-1 batch). Appending
-    # full `g` slices (every column, ~24+ by this point) into a list and
-    # pd.concat-ing them at the end held a full SECOND copy of the
-    # full-universe frame alongside the original `df` -- the same
-    # "accumulate everything then concat" shape that OOM-killed
-    # merge_prices_and_fundamentals at US scale (docs/US_DATASET_BUILD_PLAN.md
-    # §8.0.1) before that got fixed; this was the untouched sibling. Assigning
-    # the concatenated single-column Series back via `df["beta_1y"] = ...`
-    # aligns by (preserved, unique) row index -- verified byte-identical to
-    # the old full-frame-accumulation output, just without the second copy.
-    beta_parts = []
-    for ticker, g in df.groupby("ticker", sort=False):
+    # Grouped over a 3-column projection, not the full frame: each yielded `g`
+    # is a copy of every column it carries, so grouping the wide frame churns
+    # ~20 dead columns per ticker for the 2 the rolling actually reads.
+    #
+    # Accumulate only the narrow (cov/var-derived) per-ticker beta Series, not
+    # a full-width copy of `g` -- this loop runs on the WHOLE universe at once
+    # (unlike compute_price_features's identically-shaped per-ticker loop,
+    # which only ever sees one ~150-ticker Pass-1 batch). Appending full `g`
+    # slices into a list and pd.concat-ing them at the end held a full SECOND
+    # copy of the entire frame -- the same "accumulate everything then concat"
+    # shape that OOM-killed merge_prices_and_fundamentals at US scale
+    # (docs/US_DATASET_BUILD_PLAN.md §8.0.1); this was the untouched sibling.
+    # The concatenated single-column Series aligns back by each group's
+    # preserved, unique row index -- verified byte-identical to the old
+    # full-frame-accumulation output.
+    # Results land in ONE preallocated array, written by position, instead of
+    # accumulating a per-ticker list of Series for a final pd.concat. The list
+    # form cost roughly three copies of the beta column at once at US scale --
+    # each of the ~2,900 parts carries its own index alongside its values
+    # (doubling it), and concat then holds every part AND the joined result
+    # live simultaneously. Preallocating makes it exactly one array, and the
+    # loop's only per-iteration allocations are the group's own two rolling
+    # temporaries, which are freed each pass.
+    beta_input = df[["ticker", "trade_date", "log_return"]].copy()
+    beta_input["_mkt_log_return"] = df["trade_date"].map(bench["log_return"])
+    beta = np.full(len(df), np.nan, dtype=OUT_DTYPE)
+    for _, g in beta_input.groupby("ticker", sort=False, observed=True):
         g = g.sort_values("trade_date")
         cov = g["log_return"].rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).cov(g["_mkt_log_return"])
         var = g["_mkt_log_return"].rolling(BETA_WINDOW, min_periods=BETA_MIN_PERIODS).var()
-        beta_parts.append(cov / var)
-    df["beta_1y"] = pd.concat(beta_parts)
-    df = df.drop(columns=["_mkt_log_return", "_mkt_return_1m", "_mkt_return_3m", "_mkt_return_12m"])
+        # get_indexer maps this group's (preserved, unique) row labels back to
+        # positions in `df` -- the same alignment pd.concat used to do by index,
+        # just without materializing the intermediate Series.
+        beta[df.index.get_indexer(g.index)] = (cov / var).to_numpy()
+    del beta_input
+    out["beta_1y"] = beta
+    del beta
 
-    print(f"Cross-sectional features computed for {len(df)} rows")
-    return df
+    # Key columns last, inserted at the front: `out` is now exactly
+    # ["ticker", "trade_date"] + CROSS_SECTIONAL_OUTPUT_COLS, in that order.
+    # ticker goes back to object -- it's the join key Pass 3 matches against
+    # its own object ticker column, and a categorical key on one side of a
+    # join is exactly the kind of silent all-NaN mismatch that no unit test
+    # at fixture scale would catch.
+    out.insert(0, "trade_date", df["trade_date"])
+    out.insert(0, "ticker", df["ticker"].astype(object))
+
+    print(f"Cross-sectional features computed for {len(out)} rows")
+    return out

@@ -921,3 +921,74 @@ completion** — the fix is measured-consistent (≈1.1GB/batch vs. the ≈22GB 
 would have needed), not yet observed end-to-end. Launch `nohup ... & disown`, watch RSS through
 Pass 2 (§8.3, still genuinely unmeasured — the one remaining full-universe-resident stage, by
 design).
+
+## 9. Memory budgeting — the build stops assuming it owns the machine (2026-08-23)
+
+§8's fixes all shared a blind spot: each one bounded a *stage*, but nothing bounded the *build*,
+and nothing ever asked how much RAM was actually free. `chunk_size=150` was a constant. The
+15.35M-row build did complete (`us_ml_dataset.parquet`, 2026-08-23 12:07, 2,903 tickers) — but
+only by using essentially everything available, which is why the kernel OOM killer had already
+taken an unrelated VS Code session once (§8.0 verification note).
+
+### 9.1 Where the memory actually went (measured, not estimated)
+
+Column-level sizing off the built parquet's own schema + row count, plus the §8.0 RSS measurements:
+
+| Stage | Peak | Composition |
+|---|---|---|
+| **Pass 1** | **~8 GB** | `batch_fn` pinned the whole gated universe — prices + fundamentals, **5.5 GB measured** (§8.0) — while each batch added ~2.5 GB on top |
+| Pass 2 | ~4.5 GB | slim input 1.23 GB + `out` 1.72 GB (12 float64 cols x 15.35M rows) + the beta loop's per-ticker Series list and its `pd.concat` |
+| Pass 3 | ~5.2 GB | resident `slim` 1.7 GB + `clean_dataset` making **four** full copies of a ~1 GB row group |
+
+Pass 1's 5.5 GB was a **floor**, not a peak: every §8 fix bought headroom on top of a number that
+never moved. That's the thing worth fixing.
+
+### 9.2 Fixes
+
+- [x] **`memory.py` — budget + hard ceiling.** `budget_gb()` reads real `MemAvailable` and
+      subtracts a reserve (default 4 GB) left for the rest of the machine; `chunk_size_for()`
+      turns that into a batch size, clamped to `[MIN_CHUNK, MAX_CHUNK]` so row groups still
+      compress. `apply_limit()` sets `RLIMIT_DATA` at 1.25x the budget, so an overrun raises
+      `MemoryError` **inside this process** instead of handing the kernel a choice of victims —
+      and can't disappear into the 3 GB swap partition and thrash. Both `main()`s call
+      `memory.report()` first. Overrides: `BUILD_MEM_BUDGET_GB`, `BUILD_MEM_RESERVE_GB`,
+      `BUILD_MEM_NO_RLIMIT`.
+- [x] **Pass 1 loads its own batch from disk** (`_load_batch_from_disk`, `load_prices(tickers=)`
+      already existed, `load_fundamentals(tickers=)` added). Kills the 5.5 GB floor outright.
+      **Zero extra I/O** — raw data is one parquet per ticker, so each file is read exactly once
+      either way; the batches just partition reads that already happened. **Byte-identical**,
+      because `compute_fundamental_features` and `fill_missing_cagr` are strictly
+      `groupby("ticker")` passes — asserted directly in
+      `test_per_batch_fundamentals_stages_match_whole_universe`, which fails if anyone later adds
+      a cross-ticker statistic to either (that failure would otherwise be silent).
+      `_MergeBatcher` now takes an injected `load_batch` so tests can still drive it from
+      in-memory fixtures.
+- [x] **Coverage filter runs on a narrow projection.** `filter_tickers_with_no_fundamentals` reads
+      only ticker sets, last-trade dates and row counts from `prices`, and only the ticker set
+      from `fundamentals` — so `load_prices(columns=["ticker","trade_date"])` (~0.36 GB vs ~5 GB
+      dense) plus `fundamentals_ticker_index()` (parquet footers, no column data) answer it
+      exactly. The dense universe frame is now never built at any point in the US build.
+- [x] **`cross_sectional.OUT_DTYPE = float32`.** All 12 outputs are z-scores, percentile ranks,
+      return differences and rolling betas — two or three significant digits of real signal.
+      1.47 GB -> 0.74 GB in Pass 2, and Pass 3 holds that same frame resident throughout.
+      `test_beta_vs_market_matches_direct_computation`'s `rtol` moved 1e-9 -> 1e-6 to match the
+      declared dtype, and now asserts the dtype explicitly so it can't be loosened by accident.
+- [x] **Beta loop preallocates.** One `np.full(len(df))` written by position via
+      `index.get_indexer`, instead of ~2,900 per-ticker Series (each carrying its own index) held
+      for a final `pd.concat` that needed parts and result live at once.
+- [x] **`clean_dataset` stops copying the frame four times.** `drop_duplicates(ignore_index=True)`
+      replaces `.drop_duplicates().copy()` (and folds in the trailing `reset_index`); inf->NaN
+      goes column-by-column over float columns only, instead of `df[numeric_cols].replace(...)`
+      materialising ~150 columns, replacing into a second copy, then assigning back. This runs
+      once per Pass-3 row group, so every copy here was paid ~20x per build.
+
+### 9.3 Status
+
+`ruff check` clean; **59/59 fast tests green**, including 8 new ones in
+`tests/build_dataset/test_memory.py`. On this machine (8.5 GB available) the build now sizes
+itself to a 4.5 GB budget with a 5.6 GB hard cap and 241 tickers/batch, leaving 4 GB for
+everything else.
+
+**Not yet observed end-to-end at full scale** — same honest caveat as §8.0.2/§8.0.3 carried:
+the reasoning is measured-consistent and the equivalence properties are regression-tested, but a
+real full-universe run under the new budget hasn't been executed. Run it `nohup`'d and watch RSS.

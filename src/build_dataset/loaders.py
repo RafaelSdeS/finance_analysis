@@ -32,7 +32,7 @@ FUNDAMENTALS_PROVENANCE_COLS = {
 # LOAD ALL PRICE FILES
 # =============================================================================
 
-def load_prices(dir=None, tickers=None):
+def load_prices(dir=None, tickers=None, columns=None, quiet=False):
     # `dir=None` (not `dir=PRICES_DIR`) deliberately -- a bound default is
     # captured at import time, so monkeypatching module.PRICES_DIR in a test
     # would silently be ignored. Re-read the module global at call time instead.
@@ -51,19 +51,28 @@ def load_prices(dir=None, tickers=None):
         # (BR, and any test not passing tickers=) relies on.
         files = [f for f in files if f.stem in tickers]
 
-    print()
-    print("=" * 80)
-    print("LOADING PRICES")
-    print("=" * 80)
+    if not quiet:
+        print()
+        print("=" * 80)
+        print("LOADING PRICES")
+        print("=" * 80)
 
     for file in files:
-        print(f"Loading: {file.name}")
-        df = pd.read_parquet(file)
+        if not quiet:
+            print(f"Loading: {file.name}")
+        # `columns=`: a caller that only needs a narrow projection shouldn't pay
+        # for the full OHLCV width. filter_tickers_with_no_fundamentals, for
+        # instance, reads nothing but ticker/trade_date -- at US scale that's
+        # ~0.36GB projected vs ~5GB dense, which is the difference between
+        # holding it alongside a build and not (see build_us_dataset.main()).
+        df = pd.read_parquet(file, columns=columns)
         df = df.dropna(axis=1, how="all")  # Drop all-NA columns per-file
         df["trade_date"] = pd.to_datetime(df["trade_date"])
         dfs.append(df)
 
     prices = pd.concat(dfs, ignore_index=True, sort=False)
+    del dfs  # the per-file frames are dead once concatenated; holding the list
+    # alive means peak = list + result, a full second copy of the whole load
     prices = prices.sort_values(["ticker", "trade_date"])
 
     # Phantom non-trading day: every OHLC field NaN (confirmed CAMB3
@@ -72,10 +81,12 @@ def load_prices(dir=None, tickers=None):
     if ohlc_cols:
         all_nan = prices[ohlc_cols].isna().all(axis=1)
         if all_nan.any():
-            print(f"Dropping {int(all_nan.sum())} phantom all-NaN OHLC row(s)")
+            if not quiet:
+                print(f"Dropping {int(all_nan.sum())} phantom all-NaN OHLC row(s)")
             prices = prices[~all_nan]
 
-    print(f"Total price rows: {len(prices)}")
+    if not quiet:
+        print(f"Total price rows: {len(prices)}")
 
     return prices
 
@@ -84,7 +95,7 @@ def load_prices(dir=None, tickers=None):
 # LOAD ALL FUNDAMENTALS
 # =============================================================================
 
-def load_fundamentals(dir=None, optimize_dtypes=False):
+def load_fundamentals(dir=None, optimize_dtypes=False, tickers=None, quiet=False):
     """optimize_dtypes: downcast numeric columns to float32 and
     `fundamentals_tier` to category (`cik` excluded -- stays an identifier).
     Default False preserves BR's exact float64 precision (existing tests
@@ -95,16 +106,27 @@ def load_fundamentals(dir=None, optimize_dtypes=False):
     if dir is None:  # see load_prices's comment on why not `dir=FUNDAMENTALS_DIR`
         dir = FUNDAMENTALS_DIR
 
+    # `quiet`: this is called once per ticker-batch by the US build now, so its
+    # per-load banner would repeat ~20x through Pass 1 and bury the batch log.
+    say = (lambda *a, **k: None) if quiet else print
+
     dfs = []
     files = sorted(dir.glob("*.parquet"))
+    if tickers is not None:
+        # Same rationale as load_prices's `tickers=`: one file per ticker on
+        # disk means a per-batch caller can read exactly its own batch instead
+        # of loading the universe and slicing it (build_us_dataset._MergeBatcher).
+        files = [f for f in files if f.stem in tickers]
 
-    print()
-    print("=" * 80)
-    print("LOADING FUNDAMENTALS")
-    print("=" * 80)
+    if not quiet:
+        print()
+        print("=" * 80)
+        print("LOADING FUNDAMENTALS")
+        print("=" * 80)
 
     for file in files:
-        print(f"Loading: {file.name}")
+        if not quiet:
+            print(f"Loading: {file.name}")
         df = pd.read_parquet(file)
         df = df.dropna(axis=1, how="all")  # Drop all-NA columns per-file
         # US fundamentals files (data/raw/us/fundamentals/) carry no `ticker`
@@ -119,6 +141,8 @@ def load_fundamentals(dir=None, optimize_dtypes=False):
         dfs.append(df)
 
     fundamentals = pd.concat(dfs, ignore_index=True, sort=False)
+    del dfs  # see load_prices — don't hold the per-file frames and the concat
+    # result alive at the same time
 
     # Drop columns that are always null (API doesn't return them)
     cols_to_drop = [
@@ -127,12 +151,12 @@ def load_fundamentals(dir=None, optimize_dtypes=False):
     ]
     if cols_to_drop:
         fundamentals = fundamentals.drop(columns=cols_to_drop)
-        print(f"Dropped always-null columns: {cols_to_drop}")
+        say(f"Dropped always-null columns: {cols_to_drop}")
 
     # Drop redundant corporate_name — company_info has it with more detail
     if "corporate_name" in fundamentals.columns:
         fundamentals = fundamentals.drop(columns=["corporate_name"])
-        print("Dropped redundant 'corporate_name' from fundamentals")
+        say("Dropped redundant 'corporate_name' from fundamentals")
 
     provenance_cols = [
         c for c in fundamentals.columns
@@ -140,7 +164,7 @@ def load_fundamentals(dir=None, optimize_dtypes=False):
     ]
     if provenance_cols:
         fundamentals = fundamentals.drop(columns=provenance_cols)
-        print(f"Dropped collection-time provenance columns: {provenance_cols}")
+        say(f"Dropped collection-time provenance columns: {provenance_cols}")
 
     if optimize_dtypes:
         numeric_cols = fundamentals.select_dtypes(include="number").columns.drop(
@@ -149,12 +173,12 @@ def load_fundamentals(dir=None, optimize_dtypes=False):
         fundamentals[numeric_cols] = fundamentals[numeric_cols].astype("float32")
         if "fundamentals_tier" in fundamentals.columns:
             fundamentals["fundamentals_tier"] = fundamentals["fundamentals_tier"].astype("category")
-        print(f"Downcast {len(numeric_cols)} numeric columns to float32 "
+        say(f"Downcast {len(numeric_cols)} numeric columns to float32 "
               f"(+ fundamentals_tier to category)")
 
     fundamentals = fundamentals.sort_values(["ticker", "reference_date"])
 
-    print(f"Total fundamentals rows: {len(fundamentals)}")
+    say(f"Total fundamentals rows: {len(fundamentals)}")
 
     return fundamentals
 

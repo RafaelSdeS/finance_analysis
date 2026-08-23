@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from src.build_dataset import cross_sectional as cs  # noqa: E402
 from src.build_dataset.cross_sectional import compute_cross_sectional_features
 
 
@@ -253,7 +254,14 @@ def test_beta_vs_market_matches_direct_computation() -> None:
         actual = (
             result[result["ticker"] == t].sort_values("trade_date")["beta_1y"].to_numpy()
         )
-        np.testing.assert_allclose(actual, expected, rtol=1e-9, equal_nan=True)
+        # rtol tracks cross_sectional.OUT_DTYPE, not float64: these columns are
+        # emitted as float32 on purpose (see OUT_DTYPE's comment -- this is the
+        # one stage holding the whole universe at once, and halving the output
+        # frame is the cheapest headroom there is). float32 carries ~7 digits,
+        # so 1e-6 still fails on any real windowing/alignment bug while passing
+        # on the last-digit rounding the narrower dtype introduces.
+        assert result["beta_1y"].dtype == cs.OUT_DTYPE
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, equal_nan=True)
 
 
 def test_beta_nan_before_min_periods_then_no_lookahead() -> None:

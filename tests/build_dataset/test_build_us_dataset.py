@@ -399,7 +399,11 @@ def test_make_merge_batch_fn_matches_unbatched_merge(tmp_path, monkeypatch) -> N
     unbatched = us.merge_macro_us(unbatched)
     unbatched = merge_dividends(unbatched, dividends)
 
-    batch_fn = us.make_merge_batch_fn(prices, fundamentals, company_info, dividends)
+    batch_fn = us.make_merge_batch_fn(
+        company_info, dividends,
+        load_batch=lambda t: (prices[prices["ticker"].isin(t)],
+                              fundamentals[fundamentals["ticker"].isin(t)]),
+    )
     batched = pd.concat([batch_fn(["AAA", "BBB"]), batch_fn(["CCC"])], ignore_index=True)
 
     key = ["ticker", "trade_date"]

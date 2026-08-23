@@ -64,6 +64,22 @@ python -m src.build_dataset.scale_features               # → data/processed/sc
 python -m src.build_dataset.build_us_dataset             # → data/processed/us_ml_dataset.parquet
 ```
 
+**Memory:** both builds size themselves at startup from the machine's real `MemAvailable` minus a
+reserve left for whatever else is running, and cap the process with `RLIMIT_DATA` so an overrun
+raises `MemoryError` here instead of letting the kernel OOM killer pick a victim (it has taken an
+unrelated VS Code session before). `src/build_dataset/memory.py` prints what it decided —
+available / budget / hard cap / chunk_size — as the first thing either build does. Knobs:
+
+```bash
+BUILD_MEM_RESERVE_GB=6 python -m src.build_dataset.build_us_dataset   # leave more for other work
+BUILD_MEM_BUDGET_GB=10 python -m src.build_dataset.build_us_dataset   # machine is idle, go faster
+BUILD_MEM_NO_RLIMIT=1 python -m src.build_dataset.build_us_dataset    # drop the hard ceiling
+```
+
+Lower budget → smaller batches → more, smaller parquet row groups, which compress worse
+(`memory.MIN_CHUNK` is the floor where that stops being an acceptable trade). Full measurements
+and the four OOM incidents behind this: `docs/US_DATASET_BUILD_PLAN.md` §8–§9.
+
 ### Stage 3: Portfolio Construction (`src/portfolio/`, active research)
 
 Prereq: Stage 2 complete. BR only; not wired to the US dataset. Design docs: `docs/PORTFOLIO_ARCHITECTURE_PROPOSAL.md`
