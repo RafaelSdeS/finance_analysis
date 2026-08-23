@@ -214,6 +214,26 @@ def validate(df):
         checks.append((f"fundamentals respect filing lag [min gap {gap.min()}d]",
                        gap.min() >= FILING_LAG_DAYS_QUARTERLY))
 
+    # Filing-date PROVENANCE floor (D7, docs/DATA_INTEGRITY_TEST_PLAN.md §4).
+    # The no-lookahead claim rests on CVM's real DT_RECEB. When that lookup
+    # misses, quality_filters.attach_filing_dates falls back to the statutory
+    # deadline -- a MODELLED date, not an observed one, and the merge is only
+    # as honest as the mix. Nothing measured that mix, so a CVM collection
+    # regression toward 0% real dates would silently degrade "no lookahead"
+    # into "statutory estimate" with every check above still green.
+    # filing_lag_days is non-null exactly when the date is real.
+    # Measured 2026-08-23: 99.49% (1,219,067 / 1,225,282 has_fundamentals rows).
+    # The 2026-08-16 plan proposed 0.71, calibrated when the share was 80.8%;
+    # that is now far too slack to catch anything.
+    REAL_FILING_DATE_FLOOR = 0.95
+    if "filing_lag_days" in df.columns:
+        fund_rows = df["has_fundamentals"] == 1
+        n_fund = int(fund_rows.sum())
+        real_share = float(df.loc[fund_rows, "filing_lag_days"].notna().mean()) if n_fund else 0.0
+        checks.append((f"filing dates are real CVM DT_RECEB, not the statutory fallback "
+                       f"[{real_share:.2%} of {n_fund} rows, floor {REAL_FILING_DATE_FLOOR:.0%}]",
+                       real_share >= REAL_FILING_DATE_FLOOR))
+
     # No fabricated trading days (T4)
     weekend_rows = int((df["trade_date"].dt.dayofweek >= 5).sum())
     checks.append((f"no weekend trade_date rows [{weekend_rows} found]", weekend_rows == 0))

@@ -1,7 +1,7 @@
 """
 test_us_data_quality.py
 ========================
-Whole-universe sanity sweep over data/raw/us/{prices,fundamentals,macro} --
+Whole-universe sanity sweep over data/raw/us/{prices,fundamentals,macro,sec} --
 the regression net for the audit run 2026-07-30 (see docs/US_COLLECTOR_BUG_AUDIT.md
 and US_COLLECTOR_FIX_PLAN.md for the full write-up). Reuses the same
 validate.py gates the collectors themselves call at write time, applied here
@@ -45,6 +45,12 @@ Two real findings this test encodes as regression guards, not just narrative:
      backlog while still catching a NEW regression; other validate_prices
      errors (bracket violations, non-positive prices, ...) stay
      zero-tolerance, unaffected by this ceiling.
+  4. Added 2026-08-23: data/raw/us/sec/ -- the crosswalk, universe roster,
+     EDGAR filings index and SIC company_info. This file only ever globbed
+     the one-file-per-ticker directories, so the four tables that gate which
+     tickers exist at all, and that supply the manifest's survivorship
+     denominator, were checked by nothing. All clean on measurement; see
+     test_sec_artifacts_clean.
 
 Skips gracefully (prints SKIP, still exits 0) if data/raw/us isn't collected
 yet -- it's gitignored, unlike BR's git-tracked data/raw/.
@@ -103,6 +109,11 @@ _NAN_OHLC_ERROR_RE = re.compile(r"^\d+ rows with NaN in \[")
 # Rate ceiling tolerates today's backlog while catching a NEW regression.
 _JUMP_WARNING_RE = re.compile(r"^\d+ day\(s\) with adj_close moving >")
 _JUMP_RATE_CEILING = 0.035  # currently 316/9700 files = 3.26%
+
+# sec/company_info.parquet is collected on its own cadence and is a superset
+# of the crosswalk, so a small orphan share is ordinary drift between two
+# runs, not corruption. Measured 2026-08-23: 78/10,545 = 0.74%.
+_CROSSWALK_ORPHAN_RATE_CEILING = 0.05
 
 
 def _has_inf(df: pd.DataFrame) -> bool:
@@ -243,8 +254,109 @@ def test_macro_clean():
     return ok
 
 
+def test_sec_artifacts_clean():
+    """The four SEC reference tables in data/raw/us/sec/, swept by nothing
+    before 2026-08-23.
+
+    These are not incidental outputs -- they gate the whole US side upstream
+    of any price or fundamental:
+
+      cik_ticker_crosswalk -> decides which tickers get collected AT ALL
+                              (survivor-only by construction, accepted
+                              2026-07-29 per US_COLLECTOR_FIX_PLAN.md §4)
+      us_universe_roster   -> the bias-free filer roster whose per-year CIK
+                              count IS the manifest's `survivorship_coverage`
+                              denominator -- the only number tracking US
+                              survivorship bias at all
+      edgar_10k10q_filings -> the filing index behind every point-in-time
+                              `fundamentals_available_date`
+      company_info         -> SIC -> sector for the US build
+
+    A silent regression in any of them (a truncated crosswalk, a roster
+    missing a year, a filings index with the wrong quarter labels) degrades
+    the US panel without touching a single price file, so nothing else here
+    would notice.
+
+    Everything asserted at zero tolerance except the crosswalk-orphan rate --
+    all measured clean 2026-08-23 against the tables on disk.
+    """
+    sec_dir = US_ROOT / "sec"
+    if not sec_dir.exists():
+        print("SKIP  sec: data/raw/us/sec not collected yet")
+        return True
+
+    ok = True
+    crosswalk_ciks = set()
+
+    path = sec_dir / "cik_ticker_crosswalk.parquet"
+    if path.exists():
+        df = pd.read_parquet(path)
+        crosswalk_ciks = set(df["cik"])
+        dup = int(df["ticker"].duplicated().sum())
+        bad_cik = int((df["cik"] <= 0).sum())
+        file_ok = dup == 0 and bad_cik == 0 and len(df) > 0
+        ok &= file_ok
+        print(f"{'PASS' if file_ok else 'FAIL'}  sec/crosswalk: {len(df):,} rows, "
+              f"dup ticker={dup}, cik<=0={bad_cik}, tiers={df['tier'].value_counts().to_dict()}")
+
+    path = sec_dir / "company_info.parquet"
+    if path.exists():
+        df = pd.read_parquet(path)
+        dup = int(df["ticker"].duplicated().sum())
+        # Orphans are a staleness signal, not corruption: company_info is
+        # collected on its own cadence and is a superset of the crosswalk.
+        # Measured 78/10,545 = 0.74%; ceiling catches a real divergence
+        # (e.g. a crosswalk rebuild that dropped a whole tier) without
+        # failing on ordinary drift between two collection runs.
+        orphan = int((~df["cik"].isin(crosswalk_ciks)).sum()) if crosswalk_ciks else 0
+        orphan_rate = orphan / len(df) if len(df) else 0.0
+        file_ok = dup == 0 and orphan_rate <= _CROSSWALK_ORPHAN_RATE_CEILING
+        ok &= file_ok
+        print(f"{'PASS' if file_ok else 'FAIL'}  sec/company_info: {len(df):,} rows, "
+              f"dup ticker={dup}, cik not in crosswalk={orphan} ({orphan_rate:.2%}, "
+              f"ceiling {_CROSSWALK_ORPHAN_RATE_CEILING:.0%})")
+
+    path = sec_dir / "us_universe_roster.parquet"
+    if path.exists():
+        df = pd.read_parquet(path)
+        dup = int(df.duplicated(subset=["cik", "year"]).sum())
+        empty = int((df["n_filings"] <= 0).sum())
+        years = set(df["year"].unique())
+        # A hole in the year sequence silently zeroes that year's
+        # survivorship_coverage denominator instead of failing loudly.
+        gaps = sorted(set(range(int(df["year"].min()), int(df["year"].max()) + 1)) - years)
+        file_ok = dup == 0 and empty == 0 and not gaps
+        ok &= file_ok
+        print(f"{'PASS' if file_ok else 'FAIL'}  sec/roster: {len(df):,} rows, "
+              f"{int(df['year'].min())}-{int(df['year'].max())}, dup (cik,year)={dup}, "
+              f"n_filings<=0={empty}, missing years={gaps}")
+
+    path = sec_dir / "edgar_10k10q_filings.parquet"
+    if path.exists():
+        df = pd.read_parquet(path)
+        filed = pd.to_datetime(df["date_filed"])
+        dup = int(df["filename"].duplicated().sum())
+        bad_cik = int((df["cik"] <= 0).sum())
+        future = int((filed > pd.Timestamp.today()).sum())
+        unknown = sorted({f for f in df["form_type"].dropna().unique()
+                          if not f.startswith(("10-K", "10-Q"))})
+        # `quarter` is the EDGAR full-index partition the row came from; it
+        # must agree with the row's own date_filed, or the index was stitched
+        # together wrong and every filing-date lookup keyed on it is off.
+        q = df["quarter"].str.extract(r"(\d{4})Q(\d)").astype(float)
+        mismatch = int(((q[0] != filed.dt.year) | (q[1] != filed.dt.quarter)).sum())
+        file_ok = dup == 0 and bad_cik == 0 and future == 0 and not unknown and mismatch == 0
+        ok &= file_ok
+        print(f"{'PASS' if file_ok else 'FAIL'}  sec/filings: {len(df):,} rows, "
+              f"{filed.min().date()}-{filed.max().date()}, dup filename={dup}, cik<=0={bad_cik}, "
+              f"future={future}, non-10K/Q forms={unknown}, quarter-label mismatch={mismatch}")
+
+    return ok
+
+
 if __name__ == "__main__":
     all_ok = (test_prices_clean()
               & test_fundamentals_clean()
+              & test_sec_artifacts_clean()
               & test_macro_clean())
     sys.exit(0 if all_ok else 1)

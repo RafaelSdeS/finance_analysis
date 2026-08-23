@@ -1,16 +1,43 @@
-"""§1 guard from docs/DATA_LAYER_CORRECTNESS_PLAN.md: money must be in one
-scale (full currency units, never thousands) and the `*_margin` columns must
-share one convention (percent, never a mix of percent and fraction).
+"""§1 guard from docs/DATA_LAYER_CORRECTNESS_PLAN.md, rewritten 2026-08-23:
+money must be in one scale (full currency units, never thousands), every
+price-linear valuation ratio must be anchored to the SAME close it is divided
+by, and every ratio column must keep its declared percent-vs-fraction
+convention.
 
-The four scale identities (vpa*shares==equity, etc.) are asserted PER TICKER,
-worst offender reported -- not a pooled median. A pooled statistic over a
-panel that mixes correctly-scaled and still-in-thousands tickers reads
-deceptively close to correct (measured in the plan: a 497/115-ticker mixed
-panel pooled to ~1.0 median and hid a clean 1000x split). See the plan's
-tolerance banner for why every identity here uses a 10% band, not a tight one.
+WHAT CHANGED 2026-08-23, and why it matters
+-------------------------------------------
+The previous version aggregated each identity to a PER-TICKER median and
+allowed a 10% band. That combination is blind to the single largest defect
+class this file exists to catch: a per-QUARTER anchor error. When `pl` is
+built against the quarter-end close but divided by the daily close, the error
+is exactly the realized quarter-end -> filing-date return -- constant inside
+each quarter (std ~1e-16) but straddling 1.0 across quarters, so the
+per-ticker median lands back on ~1.0 and passes. Measured on the pre-fix BR
+build: median relative error 7.4%, 82% of rows off by >2%, and every existing
+check here green.
 
-The margin-scale check is POOLED instead, deliberately -- see its own
-docstring for why per-ticker doesn't work there.
+Two consequences, both landed here:
+
+  1. The identities are now asserted ROW-LEVEL, not per-ticker-median. Worst
+     offenders are still reported grouped by (ticker, reference_date) because
+     that is the shape an anchor bug takes, but the pass/fail is per row.
+  2. The band drops 0.10 -> 0.01, because these are ALGEBRAIC identities on a
+     single frame, not cross-vendor comparisons. Nothing legitimately makes
+     `market_cap` differ from `close * shares_outstanding`.
+
+Calibration (2026-08-23, BR dataset_v7 + US build 2026-08-16): all seven
+identities hold at **zero** row-level violations outside a 1% band, over
+1.1M BR and 6.2M US valid rows each. That is why this lands as zero
+tolerance rather than a rate ceiling -- there is no backlog to tolerate.
+Two of the seven (`pl*lpa == close`, `earnings_yield*pl == 1`) were only
+made true by the 2026-08-22 `rescale_price_linear_ratios` fix in
+`merge.py`/`features.py`; freezing them here is the point.
+
+The old `check_margin_scale()` pooled-median comparison is GONE, replaced by
+`SCALE_BANDS` below, which subsumes it: pinning each margin's own absolute
+level catches the ~86-100x `ebitda_margin` bug it was written for *and* the
+whole percent-vs-fraction class it could not see (it only ever compared
+margins against each other, so a uniform rescale of all of them cancelled).
 
 Usage: python tests/build_dataset/test_unit_scale_invariants.py
 """
@@ -29,117 +56,159 @@ sys.path.insert(0, str(ROOT / "tests"))
 from src.build_dataset.paths import OUTPUT_PATH, US_OUTPUT_PATH  # noqa: E402
 from test_utils import print_header, print_check, print_section_end  # noqa: E402
 
-BAND = 0.10  # DATA_LAYER_CORRECTNESS_PLAN.md tolerance banner: vendors legitimately
-             # disagree by a few percent; the real bugs this catches are off by 100-1000x.
-MIN_ROWS = 5  # a median over fewer than this isn't a meaningful per-ticker signal
+BAND = 0.01          # algebraic identities on one frame; measured violations at this band: 0
+MAX_EXAMPLES = 5     # worst offenders printed per failing identity
+BATCH_ROWS = 300_000  # the US file is 5.5 GB / 15.4M rows -- never read whole (see run())
+SAMPLE_PER_BATCH = 20_000  # per-column reservoir for the SCALE_BANDS medians
 
-# Order-of-magnitude guard, NOT an identity, and POOLED (not per-ticker) --
-# unlike the four scale identities above, a per-ticker check here produces
-# false positives: a near-zero-net_revenue distress quarter sends ebit_margin/
-# net_margin into the millions of percent (CLAUDE.md documents this as
-# intentional, kept unclipped -- e.g. OBTC3 measured at -31,023,867%), which
-# swamps a per-ticker spread check without being a scale bug at all. The
-# original §2c bug's own signature was a UNIFORM panel-wide factor (ratio
-# exactly 0.01 at every quantile p01-p99), so a pooled median -- computed only
-# over rows where both margins are in a plausible range, filtering out the
-# distress blowups -- reproduces exactly how that bug was actually found.
-ANCHOR_MARGIN = "gross_margin"  # dense in BR (CLAUDE.md), assumed correctly scaled
-# net_margin_q (0827f8b): single-quarter companion to net_margin, scaled via its
-# own *1000 list entries in ratios.py (net_revenue_q/net_income_q) -- a future
-# edit that drops one of those two entries but not the other would desync this
-# margin's numerator/denominator scale by 1000x while leaving net_margin itself
-# untouched, exactly the regression class this pooled check exists to catch.
-COMPARE_MARGINS = ["ebit_margin", "net_margin", "ebitda_margin", "net_margin_q"]
-REASONABLE_MARGIN_BOUND = 1000.0  # exclude near-zero-denominator distress blowups
-MARGIN_RATIO_BAND = 20.0  # measured healthy cross-margin ratios stay under ~6x;
-                          # the ebitda_margin bug produced ~86-100x
-MARGIN_COLS = [ANCHOR_MARGIN, *COMPARE_MARGINS]
-
-# label -> ratio(df) that should equal 1.0 on every valid row if the scale is right
+# label -> (columns needed, ratio that must equal 1.0 on every valid row).
+#
+# The first four are the original §1 scale identities (do the money columns
+# agree on one unit?). The last three are the valuation-ANCHOR identities
+# added 2026-08-23: they answer a different question -- is the price each
+# ratio was divided by the same price stored in `close` on that row? -- and
+# they are the ones that were silently false before the 2026-08-22 fix.
 IDENTITIES = [
-    ("vpa*shares == equity",       lambda df: (df["vpa"] * df["shares_outstanding"]) / df["equity"]),
-    ("lpa*shares == net_income",   lambda df: (df["lpa"] * df["shares_outstanding"]) / df["net_income"]),
-    ("market_cap/shares == close", lambda df: (df["market_cap"] / df["shares_outstanding"]) / df["close"]),
-    ("book_to_market*pvp == 1",    lambda df: df["book_to_market"] * df["pvp"]),
+    ("vpa*shares == equity",
+     ("vpa", "shares_outstanding", "equity"),
+     lambda d: (d["vpa"] * d["shares_outstanding"]) / d["equity"]),
+    ("lpa*shares == net_income",
+     ("lpa", "shares_outstanding", "net_income"),
+     lambda d: (d["lpa"] * d["shares_outstanding"]) / d["net_income"]),
+    ("market_cap == close*shares",
+     ("market_cap", "shares_outstanding", "close"),
+     lambda d: d["market_cap"] / (d["close"] * d["shares_outstanding"])),
+    ("book_to_market*pvp == 1",
+     ("book_to_market", "pvp"),
+     lambda d: d["book_to_market"] * d["pvp"]),
+    ("pl*lpa == close",
+     ("pl", "lpa", "close"),
+     lambda d: (d["pl"] * d["lpa"]) / d["close"]),
+    ("pvp*vpa == close",
+     ("pvp", "vpa", "close"),
+     lambda d: (d["pvp"] * d["vpa"]) / d["close"]),
+    ("earnings_yield*pl == 1",
+     ("earnings_yield", "pl"),
+     lambda d: d["earnings_yield"] * d["pl"]),
 ]
 
+# T2: the percent-vs-fraction convention is
+# real, load-bearing (peg_ratio divides one by the other) and, until this
+# table, asserted NOWHERE -- a source change emitting `roe` as a fraction
+# instead of percent points passed every test in the suite.
+#
+# Band = median of |x| over non-zero, finite rows, roughly a decade either
+# side of the measured value, so a 100x convention flip in either direction
+# is caught on every column while ordinary cross-market level differences
+# (US roa 1.6 vs BR roa 5.3) are not. `payout_ratio` gets its own wider band
+# because it legitimately sits near 1.0 -- a shared "fraction family" band
+# could not separate it from a 100x-flipped `log_return`.
+# Measured 2026-08-23 (BR dataset_v7 / US 2026-08-16 build):
+SCALE_BANDS = {
+    # percent points
+    "roe":                 (1.0, 200.0),    # BR 14.05  US  4.18
+    "roa":                 (0.3, 100.0),    # BR  5.34  US  1.62
+    "roic":                (0.5, 150.0),    # BR  9.45  US  4.01
+    "gross_margin":        (3.0, 300.0),    # BR 31.71  US 43.51
+    "net_margin":          (1.0, 200.0),    # BR 10.89  US  9.55
+    "ebit_margin":         (1.0, 200.0),    # BR 14.68  US 13.78
+    "ebitda_margin":       (1.0, 200.0),    # BR 18.21  US  n/a (empty_columns)
+    "net_margin_q":        (1.0, 200.0),    # BR 10.79  BR-only
+    "roe_q":               (0.3, 100.0),    # BR  3.59  BR-only
+    # fractions
+    "earnings_yield":      (0.002, 0.5),    # BR 0.098  US 0.0144
+    "div_yield_12m":       (0.002, 0.5),    # BR 0.033  US 0.0171
+    "payout_ratio":        (0.05, 10.0),    # BR 0.397  US 1.3798  <- straddles 1.0 on purpose
+    "revenue_growth_yoy":  (0.01, 1.0),     # BR 0.141  US 0.1113
+    "earnings_growth_yoy": (0.05, 5.0),     # BR 0.523  US 0.4598
+    "volatility_20d":      (0.002, 0.2),    # BR 0.024  US 0.0194
+    "volatility_60d":      (0.002, 0.2),    # BR 0.026  US 0.0205
+    "log_return":          (0.002, 0.2),    # BR 0.016  US 0.0123
+}
+MIN_SCALE_ROWS = 1000  # below this a median isn't a convention signal
 
-def check_identity(df, fn):
-    """Per-ticker median ratio; fails if the WORST ticker sits outside the band."""
-    ratio = fn(df)
-    ratio = ratio.where(np.isfinite(ratio))
-    stats = ratio.groupby(df["ticker"]).agg(["median", "count"])
-    stats = stats[stats["count"] >= MIN_ROWS]
-    if stats.empty:
-        return True, "no ticker has enough valid rows to assess", []
 
-    off = (stats["median"] - 1.0).abs()
-    failing = off[off > BAND].sort_values(ascending=False)
-    worst = [f"{t} (ratio {stats.loc[t, 'median']:.4f}, n={int(stats.loc[t, 'count'])})"
-             for t in failing.index[:5]]
-    detail = f"{len(failing)}/{len(stats)} tickers outside {BAND:.0%} band"
-    return failing.empty, detail, worst
-
-
-def check_margin_scale(df):
-    """All *_margin columns must read as the same convention, checked pooled
-    against the ANCHOR_MARGIN (see module docstring for why not per-ticker)."""
-    if ANCHOR_MARGIN not in df.columns:
-        return True, f"{ANCHOR_MARGIN} not in this dataset", []
-
-    anchor = df[ANCHOR_MARGIN]
-    in_bound = np.isfinite(anchor) & (anchor.abs().between(0.5, REASONABLE_MARGIN_BOUND))
-
-    ok = True
-    detail_parts, worst = [], []
-    for col in COMPARE_MARGINS:
-        if col not in df.columns:
-            continue
-        other = df[col]
-        valid = in_bound & np.isfinite(other) & (other.abs().between(0.5, REASONABLE_MARGIN_BOUND))
-        n = int(valid.sum())
-        if n < 100:
-            detail_parts.append(f"{col}: too few clean rows (n={n}), skipped")
-            continue
-        ratio = (other[valid] / anchor[valid]).median()
-        pair_ok = (1.0 / MARGIN_RATIO_BAND) <= ratio <= MARGIN_RATIO_BAND
-        ok &= pair_ok
-        detail_parts.append(f"{col}/{ANCHOR_MARGIN}={ratio:.3f} (n={n})")
-        if not pair_ok:
-            worst.append(f"{col} vs {ANCHOR_MARGIN}: pooled median ratio {ratio:.4f} (n={n})")
-
-    return ok, ", ".join(detail_parts), worst
+def _stream(path, columns):
+    """Row-group batches of just `columns`. The US parquet is 5.5 GB and this
+    machine has ~9 GB free -- a whole-file read of even 30 columns peaks
+    around 4 GB and is exactly the kind of thing that takes the editor with
+    it. Batching keeps peak RSS under ~100 MB regardless of market."""
+    pf = pq.ParquetFile(path)
+    for batch in pf.iter_batches(batch_size=BATCH_ROWS, columns=columns):
+        yield batch.to_pandas()
 
 
 def run(path, market):
-    print_header(f"UNIT-SCALE INVARIANTS -- {market}")
+    print_header(f"UNIT-SCALE + VALUATION-ANCHOR INVARIANTS -- {market}")
 
     if not path.exists():
         print(f"  SKIPPED: {path} not found (dataset not built)")
         return True
 
-    needed = {"ticker", "vpa", "lpa", "equity", "net_income", "shares_outstanding",
-              "market_cap", "close", "book_to_market", "pvp", *MARGIN_COLS}
-    # net_margin_q (0827f8b) is BR-only (CVM's single-quarter companion columns
-    # have no US/SEC equivalent) -- a fixed columns= projection would hard-fail
-    # reading the US file entirely instead of letting check_margin_scale's own
-    # per-column guard skip it, so intersect against this file's real schema first.
     available = set(pq.read_schema(path).names)
-    df = pd.read_parquet(path, columns=sorted(needed & available))
+    identities = [(lbl, cols, fn) for lbl, cols, fn in IDENTITIES
+                  if set(cols) <= available]
+    scale_cols = [c for c in SCALE_BANDS if c in available]
+
+    needed = sorted(({"ticker", "reference_date"} & available)
+                    | {c for _, cols, _ in identities for c in cols}
+                    | set(scale_cols))
+
+    valid = {lbl: 0 for lbl, _, _ in identities}
+    violations = {lbl: 0 for lbl, _, _ in identities}
+    examples = {lbl: [] for lbl, _, _ in identities}
+    samples = {c: [] for c in scale_cols}
+
+    for chunk in _stream(path, needed):
+        for lbl, _, fn in identities:
+            ratio = fn(chunk).replace([np.inf, -np.inf], np.nan)
+            ok = ratio.notna()
+            off = (ratio - 1.0).abs()
+            bad = ok & (off > BAND)
+            valid[lbl] += int(ok.sum())
+            violations[lbl] += int(bad.sum())
+            if bad.any() and len(examples[lbl]) < MAX_EXAMPLES:
+                worst = off[bad].nlargest(MAX_EXAMPLES).index
+                for i in worst[: MAX_EXAMPLES - len(examples[lbl])]:
+                    # An anchor bug is constant within a quarter, so the
+                    # (ticker, reference_date) pair is what identifies it --
+                    # both are best-effort here, a fixture may carry neither.
+                    who = " ".join(str(chunk.at[i, c]) for c in ("ticker", "reference_date")
+                                   if c in chunk.columns)
+                    examples[lbl].append(f"{who} ratio {ratio.at[i]:.4f}")
+        for col in scale_cols:
+            v = chunk[col].replace([np.inf, -np.inf], np.nan).dropna().abs()
+            v = v[v > 0]
+            if len(v):
+                samples[col].append(v.sample(min(SAMPLE_PER_BATCH, len(v)), random_state=0))
 
     passed = failed = 0
-    for label, fn in IDENTITIES:
-        ok, detail, worst = check_identity(df, fn)
-        print_check(f"{label}  [{detail}]", ok)
-        for w in worst:
-            print(f"      worst: {w}")
+    for lbl, _, _ in identities:
+        n, bad = valid[lbl], violations[lbl]
+        ok = n > 0 and bad == 0
+        rate = bad / n if n else float("nan")
+        print_check(f"{lbl}  [{bad}/{n} rows outside {BAND:.0%} band ({rate:.4%})]", ok)
+        for e in examples[lbl]:
+            print(f"      worst: {e}")
         passed, failed = passed + ok, failed + (not ok)
 
-    ok, detail, worst = check_margin_scale(df)
-    print_check(f"*_margin columns share one convention  [{detail}]", ok)
-    for w in worst:
-        print(f"      worst: {w}")
-    passed, failed = passed + ok, failed + (not ok)
+    skipped = [lbl for lbl, cols, _ in IDENTITIES if not set(cols) <= available]
+    if skipped:
+        print(f"      (not applicable to {market}: {', '.join(skipped)})")
+
+    for col in scale_cols:
+        if not samples[col]:
+            print(f"      (scale: {col} has no non-zero finite rows, skipped)")
+            continue
+        s = pd.concat(samples[col])
+        if len(s) < MIN_SCALE_ROWS:
+            print(f"      (scale: {col} only {len(s)} rows sampled, skipped)")
+            continue
+        lo, hi = SCALE_BANDS[col]
+        med = s.median()
+        ok = lo <= med <= hi
+        print_check(f"scale convention {col}  [median |x| = {med:.4f}, expected {lo}-{hi}]", ok)
+        passed, failed = passed + ok, failed + (not ok)
 
     print_section_end(passed, failed)
     return failed == 0

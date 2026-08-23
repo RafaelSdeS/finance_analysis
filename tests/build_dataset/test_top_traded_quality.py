@@ -31,6 +31,12 @@ from tests.build_dataset.test_final_dataset import (  # noqa: E402
 from test_utils import print_header, print_check, print_separator, numeric_columns  # noqa: E402
 
 DEFAULT_FILE = ROOT / "data/processed/ml_dataset.parquet"
+# With no --file, sweep both markets rather than BR alone. The US top-100
+# subset is the same shape and carries every column these checks read
+# (macro_cols below is an EXCLUSION set, so the US panel lacking `cdi` is
+# harmless). Gitignored and rebuildable, so a missing US file is a SKIP, not
+# a failure -- an explicit --file that is missing is still an error.
+DEFAULT_FILES = [DEFAULT_FILE, ROOT / "data/processed/us_ml_dataset_top100.parquet"]
 
 
 def build_universe(df, top_n=50):
@@ -156,11 +162,28 @@ def validate(df, universe_size):
 
     checks = []
 
-    # No NaN in critical columns
-    for col in ("open", "high", "low", "close", "adj_close", "volume", "traded_amount"):
+    # No NaN in critical columns.
+    #
+    # adj_close is deliberately NOT in this list (2026-08-23). It used to be,
+    # and that made this test contradict the repo's own decided policy: a NaN
+    # or non-positive adj_close is an ACCEPTED, unrecoverable BolsAI 2-decimal
+    # precision underflow (CLAUDE.md; DATA_LAYER_CORRECTNESS_PLAN.md §2a),
+    # already masked before log() -- provided it carries
+    # adj_close_precision_degraded == 1. test_final_dataset.py asserts exactly
+    # that rule; this file asserted zero-tolerance instead and hard-failed the
+    # whole top-50 gate on BPAC11/EPAR3, data nobody had decided was a defect.
+    # Measured 2026-08-23 on the full BR panel: 543 such rows, 0 unflagged.
+    for col in ("open", "high", "low", "close", "volume", "traded_amount"):
         if col in df.columns:
             nan_count = df[col].isna().sum()
             checks.append((f"no NaN in {col} [{nan_count} found]", nan_count == 0))
+
+    if {"adj_close", "adj_close_precision_degraded"}.issubset(df.columns):
+        bad_adj = df["adj_close"].isna() | (df["adj_close"] <= 0)
+        unflagged = int((bad_adj & (df["adj_close_precision_degraded"] != 1)).sum())
+        checks.append((f"NaN/non-positive adj_close always flagged degraded=1 "
+                       f"[{unflagged} unflagged of {int(bad_adj.sum())} such rows]",
+                       unflagged == 0))
 
     # No non-positive prices (exception: old delisted tickers may have adj_close=0 from collection)
     for col in ("open", "high", "low", "close"):
@@ -212,40 +235,11 @@ def validate(df, universe_size):
     return True
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Test data quality on top-traded tickers"
-    )
-    parser.add_argument(
-        "--file",
-        type=str,
-        default=str(DEFAULT_FILE),
-        help="Path to ml_dataset.parquet",
-    )
-    parser.add_argument(
-        "--top-n",
-        type=int,
-        default=50,
-        help="Top N tickers per period (whole + per-year)",
-    )
-    parser.add_argument(
-        "--strict",
-        action="store_true",
-        help="Fail on anomaly report findings (stale prices, outliers)",
-    )
-
-    args = parser.parse_args()
-
-    file_path = Path(args.file)
-
+def run_one(file_path, args) -> bool:
+    """One panel end-to-end. True if its hard validation passed."""
     print_separator()
-    print("TOP-TRADED TICKERS DATA QUALITY TEST")
+    print(f"TOP-TRADED TICKERS DATA QUALITY TEST -- {file_path.name}")
     print_separator()
-
-    if not file_path.exists():
-        print(f"\nERROR: file not found:\n{file_path}")
-        sys.exit(1)
-
     # -------------------------------------------------------------------------
     # LOAD AND BUILD UNIVERSE
     # -------------------------------------------------------------------------
@@ -317,7 +311,7 @@ def main():
         print("\n" + "=" * 80)
         print("HARD VALIDATION FAILED")
         print_separator()
-        sys.exit(1)
+        return False
 
     # --strict is not passed by run_all.py or ci.yml (see test_final_dataset.py's
     # matching note) -- stays informational until someone deliberately wires it in.
@@ -326,11 +320,51 @@ def main():
         print(f"STRICT MODE FAILED: {len(stale)} stale-price rows, "
               f"{len(outliers)} outlier cells")
         print_separator()
-        sys.exit(1)
+        return False
 
     print("\n" + "=" * 80)
     print("TEST PASSED")
     print_separator()
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Test data quality on top-traded tickers"
+    )
+    parser.add_argument(
+        "--file",
+        type=str,
+        default=None,
+        help="Path to a panel parquet (default: BR + US top-100)",
+    )
+    parser.add_argument(
+        "--top-n",
+        type=int,
+        default=50,
+        help="Top N tickers per period (whole + per-year)",
+    )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail on anomaly report findings (stale prices, outliers)",
+    )
+
+    args = parser.parse_args()
+
+    if args.file:
+        files = [Path(args.file)]
+        if not files[0].exists():
+            print(f"\nERROR: file not found:\n{files[0]}")
+            sys.exit(1)
+    else:
+        files = [f for f in DEFAULT_FILES if f.exists()]
+        for f in DEFAULT_FILES:
+            if not f.exists():
+                print(f"SKIP  {f.name}: not built yet")
+
+    if not all([run_one(f, args) for f in files]):
+        sys.exit(1)
 
 
 if __name__ == "__main__":

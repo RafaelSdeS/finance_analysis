@@ -15,7 +15,9 @@ per-cnpj price/shares join didn't corrupt the point-in-time balance items (equit
 relative to the raw parsed statements they came from.
 
 Part 3 (SKIPs if no fundamentals on disk): scans every ticker's balance sheet for
-a vendor-switch cliff (see test_balance_sheet_has_no_vendor_switch_cliff below).
+a vendor-switch cliff (see test_balance_sheet_has_no_vendor_switch_cliff below),
+and every ticker's TTM net_revenue for the flow analogue -- an adjacent-quarter
+jump a 4-quarter rolling sum cannot produce (test_flows_have_no_ttm_cliff).
 
 Run from project root:
     python tests/data_collection/test_cvm_statements.py
@@ -206,6 +208,61 @@ def test_balance_sheet_has_no_vendor_switch_cliff():
     return True
 
 
+def test_flows_have_no_ttm_cliff():
+    """The FLOW analogue of the balance-sheet cliff guard above, which covers
+    only equity/total_assets.
+
+    `net_revenue` is standardized to TTM for every ticker (BOLSAI_EXIT_PLAN.md
+    Task 0/1), and a TTM series is a 4-quarter rolling sum: adjacent quarters
+    share three of their four terms, so the ratio between them is heavily
+    damped by construction. A >3x adjacent-quarter jump is therefore either a
+    genuine collapse/restart, or a periodicity regression -- a ticker whose
+    flows silently reverted to single-quarter while the column still claims
+    TTM would show exactly this signature, and nothing else in the suite looks
+    at it.
+
+    Whole-history rather than tail-only (unlike the balance-sheet guard):
+    there is no single "vendor switch" moment to point at here, and the ratio's
+    own damping is what makes a whole-history scan tractable where CLAUDE.md
+    says a raw price-level scan is not.
+
+    Rate ceiling, not zero: measured 2026-08-23 at 227/27,847 = 0.82% across
+    612 files. The worst offenders are micro-caps with real collapse/restart
+    histories (INPR3, VIVR3, CORR3/4, IDNT3, JFEN3, PDTC3, MOAR3 -- 5-7 events
+    each), not a scale bug. 1.2% leaves headroom for ordinary universe growth
+    while a systemic periodicity regression would push this far past it.
+    """
+    CEILING = 0.012
+    RATIO_BAND = 3.0
+
+    files = sorted(config.FUND_DIR.glob("*.parquet"))
+    if not files:
+        print("SKIP  TTM flow cliff: no fundamentals files on disk")
+        return True
+
+    total = cliffs = 0
+    worst = {}
+    for path in files:
+        df = (pd.read_parquet(path, columns=["reference_date", "net_revenue"])
+                .sort_values("reference_date"))
+        s = df["net_revenue"].astype(float)
+        ratio = (s / s.shift()).replace([np.inf, -np.inf], np.nan).dropna()
+        ratio = ratio[ratio > 0]  # a sign flip is a different (real) event, not a scale cliff
+        total += len(ratio)
+        n = int(((ratio > RATIO_BAND) | (ratio < 1 / RATIO_BAND)).sum())
+        cliffs += n
+        if n:
+            worst[path.stem] = n
+
+    rate = cliffs / total if total else 0.0
+    ok = rate <= CEILING
+    top = sorted(worst.items(), key=lambda kv: -kv[1])[:8]
+    print(f"{'PASS' if ok else 'FAIL'}  TTM flow cliff: {cliffs}/{total} adjacent-quarter "
+          f"net_revenue ratios outside [1/{RATIO_BAND:g}, {RATIO_BAND:g}] = {rate:.2%} "
+          f"(ceiling {CEILING:.1%}); worst {top}")
+    return ok
+
+
 def test_ticker_family_resolves_continuity_chain():
     """_ticker_family must resolve TIMP3 and TIMS3 (real ticker_continuity.json
     rename entry) to the same family, both directions, and leave an unrelated
@@ -318,6 +375,7 @@ def test_apply_share_events_no_double_count_when_fre_already_reflects_split():
 if __name__ == "__main__":
     ok = (test_ratio_math() and test_cross_source_vs_bolsai()
           and test_balance_sheet_has_no_vendor_switch_cliff()
+          and test_flows_have_no_ttm_cliff()
           and test_ticker_family_resolves_continuity_chain() and test_share_events_adjustment()
           and test_apply_share_events_no_double_count_when_fre_already_reflects_split())
     sys.exit(0 if ok else 1)

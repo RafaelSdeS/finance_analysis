@@ -32,9 +32,41 @@ index, not the reasoning):
     ANCHOR_TOLERANCE_DAYS = 7 -- not cross-vendor, but the same category:
                                  how far a live-verified last-trade-date
                                  anchor may drift before the test flags it.
+  tests/build_dataset/test_unit_scale_invariants.py
+    BAND = 0.01          -- NOT cross-vendor. These are algebraic identities on
+                            one frame (market_cap == close*shares), so the band
+                            is float-noise headroom, not vendor disagreement.
+                            Measured 2026-08-23: 0 violations over 13M rows,
+                            both markets. Was 0.10 + a per-ticker median until
+                            then, which is blind to a per-QUARTER anchor error.
+    SCALE_BANDS          -- per-column percent-vs-fraction bands, ~a decade
+                            either side of measured, sized to catch a 100x
+                            convention flip and nothing narrower.
+  tests/build_dataset/test_us_final_dataset.py
+    CAGR_*_EXPLAINED_FLOOR = 0.85 / 0.68 -- US analogue of test_final_dataset's
+                            0.8 / 0.75. Measured 0.900 / 0.731.
+    REF_REGRESSION_TICKER_CEILING = 0.01 -- share of tickers whose merged
+                            reference_date ever moves backwards. BR measures
+                            0.00%; RED on landing for US (50.09%) on purpose.
+    STALE_FUNDAMENTAL_RATE_CEILING = 0.01 -- share of has_fundamentals rows
+                            whose fiscal period is >400d old. BR 0.11%; RED on
+                            landing for US (9.47%), same root cause.
+    FROZEN_PL_RATE_CEILING = 0.01 -- measured 0/84,568.
+  tests/data_collection/test_cvm_statements.py
+    TTM flow cliff CEILING = 0.012 -- adjacent-quarter net_revenue ratios
+                            outside [1/3, 3]. Measured 227/27,847 = 0.82%.
+  tests/data_collection/test_br_data_quality.py
+    _SELIC_CDI_MAX_SPREAD = 0.02 -- ~2.6x the observed max (0.00764).
 
-Last reviewed as a set: 2026-07-13 (test suite audit). Add new tolerances
-here when introduced elsewhere.
+RATE CEILINGS ONLY EARN THEIR KEEP WHILE THE BACKLOG THEY NAME EXISTS. A
+ceiling left at its landing value after the backlog clears is pure slack: it
+stays green through a regression all the way back up to the old number. Two
+were re-measured 2026-08-23 -- _JUMP_RATE_CEILING (0.12 vs. 11.22% measured,
+unchanged, still earning it) and _INF_RATE_CEILING (0.20 vs. 0.00% measured,
+ratcheted to zero).
+
+Last reviewed as a set: 2026-08-23. Add new tolerances here when introduced
+elsewhere.
 """
 
 import os
