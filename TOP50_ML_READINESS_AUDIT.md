@@ -22,7 +22,7 @@ Automated pairwise return-correlation scan (the general form of the check that c
 | 2 | PETR4 | READY WITH CAVEATS | 0 | 1 | 0 |
 | 3 | VALE3 | READY | 0 | 0 | 0 |
 | 4 | ITUB4 | READY | 0 | 0 | 0 |
-| 5 | EQTL3 | READY WITH CAVEATS | 0 | 1 | 0 |
+| 5 | EQTL3 | READY | 0 | 0 | 0 |
 | 6 | SBSP3 | READY | 0 | 0 | 0 |
 | 7 | CSAN3 | READY WITH CAVEATS | 0 | 1 | 0 |
 | 8 | BBDC4 | READY | 0 | 0 | 0 |
@@ -92,10 +92,9 @@ Also resolved during this pass: the "missing sector" warning for `PETR3`/`AZUL4`
 
 ### WARNING
 
-- **B3SA3**: 3 single-day |log_return| >= 0.3 not near a recorded corporate event
+- **B3SA3**: 1 single-day |log_return| >= 0.3 not near a recorded corporate event
 - **PETR4**: 1 single-day |log_return| >= 0.3 not near a recorded corporate event
-- **EQTL3**: 2 single-day |log_return| >= 0.3 not near a recorded corporate event
-- **CSAN3**: 4 single-day |log_return| >= 0.3 not near a recorded corporate event
+- **CSAN3**: 2 single-day |log_return| >= 0.3 not near a recorded corporate event
 - **PRIO3**: 6 single-day |log_return| >= 0.3 not near a recorded corporate event
 - **PETR3**: 2 single-day |log_return| >= 0.3 not near a recorded corporate event
 - **ABEV3**: has_fundamentals rate only 83% since 2011-04-01
@@ -137,5 +136,5 @@ PASSED for this subset+window (ticker=object, trade_date=datetime64, close/has_f
 - [x] `MRFG3`/`MBRF3` chronic precision-floor bug fixed from yfinance (§4).
 - [x] `CCRO3->MOTV3` rename added to `ticker_continuity.json`; `BHIA3`/`BRKM5` collection gaps backfilled from yfinance (§5).
 - [x] Zero CRITICAL findings remain across all 50 tickers.
-- [ ] Optional: review warning-level findings for the 21 "READY WITH CAVEATS" tickers above — per explicit scope of this pass, single-day |log_return| >= 0.3 warnings not near a recorded corporate event are treated as informational only and were not investigated individually; every other warning category (gaps, stale prices, fundamentals coverage, sector) was investigated and is resolved or explained above.
+- [ ] Optional: review warning-level findings for the 20 "READY WITH CAVEATS" tickers above — per explicit scope of this pass, single-day |log_return| >= 0.3 warnings not near a recorded corporate event are treated as informational only and were not investigated individually; every other warning category (gaps, stale prices, fundamentals coverage, sector) was investigated and is resolved or explained above.
 - [ ] Re-run this script after any raw data re-collection or dataset rebuild (`python tests/build_dataset/test_top50_ml_readiness.py`).

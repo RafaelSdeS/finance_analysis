@@ -4,6 +4,7 @@ macro series, and dividends into one daily panel."""
 import numpy as np
 import pandas as pd
 
+from .features import rescale_price_linear_ratios
 from .paths import CVM_CROSSWALK_PATH, MACRO_DIR
 from .quality_filters import _statutory_available_date
 
@@ -135,6 +136,27 @@ def merge_prices_and_fundamentals(prices, fundamentals):
             direction="backward",
         )["close"]
         price_at_filing.index = filing_dates.index
+
+        # market_cap/pl/pvp/etc. were built off the OLD close_price (reference_date,
+        # quarter-end); swapping close_price alone without rescaling them the same
+        # way silently strands them on the old basis (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md,
+        # 2026-08-22 -- confirmed as the dominant driver of AZUL3/ADMF3/RVEE3/CELP6's
+        # market_cap/shares==close test failures, and present to a smaller degree
+        # dataset-wide). Rescale by the same ref_date -> availability_date factor
+        # recompute_valuation_daily later uses for the availability_date -> daily
+        # close leg, so the two legs compose instead of the first vanishing.
+        # Only when close_price was a REAL pre-existing column: a fixture (or
+        # any caller) that never carried one has no old anchor to correct
+        # FROM, and several existing tests set pl/market_cap as plain markers
+        # with no close_price at all, expecting them to pass through untouched.
+        if "close_price" in merged.columns:
+            old_close_price = merged["close_price"]
+            factor = pd.Series(1.0, index=merged.index)
+            factor.loc[has_filing] = (
+                price_at_filing / old_close_price.loc[has_filing]
+            ).where(old_close_price.loc[has_filing] > 0)
+            merged = rescale_price_linear_ratios(merged, factor)
+
         merged.loc[has_filing, "close_price"] = price_at_filing
 
     # Restore ticker/date row order (merge_asof's global date sort above

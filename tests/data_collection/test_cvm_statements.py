@@ -32,7 +32,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.data_collection import config, validate  # noqa: E402
 from src.data_collection.cvm.ratios import (  # noqa: E402
-    _apply_share_events, _share_events, _ticker_family, compute_ratios,
+    _apply_share_events, _share_events, _shares_asof, _ticker_family, compute_ratios,
 )
 from src.data_collection.cvm.statements import load_statements  # noqa: E402
 
@@ -272,8 +272,52 @@ def test_share_events_adjustment():
     return True
 
 
+def test_apply_share_events_no_double_count_when_fre_already_reflects_split():
+    """RVEE3's real shape: FRE's OWN capital_social timeline already jumped 10x
+    the day BEFORE corporate_events.parquet's recorded 1:10 split -- CVM's
+    filing already reflects the post-split count (contrast TIMS3, which
+    _apply_share_events was built for: FRE stayed frozen ACROSS its split).
+    Reapplying the recorded split on top of an FRE snapshot that already
+    reflects it double-counts (confirmed exactly: 10,171,150 -> 101,711,500 in
+    the real raw fundamentals from 2025-09-30). A genuinely separate LATER
+    event must still apply."""
+    shares = pd.DataFrame({
+        "cnpj": ["RVEE_CNPJ"] * 2,
+        "effective_date": pd.to_datetime(["2025-06-01", "2025-08-06"]),
+        "shares": [1_017_115.0, 10_171_150.0],
+    })
+    events = pd.DataFrame({
+        "ticker": ["RVEE3", "RVEE3"],
+        "date": pd.to_datetime(["2025-08-07", "2026-01-01"]),
+        "type": ["SPLIT", "SPLIT"],
+        "ratio_from": [1.0, 1.0],
+        "ratio_to": [10.0, 2.0],
+        "factor": [10.0, 2.0],
+    })
+    tmp_path = ROOT / "tests" / "data_collection" / "_tmp_corp_events_rvee_test.parquet"
+    events.to_parquet(tmp_path, index=False)
+    orig_path = config.CORP_EVENTS_PATH
+    try:
+        config.CORP_EVENTS_PATH = tmp_path
+
+        ref_dates = pd.Series(pd.to_datetime(["2025-07-01", "2025-09-30", "2026-03-31"]))
+        shares_vals, eff_dates, prev_shares_vals = _shares_asof(shares, "RVEE_CNPJ", ref_dates)
+        out = _apply_share_events(shares_vals, eff_dates, ref_dates, "RVEE3", prev_shares_vals)
+
+        assert abs(out[0] - 1_017_115.0) < 1e-6, out[0]      # before either event
+        assert abs(out[1] - 10_171_150.0) < 1e-6, out[1]     # NOT 101,711,500 -- no double-count
+        assert abs(out[2] - 20_342_300.0) < 1e-6, out[2]     # 10,171,150 * 2 -- later event still applies
+    finally:
+        config.CORP_EVENTS_PATH = orig_path
+        tmp_path.unlink(missing_ok=True)
+
+    print("PASS  RVEE3-shape share-event double-count guard")
+    return True
+
+
 if __name__ == "__main__":
     ok = (test_ratio_math() and test_cross_source_vs_bolsai()
           and test_balance_sheet_has_no_vendor_switch_cliff()
-          and test_ticker_family_resolves_continuity_chain() and test_share_events_adjustment())
+          and test_ticker_family_resolves_continuity_chain() and test_share_events_adjustment()
+          and test_apply_share_events_no_double_count_when_fre_already_reflects_split())
     sys.exit(0 if ok else 1)

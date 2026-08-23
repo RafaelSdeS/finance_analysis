@@ -172,6 +172,23 @@ pre-existing issue; fixed same day.
       rather than another per-ticker patch. Mechanism 2 (RVEE3's double-count) is narrow and
       specific to `_apply_share_events()`.
 
+      **Both fixed 2026-08-22 (code-complete, not yet verified against a rebuild):**
+      Mechanism 1: the EV-recovery + linear-ratio-multiply block inside `recompute_valuation_daily()`
+      was extracted into a shared `rescale_price_linear_ratios(df, factor)` (`features.py`), now
+      also called from `merge.py`'s close-price swap (with `factor = price_at_filing/old_close_price`)
+      so the ref_date→availability_date leg no longer silently vanishes before the
+      availability_date→daily-close leg runs. Guarded for the US build (where `market_cap` is
+      entirely absent, not just NaN) via `if "market_cap" in df.columns and "net_debt" in df.columns`.
+      Mechanism 2: `_shares_asof()` now also returns each matched FRE row's own prior snapshot
+      (`prev_shares`); `_apply_share_events()` skips any "applicable" event whose factor matches
+      the observed `shares_vals[i]/prev_shares[i]` ratio within `_EVENT_DEDUP_TOL` — i.e. already
+      explained by FRE's own transition — rather than reapplying it. New tests:
+      `tests/build_dataset/test_merge.py::test_merge_rescales_price_linear_ratios_on_close_price_swap`,
+      `tests/data_collection/test_cvm_statements.py::test_apply_share_events_no_double_count_when_fre_already_reflects_split`.
+      Not yet run: these new/updated tests, `tests/run_all.py --group fast`, a full rebuild (which
+      also finally exercises the TIMS3 raw-OHLC repair above, still unverified too), and a re-check
+      of `test_unit_scale_invariants.py`'s worst-offenders list against the rebuilt dataset.
+
 ## Fundamentals coverage
 
 - [x] **`cagr_revenue` NaN coverage dropped to 78.1% explained** (was implicitly higher before;

@@ -207,6 +207,56 @@ def test_merge_close_price_lookup_does_not_cross_tickers() -> None:
     assert approx(result.loc[("PRICEY", filed + pd.Timedelta(days=1)), "close_price"], 9000.0)
 
 
+def test_merge_rescales_price_linear_ratios_on_close_price_swap() -> None:
+    """market_cap/pl/pvp/p_sr/ev_ebit/book_to_market were all built off the OLD
+    (reference_date) close_price. Swapping in the actual close at
+    fundamentals_available_date without rescaling them the same way strands
+    them on the old price basis -- confirmed as the dominant driver of
+    AZUL3/ADMF3/RVEE3/CELP6's market_cap/shares==close test failures
+    (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md, 2026-08-22): AZUL3's ratio was a
+    PERFECT constant across its whole history, the signature of a stale
+    price anchor, not noise."""
+    ref_date = pd.Timestamp("2026-03-31")
+    filed = ref_date + pd.Timedelta(days=45)
+
+    old_close_price, shares, net_debt, ebit = 100.0, 1_000_000.0, 2_000_000.0, 500_000.0
+    old_market_cap = old_close_price * shares
+    old_ev_ebit = (old_market_cap + net_debt) / ebit
+    old_book_to_market = 5_000_000.0 / old_market_cap
+
+    fundamentals = pd.DataFrame({
+        "ticker": ["A"],
+        "reference_date": [ref_date],
+        "fundamentals_available_date": [filed],
+        "close_price": [old_close_price],
+        "market_cap": [old_market_cap],
+        "pl": [10.0], "pvp": [2.0], "p_sr": [3.0],
+        "net_debt": [net_debt],
+        "ev_ebit": [old_ev_ebit],
+        "book_to_market": [old_book_to_market],
+    })
+    new_close = 130.0  # 30% off old_close_price -- past any rounding noise
+    prices = pd.DataFrame({
+        "ticker": ["A", "A"],
+        "trade_date": [filed, filed + pd.Timedelta(days=1)],
+        "close": [new_close, new_close],
+    })
+
+    result = merge_prices_and_fundamentals(prices, fundamentals).set_index(
+        ["ticker", "trade_date"])
+    row = result.loc[("A", filed + pd.Timedelta(days=1))]
+
+    factor = new_close / old_close_price
+    assert approx(row["close_price"], new_close)
+    assert approx(row["market_cap"], old_market_cap * factor)
+    assert approx(row["pl"], 10.0 * factor)
+    assert approx(row["pvp"], 2.0 * factor)
+    assert approx(row["p_sr"], 3.0 * factor)
+    assert approx(row["book_to_market"], old_book_to_market / factor)
+    expected_ev_ebit = (old_market_cap * factor + net_debt) / ebit
+    assert approx(row["ev_ebit"], expected_ev_ebit)
+
+
 def test_merge_ticker_with_zero_fundamentals_gets_nan_not_crash() -> None:
     """A ticker present in prices but entirely absent from fundamentals
     (previously handled by a per-ticker .get(ticker, empty-frame) fallback)

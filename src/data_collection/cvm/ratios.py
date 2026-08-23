@@ -158,20 +158,25 @@ def _price_asof(prices: pd.DataFrame, ref_dates: pd.Series) -> pd.Series:
 
 
 def _shares_asof(shares: pd.DataFrame, cnpj: str, ref_dates: pd.Series):
-    """Returns (shares, effective_date) per ref_date -- the effective_date is
-    needed by `_apply_share_events` to know how stale each matched FRE record
-    already was at ref_date."""
+    """Returns (shares, effective_date, prev_shares) per ref_date -- the
+    effective_date is needed by `_apply_share_events` to know how stale each
+    matched FRE record already was at ref_date; prev_shares (the SAME cnpj's
+    immediately prior FRE snapshot) lets it tell whether a recorded
+    corporate_events split is already reflected in that transition, instead of
+    still needing to be forward-adjusted."""
     tl = shares[shares["cnpj"] == cnpj].sort_values("effective_date")
     if tl.empty:
         nan_shares = pd.Series(float("nan"), index=ref_dates.index)
         nat_dates = pd.Series(pd.NaT, index=ref_dates.index)
-        return nan_shares.to_numpy(), nat_dates.to_numpy()
+        return nan_shares.to_numpy(), nat_dates.to_numpy(), nan_shares.to_numpy()
+    tl = tl.assign(prev_shares=tl["shares"].shift(1))
     merged = pd.merge_asof(
         pd.DataFrame({"reference_date": ref_dates}).sort_values("reference_date"),
-        tl[["effective_date", "shares"]],
+        tl[["effective_date", "shares", "prev_shares"]],
         left_on="reference_date", right_on="effective_date", direction="backward")
     merged = merged.set_index("reference_date").reindex(ref_dates)
-    return merged["shares"].to_numpy(), merged["effective_date"].to_numpy()
+    return (merged["shares"].to_numpy(), merged["effective_date"].to_numpy(),
+            merged["prev_shares"].to_numpy())
 
 
 # Some real corporate actions are recorded twice within a few days at an
@@ -251,7 +256,8 @@ def _share_events(ticker: str) -> pd.DataFrame:
     return pd.DataFrame(kept)[["date", "share_multiplier"]].reset_index(drop=True)
 
 
-def _apply_share_events(shares_vals, effective_dates, ref_dates: pd.Series, ticker: str):
+def _apply_share_events(shares_vals, effective_dates, ref_dates: pd.Series, ticker: str,
+                         prev_shares_vals=None):
     """Forward-adjust a FRE-sourced share count by any real split/inplit that
     happened AFTER the matched FRE record's own effective_date and at-or-before
     ref_date -- the gap `_shares_asof`'s backward-merge alone leaves stale
@@ -260,6 +266,17 @@ def _apply_share_events(shares_vals, effective_dates, ref_dates: pd.Series, tick
     a post-split capital_social update for its CNPJ). Only closes THAT gap --
     a CNPJ with no FRE row at all still comes out NaN/stale; this is a partial
     mitigation, not a substitute for ticker_continuity.json-level verification.
+
+    `prev_shares_vals` (the matched FRE record's own prior snapshot, from
+    `_shares_asof`): guards against double-counting an event that FRE's
+    transition ALREADY reflects, distinct from TIMS3's "FRE never updated at
+    all" shape. Confirmed on RVEE3: its FRE capital_social filing itself jumps
+    10x the day BEFORE the recorded 1:10 split (both describe the SAME real
+    action) -- naively reapplying the recorded factor on top of that already-
+    adjusted FRE value inflated shares_outstanding 100x instead of 10x
+    (docs/DATA_LAYER_FOLLOWUP_FINDINGS.md, 2026-08-22). Defaults to None (all
+    prior snapshots unknown) so the pre-existing unit test's 4-arg call keeps
+    behaving identically -- no exclusion ever triggers without this data.
     """
     events = _share_events(ticker)
     if events.empty:
@@ -271,10 +288,20 @@ def _apply_share_events(shares_vals, effective_dates, ref_dates: pd.Series, tick
     # own positional `.to_numpy()`).
     ref_dates = pd.to_datetime(pd.Series(list(ref_dates)))
     eff_dates = pd.Series(list(effective_dates))
+    prev_shares = (pd.Series(float("nan"), index=range(len(out))) if prev_shares_vals is None
+                   else pd.Series(list(prev_shares_vals)))
     for i in range(len(out)):
         if pd.isna(out[i]) or pd.isna(eff_dates.iloc[i]):
             continue
         applicable = events[(events["date"] > eff_dates.iloc[i]) & (events["date"] <= ref_dates.iloc[i])]
+        if applicable.empty:
+            continue
+        prev = prev_shares.iloc[i]
+        if pd.notna(prev) and prev != 0:
+            observed_ratio = out[i] / prev
+            applicable = applicable[
+                ~np.isclose(applicable["share_multiplier"], observed_ratio, rtol=_EVENT_DEDUP_TOL)
+            ]
         if not applicable.empty:
             out[i] *= applicable["share_multiplier"].prod()
     return out
@@ -310,9 +337,9 @@ def build_fundamentals(tickers: list[str] | None = None, rebuild: bool = False) 
         prices = pd.read_parquet(px_path)
         q = q.copy()
         q["close_price"] = _price_asof(prices, q["reference_date"])
-        shares_vals, shares_eff_dates = _shares_asof(shares, cnpj, q["reference_date"])
+        shares_vals, shares_eff_dates, shares_prev_vals = _shares_asof(shares, cnpj, q["reference_date"])
         q["shares_outstanding"] = _apply_share_events(
-            shares_vals, shares_eff_dates, q["reference_date"], ticker)
+            shares_vals, shares_eff_dates, q["reference_date"], ticker, shares_prev_vals)
 
         df = compute_ratios(q, row["corporate_name"])
         df["ticker"] = ticker
