@@ -321,11 +321,12 @@ def main():
     print("WRITING MANIFEST & CONFIG")
     print("=" * 80)
 
-    # single read-back for manifest/split_config (unavoidable — both need the
-    # full date range / column distributions), now with nothing else resident
-    dataset = pd.read_parquet(OUTPUT_PATH)
-    manifest = write_manifest(dataset, dropped_no_fundamentals=dropped_no_fundamentals)
-    write_split_config(dataset)
+    # Stream from parquet instead of loading the full dataset into memory --
+    # write_manifest reads one column at a time via parquet_path;
+    # write_split_config only ever needs trade_date, so a single-column
+    # read stands in for the full dataset (same pattern as build_us_dataset.py)
+    manifest = write_manifest(parquet_path=OUTPUT_PATH, dropped_no_fundamentals=dropped_no_fundamentals)
+    write_split_config(pd.read_parquet(OUTPUT_PATH, columns=["trade_date"]))
     sync_dataset_version(manifest)
 
     print(f"Saved to: {OUTPUT_PATH}")
@@ -334,14 +335,13 @@ def main():
     print("=" * 80)
     print("FINAL DATASET SUMMARY")
     print("=" * 80)
-    print(f"Rows: {len(dataset)}")
-    print(f"Columns: {len(dataset.columns)}")
+    pf = pq.ParquetFile(OUTPUT_PATH)
+    print(f"Rows: {pf.metadata.num_rows}")
+    print(f"Columns: {len(pf.schema_arrow.names)}")
     print()
     print("Columns:")
-    for col in dataset.columns:
+    for col in pf.schema_arrow.names:
         print(f"  {col}")
-    print()
-    print(dataset.head())
 
 
 if __name__ == "__main__":

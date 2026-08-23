@@ -203,13 +203,18 @@ def write_split_config(dataset, train_frac=0.7, val_frac=0.15, path=None):
     Filter ml_dataset.parquet by trade_date against these cutoffs at load time
     (train: <= train_end, val: train_end < d <= val_end, test: > val_end)
     instead of keeping three separate parquet files in sync with the source.
+
+    Only touches dataset["trade_date"] -- at build-dataset scale, pass
+    pd.read_parquet(path, columns=["trade_date"]) instead of the full
+    in-memory dataset to avoid loading the whole parquet just for this call
+    (see build_ml_dataset.py / build_us_dataset.py call sites).
     """
     if path is None:  # see write_manifest's comment on why not `path=SPLIT_CONFIG_PATH`
         path = SPLIT_CONFIG_PATH
     train_end, val_end = compute_split_dates(dataset, train_frac, val_frac)
-    is_train = dataset["trade_date"] <= train_end
-    is_val = (dataset["trade_date"] > train_end) & (dataset["trade_date"] <= val_end)
-    is_test = dataset["trade_date"] > val_end
+    is_train = int((dataset["trade_date"] <= train_end).sum())
+    is_val = int(((dataset["trade_date"] > train_end) & (dataset["trade_date"] <= val_end)).sum())
+    is_test = int((dataset["trade_date"] > val_end).sum())
 
     config = {
         "built_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -218,9 +223,9 @@ def write_split_config(dataset, train_frac=0.7, val_frac=0.15, path=None):
         "train_end": str(train_end.date()),
         "val_end": str(val_end.date()),
         "rows": {
-            "train": int(is_train.sum()),
-            "val": int(is_val.sum()),
-            "test": int(is_test.sum()),
+            "train": is_train,
+            "val": is_val,
+            "test": is_test,
         },
     }
     path.write_text(json.dumps(config, indent=1))
