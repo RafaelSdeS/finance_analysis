@@ -108,6 +108,7 @@ def synthesize_company_info() -> None:
 
     out = (pd.concat([refreshed, new_rows], ignore_index=True)
              .drop_duplicates("ticker", keep="last"))
+    path.parent.mkdir(parents=True, exist_ok=True)
     out.to_parquet(path, index=False)
     log.info("company_info: %d status change(s) (%d reactivation(s) blocked as stale), "
               "+%d new row(s) -> %d total",

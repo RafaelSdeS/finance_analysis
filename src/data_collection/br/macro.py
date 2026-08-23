@@ -26,7 +26,10 @@ def collect_macro(mode: str):
     try:
         for name, sid in config.BCB_SERIES.items():
             path = config.MACRO_DIR / f"{name}.parquet"
-            start = cp.get(name, {}).get("last_date")
+            # Checkpoint only trusted if the file it describes still exists -- same
+            # wiped-file/stale-checkpoint bug yf/_common.py's _seed_last_date guards
+            # against (its docstring has the full incident writeup).
+            start = cp.get(name, {}).get("last_date") if path.exists() else None
             start = (pd.to_datetime(start) + pd.Timedelta(days=1)).strftime("%Y-%m-%d") \
                 if start else config.START_DATE
             end = datetime.now().strftime("%Y-%m-%d")
