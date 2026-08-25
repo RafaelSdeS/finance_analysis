@@ -18,6 +18,7 @@ Sources:
 """
 
 import logging
+import re
 from datetime import datetime
 from time import sleep
 
@@ -64,20 +65,26 @@ def get_all_tickers_raw() -> list[str]:
 
 
 # "11"-suffix tickers are ambiguous: FII/ETF quotas use it, but so do stock
-# *units* (bundled ON+PN of a real operating company, e.g. ALUP11, KLBN11).
-# The regex below can't tell them apart, so it drops the whole suffix and
-# these known operating-company units are added back explicitly.
-# BPAC11 (BTG Pactual) confirmed missing 2026-07-14: no price or fundamentals
-# file existed under any BPAC* ticker — its canonical unit was never collected.
-KNOWN_UNIT_TICKERS = {"BOVA11", "BPAC11"}
+# *units* (bundled ON+PN of a real operating company, e.g. ALUP11, KLBN11,
+# BPAC11). A unit is confirmed real — not a fund — when the FCA crosswalk
+# resolves a CNPJ for it, the same test collect_delisted.py's
+# candidate_tickers() already applies. Replaces a hand-maintained allowlist
+# that silently drifted out of date (missed ALUP11/TAEE11/KLBN11/SANB11/...
+# — docs/BR_DATA_RECONSTRUCTION_PLAN.md DEFECT-1b).
+_UNIT = re.compile(r"^[A-Z]{4}11$")
 
 
 def get_all_tickers() -> list[str]:
-    import re
     _standard = re.compile(r"^[A-Z0-9]{4}[3-8]$")
+    raw = get_all_tickers_raw()
     # exclude BDRs (34/35), FIIs/ETFs (11), and non-standard suffixes
-    result = set(t for t in get_all_tickers_raw() if _standard.match(t))
-    result |= KNOWN_UNIT_TICKERS
+    result = {t for t in raw if _standard.match(t)}
+
+    xwalk_path = config.CVM_DIR / "fca_crosswalk.parquet"
+    if xwalk_path.exists():
+        crosswalk_tickers = set(pd.read_parquet(xwalk_path)["ticker"])
+        result |= {t for t in raw if _UNIT.match(t) and t in crosswalk_tickers}
+
     return sorted(result)
 
 
