@@ -35,7 +35,7 @@ from .cross_sectional import BENCHMARK_COLS
 from .features import compute_fundamental_features, compute_price_features, fill_missing_cagr
 from .loaders import load_dividends, load_fundamentals, load_prices
 from .manifest import write_manifest, write_split_config
-from .merge import merge_dividends, merge_prices_and_fundamentals
+from .merge import MergeBatcher
 from .paths import (
     US_COMPANY_INFO_PATH,
     US_DIVIDENDS_DIR,
@@ -358,69 +358,32 @@ def _load_batch_from_disk(batch_tickers):
     return p, f
 
 
-class _MergeBatcher:
-    """Callable batch_fn for compute_features_chunked (build_ml_dataset.py),
-    PLUS an explicit release() to drop what it holds once Pass 1 is done.
-
-    A plain closure + `del batch_fn` inside compute_features_chunked is NOT
-    enough: main() keeps its OWN reference to this same object bound in its
-    frame for the entire (synchronous, nested) compute_features_chunked
-    call -- a caller's frame doesn't go away just because the callee deletes
-    its own copy of a reference, so refcounting alone never reaches 0 there
-    (confirmed via a minimal repro before landing this). release() instead
-    MUTATES this instance's own attributes to None -- visible through every
-    reference to it, main()'s included -- which is what actually frees them
-    before Pass 2/3, which never call batch_fn again.
-
-    `load_batch(tickers) -> (prices, fundamentals)` is injected rather than
-    hardcoded: production passes _load_batch_from_disk, tests pass a slicer
-    over in-memory fixtures, and this class stays about MERGING a batch
-    rather than about where the batch came from.
-    """
-
-    def __init__(self, load_batch, company_info, dividends):
-        self.load_batch = load_batch
-        self.company_info = company_info
-        self.dividends = dividends
-
-    def __call__(self, batch_tickers):
-        bt = set(batch_tickers)
-        p, f = self.load_batch(bt)
-        d = self.dividends[self.dividends["ticker"].isin(bt)]
-
-        merged = merge_prices_and_fundamentals(p, f)
-        del p, f  # the merged panel supersedes both; holding them through the
-        # three joins below is pure dead weight at the batch's peak
-        merged = merge_company_info_us(merged, self.company_info)
-        merged = merge_macro_us(merged)
-        merged = merge_dividends(merged, d)
-        return merged
-
-    def release(self):
-        self.load_batch = self.company_info = self.dividends = None
-
-
 def make_merge_batch_fn(company_info, dividends, load_batch=_load_batch_from_disk):
-    """Returns a _MergeBatcher (see its docstring for release()) that loads
-    and merges one ticker-batch at a time instead of the whole universe.
+    """Returns a MergeBatcher bound to the US merges: it loads and merges one
+    ticker-batch at a time instead of the whole universe. See merge.py for the
+    full rationale (why the merges must be batched, why release() exists, and
+    why only merge_company_info's status rules need a whole-dataset date).
 
-    Why the merge itself must be batched: merge_prices_and_fundamentals's
-    OUTPUT -- the daily panel with every fundamentals column forward-filled
-    onto it -- is ~1,000 B/row at US fundamentals' width; at the full ~15.4M-row
-    universe that alone is ~15GB, before company_info/macro/dividends are even
-    joined. Measured directly: an 800/3,134-ticker slice already peaked at
-    5.9GB RSS through this merge (docs/US_DATASET_BUILD_PLAN.md §8.0.1). None
-    of the 4 merges are cross-sectional (unlike compute_cross_sectional_features/
-    Pass 2, which genuinely needs the whole universe at once) -- each operates
-    strictly per-ticker or via join, so scoping them to a batch changes nothing
-    about correctness, only how much is resident at once.
+    Why the merge itself must be batched, in US's numbers:
+    merge_prices_and_fundamentals's OUTPUT -- the daily panel with every
+    fundamentals column forward-filled onto it -- is ~1,000 B/row at US
+    fundamentals' width; at the full ~15.4M-row universe that alone is ~15GB,
+    before company_info/macro/dividends are even joined. Measured directly: an
+    800/3,134-ticker slice already peaked at 5.9GB RSS through this merge
+    (docs/US_DATASET_BUILD_PLAN.md §8.0.1).
 
     `company_info` (one small parquet) and `dividends` (~26MB) stay resident --
     they're join-side reference tables, small enough that per-batch reloading
     would be churn for no gain. `prices`/`fundamentals` are the ones that
     dominate, and those now arrive per batch via `load_batch`.
+
+    No `dataset_end` is bound here (unlike BR's caller): merge_company_info_us
+    does no price-recency status inference, so it has no whole-dataset date
+    dependency to preserve across batches.
     """
-    return _MergeBatcher(load_batch, company_info, dividends)
+    return MergeBatcher(load_batch, company_info, dividends,
+                        company_info_fn=merge_company_info_us,
+                        macro_fn=merge_macro_us)
 
 
 def fundamentals_ticker_index(dir):
@@ -487,7 +450,8 @@ def main():
     # whatever else the machine is doing, and cap the process so a mis-estimate
     # raises MemoryError here instead of letting the kernel OOM killer pick a
     # victim (it has picked the user's editor before -- see memory.py).
-    chunk_size = memory.report("US build", memory.US_BYTES_PER_TICKER)
+    chunk_size = memory.report("US build", memory.US_BYTES_PER_TICKER,
+                               memory.US_BASELINE_BYTES)
 
     universe = build_universe_gate_from_files(US_PRICES_DIR)
     n_before = len(universe)

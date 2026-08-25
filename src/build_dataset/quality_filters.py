@@ -315,6 +315,7 @@ def attach_filing_dates(fundamentals, company_info):
         fundamentals["fundamentals_available_date"] = (
             _statutory_available_date(fundamentals["reference_date"])
         )
+        fundamentals["filing_lag_days"] = np.nan
         return fundamentals
 
     # a quarter can appear in both ITR and DFP registers — one row per

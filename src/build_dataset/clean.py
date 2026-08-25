@@ -11,14 +11,31 @@ def clean_dataset(df):
     print("=" * 80)
 
     before = len(df)
-    # ignore_index=True rather than a trailing `.copy()`: it returns a frame
-    # with a fresh RangeIndex, which is unambiguously a new object, so the
-    # in-place inf fix below can't trip SettingWithCopy. The old
-    # `.drop_duplicates().copy()` bought the same guarantee by copying the
-    # whole frame a second time -- ~1GB per row group at US scale, on a stage
-    # that already churns several copies of it (this runs once per Pass-3 row
-    # group, so every copy here is paid ~20 times over a full build).
-    df = df.drop_duplicates(ignore_index=True)
+    # Everything here is in place. This runs once per Pass-3 row group (~20
+    # times over a full build) on a frame that is ~400MB at BR scale and ~1GB
+    # at US scale, and the caller keeps its own reference to it
+    # (`batch = clean_dataset(batch)`) -- so a returned copy leaves BOTH frames
+    # resident, and each further step stacks another. In place, a copy is
+    # transient rather than cumulative.
+    #
+    # ponytail: and don't take the full-width copy at all when there's nothing
+    # to drop. DataFrame.drop_duplicates() factorizes every one of the ~159
+    # columns (159 int64 label arrays = ~360MB per BR row group) and then
+    # rebuilds the whole frame via `self[~dup]` even when the mask is all-False.
+    # Identical rows are a strict subset of rows sharing (ticker, trade_date),
+    # so screen on those two columns first -- ~10MB -- and only pay the
+    # full-width comparison on whatever that turns up. This is where Pass 3 ran
+    # out of address space on 2026-08-23 (a 2MB allocation failed).
+    key = ["ticker", "trade_date"]
+    dupes = df.duplicated(subset=key, keep=False)
+    if dupes.any():
+        # keep="first" within the candidate rows gives the same verdict as
+        # across the whole frame: any row identical to an earlier one shares
+        # that row's key, so both are already in this subset, in the same
+        # relative order.
+        dupes.loc[dupes] = df.loc[dupes].duplicated().to_numpy()
+        df.drop(index=df.index[dupes], inplace=True)
+        df.reset_index(drop=True, inplace=True)
     print(f"Removed duplicates: {before - len(df)}")
 
     # Growth rates (pct_change from a zero base) and ratios (zero denominator,
@@ -40,6 +57,13 @@ def clean_dataset(df):
             df.loc[mask, col] = np.nan
     print(f"Replaced inf/-inf with NaN: {n_inf}")
 
-    df = df.sort_values(["ticker", "trade_date"], ignore_index=True)
+    # ponytail: Pass 1 already leaves every row group sorted by exactly this
+    # key (compute_history_relative_features's own sort is the last thing that
+    # touches the batch), so the unconditional sort was a full-frame copy per
+    # row group to produce the order the frame was already in. The check is two
+    # monotonicity scans and no allocation of consequence.
+    if not (df["ticker"].is_monotonic_increasing
+            and df.groupby("ticker", sort=False)["trade_date"].is_monotonic_increasing.all()):
+        df.sort_values(["ticker", "trade_date"], ignore_index=True, inplace=True)
 
     return df

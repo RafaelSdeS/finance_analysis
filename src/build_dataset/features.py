@@ -634,64 +634,61 @@ def compute_advanced_features(df):
 
     # --- WITHIN-TICKER HISTORICAL PERCENTILES (context for model) ---
 
-    result = []
-    for ticker, g in df.groupby("ticker", sort=False):
-        g = g.sort_values("trade_date").reset_index(drop=True)
+    # ponytail: sort the whole batch once (in place -- this function already
+    # mutates its input by assigning columns) and compute each percentile with
+    # groupby().transform, instead of copying every ticker's slice into a list
+    # and rebuilding the frame with concat. The old shape held two extra full
+    # copies of the batch resident at the concat; at BR scale (380k rows x 118
+    # float cols = 342MB per copy) that plus the sort below is what OOM'd.
+    df.sort_values(["ticker", "trade_date"], inplace=True, ignore_index=True)
+    by_ticker = df["ticker"]
 
-        # rolling.rank(method="max", pct=True) == share of window values <= current,
-        # same as the old rolling.apply lambda but computed in cython (~1000x faster).
-        # ponytail: NaNs are excluded from the window count here (old lambda counted them)
-        window_252 = 252 * 5  # 5 years
+    # rolling.rank(method="max", pct=True) == share of window values <= current,
+    # same as the old rolling.apply lambda but computed in cython (~1000x faster).
+    # ponytail: NaNs are excluded from the window count here (old lambda counted them)
+    window_252 = 252 * 5  # 5 years
 
-        # min_periods floor (not 1): a percentile ranked against a 1-3 row
-        # window is trivially 100th-percentile and carries no real
-        # information -- every OTHER rolling feature in this pipeline (beta,
-        # volatility, zhist) leaves a NaN warm-up until its window has enough
-        # history to mean something; these percentiles were the one
-        # exception, silently emitting degenerate 1.0s for young listings'
-        # earliest rows (2026-07-23 audit). PERCENTILE_MIN_PERIODS matches
-        # cross_sectional.BETA_MIN_PERIODS's ~1-quarter convention.
+    def _rolling_pct(s, window):
+        return s.groupby(by_ticker, sort=False).transform(
+            lambda x: x.rolling(window, min_periods=PERCENTILE_MIN_PERIODS).rank(
+                method="max", pct=True
+            )
+        )
 
-        # Volatility percentile: where is current vol vs this stock's history?
-        # Rolling (not a plain .rank()) so row i only sees rows <= i — a plain
-        # rank() here would rank against the ticker's *future* volatility too.
-        g["volatility_20d_percentile"] = g["volatility_20d"].rolling(
-            window=window_252, min_periods=PERCENTILE_MIN_PERIODS
-        ).rank(method="max", pct=True)
-        g["volatility_60d_percentile"] = g["volatility_60d"].rolling(
-            window=window_252, min_periods=PERCENTILE_MIN_PERIODS
-        ).rank(method="max", pct=True)
+    # min_periods floor (not 1): a percentile ranked against a 1-3 row
+    # window is trivially 100th-percentile and carries no real
+    # information -- every OTHER rolling feature in this pipeline (beta,
+    # volatility, zhist) leaves a NaN warm-up until its window has enough
+    # history to mean something; these percentiles were the one
+    # exception, silently emitting degenerate 1.0s for young listings'
+    # earliest rows (2026-07-23 audit). PERCENTILE_MIN_PERIODS matches
+    # cross_sectional.BETA_MIN_PERIODS's ~1-quarter convention.
 
-        # Price percentile: is price high/low vs own history (last 5 years)?
-        # Masked (>0), same reason as compute_price_features: a raw 0.00
-        # precision-floor row would rank as the window's all-time minimum
-        # and drag every window it's a member of for the next 1-5 years.
-        adj = g["adj_close"].where(g["adj_close"] > 0)
-        g["price_percentile_5y"] = adj.rolling(
-            window=window_252, min_periods=PERCENTILE_MIN_PERIODS
-        ).rank(method="max", pct=True)
+    # Volatility percentile: where is current vol vs this stock's history?
+    # Rolling (not a plain .rank()) so row i only sees rows <= i — a plain
+    # rank() here would rank against the ticker's *future* volatility too.
+    df["volatility_20d_percentile"] = _rolling_pct(df["volatility_20d"], window_252)
+    df["volatility_60d_percentile"] = _rolling_pct(df["volatility_60d"], window_252)
 
-        # 1-year version: the standard "52-week high/low" framing, a distinct
-        # signal from the 5y version for younger listings or a recent regime
-        # change that 5 years of history would dilute. Same window as
-        # drawdown_percentile below, for consistency.
-        g["price_percentile_1y"] = adj.rolling(
-            window=252, min_periods=PERCENTILE_MIN_PERIODS
-        ).rank(method="max", pct=True)
+    # Price percentile: is price high/low vs own history (last 5 years)?
+    # Masked (>0), same reason as compute_price_features: a raw 0.00
+    # precision-floor row would rank as the window's all-time minimum
+    # and drag every window it's a member of for the next 1-5 years.
+    adj = df["adj_close"].where(df["adj_close"] > 0)
+    df["price_percentile_5y"] = _rolling_pct(adj, window_252)
 
-        # P/L (P/E) percentile within stock's history
-        g["pl_percentile_5y"] = g["pl"].rolling(
-            window=window_252, min_periods=PERCENTILE_MIN_PERIODS
-        ).rank(method="max", pct=True)
+    # 1-year version: the standard "52-week high/low" framing, a distinct
+    # signal from the 5y version for younger listings or a recent regime
+    # change that 5 years of history would dilute. Same window as
+    # drawdown_percentile below, for consistency.
+    df["price_percentile_1y"] = _rolling_pct(adj, 252)
+    del adj
 
-        # Drawdown percentile: how deep is current drawdown vs historical?
-        g["drawdown_percentile"] = g["drawdown"].rolling(
-            window=252, min_periods=PERCENTILE_MIN_PERIODS
-        ).rank(method="max", pct=True)
+    # P/L (P/E) percentile within stock's history
+    df["pl_percentile_5y"] = _rolling_pct(df["pl"], window_252)
 
-        result.append(g)
-
-    df = pd.concat(result, ignore_index=True).reset_index(drop=True)
+    # Drawdown percentile: how deep is current drawdown vs historical?
+    df["drawdown_percentile"] = _rolling_pct(df["drawdown"], 252)
 
     # --- FUNDAMENTAL TREND SIGNALS (raw, no thresholds) ---
 
@@ -701,7 +698,7 @@ def compute_advanced_features(df):
     # 4-row blip right after each filing. Dedup to one row per (ticker,
     # reference_date), diff there, then map the quarterly trend back onto
     # every daily row.
-    df = df.sort_values(["ticker", "reference_date"]).reset_index(drop=True)
+    df.sort_values(["ticker", "reference_date"], inplace=True, ignore_index=True)
 
     # Every metric that has a diff(1) counterpart in the *_qoq block above gets a
     # diff(4) here, so feature coverage doesn't depend on which metric you picked.
@@ -715,27 +712,35 @@ def compute_advanced_features(df):
         "gross_margin": "gross_margin_trend_4q",
         "current_ratio": "current_ratio_trend_4q",
     }
-    result = []
+    # ponytail: same reason as the percentile block above -- build ONLY the 7
+    # new columns per ticker and assign them back index-aligned, rather than
+    # copying every ticker's 118-column slice just to add 7 of them.
+    parts = []
     for _, g in df.groupby("ticker", sort=False):
-        g = g.copy()
         q = g.drop_duplicates("reference_date").set_index("reference_date").sort_index()
+        part = pd.DataFrame(index=g.index)
         for col, out in trend_cols.items():
             # Presence guard, same reason as book_to_market/ebitda above: an
             # all-NaN column is dropped outright by load_fundamentals's per-file
             # dropna(how="all"), so it's ABSENT rather than NaN-valued. gross_margin
             # is the live case -- 93.6% null in the US build, and fully absent for
             # any ticker where it never populated. Unguarded, q[col] KeyErrors.
-            g[out] = g["reference_date"].map(q[col].diff(4)) if col in q.columns else np.nan
+            part[out] = g["reference_date"].map(q[col].diff(4)) if col in q.columns else np.nan
 
         # Cumulative quarterly filing count per ticker: number of distinct
         # reference_date values seen so far (expanding count). Explains all
         # window-based NaNs (CAGR history, YoY, QoQ, trends). Non-decreasing by reference_date order.
         # Only assign where reference_date is not NaN (rows without fundamentals get NaN).
         q["n_quarters_cumulative"] = range(1, len(q) + 1)
-        g["n_quarters_available"] = g["reference_date"].map(q["n_quarters_cumulative"])
+        part["n_quarters_available"] = g["reference_date"].map(q["n_quarters_cumulative"])
 
-        result.append(g)
-    df = pd.concat(result, ignore_index=True)
+        parts.append(part)
+
+    trends = pd.concat(parts)
+    del parts
+    for col in trends.columns:
+        df[col] = trends[col]
+    del trends
 
     # --- VALUATION RELATIVE TO FUNDAMENTALS (raw relationships) ---
 
@@ -826,22 +831,32 @@ def compute_history_relative_features(df):
     fund_cols = [c for c in FUND_ZHIST_COLS if c in df.columns]
     daily_cols = [c for c in DAILY_ZHIST_COLS if c in df.columns]
 
-    result = []
+    # ponytail: sort once in place, then build only the *_zhist_5y columns and
+    # assign them back index-aligned -- copying each ticker's slice and
+    # concat'ing them held two extra full copies of the batch resident, which
+    # at BR/US scale is a few hundred MB each (see compute_advanced_features).
+    df.sort_values(["ticker", "trade_date"], inplace=True, ignore_index=True)
+
+    parts = []
     for _, g in df.groupby("ticker", sort=False):
-        g = g.sort_values("trade_date").copy()
+        part = pd.DataFrame(index=g.index)
 
         for col in daily_cols:
-            g[f"{col}_zhist_5y"] = _rolling_robust_zscore(
+            part[f"{col}_zhist_5y"] = _rolling_robust_zscore(
                 g[col], DAILY_ZHIST_WINDOW_DAYS, DAILY_ZHIST_MIN_DAYS
             )
 
         q = g.drop_duplicates("reference_date").set_index("reference_date").sort_index()
         for col in fund_cols:
             q_zhist = _rolling_robust_zscore(q[col], FUND_ZHIST_WINDOW_QUARTERS, FUND_ZHIST_MIN_QUARTERS)
-            g[f"{col}_zhist_5y"] = g["reference_date"].map(q_zhist)
+            part[f"{col}_zhist_5y"] = g["reference_date"].map(q_zhist)
 
-        result.append(g)
+        parts.append(part)
 
-    df = pd.concat(result, ignore_index=True)
+    zhist = pd.concat(parts)
+    del parts
+    for col in zhist.columns:
+        df[col] = zhist[col]
+    del zhist
     print(f"History-relative features added for {df['ticker'].nunique()} tickers")
     return df

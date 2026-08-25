@@ -179,7 +179,19 @@ def test_attach_filing_dates_no_file_uses_statutory_only(tmp_path, monkeypatch) 
 
     assert result.iloc[0]["fundamentals_available_date"] == pd.Timestamp("2026-03-31") + pd.Timedelta(days=45)
     assert result.iloc[1]["fundamentals_available_date"] == pd.Timestamp("2026-12-31") + pd.Timedelta(days=90)
-    assert "filing_lag_days" not in result.columns
+
+    # filing_lag_days present but all-NaN, NOT absent. This branch used to omit
+    # the column entirely, which crashed the next stage of the real build with
+    # KeyError: 'filing_lag_days' (2026-08-23) -- attach_filing_dates' two
+    # branches have to agree on their output SCHEMA, not just on the dates.
+    # All-NaN is also the semantically right value: no CVM register means no
+    # known real lag, which is exactly the per-row NaN case the found-file
+    # branch already produces for a quarter missing from the register.
+    assert result["filing_lag_days"].isna().all()
+
+    # ...and the contract that actually matters downstream: unknown lag is not
+    # an excessive lag, so nothing is dropped.
+    assert len(qf.filter_excessive_filing_lag(result)) == len(result)
 
 
 def test_drop_orphan_prefix_rows() -> None:

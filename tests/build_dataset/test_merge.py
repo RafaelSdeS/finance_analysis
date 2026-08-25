@@ -61,6 +61,49 @@ def test_merge_company_info_infers_status_from_price_recency() -> None:
     assert (result.loc[result["ticker"] == "OLD3", "status"] == "CANCELADA").all()
 
 
+def test_merge_company_info_status_survives_batching() -> None:
+    """The status rules above ask "did this ticker trade recently?" relative to
+    the WHOLE dataset's end. Under MergeBatcher the frame handed to
+    merge_company_info is one ticker-batch, so a batch containing only names
+    that died years ago would take its own last date as "now" and resurrect
+    every one of them as ATIVO -- silently, and only for whichever tickers
+    happened to share a batch. Binding dataset_end is what prevents that.
+    """
+    max_date = pd.Timestamp("2026-07-10")
+    old_last_trade = max_date - pd.Timedelta(days=STATUS_INFERENCE_WINDOW_DAYS + 1)
+
+    df = pd.DataFrame({
+        "ticker": ["RECENT3", "RECENT3", "OLD3", "OLD3"],
+        "trade_date": [
+            max_date - pd.Timedelta(days=30), max_date,
+            old_last_trade - pd.Timedelta(days=10), old_last_trade,
+        ],
+    })
+    company_info = pd.DataFrame({
+        "ticker": ["OTHER3"], "cvm_code": ["1"], "status": ["ATIVO"],
+    })
+
+    whole = merge_company_info(df, company_info)
+    dead_only = df[df["ticker"] == "OLD3"]
+
+    # The batch on its own: its max trade_date IS old_last_trade, so without
+    # the bound end date every row looks like it traded "today".
+    assert merge_company_info(dead_only, company_info)["status"].eq("ATIVO").all()
+
+    # With the whole universe's end date bound in, the batched answer matches
+    # the unbatched one exactly.
+    batched = pd.concat(
+        [merge_company_info(df[df["ticker"] == t], company_info, dataset_end=max_date)
+         for t in ("RECENT3", "OLD3")],
+        ignore_index=True,
+    )
+    pd.testing.assert_frame_equal(
+        batched.sort_values(["ticker", "trade_date"], ignore_index=True),
+        whole.sort_values(["ticker", "trade_date"], ignore_index=True),
+    )
+    assert (batched.loc[batched["ticker"] == "OLD3", "status"] == "CANCELADA").all()
+
+
 def test_merge_dividends_flags_missing_data() -> None:
     """A ticker with no dividend rows at all gets has_dividends=0, distinct
     from a ticker with real (even old, out-of-window) dividend history — so

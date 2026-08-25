@@ -173,12 +173,22 @@ def merge_prices_and_fundamentals(prices, fundamentals):
 # ADD STATIC COMPANY INFO
 # =============================================================================
 
-def merge_company_info(df, company_info):
+def merge_company_info(df, company_info, dataset_end=None):
+    """`dataset_end`: the WHOLE universe's last trade_date. Both status rules
+    below ("did this ticker trade recently?") are relative to the end of the
+    dataset, so deriving it from `df` is only correct when `df` IS the whole
+    dataset. Under MergeBatcher, `df` is one ticker-batch -- a batch made
+    mostly of names delisted in 2015 would take its own 2015 max as "now" and
+    resurrect every one of them as ATIVO. Defaults to df's own max so every
+    unbatched caller (and every existing test) is unchanged."""
 
     print()
     print("=" * 80)
     print("ADDING COMPANY INFO")
     print("=" * 80)
+
+    if dataset_end is None:
+        dataset_end = df["trade_date"].max()
 
     # ticker_primary duplicates ticker — drop before merging
     company_info = company_info.drop(
@@ -249,8 +259,7 @@ def merge_company_info(df, company_info):
     status_missing = merged["status"].isna()
     if status_missing.any():
         last_trade = merged.groupby("ticker")["trade_date"].transform("max")
-        max_date = merged["trade_date"].max()
-        is_recent = (max_date - last_trade).dt.days <= STATUS_INFERENCE_WINDOW_DAYS
+        is_recent = (dataset_end - last_trade).dt.days <= STATUS_INFERENCE_WINDOW_DAYS
         merged.loc[status_missing, "status"] = np.where(
             is_recent[status_missing], "ATIVO", "CANCELADA"
         )
@@ -263,7 +272,6 @@ def merge_company_info(df, company_info):
     # ponytail: override stale CANCELADA status when price data is recent. BolsAI
     # company_info can lag behind actual trading (e.g. ITUB3 marked delisted but
     # still trading). If a ticker traded within 30 days of dataset end, it's ATIVO.
-    dataset_end = merged["trade_date"].max()
     very_recent_cutoff = dataset_end - pd.Timedelta(days=30)
     last_trade_per_ticker = merged.groupby("ticker")["trade_date"].transform("max")
     still_trading = last_trade_per_ticker >= very_recent_cutoff
@@ -410,3 +418,80 @@ def merge_dividends(dataset, dividends):
     print(f"  {n_missing} tickers have no dividend data collected (has_dividends=0)")
 
     return result
+
+
+# =============================================================================
+# PER-BATCH MERGING (memory bound)
+# =============================================================================
+
+class MergeBatcher:
+    """Callable batch_fn for compute_features_chunked: runs the 4 merges above
+    on ONE ticker-batch at a time instead of the whole universe, PLUS an
+    explicit release() to drop what it holds once Pass 1 is done.
+
+    Why the merges must be batched: merge_prices_and_fundamentals's OUTPUT --
+    the daily panel with every fundamentals column forward-filled onto it --
+    is where the frame's width explodes (BR: 14 price cols + 47 fundamentals
+    cols, then ~130 by the end of Pass 1). At BR's 1.76M rows that is ~1.7GB
+    before merge_macro's sort+merge_asof each take a full copy of it; measured
+    directly, US peaked at 5.9GB RSS on an 800/3,134-ticker slice
+    (docs/US_DATASET_BUILD_PLAN.md §8.0.1) and BR died on RLIMIT_DATA inside
+    merge_prices_and_fundamentals' own concat (2026-08-23, an 891MB
+    allocation for a single 67-column block).
+
+    None of the 4 merges is cross-sectional (unlike compute_cross_sectional_
+    features/Pass 2, which genuinely needs the whole universe at once): each
+    is per-ticker or a join against a small reference table, so scoping them
+    to a batch changes nothing about correctness. The ONE exception is
+    merge_company_info's two "did this ticker trade recently?" status rules,
+    which are relative to the whole dataset's last date -- bind `dataset_end`
+    via company_info_fn=partial(merge_company_info, dataset_end=...) when
+    batching, or a batch of delisted names infers its own end date. See that
+    function's docstring.
+
+    A plain closure + `del batch_fn` inside compute_features_chunked is NOT
+    enough to free this: the caller keeps its OWN reference to this same
+    object bound in its frame for the entire (synchronous, nested)
+    compute_features_chunked call -- a caller's frame doesn't go away just
+    because the callee deletes its own copy of a reference, so refcounting
+    alone never reaches 0 there (confirmed via a minimal repro before landing
+    this). release() instead MUTATES this instance's own attributes to None --
+    visible through every reference to it, the caller's included -- which is
+    what actually frees them before Pass 2/3, which never call batch_fn again.
+
+    `load_batch(tickers) -> (prices, fundamentals)` is injected rather than
+    hardcoded: US reads exactly that batch's parquet files off disk (its raw
+    prices alone don't fit in RAM), BR slices frames already in memory (its
+    whole-universe split-repair/continuity/BOVA11 steps have to run before any
+    batching exists, and the narrow pre-merge frames are only ~200MB anyway),
+    and tests pass a slicer over fixtures. Same seam for all three, so this
+    class stays about MERGING a batch rather than about where it came from.
+
+    `company_info_fn`/`macro_fn` default to BR's merges (defined above); US
+    passes merge_company_info_us/merge_macro_us, which differ in sector
+    mapping and macro source rather than in shape.
+    """
+
+    def __init__(self, load_batch, company_info, dividends,
+                 company_info_fn=merge_company_info, macro_fn=merge_macro):
+        self.load_batch = load_batch
+        self.company_info = company_info
+        self.dividends = dividends
+        self.company_info_fn = company_info_fn
+        self.macro_fn = macro_fn
+
+    def __call__(self, batch_tickers):
+        bt = set(batch_tickers)
+        p, f = self.load_batch(bt)
+        d = self.dividends[self.dividends["ticker"].isin(bt)]
+
+        merged = merge_prices_and_fundamentals(p, f)
+        del p, f  # the merged panel supersedes both; holding them through the
+        # three joins below is pure dead weight at the batch's peak
+        merged = self.company_info_fn(merged, self.company_info)
+        merged = self.macro_fn(merged)
+        return merge_dividends(merged, d)
+
+    def release(self):
+        self.load_batch = self.company_info = self.dividends = None
+        self.company_info_fn = self.macro_fn = None

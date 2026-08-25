@@ -30,6 +30,7 @@ file only orchestrates the call order and the memory-bounded feature pass.
 
 import ctypes
 import gc
+from functools import partial
 
 import pandas as pd
 import pyarrow as pa
@@ -56,7 +57,7 @@ from .features import (
 )
 from .loaders import load_company_info, load_dividends, load_fundamentals, load_prices
 from .manifest import sync_dataset_version, write_manifest, write_split_config
-from .merge import merge_company_info, merge_dividends, merge_macro, merge_prices_and_fundamentals
+from .merge import MergeBatcher, merge_company_info
 from .paths import OUTPUT_PATH
 from .quality_filters import (
     attach_filing_dates,
@@ -90,6 +91,11 @@ def _reclaim_memory():
         ctypes.CDLL("libc.so.6").malloc_trim(0)
     except OSError:
         pass
+    # Print what the rlimit is actually measuring. malloc_trim moves RSS but
+    # barely moves VmData (measured 2.42 -> 2.39 GiB), so this is the only
+    # number that says whether a pass left its memory behind -- and the builds
+    # have now died three times over guessing at it.
+    print(f"[mem] VmData {memory.vmdata_gb():.2f} GiB")
 
 
 # =============================================================================
@@ -296,7 +302,26 @@ def compute_features_chunked(dataset, dividends, benchmark, output_path, chunk_s
     try:
         for rg in range(pf.num_row_groups):
             batch = pf.read_row_group(rg).to_pandas()
-            batch = batch.join(slim, on=["ticker", "trade_date"])
+
+            # ponytail: reindex the 12 narrow cross-sectional columns onto this
+            # row group's keys and assign them in, rather than DataFrame.join.
+            # join routes through concat([left, right], axis=1), which copies
+            # the WHOLE 159-column left frame to add 12 columns -- a 306MB
+            # allocation per row group at BR scale, and the exact one that
+            # raised MemoryError here on 2026-08-23. This copies 12 columns.
+            aligned = slim.reindex(
+                pd.MultiIndex.from_arrays([batch["ticker"], batch["trade_date"]])
+            )
+            # A dtype mismatch on the join keys (slim's ticker level is
+            # `category`, batch's column is object) would produce an all-NaN
+            # block rather than an error, silently shipping a dataset with no
+            # cross-sectional features at all -- so check the match landed.
+            assert aligned.notna().to_numpy().any(), (
+                "cross-sectional features matched no rows in this row group"
+            )
+            for col in aligned.columns:
+                batch[col] = aligned[col].to_numpy()
+            del aligned
             batch = clean_dataset(batch)
 
             table = pa.Table.from_pandas(batch, preserve_index=False)
@@ -332,7 +357,8 @@ def main():
     # the rest of the machine) instead of a fixed chunk_size=150, and cap this
     # process so an overrun raises MemoryError here rather than handing the
     # kernel's OOM killer a choice of victims. See memory.py.
-    chunk_size = memory.report("BR build", memory.BR_BYTES_PER_TICKER)
+    chunk_size = memory.report("BR build", memory.BR_BYTES_PER_TICKER,
+                               memory.BR_BASELINE_BYTES)
 
     prices       = load_prices()
     fundamentals = load_fundamentals()
@@ -375,15 +401,48 @@ def main():
 
     fundamentals = attach_filing_dates(fundamentals, company_info)
     fundamentals = filter_excessive_filing_lag(fundamentals)
-    dataset = merge_prices_and_fundamentals(prices, fundamentals)
-    del prices, fundamentals  # dead from here on; keeping them resident during
-    # the macro/dividends merges below was inflating peak memory for nothing
-    dataset = merge_company_info(dataset, company_info)
-    del company_info
-    dataset = merge_macro(dataset)
-    dataset = merge_dividends(dataset, dividends)
-    compute_features_chunked(dataset, dividends, benchmark, OUTPUT_PATH, chunk_size=chunk_size)
-    del dataset
+
+    # Merge per ticker-batch rather than whole-universe. The 4 merges widen the
+    # panel from 14 price columns to ~60, and Pass 1 takes it to ~130; at BR's
+    # 1.76M rows the whole-universe version of that is ~1.7GB before
+    # merge_asof's own concat and merge_macro's sort each take a full copy of
+    # it. That is where this build actually died (2026-08-23: RLIMIT_DATA hit
+    # on an 891MB allocation for a single 67-column block inside
+    # merge_prices_and_fundamentals). Batching them means the wide frame never
+    # exists for more than chunk_size tickers at a time -- the same fix the US
+    # build already runs (see merge.MergeBatcher).
+    #
+    # Unlike US, the batches are sliced from memory rather than reloaded from
+    # disk: BR's split-repair/continuity/BOVA11 steps above are whole-universe
+    # by nature (apply_ticker_continuity splices one ticker's history onto
+    # another's, so both legs must be present at once), and the narrow
+    # pre-merge frames they produce are only ~200MB anyway. It's the merge
+    # OUTPUT that's big here, not its inputs.
+    tickers = prices["ticker"].unique()
+    batch_fn = MergeBatcher(
+        # p=/f= as DEFAULT ARGS, not free variables: a closure captures the
+        # variable's cell, so the `del prices, fundamentals` below would empty
+        # that cell and make this raise NameError on the first batch. Defaults
+        # bind the value here and now, which is exactly what lets main() drop
+        # its own references while batch_fn keeps the frames alive.
+        load_batch=lambda bt, p=prices, f=fundamentals: (
+            p[p["ticker"].isin(bt)], f[f["ticker"].isin(bt)]
+        ),
+        company_info=company_info,
+        dividends=dividends,
+        # Bind the WHOLE universe's last date: merge_company_info's two status
+        # rules ask "did this ticker trade recently?", and a batch of names
+        # delisted years ago would otherwise take its own last date as "now"
+        # and mark every one of them ATIVO.
+        company_info_fn=partial(merge_company_info, dataset_end=prices["trade_date"].max()),
+    )
+    # main()'s own references, not the closure's -- batch_fn keeps prices/
+    # fundamentals alive until its release() drops them after Pass 1.
+    del prices, fundamentals, company_info
+
+    compute_features_chunked(None, dividends, benchmark, OUTPUT_PATH, chunk_size=chunk_size,
+                              tickers=tickers, batch_fn=batch_fn)
+    del batch_fn
 
     print()
     print("=" * 80)
