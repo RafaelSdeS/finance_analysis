@@ -355,15 +355,20 @@ def build_fundamentals(tickers: list[str] | None = None, rebuild: bool = False) 
 def collect_fundamentals_cvm(tickers: list[str], mode: str) -> None:
     """pipeline.py's ("fundamentals", "cvm") DATA_SOURCE entry -- BUG-1's free, correct
     replacement for the yfinance fundamentals path (see BOLSAI_EXIT_PLAN.md Task 5).
-    `mode` unused (fn_map signature parity with every other collect_X(tickers, mode)).
 
     collect_statements()/collect_shares() only ever re-fetch the CURRENT CVM year (both
     already cache-and-skip every prior year), so refreshing them every quarterly update
     is cheap -- picks up newly-filed quarters before rebuilding ratios from them.
-    rebuild=True: `tickers` here is the caller's already-scoped list (e.g. `active`
-    ATIVO tickers in pipeline.py), not the full universe, so a full per-ticker recompute
-    every run is still fast.
+    rebuild=True: for every mode but full_scale, `tickers` is the caller's already-scoped
+    list (e.g. `active` ATIVO tickers in pipeline.py), so a full per-ticker recompute every
+    run is still fast. full_scale ignores `tickers` and passes None instead -- it means
+    "everything", so it rebuilds the whole crosswalk, not just the ATIVO-scoped subset
+    (DEFECT-2, docs/BR_DATA_RECONSTRUCTION_PLAN.md P3).
     """
     collect_statements()
     collect_shares()
-    build_fundamentals(tickers=tickers, rebuild=True)
+    # full_scale means "everything" -- rebuild the whole crosswalk, not just the
+    # caller's ATIVO-scoped `tickers`, or every delisted-but-crosswalk-resolvable
+    # ticker stays stranded without fundamentals forever (DEFECT-2,
+    # docs/BR_DATA_RECONSTRUCTION_PLAN.md P3).
+    build_fundamentals(tickers=None if mode == "full_scale" else tickers, rebuild=True)

@@ -19,6 +19,7 @@ Usage (from project root):
 """
 
 import argparse
+import json
 import re
 
 from . import collectors
@@ -27,17 +28,37 @@ from .. import config
 _STOCK = re.compile(r"^[A-Z0-9]{4}[3-8]$")  # same filter as get_all_tickers
 _UNIT = re.compile(r"^[A-Z]{4}11$")         # units (SULA11); funds excluded via crosswalk
 
+_CONTINUITY_PATH = config.BR_RAW_DIR / "reference/ticker_continuity.json"
+
+
+def _known_renamed_tickers() -> set[str]:
+    """Old-side tickers of a rename/merger already spliced in ticker_continuity.json.
+
+    BolsAI resolves a retired code to the live successor and serves its current
+    data under the dead symbol, unflagged (docs/BR_DATA_RECONSTRUCTION_PLAN.md §9
+    "rename phantom" -- confirmed on KROT3/ELET3). Collecting these here would
+    reintroduce a second, uncorrected copy of the surviving entity's own history
+    right as apply_ticker_continuity() is about to splice the real one in. Only
+    catches renames already known; find_rename_candidates() (Stage 2) is the
+    backstop for ones not yet in this file.
+    """
+    if not _CONTINUITY_PATH.exists():
+        return set()
+    events = json.loads(_CONTINUITY_PATH.read_text())["events"]
+    return {e["old"] for e in events if e["type"] in ("rename", "merger")}
+
 
 def candidate_tickers(all_tickers, existing, crosswalk_tickers=None) -> list[str]:
     """Stock-like tickers with no prices parquet yet.
 
     Suffix 3-8 pass on shape alone; suffix-11 only if the FCA crosswalk confirms
-    a CVM-registered company behind them (filters out FIIs/ETFs).
+    a CVM-registered company behind them (filters out FIIs/ETFs). Excludes known
+    rename/merger old-side tickers -- see _known_renamed_tickers().
     """
     cands = {t for t in all_tickers if _STOCK.match(t)}
     if crosswalk_tickers:
         cands |= {t for t in all_tickers if _UNIT.match(t) and t in crosswalk_tickers}
-    return sorted(cands - set(existing) - set(config.BENCHMARK_TICKERS))
+    return sorted(cands - set(existing) - set(config.BENCHMARK_TICKERS) - _known_renamed_tickers())
 
 
 def main():
