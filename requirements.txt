@@ -3,6 +3,9 @@ pandas==2.3.3
 plotly==6.3.1
 python-bcb==0.3.3
 numpy==2.2.6
+pyarrow==21.0.0  # every read/to_parquet; pandas does not pull it in
+requests==2.32.5  # imported directly (BCB, CVM, SEC http); was only arriving via yfinance
+lxml==6.0.2  # pd.read_html parser for the SEC 10-Q / Item 6 tiers (sec/tenq.py, selected_financial_data.py)
 pytz==2025.2
 python-dateutil==2.9.0.post0
 httpx==0.28.1
@@ -16,9 +19,9 @@ joblib==1.5.3
 # Stage 3 portfolio (src/portfolio/) -- scipy.stats for the deflated Sharpe ratio
 scipy==1.18.0
 # Stage 3 portfolio -- the cost-aware convex optimizer (proposal §5)
-cvxpy==1.7.4
+cvxpy==1.9.2
 # Stage 3 portfolio -- the Stage A alpha forecaster (proposal §2b)
-lightgbm==4.6.0
+lightgbm==4.7.0
 # Stage 3 portfolio -- renders a single tree from the alpha model (plot_tree.py); needs the
 # system `dot` binary too (already present here, install via your OS package manager otherwise)
 graphviz==0.21
@@ -26,3 +29,6 @@ graphviz==0.21
 pytest==8.3.4
 ruff==0.15.20
 coverage==7.6.9  # `python tests/run_all.py --coverage` -- informational src/ coverage report
+# Notebooks (src/visualizations/*.ipynb) -- kernel + what plotly's fig.show() needs inside one
+ipykernel==7.2.0
+nbformat==5.10.4
